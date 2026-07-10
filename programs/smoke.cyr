@@ -12,7 +12,7 @@ include "src/main.cyr"
 fn main() {
     alloc_init();
     # core: version + a leb128 round-trip through writer and reader.
-    if (drishti_version() != 100) { return 1; }
+    if (drishti_version() != 700) { return 1; }
     var bw = dr_bw_init(16);
     dr_leb128_write(bw, 300);
     var blen = dr_bw_flush(bw);

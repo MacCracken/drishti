@@ -24,10 +24,10 @@
 # av1/decoder/obu.c (read_sequence_header_obu) — field order and the
 # conditional branches match both.
 #
-# drishti 0.1.x extracts a SUMMARY record: fields that later phases
+# drishti 0.7.0 extracts a SUMMARY record: fields that later phases
 # (frame-header parse, tile decode) don't yet need are consumed
 # bit-exactly and discarded, so the cursor is always spec-true. The
-# full-fidelity record grows in the 0.2.x frame-header bite.
+# full-fidelity record grows in the 0.7.x frame-header bite.
 #
 # Av1Seq record layout (56 bytes, heap):
 #   +0:  profile  — seq_profile (0/1/2)
@@ -179,7 +179,7 @@ fn av1_color_config_parse(br, profile, out_depth, out_mono): i64 {
 #                         still_picture (6.4.1)
 #   DR_ERR_OOM          — allocation failure
 # Trailing bits (5.3.4) after film_grain_params_present are not
-# inspected in 0.1.x.
+# inspected in 0.7.0.
 fn av1_seq_parse(buf, len, out_err): i64 {
     store64(out_err, DR_OK);
     if (len < 0) {

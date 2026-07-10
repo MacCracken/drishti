@@ -62,7 +62,7 @@ enum H265Limits {
 #                  sub_layer_level_idc u(8) if level-present
 #
 # Sub-layer PTL values are parsed for ALIGNMENT (the bit cursor must
-# land exactly at the end of the structure) and discarded at 0.1.x.
+# land exactly at the end of the structure) and discarded at 0.7.0.
 #
 # H265Ptl layout (96 bytes, heap) — all fields widened to i64:
 #   +0:  profile_space           +8:  tier_flag
@@ -184,7 +184,7 @@ fn h265_ptl_max_sub_layers_minus1(ptl): i64 { return load64(ptl + 88); }
 #   vps_reserved_0xffff_16bits     u(16)  — captured, never rejected
 #                                    (7.4.3.1: decoders ignore value)
 #   profile_tier_level(1, vps_max_sub_layers_minus1)
-#   ... (sub-layer ordering info et seq. — out of the 0.1.x cut)
+#   ... (sub-layer ordering info et seq. — out of the 0.7.0 cut)
 #
 # H265Vps layout (64 bytes, heap):
 #   +0:  vps_id                   +8:  base_layer_internal_flag
@@ -270,7 +270,7 @@ fn h265_vps_ptl(v): i64 { return load64(v + 56); }
 #   bit_depth_luma_minus8                ue(v)  — [0, 8]
 #   bit_depth_chroma_minus8              ue(v)  — [0, 8]
 #   log2_max_pic_order_cnt_lsb_minus4    ue(v)  — [0, 12]
-#   --- 0.1.x stops cleanly here (sizing block complete) ---
+#   --- 0.7.0 stops cleanly here (sizing block complete) ---
 #
 # Computed output dimensions (7.4.3.2.1, Table 6-1): the conformance
 # cropping window is expressed in chroma units —
@@ -487,7 +487,7 @@ fn h265_sps_height(s): i64 { return load64(s + 136); }
 #   cu_qp_delta_enabled_flag               u(1)
 #   if (cu_qp_delta_enabled_flag)
 #     diff_cu_qp_delta_depth               ue(v) — inferred 0 if absent
-#   --- 0.1.x stops cleanly here ---
+#   --- 0.7.0 stops cleanly here ---
 #
 # H265Pps layout (112 bytes, heap):
 #   +0:   pps_id                    +8:   sps_id

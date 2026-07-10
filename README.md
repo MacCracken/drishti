@@ -18,7 +18,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.1.0 (pre-1.0, surface moving)
+## Status — 0.7.0 (almost v1, not quite)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (2,220 suite assertions + 1,140 fuzz
@@ -34,9 +34,12 @@ assertions, all green):
   encoder, bounds-hardened), VP8 frame framing + byte-exact writer,
   VP9 uncompressed header
 
-Pixels come next: each family's decode milestone is phased in
-[`docs/development/roadmap.md`](docs/development/roadmap.md). Encode
-lanes grow from the writer seeds already shipped.
+Pixels come next: the road to 1.0 is **one minor arc per codec** —
+**0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
+**0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
+**freeze/documentation** arc (0.12.x) before the 1.0.0 close-out.
+Encode lanes grow from the writer seeds already shipped. Full plan:
+[`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Build
 

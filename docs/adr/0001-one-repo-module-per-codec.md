@@ -33,10 +33,10 @@ keep in sync.
 2. **Family charters** (what each replaces):
    - **AV1 — decode AND encode**, absorbing the registry's separate
      dav1d-replacement and rav1e-replacement rows into one charter.
-     0.1.x lands the substrate both lanes share (OBU parse/walk/write,
-     sequence header); the encode lane grows from the
-     `av1_obu_write_header` seed, gated on own-decoder then
-     cross-decoder round-trips.
+     The 0.7.0 baseline lands the substrate both lanes share (OBU
+     parse/walk/write, sequence header); the encode lane grows from the
+     `av1_obu_write_header` seed late in the AV1 arc (0.7.x), gated on
+     own-decoder then cross-decoder round-trips.
    - **H.264/AVC — decode AND encode**, replacing openh264. The
      Annex-B NAL layer is bidirectional from day one (scan/strip for
      decode, EPB-insert/compose for encode); ITU-T Rec. H.264 is the
@@ -66,8 +66,10 @@ keep in sync.
 - **One dist bundle** — consumers (tarang, tazama, jalwa, aethersafta)
   pull `dist/drishti.cyr` and get every codec; no five-way version
   matrix.
-- **One version line** — a cut ships whatever family bites landed;
-  per-family phase plans live in
+- **One version line, one arc per codec** — the path to 1.0 is a minor
+  arc per family (0.7.x AV1, 0.8.x H.264, 0.9.x H.265, 0.10.x VP8/VP9)
+  then an audit arc (0.11.x) and a freeze/docs arc (0.12.x); a cut
+  ships whatever bites landed. Per-family phase plans live in
   [`roadmap.md`](../development/roadmap.md).
 - The registry's *Video Codec Projects* table collapses to a single
   `drishti` row (updated in agnosticos alongside this scaffold).

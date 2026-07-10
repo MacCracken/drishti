@@ -4,15 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-07-10
+## [0.7.0] - 2026-07-10
 
-The scaffold cut: one repo, four codec families as flat `[lib]` modules
+The first cut — one repo, four codec families as flat `[lib]` modules
 over a shared core (the shravan model — [ADR 0001](docs/adr/0001-one-repo-module-per-codec.md)
 records the collapse of the five planned `drishti-*` repos into this
 one, and the merge of the AV1 decode and encode charters). Every
 family's bitstream/container/header layer, spec-derived and
 adversarially tested: **2,220 suite assertions + 1,140 fuzz assertions,
 all green**; `dist/drishti.cyr` verified via a consumer-style build.
+
+> **Versioned at 0.7.0** (not 0.1.0): the shared substrate + all four
+> families' full bitstream/container/header surface is substantial and
+> already hardened — "almost ready for v1, but not quite." The
+> remaining distance is the per-codec decode/encode completion arcs
+> (0.7.x AV1 → 0.8.x H.264 → 0.9.x H.265 → 0.10.x VP8/VP9), then an
+> audit arc (0.11.x) and a freeze/documentation arc (0.12.x) before the
+> 1.0.0 close-out. See [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ### Added
 - **Core** (`src/drishti.cyr`, `src/bits.cyr`, `src/ivf.cyr`, prefix `dr_`):

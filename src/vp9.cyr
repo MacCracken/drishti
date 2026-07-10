@@ -38,7 +38,7 @@
 #
 # Parsing STOPS after render_size() on the keyframe path — the rest of
 # uncompressed_header() (refresh flags, loop-filter/quant/segmentation/
-# tile syntax, header_size_in_bytes) is the 0.4.x VP9-keyframe-decode
+# tile syntax, header_size_in_bytes) is the 0.10.x VP9-keyframe-decode
 # milestone. bits_consumed tells the caller exactly where this parse
 # stopped. Inter-frame headers (frame_type == 1) stop right after
 # error_resilient_mode for the same reason.

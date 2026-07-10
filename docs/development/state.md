@@ -6,10 +6,13 @@
 
 ## Version
 
-**0.1.0** — cut 2026-07-10, not yet tagged (user's git). The scaffold
-cut: shared core + all four families' bitstream/container/header
-layers, spec-derived and adversarially tested. See
-[`CHANGELOG.md`](../../CHANGELOG.md).
+**0.7.0** — cut 2026-07-10, not yet tagged (user's git). The first cut:
+shared core + all four families' bitstream/container/header layers,
+spec-derived and adversarially tested. Started at 0.7.0 (not 0.1.0) —
+the surface is "almost ready for v1"; the remaining distance is the
+per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x)
++ freeze/docs (0.12.x) → 1.0.0. See [`CHANGELOG.md`](../../CHANGELOG.md)
++ [`roadmap.md`](roadmap.md).
 
 ## Toolchain
 
@@ -59,5 +62,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 ## In-flight / next
 
-Per-family 0.2.x bites — see [`roadmap.md`](roadmap.md). Nothing else
-in flight.
+The **0.7.x AV1 arc** opens next — frame-header OBU → entropy decoder →
+intra still-picture decode (first pixels). Full per-codec arc plan +
+the audit/freeze arcs in [`roadmap.md`](roadmap.md). Nothing else in
+flight.

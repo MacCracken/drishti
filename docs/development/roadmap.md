@@ -1,123 +1,207 @@
 # drishti — Roadmap
 
 > Milestone plan through v1.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates.
+> this file is the sequencing — what ships, in what order.
 >
 > **Shape of the repo**: ONE repo, codec families as flat `[lib]`
-> modules (the shravan model — see
-> [ADR 0001](../adr/0001-one-repo-module-per-codec.md)). Each family
-> phases below independently, but the repo cuts one version line; a
-> cut ships whatever family bites landed.
+> modules (the shravan model — [ADR 0001](../adr/0001-one-repo-module-per-codec.md)).
+> The path to 1.0 is **one minor arc per codec** — each family gets a
+> full minor line to go from "bitstream/header layer" (all shipped at
+> **0.7.0**) to **100%** (decode conformance-clean + encode
+> round-trip-clean, where encode is in charter) — followed by a
+> cross-family **audit** arc and a **freeze/documentation** arc before
+> the 1.0.0 close-out.
+
+## The path to 1.0 — minor arc per codec
+
+| Arc | Owner | Target | Charter |
+|-----|-------|--------|---------|
+| **0.7.x** | **AV1** | decode + encode → 100% | replaces dav1d + rav1e |
+| **0.8.x** | **H.264/AVC** | decode + encode → 100% | replaces openh264 |
+| **0.9.x** | **H.265/HEVC** | decode → 100% | replaces libde265 (encode out of charter) |
+| **0.10.x** | **VP8/VP9** | decode + encode → 100% | replaces libvpx |
+| **0.11.x** | **Audit** | cross-family security + correctness | find → adversarially verify → harden |
+| **0.12.x** | **Freeze + docs** | API freeze, benchmarks, consumer | no behavior change |
+| **1.0.0** | **Close-out** | clean cut, all criteria green | — |
+
+> **Why 0.7.0 as the baseline** (not 0.1.0): the shared substrate plus
+> every family's full bitstream/container/header layer is a large,
+> already-hardened surface (2,220 suite + 1,140 fuzz assertions) —
+> "almost ready for v1, but not quite." The remaining distance is the
+> per-codec decode/encode completion arcs below. Minor versions run
+> past 9 by SemVer (`0.10.0 > 0.9.0`).
 
 ## v1.0 criteria (ecosystem standard)
 
-- [ ] Public API frozen — every exported symbol documented and tested
-- [ ] All four families at their charter milestone (AV1 dec+enc, H.264
-      dec+enc, H.265 dec, VP8/VP9 dec+enc) with conformance vectors green
-- [ ] Benchmarks captured in `docs/benchmarks.md`
+- [ ] All four families at their charter target (AV1 dec+enc, H.264
+      dec+enc, H.265 dec, VP8/VP9 dec+enc), each conformance-clean
+      (decode) / round-trip-clean (encode) — arcs 0.7.x–0.10.x
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — arc 0.11.x
+- [ ] Public API frozen — `docs/api.md`, every exported symbol
+      documented and tested — arc 0.12.x
+- [ ] Benchmarks captured (`docs/benchmarks.md`) — arc 0.12.x
 - [ ] At least one downstream consumer green (tarang / tazama / jalwa /
-      aethersafta)
-- [ ] CHANGELOG complete from v0.1.0 onward
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
+      aethersafta) — arc 0.12.x
+- [ ] CHANGELOG complete from 0.7.0 onward
 
-## Shared substrate (`drishti.cyr` / `bits.cyr` / `ivf.cyr`, prefix `dr_`)
+## 0.7.0 — baseline (done, this cut)
 
-- **0.1.x (THIS CUT, done)**: error record + family code bands, format
-  sniff; MSB-first bitreader with sticky-error discipline; leb128
-  read/write (AV1 4.10.5), uvlc (4.10.3), exp-Golomb ue/se read
-  (H.264 9.1 / H.265 9.2) + bit writer with ue/se/leb128 write (the
-  encode-lane seed); IVF container read/write (AV01/VP80/VP90); the
-  external sticky-latch seam `dr_br_set_err` / `dr_bw_set_err` for
-  family modules.
-- **Later, demand-gated**:
-  - **Entropy-coder consolidation watch** — CABAC (H.264/H.265),
-    multi-symbol adaptive-CDF (AV1), and the boolean coder (VP8/VP9)
-    stay per-family until real overlap proves out; do NOT unify
-    speculatively.
-  - **YUV frame-buffer / plane types** — a shared planar-frame record
-    once two families emit pixels (their 0.3.x-0.4.x eras).
-  - **Conformance-vector harness** — a shared runner once the first
-    family reaches its conformance phase.
-  - **Container growth** — IVF is the test-bench container; MP4/WebM
-    demux is out of scope for drishti (a future container lib's job).
+Shipped for all four families at once, so the arcs below start from a
+common floor:
 
-## AV1 — decode + encode (`src/av1_*.cyr`, prefix `av1_`)
+- **Shared core** (`dr_`): error record + per-family code bands, format
+  sniff; MSB-first bitreader/bitwriter with sticky-error discipline;
+  leb128 (AV1 4.10.5), uvlc (4.10.3), exp-Golomb ue/se (H.264 9.1 /
+  H.265 9.2) — read AND write (the encode-lane seed); IVF read/write;
+  the `dr_br_set_err` / `dr_bw_set_err` latch seam.
+- **AV1**: OBU parse/walk/write + sequence-header parse (both paths).
+- **H.264**: Annex-B scan, NAL headers, EPB both directions, full SPS
+  (incl. High branch + crop) + PPS.
+- **H.265**: strict Annex-B scan, two-byte NAL headers, profile_tier_level,
+  VPS/SPS/PPS with crop math + dimension-bomb guard.
+- **VP8/VP9**: the RFC 6386 boolean coder (decode + encode), VP8 framing
+  + writer, VP9 uncompressed header.
 
-Replaces **dav1d** (decode) and **rav1e** (encode) in one family — the registry's two planned repos merged here (2026-07-10).
+## Shared substrate — grows *within* the arcs (demand-gated)
 
-- **0.1.x — OBU layer + sequence header** (THIS CUT, done): OBU header parse (spec 5.3.2/5.3.3, forbidden-bit rejection, reserved-bit tolerance per 6.2.2/6.2.3), leb128 obu_size (4.10.5 via core), OBU buffer walk (iterator, no-size-field tail OBUs, clean-END sentinel), `av1_obu_write_header` encode seed; `sequence_header_obu` summary parse (5.5.1) on both the reduced-still-picture and full operating-points paths (timing/decoder-model/operating-parameters skipped bit-exactly), color_config (5.5.2) → {profile, width, height, bitdepth 8/10/12, mono, still}. 185 assertions incl. adversarial vectors.
-- **0.2.x — frame-header OBU**: uncompressed frame header parse, ref-frame state machine, frame-size overrides / superres, full-fidelity Av1Seq record growth.
-- **0.3.x — entropy decoder**: multi-symbol adaptive-CDF arithmetic decoder (daala lineage) — the substrate every tile decode needs.
-- **0.4.x — intra still-picture decode MILESTONE**: partition tree, intra prediction modes, inverse transforms; first pixels out (profile 0 keyframes).
-- **0.5.x — inter + filters**: motion compensation, deblocking, CDEF, loop restoration, film grain synthesis.
-- **0.6.x — conformance**: libaom/Argon vector runs, 10-bit paths, fuzz hardening.
-- **0.7.x — ENCODE lane bring-up**: intra keyframe encoder (rav1e lineage) growing from the 0.1.x OBU-writer seed; gate = own-decoder round-trip first, then cross-decoder (dav1d/libaom) validation.
+Not its own arc; these land inside whichever codec arc first needs them:
 
-## H.264/AVC — decode + encode (`src/h264_*.cyr`, prefix `h264_`)
+- **YUV frame-buffer / plane types** — a shared planar-frame record
+  appears when the first decoder emits pixels (AV1 0.7.x or VP8 0.10.x,
+  whichever milestone lands first).
+- **Entropy-coder consolidation watch** — CABAC (H.264/H.265),
+  multi-symbol adaptive-CDF (AV1), and the boolean coder (VP8/VP9) stay
+  per-family until real overlap proves out. Do NOT unify speculatively.
+- **Conformance-vector harness** — a shared runner lands with the first
+  family's conformance sub-arc, then the others reuse it.
+- **Container scope** — IVF is the test-bench container; MP4/WebM demux
+  is out of scope for drishti (a future container lib's job).
 
-Replaces **openh264**.
+---
 
-- **0.1.x (THIS CUT, done)** — NAL layer + parameter sets. Annex-B byte-stream scan (3-/4-byte start codes with zero_byte attribution, garbage resync, trailing-zero strip, zero-copy yield), NAL header parse (Table 7-1, forbidden_zero_bit enforcement), emulation-prevention in BOTH directions (RBSP strip + EPB insert, round-trip proven), Annex-B composer with 7.4.1 header-semantics enforcement (the encode seed). Full SPS parse (7.3.2.1.1 incl. High-profile branch, scaling-list skip with early-out, computed cropped display dims) + minimal PPS parse (CAVLC/CABAC flag through redundant_pic_cnt_present_flag). 326-assertion suite: hand-built QCIF/1080p-crop/720p-High/interlaced vectors, exp-Golomb cross-check against the core writer, adversarial truncation/lying-value/bomb rejections, end-to-end wrap→scan→unwrap→parse.
-- **0.2.x** — slice header parse + CAVLC residual entropy (9.2); pic_order_cnt_type 1 support; PPS High-profile tail (transform_8x8_mode_flag, pic scaling matrix, second_chroma_qp_index_offset via more_rbsp_data()).
-- **0.3.x** — **intra I-frame decode MILESTONE**: Intra_4x4 / Intra_16x16 prediction modes, inverse 4x4 transform + dequant (8.5), reconstruction to planar YUV output.
-- **0.4.x** — P slices: ref pic lists, quarter-pel luma / eighth-pel chroma motion compensation (8.4), deblocking filter (8.7).
-- **0.5.x** — CABAC entropy decode (9.3) + High-profile 8x8 transform path.
-- **0.6.x** — conformance: ITU/JM test-vector sweep, fuzz corpus expansion.
-- **0.7.x** — ENCODE lane: Baseline intra encoder (SPS/PPS emission already seeded by the composer + core VLC writers) → P-frame encode.
+## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e)
 
-## H.265/HEVC — decode-only (`src/h265_*.cyr`, prefix `h265_`)
+Baseline (0.7.0): OBU layer + sequence header.
 
-Replaces **libde265**. Encode is explicitly OUT of this family's charter (ADR 0001).
+- **frame-header OBU** — uncompressed frame header, ref-frame state
+  machine, frame-size overrides / superres; full-fidelity Av1Seq growth.
+- **entropy decoder** — multi-symbol adaptive-CDF arithmetic decoder
+  (daala lineage); the substrate every tile decode needs.
+- **intra still-picture decode — MILESTONE** — partition tree, intra
+  prediction modes, inverse transforms, reconstruction (profile-0
+  keyframes: first pixels out).
+- **inter + filters** — motion compensation, deblocking, CDEF, loop
+  restoration, film-grain synthesis.
+- **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
+  fuzz hardening.
+- **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
+  the `av1_obu_write_header` seed; gate = own-decoder round-trip, then
+  cross-decoder (dav1d/libaom).
+- **AV1 100%** = decode conformance-clean + encode round-trip-clean →
+  close 0.7.x.
 
-- **0.1.x — NAL layer + parameter sets (THIS CUT, done)**: Annex-B byte-stream scan (B.2.2, strict — garbage before a start code is `DR_ERR_BAD_HEADER`, no resync), two-byte NAL unit header (7.3.1.2) with forbidden-bit and temporal-id-plus1 enforcement + VCL/IRAP/IDR predicates, EPB strip / RBSP extraction (7.3.1.1), profile_tier_level incl. sub-layer alignment (7.3.3), minimal VPS (7.3.2.1, reserved-0xffff captured-not-rejected), SPS through the sizing block with computed cropped display dims (7.3.2.2, Table 6-1 chroma-unit crop math, A.4.2 dimension bomb guard at 16888), minimal PPS through cu_qp_delta (7.3.2.3). 276 assertions green standalone, adversarial battery included.
-- **0.2.x — slice plumbing**: slice_segment_header parse (7.3.6), remaining PPS tail (tiles / deblocking / scaling-list flags), CABAC engine + context init (9.3.2), parameter-set store keyed by vps/sps/pps ids.
-- **0.3.x — intra-only decode MILESTONE**: CTU quadtree walk (7.3.8), all 35 intra prediction modes (8.4), inverse 4/8/16/32 transforms + reconstruction — decodes real Main-profile still-picture streams end to end.
-- **0.4.x — inter + loop filters**: motion compensation (8.5), deblocking (8.7.2), SAO (8.7.3) — full Main-profile P/B-frame decode.
-- **0.5.x — Main10 + conformance**: 10-bit code paths, HM conformance-vector battery, fuzz hardening of the slice/CTU layers.
-- **1.0 — decode charter complete**: Main + Main10 conformance-clean.
+## 0.8.x — H.264/AVC → 100% (decode + encode; replaces openh264)
 
-## VP8/VP9 — decode + encode (`src/vpx_bool.cyr` + `src/vp8.cyr` + `src/vp9.cyr`, prefixes `vbool_` / `vp8_` / `vp9_`)
+Baseline (0.7.0): NAL layer + parameter sets.
 
-Replaces **libvpx**.
+- **slice + CAVLC** — slice header parse + CAVLC residual entropy (9.2);
+  pic_order_cnt_type 1; PPS High tail (transform_8x8, pic scaling
+  matrix, second_chroma_qp_index_offset via more_rbsp_data()).
+- **intra I-frame decode — MILESTONE** — Intra_4x4 / Intra_16x16
+  prediction, inverse 4×4 transform + dequant (8.5), reconstruction to
+  planar YUV.
+- **P slices** — ref pic lists, quarter-pel luma / eighth-pel chroma
+  motion compensation (8.4), deblocking filter (8.7).
+- **CABAC + High** — CABAC entropy decode (9.3) + High-profile 8×8
+  transform path.
+- **conformance** — ITU/JM test-vector sweep, fuzz corpus expansion.
+- **ENCODE lane** — Baseline intra encoder (SPS/PPS emission already
+  seeded by the composer + core VLC writers) → P-frame encode.
+- **H.264 100%** = decode conformance-clean + encode round-trip-clean →
+  close 0.8.x.
 
-- **0.1.x (THIS CUT, done)** — the boolean arithmetic coder, DECODER
-  and ENCODER (RFC 6386 7.3 verbatim arithmetic: split subdivision,
-  carry-at-renormalization propagation, 4-byte flush), bounds-hardened
-  with the core sticky-error discipline (the RFC reference reads
-  unchecked past the buffer; this port latches `DR_ERR_TRUNCATED`) —
-  the foundation every VP8/VP9 layer sits on, one implementation
-  serving both codecs (the VP9 spec's 9.2 bool decoding is the
-  identical coder). VP8 frame framing (RFC 6386 9.1: LE-packed 3-byte
-  frame tag, keyframe start code + 14-bit dims/scales,
-  lying-first_partition_size rejection) with a validated builder +
-  byte-exact writer (encode seed). VP9 uncompressed header (spec
-  6.2-6.2.4: frame marker, profile bits + profile-3 reserved check,
-  show_existing_frame short-circuit, sync code, color config per
-  profile incl. the RGB-in-profile-0/2 rejection, frame + render
-  size). 287-assertion suite incl. two hand-computed encoder
-  known-answer vectors and encode→decode round-trips across the
-  probability range.
-- **0.2.x — VP8 keyframe decode MILESTONE**: header partition
-  (mode/prob decode), token/residual decode, dequant, inverse WHT/DCT,
-  intra prediction, loop filter — first pixels out (RFC 6386 §§10-15).
-- **0.3.x — VP8 inter frames**: MV decode (§17), motion compensation
-  (§18), golden/altref reference state.
-- **0.4.x — VP9 keyframe decode**: superblock partition trees, tree
-  probs, transforms (VP9 spec §§8-9).
-- **0.5.x — VP9 inter + loop filter**.
-- **0.6.x — conformance**: libvpx test-vector sweep, fuzz hardening.
-- **0.7.x — ENCODE lane**: VP8 keyframe encoder first (RFC 6386's
-  reference code makes VP8 the natural encode entry), growing from the
-  0.1.x bool-encoder + frame-tag-writer seeds; gate = own-decoder
-  round-trip, then libvpx cross-decode.
+## 0.9.x — H.265/HEVC → 100% (decode only; replaces libde265)
+
+Baseline (0.7.0): NAL layer + parameter sets. Encode is explicitly OUT
+of this family's charter (ADR 0001).
+
+- **slice plumbing** — slice_segment_header parse (7.3.6), remaining PPS
+  tail (tiles / deblocking / scaling-list flags), CABAC engine + context
+  init (9.3.2), parameter-set store keyed by vps/sps/pps ids.
+- **intra-only decode — MILESTONE** — CTU quadtree walk (7.3.8), all 35
+  intra prediction modes (8.4), inverse 4/8/16/32 transforms +
+  reconstruction: real Main-profile still-picture streams end to end.
+- **inter + loop filters** — motion compensation (8.5), deblocking
+  (8.7.2), SAO (8.7.3): full Main-profile P/B-frame decode.
+- **Main10 + conformance** — 10-bit code paths, HM conformance-vector
+  battery, fuzz hardening of the slice/CTU layers.
+- **H.265 100%** = Main + Main10 decode conformance-clean → close 0.9.x.
+
+## 0.10.x — VP8/VP9 → 100% (decode + encode; replaces libvpx)
+
+Baseline (0.7.0): the boolean coder (decode + encode) + frame headers.
+
+- **VP8 keyframe decode — MILESTONE** — header partition (mode/prob
+  decode), token/residual decode, dequant, inverse WHT/DCT, intra
+  prediction, loop filter: first pixels (RFC 6386 §§10-15).
+- **VP8 inter** — MV decode (§17), motion compensation (§18),
+  golden/altref reference state.
+- **VP9 keyframe decode** — superblock partition trees, tree probs,
+  transforms (VP9 spec §§8-9).
+- **VP9 inter + loop filter**.
+- **conformance** — libvpx test-vector sweep, fuzz hardening.
+- **ENCODE lane** — VP8 keyframe encoder first (RFC 6386's reference
+  code makes VP8 the natural encode entry), growing from the 0.7.0
+  bool-encoder + frame-tag-writer seeds; gate = own-decoder round-trip,
+  then libvpx cross-decode.
+- **VP8/VP9 100%** = decode conformance-clean + encode round-trip-clean
+  → close 0.10.x.
+
+## 0.11.x — Audit phase (cross-family)
+
+No new features — a security + correctness pass over the whole,
+now-complete codec surface, the standard AGNOS pattern (find →
+adversarially verify reachability → harden):
+
+- Untrusted-input hardening sweep across every decoder (all four
+  families are now full decoders, not just header parsers): re-audit
+  every entropy/transform/prediction loop bound, every allocation from
+  a stream-derived size, every table index.
+- Fuzz-corpus expansion to the decode paths (0.7.0 fuzzed the header
+  layer; now the full decoders get corpora).
+- Allocation audit — allocation confined to `*_init` / one-shot setup;
+  hot decode/encode paths allocation-free.
+- The report: `docs/audit/YYYY-MM-DD-audit.md`, findings fixed/guarded,
+  sound paths verified. Ticks the v1.0 security-audit criterion.
+
+## 0.12.x — Freeze + documentation phase
+
+No behavior change — close the remaining v1.0 criteria:
+
+- **API freeze** — `docs/api.md`: every exported symbol documented,
+  the stable 1.x surface declared, internals marked out-of-freeze;
+  `STABILITY.md`.
+- **Benchmarks** — `docs/benchmarks.md`: decode/encode throughput per
+  family with methodology + reproduction (0.7.0's bitreader/VLC numbers
+  extended to whole-frame decode).
+- **Downstream consumer green** — at least one of tarang / tazama /
+  jalwa / aethersafta (or a bundled `examples/` consumer) decoding a
+  real stream through the public API.
+- **CHANGELOG** complete + gap-free from 0.7.0; `SECURITY.md` current.
+
+## 1.0.0 — close-out
+
+The clean cut once 0.7.x–0.12.x are all green: no code change from the
+last 0.12.x, all six v1.0 criteria met, `api.md` freeze in force for
+the 1.x line (minors add only). drishti becomes a v1.0+ crate and moves
+to the applications libs registry.
 
 ## Out of scope (for v1.0)
 
-- MP4 / WebM / Matroska demuxing — container work beyond IVF belongs
-  to a future container lib, not drishti.
-- HEVC encode (no sovereign x265-replacement is registered; re-enters
-  via the crate registry or not at all).
-- Hardware acceleration — drishti is the CPU reference; a GPU path is
-  a post-1.0 lever behind mabda.
+- MP4 / WebM / Matroska demuxing — container work beyond IVF belongs to
+  a future container lib, not drishti.
+- HEVC encode — no sovereign x265-replacement is registered; re-enters
+  via the crate registry or not at all.
+- Hardware acceleration — drishti is the CPU reference; a GPU path is a
+  post-1.0 lever behind mabda.
 - Audio — that's shravan.
