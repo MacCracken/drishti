@@ -1,0 +1,179 @@
+# tests/drishti.fcyr — drishti fuzz harness: mutate a valid IVF file
+# (header bytes, frame-size fields) and hammer the reader + sniffer +
+# VLC readers. The contract under fuzz: NEVER crash, NEVER read OOB,
+# NEVER loop forever — every outcome is either a clean parse or a
+# clean DR_ERR_* / DR_IVF_END code.
+#
+# Suites explicitly include the lib root: stdlib auto-resolves, [lib]
+# modules do not (pin 6.4.43 behavior).
+include "src/main.cyr"
+
+# Deterministic xorshift PRNG so failures reproduce.
+var fuzz_seed = 0x2545F491;
+fn fuzz_rand(): i64 {
+    var s = fuzz_seed;
+    s = s ^ (s << 13);
+    s = s ^ (s >> 7);
+    s = s ^ (s << 17);
+    s = s & 0x7FFFFFFFFFFFFFFF;
+    fuzz_seed = s;
+    return s;
+}
+
+# Build a fresh valid 2-frame IVF via the writer (60+ bytes).
+fn fuzz_build_ivf(out_len): i64 {
+    var w = dr_ivf_writer_init(DR_FOURCC_AV01, 176, 144, 1, 30);
+    var f0 = alloc(16);
+    var i = 0;
+    while (i < 16) { store8(f0 + i, i * 7); i = i + 1; }
+    dr_ivf_write_frame(w, f0, 16, 0);
+    dr_ivf_write_frame(w, f0, 5, 1);
+    return dr_ivf_writer_finish(w, out_len);
+}
+
+# Drive the full read path over an arbitrary buffer; returns the number
+# of frames read. Every return path is a clean code — the assertion is
+# simply that we come back at all (no crash/hang) and that any error
+# is a known DR_ERR_* value.
+fn fuzz_drive_reader(buf, len): i64 {
+    dr_sniff(buf, len);
+    dr_sniff_fourcc(buf, len);
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, len, &e);
+    if (r == 0) {
+        # Init refused: error must be one of the documented codes.
+        assert((e == DR_ERR_TRUNCATED) || (e == DR_ERR_BAD_HEADER)
+        || (e == DR_ERR_UNSUPPORTED) || (e == DR_ERR_OOM),
+        "init error is a known code");
+        return 0;
+    }
+    var p = 0; var sz = 0; var pts = 0;
+    var frames = 0;
+    var rc = dr_ivf_next_frame(r, &p, &sz, &pts);
+    while (rc == DR_OK) {
+        # Payload must lie fully inside the source buffer (no OOB).
+        assert(p >= buf, "payload starts inside buffer");
+        assert((p + sz) <= (buf + len), "payload ends inside buffer");
+        frames = frames + 1;
+        rc = dr_ivf_next_frame(r, &p, &sz, &pts);
+    }
+    assert((rc == DR_IVF_END) || (rc == DR_ERR_TRUNCATED)
+    || (rc == DR_ERR_OVERSIZE), "loop exit is a known code");
+    return frames;
+}
+
+# Feed a buffer to every VLC reader; clean codes only, no hangs.
+fn fuzz_drive_vlc(buf, len): i64 {
+    var v = 0;
+    var br = dr_br_init(buf, len);
+    while (dr_leb128_read(br, &v) == DR_OK) { }
+    br = dr_br_init(buf, len);
+    while (dr_uvlc_read(br, &v) == DR_OK) { }
+    br = dr_br_init(buf, len);
+    while (dr_ue_read(br, &v) == DR_OK) { }
+    br = dr_br_init(buf, len);
+    while (dr_se_read(br, &v) == DR_OK) { }
+    return 0;
+}
+
+# Pass 1: single-byte exhaustive header mutation — every header byte
+# index x a handful of interesting values.
+fn fuzz_pass_header_bytes(): i64 {
+    var len = 0;
+    var vals = alloc(8);
+    store8(vals, 0x00); store8(vals + 1, 0x01); store8(vals + 2, 0x7F);
+    store8(vals + 3, 0x80); store8(vals + 4, 0xFF); store8(vals + 5, 0x20);
+    var idx = 0;
+    while (idx < 32) {
+        var vi = 0;
+        while (vi < 6) {
+            var b = fuzz_build_ivf(&len);
+            store8(b + idx, load8(vals + vi));
+            fuzz_drive_reader(b, len);
+            vi = vi + 1;
+        }
+        idx = idx + 1;
+    }
+    return 0;
+}
+
+# Pass 2: frame-size field attacks — lying sizes at both frame headers.
+fn fuzz_pass_frame_sizes(): i64 {
+    var len = 0;
+    var sizes = alloc(48);   # 6 x i64 hostile size values
+    store64(sizes, 0);
+    store64(sizes + 8, 1);
+    store64(sizes + 16, 0xFFFFFFFF);      # u32 max
+    store64(sizes + 24, 0x7FFFFFFF);      # i32 max
+    store64(sizes + 32, 0x10000000);      # DR_IVF_MAX_FRAME exactly
+    store64(sizes + 40, 0x10000001);      # one over the cap
+    var si = 0;
+    while (si < 6) {
+        var b = fuzz_build_ivf(&len);
+        dr_wr_le32(b + 32, load64(sizes + (si * 8)));   # frame 0 size field
+        fuzz_drive_reader(b, len);
+        b = fuzz_build_ivf(&len);
+        dr_wr_le32(b + 60, load64(sizes + (si * 8)));   # frame 1 size field
+        fuzz_drive_reader(b, len);
+        si = si + 1;
+    }
+    return 0;
+}
+
+# Pass 3: random truncation — every prefix length of the valid file.
+fn fuzz_pass_truncation(): i64 {
+    var len = 0;
+    var b = fuzz_build_ivf(&len);
+    var cut = 0;
+    while (cut <= len) {
+        fuzz_drive_reader(b, cut);
+        cut = cut + 1;
+    }
+    return 0;
+}
+
+# Pass 4: random garbage buffers through reader + VLCs.
+fn fuzz_pass_garbage(): i64 {
+    var round = 0;
+    while (round < 200) {
+        var n = (fuzz_rand() & 127) + 1;   # 1..128 bytes
+        var b = alloc(n);
+        var i = 0;
+        while (i < n) {
+            store8(b + i, fuzz_rand() & 255);
+            i = i + 1;
+        }
+        fuzz_drive_reader(b, n);
+        fuzz_drive_vlc(b, n);
+        round = round + 1;
+    }
+    # Pathological non-random shapes: all-zeros and all-ones.
+    var z = alloc(64);
+    var o = alloc(64);
+    var k = 0;
+    while (k < 64) { store8(z + k, 0); store8(o + k, 0xFF); k = k + 1; }
+    fuzz_drive_vlc(z, 64);   # zero runs: uvlc/ue must reject, not hang
+    fuzz_drive_vlc(o, 64);
+    fuzz_drive_reader(z, 64);
+    fuzz_drive_reader(o, 64);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    fuzz_pass_header_bytes();
+    fuzz_pass_frame_sizes();
+    fuzz_pass_truncation();
+    fuzz_pass_garbage();
+    # A pristine file still parses after all that (fixtures are fresh
+    # per mutation, so this is a sanity check of the harness itself).
+    var len = 0;
+    var b = fuzz_build_ivf(&len);
+    assert_eq(fuzz_drive_reader(b, len), 2, "pristine file: 2 frames");
+    var rc = assert_summary();
+    if (rc == 0) { println("fuzz: ok"); }
+    return rc;
+}
+
+var r = main();
+syscall(60, r);

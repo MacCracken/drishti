@@ -1,0 +1,532 @@
+# @public — drishti bit I/O: MSB-first bitreader/bitwriter + the shared
+# variable-length codes every video family parses (leb128, uvlc,
+# exp-Golomb ue(v)/se(v)) + little/big-endian byte helpers.
+#
+# FLAT module (no includes) — stdlib resolves via cyrius.cyml; wiring in
+# src/main.cyr. Depends on src/drishti.cyr (DR_ERR_* codes) only.
+#
+# Spec citations:
+#   AV1  spec 4.10.3 uvlc(), 4.10.5 leb128()
+#   H.264 spec 9.1 ue(v) / 9.1.1 se(v) exp-Golomb   (H.265 9.2 is the
+#   same code family — one implementation, cross-checked against both)
+#
+# Every read is bounds-checked; errors are STICKY: once a reader/writer
+# faults, every later call is a no-op returning 0 and the first error
+# code is preserved for inspection via dr_br_err / dr_bw_err.
+#
+# DrBr bitreader layout (32 bytes, heap):
+#   +0:  buf — byte buffer base pointer (borrowed, not owned)
+#   +8:  len — buffer length in BYTES
+#   +16: pos — bit cursor (bits consumed since buf[0] bit 7)
+#   +24: err — sticky error code (DR_OK until first fault)
+#
+# DrBw bitwriter layout (32 bytes, heap):
+#   +0:  buf — owned output buffer (auto-grows by doubling)
+#   +8:  cap — current capacity in BYTES
+#   +16: pos — bit cursor (bits written)
+#   +24: err — sticky error code
+
+# Hard cap on bitwriter growth: 1 GiB. A writer asked to exceed it
+# faults with DR_ERR_OVERSIZE instead of eating the machine.
+enum DrBwLimits {
+    DR_BW_MAX_BYTES = 1073741824;   # 1 << 30
+}
+
+# ================================================================
+# Endian byte helpers — shared by ivf.cyr and the codec families.
+# LE for IVF/RIFF-style containers, BE for MP4/avcC-style boxes.
+# Callers own the bounds check (these are raw pointer reads).
+# ================================================================
+
+fn dr_rd_le16(p): i64 {
+    return load8(p) + (load8(p + 1) << 8);
+}
+
+fn dr_rd_le32(p): i64 {
+    return load8(p) + (load8(p + 1) << 8) + (load8(p + 2) << 16)
+    + (load8(p + 3) << 24);
+}
+
+fn dr_rd_le64(p): i64 {
+    return dr_rd_le32(p) + (dr_rd_le32(p + 4) << 32);
+}
+
+fn dr_wr_le16(p, v): i64 {
+    store8(p, v & 255);
+    store8(p + 1, (v >> 8) & 255);
+    return 0;
+}
+
+fn dr_wr_le32(p, v): i64 {
+    store8(p, v & 255);
+    store8(p + 1, (v >> 8) & 255);
+    store8(p + 2, (v >> 16) & 255);
+    store8(p + 3, (v >> 24) & 255);
+    return 0;
+}
+
+fn dr_wr_le64(p, v): i64 {
+    dr_wr_le32(p, v & 0xFFFFFFFF);
+    dr_wr_le32(p + 4, (v >> 32) & 0xFFFFFFFF);
+    return 0;
+}
+
+fn dr_rd_be16(p): i64 {
+    return (load8(p) << 8) + load8(p + 1);
+}
+
+fn dr_rd_be32(p): i64 {
+    return (load8(p) << 24) + (load8(p + 1) << 16) + (load8(p + 2) << 8)
+    + load8(p + 3);
+}
+
+fn dr_wr_be16(p, v): i64 {
+    store8(p, (v >> 8) & 255);
+    store8(p + 1, v & 255);
+    return 0;
+}
+
+fn dr_wr_be32(p, v): i64 {
+    store8(p, (v >> 24) & 255);
+    store8(p + 1, (v >> 16) & 255);
+    store8(p + 2, (v >> 8) & 255);
+    store8(p + 3, v & 255);
+    return 0;
+}
+
+# ================================================================
+# DrBr — MSB-first bitreader
+# ================================================================
+
+# Create a bitreader over buf[0..len). The buffer is BORROWED — the
+# caller keeps it alive for the reader's lifetime. Returns the DrBr
+# handle, or 0 on allocation failure / negative len.
+fn dr_br_init(buf, len): i64 {
+    if (len < 0) { return 0; }
+    var br = alloc(32);
+    if (br == 0) { return 0; }
+    store64(br, buf);
+    store64(br + 8, len);
+    store64(br + 16, 0);
+    store64(br + 24, DR_OK);
+    return br;
+}
+
+# Sticky error code (DR_OK if the reader has never faulted).
+fn dr_br_err(br): i64 {
+    return load64(br + 24);
+}
+
+# Latch a sticky error onto the reader from OUTSIDE this module — the
+# public seam family modules use to flag domain faults with core-
+# consistent sticky semantics (no DrBr layout coupling). First code
+# wins: an already-faulted reader keeps its original code. Returns the
+# reader's (resulting) sticky code so callers can `return` it directly.
+fn dr_br_set_err(br, code): i64 {
+    if (load64(br + 24) == DR_OK) { store64(br + 24, code); }
+    return load64(br + 24);
+}
+
+# Bits remaining (0 when exhausted or after a fault froze the cursor).
+fn dr_br_bits_left(br): i64 {
+    return (load64(br + 8) << 3) - load64(br + 16);
+}
+
+# Bit cursor: bits consumed so far.
+fn dr_br_bit_pos(br): i64 {
+    return load64(br + 16);
+}
+
+# Byte offset of the byte holding the NEXT unread bit (pos >> 3).
+fn dr_br_byte_pos(br): i64 {
+    return load64(br + 16) >> 3;
+}
+
+# Read one bit, MSB-first (bit 7 of buf[0] comes out first).
+# Returns 0/1; on exhaustion sets sticky DR_ERR_TRUNCATED and returns 0.
+fn dr_br_read_bit(br): i64 {
+    if (load64(br + 24) != DR_OK) { return 0; }
+    var pos = load64(br + 16);
+    if (pos >= (load64(br + 8) << 3)) {
+        store64(br + 24, DR_ERR_TRUNCATED);
+        return 0;
+    }
+    var byte = load8(load64(br) + (pos >> 3));
+    store64(br + 16, pos + 1);
+    return (byte >> (7 - (pos & 7))) & 1;
+}
+
+# Read n bits (0 <= n <= 32), MSB-first, returned right-aligned.
+# n == 0 reads nothing and returns 0. n outside [0,32] sets sticky
+# DR_ERR_BOUNDS; fewer than n bits left sets sticky DR_ERR_TRUNCATED
+# WITHOUT advancing the cursor. Faulted reads return 0.
+fn dr_br_read_bits(br, n): i64 {
+    if (load64(br + 24) != DR_OK) { return 0; }
+    if ((n < 0) || (n > 32)) {
+        store64(br + 24, DR_ERR_BOUNDS);
+        return 0;
+    }
+    if (n == 0) { return 0; }
+    if (dr_br_bits_left(br) < n) {
+        store64(br + 24, DR_ERR_TRUNCATED);
+        return 0;
+    }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        v = (v << 1) + dr_br_read_bit(br);
+        i = i + 1;
+    }
+    return v;
+}
+
+# Advance the cursor to the next byte boundary (no-op if aligned).
+# Discarded bits are not inspected. Cannot overrun: pos lands at most
+# on len*8. Returns DR_OK (or the sticky error if already faulted).
+fn dr_br_byte_align(br): i64 {
+    var e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    var pos = load64(br + 16);
+    store64(br + 16, (pos + 7) & (0 - 8));
+    return DR_OK;
+}
+
+# True (1) when the cursor sits on a byte boundary.
+fn dr_br_is_aligned(br): i64 {
+    if ((load64(br + 16) & 7) == 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# leb128 — AV1 spec 4.10.5 leb128()
+#
+#   value = 0
+#   for (i = 0; i < 8; i++) {
+#     leb128_byte = f(8)
+#     value |= (leb128_byte & 0x7f) << (i*7)
+#     if (!(leb128_byte & 0x80)) break
+#   }
+#
+# Conformance (4.10.5): at most 8 bytes, value <= (1<<32)-1, and the
+# final byte has its continuation bit clear. Non-minimal encodings
+# (zero-padded, e.g. 0x80 0x00) ARE legal — encoders pad obu_size.
+# ================================================================
+
+# Read a leb128 value from a BYTE-ALIGNED reader into *out (u64 store).
+# Returns DR_OK, or: DR_ERR_BOUNDS (reader not byte-aligned),
+# DR_ERR_TRUNCATED (buffer ends mid-value), DR_ERR_BAD_LEB128 (8th byte
+# still has the continuation bit, or decoded value > 0xFFFFFFFF).
+# Fault codes are also latched into the reader's sticky error.
+fn dr_leb128_read(br, out): i64 {
+    var e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    if (dr_br_is_aligned(br) == 0) {
+        store64(br + 24, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    var value = 0;
+    var i = 0;
+    while (i < 8) {
+        var b = dr_br_read_bits(br, 8);
+        e = load64(br + 24);
+        if (e != DR_OK) { return e; }
+        value = value + ((b & 0x7F) << (i * 7));
+        if ((b & 0x80) == 0) {
+            # 4.10.5 conformance: value must fit in 32 bits.
+            if (value > 0xFFFFFFFF) {
+                store64(br + 24, DR_ERR_BAD_LEB128);
+                return DR_ERR_BAD_LEB128;
+            }
+            store64(out, value);
+            return DR_OK;
+        }
+        i = i + 1;
+    }
+    # 8 bytes consumed and the last one still had the continuation bit.
+    store64(br + 24, DR_ERR_BAD_LEB128);
+    return DR_ERR_BAD_LEB128;
+}
+
+# ================================================================
+# uvlc — AV1 spec 4.10.3 uvlc()
+#
+#   leadingZeros = 0
+#   while (1) { done = f(1); if (done) break; leadingZeros++ }
+#   if (leadingZeros >= 32) return (1<<32) - 1
+#   value = f(leadingZeros)
+#   return value + (1 << leadingZeros) - 1
+# ================================================================
+
+# Read a uvlc value into *out. Returns DR_OK or DR_ERR_TRUNCATED
+# (zero-run or suffix hits end of buffer). Per spec, leadingZeros >= 32
+# is NOT an error: the value is (1<<32)-1 and only the terminating 1
+# bit (no suffix) is consumed after the zero run.
+fn dr_uvlc_read(br, out): i64 {
+    var e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    var lz = 0;
+    while (1) {
+        var done = dr_br_read_bit(br);
+        e = load64(br + 24);
+        if (e != DR_OK) { return e; }
+        if (done) { break; }
+        lz = lz + 1;
+    }
+    if (lz >= 32) {
+        store64(out, 0xFFFFFFFF);
+        return DR_OK;
+    }
+    var suffix = dr_br_read_bits(br, lz);
+    e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    store64(out, suffix + (1 << lz) - 1);
+    return DR_OK;
+}
+
+# ================================================================
+# exp-Golomb — H.264 spec 9.1 (ue(v)) / 9.1.1 (se(v)); H.265 spec 9.2
+# is the identical code family.
+#
+#   leadingZeroBits = -1
+#   for (b = 0; !b; leadingZeroBits++) b = read_bit()
+#   codeNum = 2^leadingZeroBits - 1 + read_bits(leadingZeroBits)
+#
+# codeNum is spec-bounded to [0, 2^32 - 2] (H.264 9.1: "the bitstream
+# shall not contain data that result in a value of codeNum greater than
+# 2^32 - 2"), which bounds leadingZeroBits to <= 31. A longer zero run
+# is a malformed stream: DR_ERR_BAD_VLC.
+# ================================================================
+
+# Read ue(v) into *out. Returns DR_OK, DR_ERR_TRUNCATED, or
+# DR_ERR_BAD_VLC (more than 31 leading zeros).
+fn dr_ue_read(br, out): i64 {
+    var e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    var lz = 0;
+    while (1) {
+        var b = dr_br_read_bit(br);
+        e = load64(br + 24);
+        if (e != DR_OK) { return e; }
+        if (b) { break; }
+        lz = lz + 1;
+        if (lz > 31) {
+            store64(br + 24, DR_ERR_BAD_VLC);
+            return DR_ERR_BAD_VLC;
+        }
+    }
+    var suffix = dr_br_read_bits(br, lz);
+    e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    store64(out, (1 << lz) - 1 + suffix);
+    return DR_OK;
+}
+
+# Read se(v) into *out (signed, i64 store). H.264 9.1.1 mapping from
+# codeNum k: value = (-1)^(k+1) * Ceil(k / 2), i.e. k odd -> (k+1)/2,
+# k even -> -(k/2). Range [-(2^31 - 1), 2^31 - 1]. Same errors as ue.
+fn dr_se_read(br, out): i64 {
+    var k = 0;
+    var rc = dr_ue_read(br, &k);
+    if (rc != DR_OK) { return rc; }
+    if (k & 1) {
+        store64(out, (k + 1) >> 1);
+    } else {
+        store64(out, 0 - (k >> 1));
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# DrBw — MSB-first bitwriter (for the encode lanes)
+# ================================================================
+
+# Create a bitwriter with an initial capacity hint in bytes (values
+# < 16 are rounded up to 16). The buffer auto-grows by doubling up to
+# DR_BW_MAX_BYTES. Returns the DrBw handle, or 0 on allocation failure.
+fn dr_bw_init(cap_hint): i64 {
+    var cap = cap_hint;
+    if (cap < 16) { cap = 16; }
+    if (cap > DR_BW_MAX_BYTES) { return 0; }
+    var buf = alloc(cap);
+    if (buf == 0) { return 0; }
+    var bw = alloc(32);
+    if (bw == 0) { return 0; }
+    store64(bw, buf);
+    store64(bw + 8, cap);
+    store64(bw + 16, 0);
+    store64(bw + 24, DR_OK);
+    return bw;
+}
+
+# Sticky error code (DR_OK if the writer has never faulted).
+fn dr_bw_err(bw): i64 {
+    return load64(bw + 24);
+}
+
+# Latch a sticky error onto the writer from OUTSIDE this module — see
+# dr_br_set_err. First code wins; returns the resulting sticky code.
+fn dr_bw_set_err(bw, code): i64 {
+    if (load64(bw + 24) == DR_OK) { store64(bw + 24, code); }
+    return load64(bw + 24);
+}
+
+# Bit cursor: bits written so far.
+fn dr_bw_bit_pos(bw): i64 {
+    return load64(bw + 16);
+}
+
+# Bytes occupied so far, counting a trailing partial byte: (pos+7)/8.
+fn dr_bw_bytes(bw): i64 {
+    return (load64(bw + 16) + 7) >> 3;
+}
+
+# Output buffer pointer. OWNED by the writer; stable only until the
+# next put (growth may reallocate). Snapshot after dr_bw_flush.
+fn dr_bw_buf(bw): i64 {
+    return load64(bw);
+}
+
+# Internal: ensure room for extra_bits more bits, doubling the buffer.
+# Sets sticky DR_ERR_OVERSIZE past DR_BW_MAX_BYTES, DR_ERR_OOM on a
+# failed allocation. Returns DR_OK / error code.
+fn dr_bw_ensure(bw, extra_bits): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }
+    var need_bytes = (load64(bw + 16) + extra_bits + 7) >> 3;
+    var cap = load64(bw + 8);
+    if (need_bytes <= cap) { return DR_OK; }
+    var new_cap = cap;
+    while (new_cap < need_bytes) {
+        new_cap = new_cap << 1;
+        if (new_cap > DR_BW_MAX_BYTES) {
+            store64(bw + 24, DR_ERR_OVERSIZE);
+            return DR_ERR_OVERSIZE;
+        }
+    }
+    var new_buf = alloc(new_cap);
+    if (new_buf == 0) {
+        store64(bw + 24, DR_ERR_OOM);
+        return DR_ERR_OOM;
+    }
+    memcpy(new_buf, load64(bw), dr_bw_bytes(bw));
+    store64(bw, new_buf);
+    store64(bw + 8, new_cap);
+    return DR_OK;
+}
+
+# Append one bit (any nonzero bit value writes a 1). MSB-first: the
+# first bit written lands in bit 7 of byte 0. Returns DR_OK / sticky
+# error code.
+fn dr_bw_put_bit(bw, bit): i64 {
+    var rc = dr_bw_ensure(bw, 1);
+    if (rc != DR_OK) { return rc; }
+    var pos = load64(bw + 16);
+    var p = load64(bw) + (pos >> 3);
+    var shift = 7 - (pos & 7);
+    var byte = load8(p);
+    # Clear then set — the grown region is not guaranteed zeroed.
+    byte = byte & (255 - (1 << shift));
+    if (bit) { byte = byte + (1 << shift); }
+    store8(p, byte);
+    store64(bw + 16, pos + 1);
+    return DR_OK;
+}
+
+# Append the low n bits of value (0 <= n <= 32), MSB-first. Bits of
+# value above n are ignored (masked). n outside [0,32] sets sticky
+# DR_ERR_BOUNDS. Returns DR_OK / error code.
+fn dr_bw_put_bits(bw, value, n): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }
+    if ((n < 0) || (n > 32)) {
+        store64(bw + 24, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    var i = n;
+    while (i > 0) {
+        i = i - 1;
+        var rc = dr_bw_put_bit(bw, (value >> i) & 1);
+        if (rc != DR_OK) { return rc; }
+    }
+    return DR_OK;
+}
+
+# Zero-pad to a byte boundary. Returns the total byte length of the
+# stream (dr_bw_bytes), or 0-with-sticky-error if the writer faulted.
+fn dr_bw_flush(bw): i64 {
+    if (load64(bw + 24) != DR_OK) { return 0; }
+    while (load64(bw + 16) & 7) {
+        var rc = dr_bw_put_bit(bw, 0);
+        if (rc != DR_OK) { return 0; }
+    }
+    return dr_bw_bytes(bw);
+}
+
+# ================================================================
+# VLC writers — inverses of the readers above, for the encode lanes.
+# ================================================================
+
+# Write value as leb128 (minimal-length encoding; value 0 emits one
+# 0x00 byte). Requires a BYTE-ALIGNED writer (DR_ERR_BOUNDS otherwise)
+# and value in [0, 0xFFFFFFFF] (DR_ERR_BAD_LEB128 otherwise, matching
+# the 4.10.5 32-bit conformance bound). Returns DR_OK / error code.
+fn dr_leb128_write(bw, value): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }
+    if (load64(bw + 16) & 7) {
+        store64(bw + 24, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    if ((value < 0) || (value > 0xFFFFFFFF)) {
+        store64(bw + 24, DR_ERR_BAD_LEB128);
+        return DR_ERR_BAD_LEB128;
+    }
+    var v = value;
+    while (1) {
+        var b = v & 0x7F;
+        v = v >> 7;
+        if (v != 0) { b = b + 0x80; }
+        var rc = dr_bw_put_bits(bw, b, 8);
+        if (rc != DR_OK) { return rc; }
+        if (v == 0) { return DR_OK; }
+    }
+    return DR_OK;
+}
+
+# Write ue(v). value must be in [0, 2^32 - 2] (H.264 9.1 codeNum bound);
+# out of range sets sticky DR_ERR_BAD_VLC. Encoding: v+1 has exactly
+# lz+1 significant bits (2^lz <= v+1 < 2^(lz+1)); emit lz zeros then
+# v+1 in lz+1 bits. Returns DR_OK / error code.
+fn dr_ue_write(bw, value): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }
+    if ((value < 0) || (value > 0xFFFFFFFE)) {
+        store64(bw + 24, DR_ERR_BAD_VLC);
+        return DR_ERR_BAD_VLC;
+    }
+    var x = value + 1;
+    var lz = 0;
+    while ((x >> (lz + 1)) != 0) { lz = lz + 1; }
+    var rc = dr_bw_put_bits(bw, 0, lz);
+    if (rc != DR_OK) { return rc; }
+    return dr_bw_put_bits(bw, x, lz + 1);
+}
+
+# Write se(v). value must be in [-(2^31 - 1), 2^31 - 1] (H.264 9.1.1);
+# out of range sets sticky DR_ERR_BAD_VLC. Mapping: v > 0 -> 2v - 1,
+# v <= 0 -> -2v. Returns DR_OK / error code.
+fn dr_se_write(bw, value): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }   # sticky first — never clobber the first code
+    if ((value < (0 - 2147483647)) || (value > 2147483647)) {
+        store64(bw + 24, DR_ERR_BAD_VLC);
+        return DR_ERR_BAD_VLC;
+    }
+    var k = 0;
+    if (value > 0) {
+        k = (value << 1) - 1;
+    } else {
+        k = 0 - (value << 1);
+    }
+    return dr_ue_write(bw, k);
+}

@@ -1,0 +1,625 @@
+# tests/vpx.tcyr — VP8/VP9 family suite: the boolean arithmetic coder
+# (RFC 6386 7.3 — decoder AND encoder, round-trips + hand-computed
+# known-answer vectors + truncation/bounds faults), the VP8 frame tag /
+# keyframe header + writer round-trip (RFC 6386 9.1/9.2), and the VP9
+# uncompressed header (VP9 spec 6.2-6.2.4, 7.2.x) — keyframe,
+# show_existing short-circuit, render-size branch, and the adversarial
+# set (bad marker/sync/start-code, reserved bits, RGB-in-profile-0,
+# truncation, lying sizes). All vectors hand-built from the specs,
+# every field commented.
+#
+# Suites explicitly include the lib root + this family's not-yet-wired
+# modules: `cyrius test` auto-includes stdlib only, never [lib] modules
+# (verified at pin 6.4.43). Once vpx_bool/vp8/vp9 are wired into
+# src/main.cyr the self-includes below dedupe into no-ops.
+include "src/main.cyr"
+include "src/vpx_bool.cyr"
+include "src/vp8.cyr"
+include "src/vp9.cyr"
+
+# ================================================================
+# Fixture helpers
+# ================================================================
+
+# Zero-fill n bytes at b (alloc() does not guarantee zeroed memory).
+fn fx_zero(b, n) {
+    var i = 0;
+    while (i < n) {
+        store8(b + i, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Fixture: VP8 keyframe uncompressed chunk — RFC 6386 9.1, hand-packed.
+#
+#   frame tag (3 bytes, LITTLE-endian 24-bit):
+#     bit 0      !key_frame     = 0            (KEY frame — inverted sense)
+#     bits 1-3   version        = 1
+#     bit 4      show_frame     = 1
+#     bits 5-23  first_part_size= 100
+#   tmp = 0 | (1<<1) | (1<<4) | (100<<5) = 2 + 16 + 3200 = 3218 = 0x000C92
+#   -> bytes LE: 92 0C 00
+#   start code (9.1): 9d 01 2a
+#   width word  (16-bit LE): 176 | (hscale 2 << 14) = 0x80B0 -> B0 80
+#   height word (16-bit LE): 144 | (vscale 1 << 14) = 0x4090 -> 90 40
+#   + 100 zero bytes of "first partition" so first_part_size is honest.
+# ================================================================
+fn fx_vp8_key(out_len): i64 {
+    var b = alloc(110);
+    fx_zero(b, 110);
+    store8(b, 0x92);        # tag byte 0
+    store8(b + 1, 0x0C);    # tag byte 1
+    store8(b + 2, 0x00);    # tag byte 2
+    store8(b + 3, 0x9d);    # start code (9.1)
+    store8(b + 4, 0x01);
+    store8(b + 5, 0x2a);
+    store8(b + 6, 0xB0);    # width word LE: 176 | 2<<14
+    store8(b + 7, 0x80);
+    store8(b + 8, 0x90);    # height word LE: 144 | 1<<14
+    store8(b + 9, 0x40);
+    store64(out_len, 110);
+    return b;
+}
+
+# ================================================================
+# Fixture: VP9 keyframe uncompressed header — spec 6.2, hand-packed
+# MSB-first:
+#   frame_marker            f(2) = 10             (must be 2)
+#   profile_low_bit         f(1) = 0
+#   profile_high_bit        f(1) = 0              (-> profile 0, 8-bit)
+#   show_existing_frame     f(1) = 0
+#   frame_type              f(1) = 0              (KEY_FRAME, 7.2)
+#   show_frame              f(1) = 1
+#   error_resilient_mode    f(1) = 0
+#     -> byte 0 = 1000 0010 = 0x82
+#   frame_sync_code (6.2.1): 49 83 42
+#   color_config (6.2.2, profile 0 -> no ten_or_twelve bit):
+#     color_space           f(3) = 001            (CS_BT_601)
+#     color_range           f(1) = 0              (studio)
+#     (profile 0: subsampling implied 4:2:0 — no bits)
+#   frame_size (6.2.3):
+#     frame_width_minus_1   f(16)= 175            (-> 176)
+#     frame_height_minus_1  f(16)= 143            (-> 144)
+#   render_size (6.2.4):
+#     render_and_frame_size_different f(1) = 0    (render = frame size)
+#   (pad to byte)                    000
+#   post-sync bits: 001 0 0000000010101111 0000000010001111 0 + 000
+#   -> bytes: 20 0A F0 08 F0
+#   bits_consumed = 8 (flags) + 24 (sync) + 37 = 69
+# ================================================================
+fn fx_vp9_key(out_len): i64 {
+    var b = alloc(9);
+    store8(b, 0x82);        # marker/profile/flags byte (above)
+    store8(b + 1, 0x49);    # frame_sync_code (6.2.1)
+    store8(b + 2, 0x83);
+    store8(b + 3, 0x42);
+    store8(b + 4, 0x20);    # cs=001, range=0, w[0:3]=0000
+    store8(b + 5, 0x0A);    # w[4:11] = 00001010
+    store8(b + 6, 0xF0);    # w[12:15]=1111, h[0:3]=0000
+    store8(b + 7, 0x08);    # h[4:11] = 00001000
+    store8(b + 8, 0xF0);    # h[12:15]=1111, rdiff=0, pad 000
+    store64(out_len, 9);
+    return b;
+}
+
+# ================================================================
+# Fixture: VP9 keyframe with a DIFFERENT render size — same as
+# fx_vp9_key through frame_size, then (6.2.4):
+#   render_and_frame_size_different f(1) = 1
+#   render_width_minus_1   f(16) = 319            (-> 320)
+#   render_height_minus_1  f(16) = 239            (-> 240)
+# post-sync bits (69 total, pad 3):
+#   001 0 [w16] [h16] 1 [rw16=0000000100111111] [rh16=0000000011101111]
+#   -> bytes: 20 0A F0 08 F8 09 F8 07 78
+#   bits_consumed = 8 + 24 + 69 = 101
+# ================================================================
+fn fx_vp9_key_render(out_len): i64 {
+    var b = alloc(13);
+    store8(b, 0x82);
+    store8(b + 1, 0x49);
+    store8(b + 2, 0x83);
+    store8(b + 3, 0x42);
+    store8(b + 4, 0x20);    # cs=001, range=0, w[0:3]
+    store8(b + 5, 0x0A);    # w[4:11]
+    store8(b + 6, 0xF0);    # w[12:15], h[0:3]
+    store8(b + 7, 0x08);    # h[4:11]
+    store8(b + 8, 0xF8);    # h[12:15]=1111, rdiff=1, rw[0:2]=000
+    store8(b + 9, 0x09);    # rw[3:10] = 00001001
+    store8(b + 10, 0xF8);   # rw[11:15]=11111, rh[0:2]=000
+    store8(b + 11, 0x07);   # rh[3:10] = 00000111
+    store8(b + 12, 0x78);   # rh[11:15]=01111, pad 000
+    store64(out_len, 13);
+    return b;
+}
+
+# ================================================================
+# Boolean coder — encoder known-answer vectors (RFC 6386 7.3)
+# ================================================================
+
+fn test_vbool_kat_empty_flush() {
+    # init_bool_encoder: range=255 bottom=0 bit_count=24. Flushing with
+    # nothing encoded: no carry (bit 8 of 0), v stays 0 -> exactly the
+    # 4 zero-padding bytes of flush_bool_encoder.
+    var e = vbool_enc_init(16);
+    assert(e != 0, "encoder allocates");
+    var n = vbool_enc_flush(e);
+    assert_eq(n, 4, "empty flush emits exactly 4 pad bytes");
+    var buf = vbool_enc_buf(e);
+    assert_eq(load8(buf), 0, "pad byte 0 is 0x00");
+    assert_eq(load8(buf + 1), 0, "pad byte 1 is 0x00");
+    assert_eq(load8(buf + 2), 0, "pad byte 2 is 0x00");
+    assert_eq(load8(buf + 3), 0, "pad byte 3 is 0x00");
+    assert_eq(vbool_enc_err(e), DR_OK, "no error");
+    return 0;
+}
+
+fn test_vbool_kat_single_one() {
+    # One bool=1 at prob 128: split = 1+((254*128)>>8) = 128;
+    # bottom=128, range=127 -> renorm once: range=254, bottom=256,
+    # bit_count=23. Flush: no carry (bit 9 of 256 = 0);
+    # v = 256<<7 = 32768; c = 23>>3 = 2 byte-shifts -> v = 0x80000000;
+    # emitted bytes: 80 00 00 00.
+    var e = vbool_enc_init(16);
+    assert_eq(vbool_enc_bool(e, 128, 1), DR_OK, "encode 1 @128 ok");
+    var n = vbool_enc_flush(e);
+    assert_eq(n, 4, "single bool flushes to 4 bytes");
+    var buf = vbool_enc_buf(e);
+    assert_eq(load8(buf), 0x80, "KAT byte 0 = 0x80");
+    assert_eq(load8(buf + 1), 0, "KAT byte 1 = 0x00");
+    assert_eq(load8(buf + 2), 0, "KAT byte 2 = 0x00");
+    assert_eq(load8(buf + 3), 0, "KAT byte 3 = 0x00");
+    # And the decoder reads the 1 back: value primes to 0x8000,
+    # split<<8 = 0x8000, value >= split<<8 -> 1.
+    var d = vbool_dec_init(buf, n);
+    assert_eq(vbool_dec_bool(d, 128), 1, "decoder reads the 1 back");
+    assert_eq(vbool_dec_err(d), DR_OK, "decode clean");
+    return 0;
+}
+
+# ================================================================
+# Boolean coder — round-trips across the probability range
+# ================================================================
+
+fn test_vbool_roundtrip_bools() {
+    # 12 bools across skewed and midpoint probabilities: the decoder
+    # must reproduce the exact sequence with the same prob schedule.
+    var bits = alloc(12);
+    store8(bits, 1); store8(bits + 1, 0); store8(bits + 2, 1);
+    store8(bits + 3, 1); store8(bits + 4, 0); store8(bits + 5, 0);
+    store8(bits + 6, 1); store8(bits + 7, 0); store8(bits + 8, 1);
+    store8(bits + 9, 1); store8(bits + 10, 1); store8(bits + 11, 0);
+    var probs = alloc(12);
+    store8(probs, 1); store8(probs + 1, 64); store8(probs + 2, 128);
+    store8(probs + 3, 200); store8(probs + 4, 254); store8(probs + 5, 128);
+    store8(probs + 6, 30); store8(probs + 7, 30); store8(probs + 8, 240);
+    store8(probs + 9, 128); store8(probs + 10, 77); store8(probs + 11, 254);
+    var e = vbool_enc_init(16);
+    var i = 0;
+    while (i < 12) {
+        assert_eq(vbool_enc_bool(e, load8(probs + i), load8(bits + i)), DR_OK, "encode bool ok");
+        i = i + 1;
+    }
+    var n = vbool_enc_flush(e);
+    assert(n >= 4, "flushed stream is >= 4 bytes");
+    var d = vbool_dec_init(vbool_enc_buf(e), n);
+    i = 0;
+    while (i < 12) {
+        assert_eq(vbool_dec_bool(d, load8(probs + i)), load8(bits + i), "round-trip bool matches");
+        i = i + 1;
+    }
+    assert_eq(vbool_dec_err(d), DR_OK, "round-trip decode clean");
+    return 0;
+}
+
+fn test_vbool_roundtrip_literals() {
+    # read_literal/write_literal inverses, incl. the n=0 no-op, the
+    # n=32 boundary, and above-n bits being masked by the encoder.
+    var e = vbool_enc_init(16);
+    assert_eq(vbool_enc_literal(e, 0, 0), DR_OK, "n=0 literal is a no-op");
+    assert_eq(vbool_enc_literal(e, 5, 4), DR_OK, "4-bit literal");
+    assert_eq(vbool_enc_literal(e, 255, 8), DR_OK, "8-bit literal");
+    assert_eq(vbool_enc_literal(e, 12345, 19), DR_OK, "19-bit literal");
+    assert_eq(vbool_enc_literal(e, 4294967295, 32), DR_OK, "32-bit all-ones literal");
+    assert_eq(vbool_enc_literal(e, 0x1F0, 4), DR_OK, "bits above n are masked");
+    var n = vbool_enc_flush(e);
+    var d = vbool_dec_init(vbool_enc_buf(e), n);
+    assert_eq(vbool_dec_literal(d, 0), 0, "n=0 literal reads 0");
+    assert_eq(vbool_dec_literal(d, 4), 5, "4-bit literal round-trips");
+    assert_eq(vbool_dec_literal(d, 8), 255, "8-bit literal round-trips");
+    assert_eq(vbool_dec_literal(d, 19), 12345, "19-bit literal round-trips");
+    assert_eq(vbool_dec_literal(d, 32), 4294967295, "32-bit literal round-trips");
+    assert_eq(vbool_dec_literal(d, 4), 0, "masked literal kept only low n bits");
+    assert_eq(vbool_dec_err(d), DR_OK, "literal round-trip clean");
+    return 0;
+}
+
+fn test_vbool_roundtrip_signed() {
+    # Sign-magnitude signed values (RFC 6386 9.x, e.g. 9.6 delta_q):
+    # n-bit magnitude then sign bool, sign 1 = negative.
+    var e = vbool_enc_init(16);
+    assert_eq(vbool_enc_signed(e, 5, 4), DR_OK, "encode +5");
+    assert_eq(vbool_enc_signed(e, 0 - 5, 4), DR_OK, "encode -5");
+    assert_eq(vbool_enc_signed(e, 0, 4), DR_OK, "encode 0");
+    assert_eq(vbool_enc_signed(e, 15, 4), DR_OK, "encode +15 (max 4-bit mag)");
+    assert_eq(vbool_enc_signed(e, 0 - 15, 4), DR_OK, "encode -15");
+    var n = vbool_enc_flush(e);
+    var d = vbool_dec_init(vbool_enc_buf(e), n);
+    assert_eq(vbool_dec_signed(d, 4), 5, "+5 round-trips");
+    assert_eq(vbool_dec_signed(d, 4), 0 - 5, "-5 round-trips");
+    assert_eq(vbool_dec_signed(d, 4), 0, "0 round-trips");
+    assert_eq(vbool_dec_signed(d, 4), 15, "+15 round-trips");
+    assert_eq(vbool_dec_signed(d, 4), 0 - 15, "-15 round-trips");
+    assert_eq(vbool_dec_err(d), DR_OK, "signed round-trip clean");
+    return 0;
+}
+
+fn test_vbool_roundtrip_bulk() {
+    # 100 8-bit literals — exercises encoder growth (output > the 16-byte
+    # hint) and sustained renormalization on both sides.
+    var e = vbool_enc_init(16);
+    var i = 0;
+    while (i < 100) {
+        assert_eq(vbool_enc_literal(e, (i * 37) & 255, 8), DR_OK, "bulk encode ok");
+        i = i + 1;
+    }
+    var n = vbool_enc_flush(e);
+    assert(n > 16, "bulk stream outgrew the capacity hint");
+    var d = vbool_dec_init(vbool_enc_buf(e), n);
+    var ok = 1;
+    i = 0;
+    while (i < 100) {
+        if (vbool_dec_literal(d, 8) != ((i * 37) & 255)) { ok = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok, 1, "all 100 literals round-trip");
+    assert_eq(vbool_dec_err(d), DR_OK, "bulk decode clean");
+    return 0;
+}
+
+# ================================================================
+# Boolean coder — faults (bounds, truncation, sticky discipline)
+# ================================================================
+
+fn test_vbool_faults() {
+    # Encoder: prob out of range latches sticky DR_ERR_BOUNDS; later
+    # writes are no-ops preserving the first code; flush returns 0.
+    var e = vbool_enc_init(16);
+    assert_eq(vbool_enc_bool(e, 256, 1), DR_ERR_BOUNDS, "prob 256 rejected");
+    assert_eq(vbool_enc_err(e), DR_ERR_BOUNDS, "encoder error sticky");
+    assert_eq(vbool_enc_bool(e, 128, 1), DR_ERR_BOUNDS, "faulted encoder is a no-op");
+    assert_eq(vbool_enc_flush(e), 0, "faulted encoder flushes to 0");
+    # Encoder: literal n out of range; signed magnitude overflow.
+    var e2 = vbool_enc_init(16);
+    assert_eq(vbool_enc_literal(e2, 1, 33), DR_ERR_BOUNDS, "literal n=33 rejected");
+    var e3 = vbool_enc_init(16);
+    assert_eq(vbool_enc_signed(e3, 16, 4), DR_ERR_BOUNDS, "magnitude 16 overflows 4 bits");
+    var e4 = vbool_enc_init(16);
+    assert_eq(vbool_enc_signed(e4, 0 - 16, 4), DR_ERR_BOUNDS, "magnitude -16 overflows 4 bits");
+    # Decoder: negative len refuses construction; prob/n bounds latch.
+    var b = alloc(4);
+    fx_zero(b, 4);
+    assert_eq(vbool_dec_init(b, 0 - 1), 0, "negative len refused");
+    var d = vbool_dec_init(b, 4);
+    assert_eq(vbool_dec_bool(d, 300), 0, "decoder prob 300 returns 0");
+    assert_eq(vbool_dec_err(d), DR_ERR_BOUNDS, "decoder error sticky");
+    var d2 = vbool_dec_init(b, 4);
+    assert_eq(vbool_dec_literal(d2, 33), 0, "decoder literal n=33 returns 0");
+    assert_eq(vbool_dec_err(d2), DR_ERR_BOUNDS, "decoder n-bound sticky");
+    return 0;
+}
+
+fn test_vbool_truncation() {
+    # A buffer shorter than the 2 priming bytes starts truncated (7.3
+    # primes value with two bytes).
+    var b = alloc(4);
+    fx_zero(b, 4);
+    var d0 = vbool_dec_init(b, 0);
+    assert_eq(vbool_dec_err(d0), DR_ERR_TRUNCATED, "0-byte stream starts truncated");
+    assert_eq(vbool_dec_bool(d0, 128), 0, "truncated decoder returns 0");
+    var d1 = vbool_dec_init(b, 1);
+    assert_eq(vbool_dec_err(d1), DR_ERR_TRUNCATED, "1-byte stream starts truncated");
+    # Cutting a valid stream mid-way: decoding far past the cut must
+    # latch DR_ERR_TRUNCATED, never crash or hang; later reads return 0.
+    var e = vbool_enc_init(16);
+    var i = 0;
+    while (i < 100) {
+        vbool_enc_literal(e, (i * 37) & 255, 8);
+        i = i + 1;
+    }
+    var n = vbool_enc_flush(e);
+    var dcut = vbool_dec_init(vbool_enc_buf(e), n - 60);
+    i = 0;
+    while (i < 100) {
+        vbool_dec_literal(dcut, 8);
+        i = i + 1;
+    }
+    assert_eq(vbool_dec_err(dcut), DR_ERR_TRUNCATED, "cut stream latches TRUNCATED");
+    assert_eq(vbool_dec_literal(dcut, 8), 0, "post-fault reads return 0");
+    assert_eq(vbool_dec_err(dcut), DR_ERR_TRUNCATED, "first code preserved");
+    return 0;
+}
+
+# ================================================================
+# VP8 — frame tag / keyframe header parse (RFC 6386 9.1/9.2)
+# ================================================================
+
+fn test_vp8_parse_keyframe() {
+    var flen = 0;
+    var b = fx_vp8_key(&flen);
+    var e = 0;
+    var h = vp8_parse_frame_hdr(b, flen, &e);
+    assert(h != 0, "keyframe header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(vp8_hdr_key_frame(h), 1, "key frame (tag bit 0 inverted)");
+    assert_eq(vp8_hdr_version(h), 1, "version 1");
+    assert_eq(vp8_hdr_show_frame(h), 1, "show_frame 1");
+    assert_eq(vp8_hdr_part_size(h), 100, "first_part_size 100");
+    assert_eq(vp8_hdr_width(h), 176, "width 176");
+    assert_eq(vp8_hdr_height(h), 144, "height 144");
+    assert_eq(vp8_hdr_hscale(h), 2, "hscale 2");
+    assert_eq(vp8_hdr_vscale(h), 1, "vscale 1");
+    assert_eq(vp8_hdr_size(h), 10, "keyframe chunk is 10 bytes");
+    return 0;
+}
+
+fn test_vp8_parse_interframe() {
+    # Interframe tag: bit0 = 1 (NOT key), version 0, show 1, size 0:
+    # tmp = 1 | (1<<4) = 17 -> bytes 11 00 00; chunk is 3 bytes, no
+    # start code / dimensions.
+    var b = alloc(3);
+    store8(b, 0x11);
+    store8(b + 1, 0x00);
+    store8(b + 2, 0x00);
+    var e = 0;
+    var h = vp8_parse_frame_hdr(b, 3, &e);
+    assert(h != 0, "interframe header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(vp8_hdr_key_frame(h), 0, "not a key frame");
+    assert_eq(vp8_hdr_show_frame(h), 1, "show_frame 1");
+    assert_eq(vp8_hdr_part_size(h), 0, "part_size 0");
+    assert_eq(vp8_hdr_width(h), 0, "no width on interframes");
+    assert_eq(vp8_hdr_size(h), 3, "interframe chunk is 3 bytes");
+    return 0;
+}
+
+fn test_vp8_faults() {
+    var e = 0;
+    # Truncation: shorter than the 3-byte tag.
+    var b2 = alloc(2);
+    fx_zero(b2, 2);
+    assert_eq(vp8_parse_frame_hdr(b2, 2, &e), 0, "2-byte buffer rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "tag truncation code");
+    # Negative length.
+    assert_eq(vp8_parse_frame_hdr(b2, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len code");
+    # Keyframe cut before the dimension block (len 9 < 10).
+    var flen = 0;
+    var bk = fx_vp8_key(&flen);
+    assert_eq(vp8_parse_frame_hdr(bk, 9, &e), 0, "cut keyframe rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "keyframe truncation code");
+    # Lying first_part_size: the 10 header bytes alone leave 0 bytes of
+    # partition but the tag claims 100 (9.1: partition follows the chunk).
+    assert_eq(vp8_parse_frame_hdr(bk, 10, &e), 0, "lying part_size rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "lying-size code");
+    # Corrupt start code (9.1 vet-via-sync-code).
+    var bs = fx_vp8_key(&flen);
+    store8(bs + 3, 0x9C);
+    assert_eq(vp8_parse_frame_hdr(bs, flen, &e), 0, "bad start code rejected");
+    assert_eq(e, VP8_ERR_BAD_START_CODE, "start-code error is the family code");
+    # Version above 3 (9.2 defines 0-3): tag tmp = 4<<1 = 8 -> 08 00 00.
+    var bv = alloc(3);
+    store8(bv, 0x08);
+    store8(bv + 1, 0x00);
+    store8(bv + 2, 0x00);
+    assert_eq(vp8_parse_frame_hdr(bv, 3, &e), 0, "version 4 rejected");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "undefined-version code");
+    return 0;
+}
+
+# ================================================================
+# VP8 — build + write (encode lane): inverse of parse
+# ================================================================
+
+fn test_vp8_write_roundtrip() {
+    var e = 0;
+    var h = vp8_hdr_new(1, 1, 1, 100, 176, 144, 2, 1, &e);
+    assert(h != 0, "builder accepts valid keyframe fields");
+    assert_eq(e, DR_OK, "no build error");
+    var wlen = 0;
+    var w = vp8_write_frame_hdr(h, &wlen);
+    assert(w != 0, "writer emits");
+    assert_eq(wlen, 10, "keyframe chunk writes 10 bytes");
+    # Byte-exact against the hand-packed fixture (its first 10 bytes).
+    var flen = 0;
+    var fx = fx_vp8_key(&flen);
+    var same = 1;
+    var i = 0;
+    while (i < 10) {
+        if (load8(w + i) != load8(fx + i)) { same = 0; }
+        i = i + 1;
+    }
+    assert_eq(same, 1, "written bytes match the hand-packed vector");
+    # And parse-back over a buffer with the claimed partition present.
+    var full = alloc(110);
+    fx_zero(full, 110);
+    memcpy(full, w, 10);
+    var h2 = vp8_parse_frame_hdr(full, 110, &e);
+    assert(h2 != 0, "written header parses back");
+    assert_eq(vp8_hdr_width(h2), 176, "width survives the round-trip");
+    assert_eq(vp8_hdr_vscale(h2), 1, "vscale survives the round-trip");
+    # Interframe write: 3 bytes, matches the hand vector 11 00 00.
+    var hi = vp8_hdr_new(0, 0, 1, 0, 0, 0, 0, 0, &e);
+    var wi = vp8_write_frame_hdr(hi, &wlen);
+    assert_eq(wlen, 3, "interframe chunk writes 3 bytes");
+    assert_eq(load8(wi), 0x11, "interframe tag byte 0");
+    assert_eq(load8(wi + 1), 0x00, "interframe tag byte 1");
+    assert_eq(load8(wi + 2), 0x00, "interframe tag byte 2");
+    return 0;
+}
+
+fn test_vp8_builder_faults() {
+    var e = 0;
+    assert_eq(vp8_hdr_new(1, 5, 1, 0, 16, 16, 0, 0, &e), 0, "version 5 refused");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "version bound code");
+    assert_eq(vp8_hdr_new(1, 0, 1, 0, 0x4000, 16, 0, 0, &e), 0, "width 2^14 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "width bound code");
+    assert_eq(vp8_hdr_new(1, 0, 1, 0x80000, 16, 16, 0, 0, &e), 0, "part_size 2^19 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "part_size bound code");
+    assert_eq(vp8_hdr_new(1, 0, 1, 0, 16, 16, 4, 0, &e), 0, "hscale 4 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "hscale bound code");
+    return 0;
+}
+
+# ================================================================
+# VP9 — uncompressed header parse (spec 6.2-6.2.4)
+# ================================================================
+
+fn test_vp9_parse_keyframe() {
+    var flen = 0;
+    var b = fx_vp9_key(&flen);
+    var e = 0;
+    var h = vp9_parse_uncompressed_header(b, flen, &e);
+    assert(h != 0, "keyframe header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(vp9_hdr_profile(h), 0, "profile 0");
+    assert_eq(vp9_hdr_show_existing(h), 0, "not show_existing");
+    assert_eq(vp9_hdr_frame_type(h), VP9_KEY_FRAME, "KEY_FRAME (7.2)");
+    assert_eq(vp9_hdr_show_frame(h), 1, "show_frame 1");
+    assert_eq(vp9_hdr_error_resilient(h), 0, "error_resilient 0");
+    assert_eq(vp9_hdr_bit_depth(h), 8, "profile 0 is 8-bit (6.2.2)");
+    assert_eq(vp9_hdr_color_space(h), VP9_CS_BT_601, "color_space BT.601");
+    assert_eq(vp9_hdr_color_range(h), 0, "studio range");
+    assert_eq(vp9_hdr_subsampling_x(h), 1, "profile 0 implies 4:2:0 (x)");
+    assert_eq(vp9_hdr_subsampling_y(h), 1, "profile 0 implies 4:2:0 (y)");
+    assert_eq(vp9_hdr_width(h), 176, "width 176 (minus_1 field)");
+    assert_eq(vp9_hdr_height(h), 144, "height 144 (minus_1 field)");
+    assert_eq(vp9_hdr_render_width(h), 176, "render width defaults to frame (6.2.4)");
+    assert_eq(vp9_hdr_render_height(h), 144, "render height defaults to frame");
+    assert_eq(vp9_hdr_bits_consumed(h), 69, "parse stopped after render_size");
+    return 0;
+}
+
+fn test_vp9_parse_render_size() {
+    var flen = 0;
+    var b = fx_vp9_key_render(&flen);
+    var e = 0;
+    var h = vp9_parse_uncompressed_header(b, flen, &e);
+    assert(h != 0, "render-size header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(vp9_hdr_width(h), 176, "frame width unchanged");
+    assert_eq(vp9_hdr_height(h), 144, "frame height unchanged");
+    assert_eq(vp9_hdr_render_width(h), 320, "explicit render width (6.2.4)");
+    assert_eq(vp9_hdr_render_height(h), 240, "explicit render height");
+    assert_eq(vp9_hdr_bits_consumed(h), 101, "explicit render size adds 32 bits");
+    return 0;
+}
+
+fn test_vp9_parse_show_existing() {
+    # marker 10, profile 00, show_existing 1, map_idx 011 -> 1000 1011.
+    var b = alloc(1);
+    store8(b, 0x8B);
+    var e = 0;
+    var h = vp9_parse_uncompressed_header(b, 1, &e);
+    assert(h != 0, "show_existing header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(vp9_hdr_show_existing(h), 1, "show_existing set");
+    assert_eq(vp9_hdr_show_map_idx(h), 3, "frame_to_show_map_idx 3");
+    assert_eq(vp9_hdr_bits_consumed(h), 8, "short-circuit after map idx");
+    assert_eq(vp9_hdr_width(h), 0, "no dimensions on the short-circuit");
+    return 0;
+}
+
+fn test_vp9_faults() {
+    var e = 0;
+    # frame_marker != 2 (6.2): 0x42 = 01...
+    var bm = alloc(1);
+    store8(bm, 0x42);
+    assert_eq(vp9_parse_uncompressed_header(bm, 1, &e), 0, "marker 1 rejected");
+    assert_eq(e, VP9_ERR_BAD_MARKER, "marker error is the family code");
+    # profile 3 reserved_zero set (6.2): bits 1,0,1,1,1 -> 1011 1xxx.
+    var bp = alloc(1);
+    store8(bp, 0xB8);
+    assert_eq(vp9_parse_uncompressed_header(bp, 1, &e), 0, "profile-3 reserved bit rejected");
+    assert_eq(e, DR_ERR_FORBIDDEN_BIT, "reserved-bit code");
+    # frame_sync_code corrupt (6.2.1): 49 83 43.
+    var bs = alloc(4);
+    store8(bs, 0x82);
+    store8(bs + 1, 0x49);
+    store8(bs + 2, 0x83);
+    store8(bs + 3, 0x43);
+    assert_eq(vp9_parse_uncompressed_header(bs, 4, &e), 0, "bad sync rejected");
+    assert_eq(e, VP9_ERR_BAD_SYNC, "sync error is the family code");
+    # CS_RGB in profile 0 (6.2.2 has no such path; libvpx rejects):
+    # byte 4 = cs 111 ... -> 1110 0000.
+    var br = alloc(5);
+    store8(br, 0x82);
+    store8(br + 1, 0x49);
+    store8(br + 2, 0x83);
+    store8(br + 3, 0x42);
+    store8(br + 4, 0xE0);
+    assert_eq(vp9_parse_uncompressed_header(br, 5, &e), 0, "RGB in profile 0 rejected");
+    assert_eq(e, DR_ERR_BAD_HEADER, "conformance-violation code");
+    # Truncations: empty, mid-sync, and mid-frame-size cuts.
+    var flen = 0;
+    var bk = fx_vp9_key(&flen);
+    assert_eq(vp9_parse_uncompressed_header(bk, 0, &e), 0, "empty buffer rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty-buffer code");
+    assert_eq(vp9_parse_uncompressed_header(bk, 3, &e), 0, "cut inside sync rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "mid-sync truncation code");
+    assert_eq(vp9_parse_uncompressed_header(bk, 6, &e), 0, "cut inside frame_size rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "mid-frame-size truncation code");
+    # Negative length.
+    assert_eq(vp9_parse_uncompressed_header(bk, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative-len code");
+    return 0;
+}
+
+# ================================================================
+# Family error codes stay distinct (band 70-89, src/drishti.cyr)
+# ================================================================
+
+fn test_vpx_error_band() {
+    assert_eq(VP8_ERR_BAD_START_CODE, 70, "VP8 band starts at 70");
+    assert_eq(VP9_ERR_BAD_MARKER, 75, "VP9 band starts at 75");
+    assert_eq(VP9_ERR_BAD_SYNC, 76, "VP9 sync code is 76");
+    assert(VP8_ERR_BAD_START_CODE != DR_ERR_BAD_HEADER, "family codes clear of core band");
+    assert(VP9_ERR_BAD_MARKER != VP8_ERR_BAD_START_CODE, "VP8/VP9 bands disjoint");
+    return 0;
+}
+
+# ================================================================
+
+fn main() {
+    alloc_init();
+    test_group("vbool known-answer");
+    test_vbool_kat_empty_flush();
+    test_vbool_kat_single_one();
+    test_group("vbool round-trips");
+    test_vbool_roundtrip_bools();
+    test_vbool_roundtrip_literals();
+    test_vbool_roundtrip_signed();
+    test_vbool_roundtrip_bulk();
+    test_group("vbool faults");
+    test_vbool_faults();
+    test_vbool_truncation();
+    test_group("vp8 parse");
+    test_vp8_parse_keyframe();
+    test_vp8_parse_interframe();
+    test_vp8_faults();
+    test_group("vp8 write");
+    test_vp8_write_roundtrip();
+    test_vp8_builder_faults();
+    test_group("vp9 parse");
+    test_vp9_parse_keyframe();
+    test_vp9_parse_render_size();
+    test_vp9_parse_show_existing();
+    test_vp9_faults();
+    test_group("error bands");
+    test_vpx_error_band();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

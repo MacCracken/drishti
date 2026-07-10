@@ -1,0 +1,828 @@
+# tests/av1.tcyr — AV1 family suite: OBU header parse (spec 5.3.2/5.3.3),
+# OBU walk, OBU header write round-trip, sequence_header_obu parse
+# (spec 5.5.1/5.5.2) on both the reduced-still-picture and full
+# operating-points paths, plus adversarial vectors (truncation, lying
+# sizes, forbidden bit, reserved profiles). All vectors hand-built from
+# the AV1 spec v1.0.0 w/ Errata 1, every field commented.
+#
+# Suites explicitly include the lib root + this family's not-yet-wired
+# modules: `cyrius test` auto-includes stdlib only, never [lib] modules
+# (verified at pin 6.4.43). Once av1_* are wired into src/main.cyr the
+# self-includes below dedupe into no-ops.
+include "src/main.cyr"
+include "src/av1_obu.cyr"
+include "src/av1_seq.cyr"
+
+# ================================================================
+# Fixture: reduced-still-picture sequence header, profile 0, 64x64,
+# 8-bit, 4:2:0 — hand-packed bits (MSB-first), 44 bits + 4 pad:
+#
+#   seq_profile                  f(3) = 000        (profile 0)
+#   still_picture                f(1) = 1
+#   reduced_still_picture_header f(1) = 1
+#   seq_level_idx[0]             f(5) = 00000      (level 2.0)
+#   frame_width_bits_minus_1     f(4) = 0101       (6-bit widths)
+#   frame_height_bits_minus_1    f(4) = 0101       (6-bit heights)
+#   max_frame_width_minus_1      f(6) = 111111     (63 -> width 64)
+#   max_frame_height_minus_1     f(6) = 111111     (63 -> height 64)
+#   use_128x128_superblock       f(1) = 0
+#   enable_filter_intra          f(1) = 0
+#   enable_intra_edge_filter     f(1) = 0
+#   enable_superres              f(1) = 0
+#   enable_cdef                  f(1) = 0
+#   enable_restoration           f(1) = 0
+#   high_bitdepth                f(1) = 0          (-> BitDepth 8)
+#   mono_chrome                  f(1) = 0
+#   color_description_present    f(1) = 0
+#   color_range                  f(1) = 0
+#   chroma_sample_position       f(2) = 00         (profile 0 -> 4:2:0)
+#   separate_uv_delta_q          f(1) = 0
+#   film_grain_params_present    f(1) = 0
+#   (byte-pad)                          0000
+#
+# Packed bytes: 00011000 00010101 01111111 11111100 00000000 00000000
+#             = 0x18     0x15     0x7F     0xFC     0x00     0x00
+# ================================================================
+fn fx_av1_seq_reduced_64(out_len): i64 {
+    var b = alloc(6);
+    store8(b, 0x18);
+    store8(b + 1, 0x15);
+    store8(b + 2, 0x7F);
+    store8(b + 3, 0xFC);
+    store8(b + 4, 0x00);
+    store8(b + 5, 0x00);
+    store64(out_len, 6);
+    return b;
+}
+
+# ================================================================
+# OBU header parse — spec 5.3.2/5.3.3 vectors
+# ================================================================
+
+fn test_av1_obu_parse_min() {
+    # Temporal delimiter, the canonical 2-byte OBU:
+    #   0x12 = 0 0010 0 1 0 : forbidden 0, type 2 (TD), ext 0,
+    #                         has_size 1, reserved 0
+    #   0x00 = leb128 obu_size = 0
+    var b = alloc(2);
+    store8(b, 0x12);
+    store8(b + 1, 0x00);
+    var e = 0;
+    var o = av1_obu_parse_header(b, 2, &e);
+    assert(o != 0, "TD header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_obu_type(o), AV1_OBU_TEMPORAL_DELIMITER, "type TD");
+    assert_eq(av1_obu_ext(o), 0, "no extension");
+    assert_eq(av1_obu_tid(o), 0, "tid defaults 0");
+    assert_eq(av1_obu_sid(o), 0, "sid defaults 0");
+    assert_eq(av1_obu_has_size(o), 1, "has size field");
+    assert_eq(av1_obu_size(o), 0, "size 0");
+    assert_eq(av1_obu_hdr_size(o), 2, "2 header bytes");
+    return 0;
+}
+
+fn test_av1_obu_parse_ext() {
+    # Tile group with extension header:
+    #   0x26 = 0 0100 1 1 0 : type 4 (TILE_GROUP), ext 1, has_size 1
+    #   0x48 = 010 01 000   : temporal_id 2, spatial_id 1, reserved3 0
+    #   0x03 = leb128 obu_size = 3
+    #   payload AA BB CC
+    var b = alloc(6);
+    store8(b, 0x26);
+    store8(b + 1, 0x48);
+    store8(b + 2, 0x03);
+    store8(b + 3, 0xAA); store8(b + 4, 0xBB); store8(b + 5, 0xCC);
+    var e = 0;
+    var o = av1_obu_parse_header(b, 6, &e);
+    assert(o != 0, "ext header parses");
+    assert_eq(av1_obu_type(o), AV1_OBU_TILE_GROUP, "type tile group");
+    assert_eq(av1_obu_ext(o), 1, "extension present");
+    assert_eq(av1_obu_tid(o), 2, "temporal_id 2");
+    assert_eq(av1_obu_sid(o), 1, "spatial_id 1");
+    assert_eq(av1_obu_size(o), 3, "size 3");
+    assert_eq(av1_obu_hdr_size(o), 3, "3 header bytes");
+    assert_eq(load8(b + av1_obu_hdr_size(o)), 0xAA, "payload starts after header");
+    return 0;
+}
+
+fn test_av1_obu_parse_nosize() {
+    # has_size_field == 0: payload extends to the end of the supplied
+    # buffer (5.3.1: obu_size = sz - 1 - obu_extension_flag).
+    #   0x30 = 0 0110 0 0 0 : type 6 (FRAME), ext 0, has_size 0
+    var b = alloc(6);
+    store8(b, 0x30);
+    store8(b + 1, 0x11); store8(b + 2, 0x22); store8(b + 3, 0x33);
+    store8(b + 4, 0x44); store8(b + 5, 0x55);
+    var e = 0;
+    var o = av1_obu_parse_header(b, 6, &e);
+    assert(o != 0, "no-size header parses");
+    assert_eq(av1_obu_type(o), AV1_OBU_FRAME, "type frame");
+    assert_eq(av1_obu_has_size(o), 0, "no size field");
+    assert_eq(av1_obu_size(o), 5, "size = len - 1 (5.3.1)");
+    assert_eq(av1_obu_hdr_size(o), 1, "1 header byte");
+    # Same with extension: 0x34 = 0 0110 1 0 0, ext byte 0x28 = 001 01 000
+    # (tid 1, sid 1). size = 4 - 2 = 2.
+    var b2 = alloc(4);
+    store8(b2, 0x34);
+    store8(b2 + 1, 0x28);
+    store8(b2 + 2, 0x99); store8(b2 + 3, 0x88);
+    var o2 = av1_obu_parse_header(b2, 4, &e);
+    assert(o2 != 0, "no-size + ext parses");
+    assert_eq(av1_obu_tid(o2), 1, "tid 1");
+    assert_eq(av1_obu_sid(o2), 1, "sid 1");
+    assert_eq(av1_obu_size(o2), 2, "size = len - 2 (5.3.1 with ext)");
+    assert_eq(av1_obu_hdr_size(o2), 2, "2 header bytes");
+    return 0;
+}
+
+fn test_av1_obu_reserved_ignored() {
+    # obu_reserved_1bit set — 6.2.2: "must be set to 0. The value is
+    # ignored by a decoder." Parse must SUCCEED.
+    #   0x13 = 0 0010 0 1 1 : type 2, has_size 1, reserved 1
+    var b = alloc(2);
+    store8(b, 0x13);
+    store8(b + 1, 0x00);
+    var e = 0;
+    var o = av1_obu_parse_header(b, 2, &e);
+    assert(o != 0, "reserved_1bit set still parses (6.2.2)");
+    assert_eq(av1_obu_type(o), AV1_OBU_TEMPORAL_DELIMITER, "type intact");
+    # extension_header_reserved_3bits nonzero — 6.2.3: likewise ignored.
+    #   0x26 as in test_av1_obu_parse_ext; ext byte 0x4D = 010 01 101.
+    var b2 = alloc(3);
+    store8(b2, 0x26);
+    store8(b2 + 1, 0x4D);
+    store8(b2 + 2, 0x00);
+    var o2 = av1_obu_parse_header(b2, 3, &e);
+    assert(o2 != 0, "ext reserved bits set still parses (6.2.3)");
+    assert_eq(av1_obu_tid(o2), 2, "tid decoded around reserved bits");
+    assert_eq(av1_obu_sid(o2), 1, "sid decoded around reserved bits");
+    return 0;
+}
+
+fn test_av1_obu_parse_reject() {
+    var e = 0;
+    # Empty buffer.
+    var b = alloc(16);
+    store8(b, 0x12);
+    assert_eq(av1_obu_parse_header(b, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    # Negative length.
+    assert_eq(av1_obu_parse_header(b, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len -> bounds");
+    # Forbidden bit: 0x92 = 1 0010 0 1 0 (forbidden 1, else a valid TD).
+    store8(b, 0x92);
+    store8(b + 1, 0x00);
+    assert_eq(av1_obu_parse_header(b, 2, &e), 0, "forbidden bit rejected");
+    assert_eq(e, DR_ERR_FORBIDDEN_BIT, "forbidden -> DR_ERR_FORBIDDEN_BIT");
+    # Extension flagged, buffer ends before the extension byte:
+    # 0x26 = type 4, ext 1, has_size 1 — 1 byte only.
+    store8(b, 0x26);
+    assert_eq(av1_obu_parse_header(b, 1, &e), 0, "missing ext byte rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "missing ext byte -> truncated");
+    # leb128 size truncated mid-value: 0x0A = 0 0001 0 1 0 (type 1,
+    # has_size 1), then 0x80 (continuation set) and EOF.
+    store8(b, 0x0A);
+    store8(b + 1, 0x80);
+    assert_eq(av1_obu_parse_header(b, 2, &e), 0, "leb mid-value EOF rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "leb mid-value -> truncated");
+    # leb128 too long: 8 bytes all with the continuation bit (4.10.5
+    # bounds leb128 to 8 bytes, last byte must clear the bit).
+    var i = 0;
+    while (i < 8) { store8(b + 1 + i, 0x80); i = i + 1; }
+    assert_eq(av1_obu_parse_header(b, 9, &e), 0, "9-byte leb rejected");
+    assert_eq(e, DR_ERR_BAD_LEB128, "over-long leb -> bad_leb128");
+    # leb128 value over 32 bits: FF FF FF FF 1F decodes to 0x1FFFFFFFF
+    # (> 0xFFFFFFFF -> 4.10.5 conformance failure).
+    store8(b + 1, 0xFF); store8(b + 2, 0xFF); store8(b + 3, 0xFF);
+    store8(b + 4, 0xFF); store8(b + 5, 0x1F);
+    assert_eq(av1_obu_parse_header(b, 6, &e), 0, "33-bit obu_size rejected");
+    assert_eq(e, DR_ERR_BAD_LEB128, "33-bit size -> bad_leb128");
+    # Lying size: header claims 5 payload bytes, buffer holds 1.
+    store8(b, 0x0A);
+    store8(b + 1, 0x05);
+    store8(b + 2, 0xAA);
+    assert_eq(av1_obu_parse_header(b, 3, &e), 0, "lying size rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "lying size -> truncated");
+    return 0;
+}
+
+# ================================================================
+# OBU walk — iterator over a low-overhead bitstream buffer
+# ================================================================
+
+fn test_av1_obu_walk() {
+    # Two OBUs: TD (0x12 0x00) then a sequence header OBU
+    # (0x0A = 0 0001 0 1 0 : type 1, has_size 1; 0x06 = size 6)
+    # wrapping 6 payload bytes. Total 10 bytes.
+    var len = 0;
+    var seq = fx_av1_seq_reduced_64(&len);
+    var b = alloc(10);
+    store8(b, 0x12); store8(b + 1, 0x00);   # TD
+    store8(b + 2, 0x0A); store8(b + 3, 0x06);   # SEQ_HDR, size 6
+    memcpy(b + 4, seq, 6);
+    var it = av1_obu_iter_init(b, 10);
+    assert(it != 0, "iterator inits");
+    assert_eq(av1_obu_iter_obu(it), 0, "no OBU yielded yet");
+    var t = 0; var off = 0; var sz = 0;
+    # OBU 1: temporal delimiter.
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_OK, "OBU 1 yields");
+    assert_eq(t, AV1_OBU_TEMPORAL_DELIMITER, "OBU 1 is TD");
+    assert_eq(off, 2, "OBU 1 payload offset");
+    assert_eq(sz, 0, "OBU 1 empty payload");
+    assert_eq(av1_obu_iter_pos(it), 2, "cursor after TD");
+    # OBU 2: sequence header.
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_OK, "OBU 2 yields");
+    assert_eq(t, AV1_OBU_SEQUENCE_HEADER, "OBU 2 is seq header");
+    assert_eq(off, 4, "OBU 2 payload offset");
+    assert_eq(sz, 6, "OBU 2 payload size");
+    assert_eq(load8(b + off), 0x18, "OBU 2 payload bytes reachable");
+    var o = av1_obu_iter_obu(it);
+    assert(o != 0, "last-OBU record exposed");
+    assert_eq(av1_obu_type(o), AV1_OBU_SEQUENCE_HEADER, "record type matches");
+    assert_eq(av1_obu_tid(o), 0, "record tid 0 (no ext)");
+    # Clean end, repeatable.
+    assert_eq(av1_obu_next(it, &t, &off, &sz), AV1_OBU_END, "end -> AV1_OBU_END");
+    assert_eq(av1_obu_next(it, &t, &off, &sz), AV1_OBU_END, "end repeats");
+    assert_eq(av1_obu_iter_err(it), DR_OK, "clean end is not an error");
+    return 0;
+}
+
+fn test_av1_obu_walk_nosize() {
+    # TD then a FRAME OBU without a size field — it consumes the rest
+    # of the buffer and is the final yield.
+    var b = alloc(7);
+    store8(b, 0x12); store8(b + 1, 0x00);   # TD
+    store8(b + 2, 0x30);                    # FRAME, ext 0, has_size 0
+    store8(b + 3, 1); store8(b + 4, 2); store8(b + 5, 3); store8(b + 6, 4);
+    var it = av1_obu_iter_init(b, 7);
+    var t = 0; var off = 0; var sz = 0;
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_OK, "TD yields");
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_OK, "no-size frame yields");
+    assert_eq(t, AV1_OBU_FRAME, "frame type");
+    assert_eq(off, 3, "frame payload offset");
+    assert_eq(sz, 4, "frame swallows buffer tail");
+    assert_eq(av1_obu_next(it, &t, &off, &sz), AV1_OBU_END, "then clean end");
+    return 0;
+}
+
+fn test_av1_obu_walk_reject() {
+    var t = 0; var off = 0; var sz = 0;
+    # Lying size mid-stream: TD ok, then size 100 with 1 byte left.
+    var b = alloc(5);
+    store8(b, 0x12); store8(b + 1, 0x00);
+    store8(b + 2, 0x0A); store8(b + 3, 0x64);   # SEQ_HDR claims 100 bytes
+    store8(b + 4, 0xAA);
+    var it = av1_obu_iter_init(b, 5);
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_OK, "TD still yields");
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_ERR_TRUNCATED,
+    "lying size -> truncated");
+    assert_eq(av1_obu_iter_err(it), DR_ERR_TRUNCATED, "iterator fault sticky");
+    assert_eq(av1_obu_next(it, &t, &off, &sz), DR_ERR_TRUNCATED,
+    "sticky on repeat");
+    # Forbidden bit mid-stream.
+    var b2 = alloc(4);
+    store8(b2, 0x12); store8(b2 + 1, 0x00);
+    store8(b2 + 2, 0x92); store8(b2 + 3, 0x00);   # forbidden bit set
+    var it2 = av1_obu_iter_init(b2, 4);
+    assert_eq(av1_obu_next(it2, &t, &off, &sz), DR_OK, "TD yields first");
+    assert_eq(av1_obu_next(it2, &t, &off, &sz), DR_ERR_FORBIDDEN_BIT,
+    "forbidden bit mid-stream -> error");
+    # Negative length refused at init.
+    assert_eq(av1_obu_iter_init(b2, 0 - 1), 0, "negative len -> no iterator");
+    # Empty buffer: clean END immediately.
+    var it3 = av1_obu_iter_init(b2, 0);
+    assert_eq(av1_obu_next(it3, &t, &off, &sz), AV1_OBU_END, "empty -> END");
+    return 0;
+}
+
+# ================================================================
+# OBU header write — encode seed, exact bytes + write->parse round-trip
+# ================================================================
+
+fn test_av1_obu_write_exact_bytes() {
+    # TD: expect exactly 0x12 0x00.
+    var bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0, 0, 1, 0),
+    DR_OK, "TD header writes");
+    assert_eq(dr_bw_flush(bw), 2, "TD is 2 bytes");
+    var p = dr_bw_buf(bw);
+    assert_eq(load8(p), 0x12, "TD byte 0");
+    assert_eq(load8(p + 1), 0x00, "TD byte 1 (leb128 0)");
+    # Tile group + ext, tid 2 sid 1, size 3: expect 0x26 0x48 0x03
+    # (mirrors test_av1_obu_parse_ext's hand vector).
+    var bw2 = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw2, AV1_OBU_TILE_GROUP, 1, 2, 1, 1, 3),
+    DR_OK, "ext header writes");
+    assert_eq(dr_bw_flush(bw2), 3, "ext header is 3 bytes");
+    var p2 = dr_bw_buf(bw2);
+    assert_eq(load8(p2), 0x26, "ext byte 0");
+    assert_eq(load8(p2 + 1), 0x48, "ext byte 1 (tid 2, sid 1)");
+    assert_eq(load8(p2 + 2), 0x03, "ext byte 2 (leb128 3)");
+    # No size field: single byte 0x30.
+    var bw3 = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw3, AV1_OBU_FRAME, 0, 0, 0, 0, 0),
+    DR_OK, "no-size header writes");
+    assert_eq(dr_bw_flush(bw3), 1, "no-size header is 1 byte");
+    assert_eq(load8(dr_bw_buf(bw3)), 0x30, "no-size byte");
+    return 0;
+}
+
+fn test_av1_obu_write_parse_roundtrip() {
+    # Multi-byte leb128 size: 1000 = leb128 E8 07. FRAME + ext,
+    # tid 3, sid 2: byte0 = 0 0110 1 1 0 = 0x36, ext = 011 10 000 = 0x70.
+    var bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, AV1_OBU_FRAME, 1, 3, 2, 1, 1000),
+    DR_OK, "1000-byte-size header writes");
+    var hlen = dr_bw_flush(bw);
+    assert_eq(hlen, 4, "header is 4 bytes (2 fixed + 2 leb)");
+    var hp = dr_bw_buf(bw);
+    assert_eq(load8(hp), 0x36, "byte 0");
+    assert_eq(load8(hp + 1), 0x70, "ext byte");
+    assert_eq(load8(hp + 2), 0xE8, "leb byte 0");
+    assert_eq(load8(hp + 3), 0x07, "leb byte 1");
+    # Parse back over a buffer that really holds the claimed payload.
+    var full = alloc(1004);
+    memcpy(full, hp, 4);
+    var e = 0;
+    var o = av1_obu_parse_header(full, 1004, &e);
+    assert(o != 0, "round-trip parses");
+    assert_eq(av1_obu_type(o), AV1_OBU_FRAME, "rt type");
+    assert_eq(av1_obu_ext(o), 1, "rt ext");
+    assert_eq(av1_obu_tid(o), 3, "rt tid");
+    assert_eq(av1_obu_sid(o), 2, "rt sid");
+    assert_eq(av1_obu_has_size(o), 1, "rt has_size");
+    assert_eq(av1_obu_size(o), 1000, "rt size");
+    assert_eq(av1_obu_hdr_size(o), 4, "rt hdr_size");
+    return 0;
+}
+
+fn test_av1_obu_write_reject() {
+    # Each case uses a fresh writer — the faults are sticky.
+    var bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, 16, 0, 0, 0, 1, 0), DR_ERR_BOUNDS,
+    "type 16 rejected");
+    assert_eq(dr_bw_err(bw), DR_ERR_BOUNDS, "type fault sticky");
+    bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, 0 - 1, 0, 0, 0, 1, 0), DR_ERR_BOUNDS,
+    "negative type rejected");
+    bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, 6, 1, 8, 0, 1, 0), DR_ERR_BOUNDS,
+    "tid 8 rejected");
+    bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, 6, 1, 0, 4, 1, 0), DR_ERR_BOUNDS,
+    "sid 4 rejected");
+    # obu_size outside the 4.10.5 32-bit bound -> core leb128 writer code.
+    bw = dr_bw_init(0);
+    assert_eq(av1_obu_write_header(bw, 6, 0, 0, 0, 1, 0x100000000),
+    DR_ERR_BAD_LEB128, "2^32 size rejected");
+    # Misaligned writer: OBUs are byte entities.
+    bw = dr_bw_init(0);
+    dr_bw_put_bit(bw, 1);
+    assert_eq(av1_obu_write_header(bw, 6, 0, 0, 0, 1, 0), DR_ERR_BOUNDS,
+    "misaligned writer rejected");
+    assert_eq(dr_bw_err(bw), DR_ERR_BOUNDS, "misalignment sticky");
+    return 0;
+}
+
+# ================================================================
+# Sequence header — reduced still-picture path (hand vector)
+# ================================================================
+
+fn test_av1_seq_reduced() {
+    var len = 0;
+    var b = fx_av1_seq_reduced_64(&len);
+    var e = 0;
+    var s = av1_seq_parse(b, len, &e);
+    assert(s != 0, "reduced seq header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_seq_profile(s), 0, "profile 0");
+    assert_eq(av1_seq_still(s), 1, "still picture");
+    assert_eq(av1_seq_reduced(s), 1, "reduced header");
+    assert_eq(av1_seq_width(s), 64, "width 64");
+    assert_eq(av1_seq_height(s), 64, "height 64");
+    assert_eq(av1_seq_bitdepth(s), 8, "8-bit");
+    assert_eq(av1_seq_mono(s), 0, "not monochrome");
+    return 0;
+}
+
+fn test_av1_seq_reduced_builder_crosscheck() {
+    # Rebuild fx_av1_seq_reduced_64 field-by-field through the core
+    # bitwriter and require BYTE-IDENTICAL output — cross-checks the
+    # hand-packed literals and the writer in one shot.
+    var bw = dr_bw_init(8);
+    dr_bw_put_bits(bw, 0, 3);    # seq_profile = 0
+    dr_bw_put_bit(bw, 1);        # still_picture = 1
+    dr_bw_put_bit(bw, 1);        # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);    # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 5, 4);    # frame_width_bits_minus_1 = 5
+    dr_bw_put_bits(bw, 5, 4);    # frame_height_bits_minus_1 = 5
+    dr_bw_put_bits(bw, 63, 6);   # max_frame_width_minus_1 = 63
+    dr_bw_put_bits(bw, 63, 6);   # max_frame_height_minus_1 = 63
+    dr_bw_put_bit(bw, 0);        # use_128x128_superblock
+    dr_bw_put_bit(bw, 0);        # enable_filter_intra
+    dr_bw_put_bit(bw, 0);        # enable_intra_edge_filter
+    dr_bw_put_bit(bw, 0);        # enable_superres
+    dr_bw_put_bit(bw, 0);        # enable_cdef
+    dr_bw_put_bit(bw, 0);        # enable_restoration
+    dr_bw_put_bit(bw, 0);        # high_bitdepth
+    dr_bw_put_bit(bw, 0);        # mono_chrome
+    dr_bw_put_bit(bw, 0);        # color_description_present_flag
+    dr_bw_put_bit(bw, 0);        # color_range
+    dr_bw_put_bits(bw, 0, 2);    # chroma_sample_position
+    dr_bw_put_bit(bw, 0);        # separate_uv_delta_q
+    dr_bw_put_bit(bw, 0);        # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    assert_eq(n, 6, "44 bits pad to 6 bytes");
+    var built = dr_bw_buf(bw);
+    var len = 0;
+    var lit = fx_av1_seq_reduced_64(&len);
+    var i = 0;
+    while (i < 6) {
+        assert_eq(load8(built + i), load8(lit + i), "builder matches literal");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Sequence header — full path (operating points), built field-by-field
+# ================================================================
+
+fn test_av1_seq_full() {
+    # Full (non-reduced) header, no timing info, one operating point:
+    # profile 0, 1920x1080, 8-bit 4:2:0.
+    var bw = dr_bw_init(32);
+    dr_bw_put_bits(bw, 0, 3);      # seq_profile = 0
+    dr_bw_put_bit(bw, 0);          # still_picture = 0
+    dr_bw_put_bit(bw, 0);          # reduced_still_picture_header = 0
+    dr_bw_put_bit(bw, 0);          # timing_info_present_flag = 0
+    dr_bw_put_bit(bw, 0);          # initial_display_delay_present_flag = 0
+    dr_bw_put_bits(bw, 0, 5);      # operating_points_cnt_minus_1 = 0
+    dr_bw_put_bits(bw, 0, 12);     # operating_point_idc[0] = 0
+    dr_bw_put_bits(bw, 8, 5);      # seq_level_idx[0] = 8 (level 4.0)
+    dr_bw_put_bit(bw, 0);          # seq_tier[0] (coded: level > 7)
+    dr_bw_put_bits(bw, 10, 4);     # frame_width_bits_minus_1 = 10
+    dr_bw_put_bits(bw, 10, 4);     # frame_height_bits_minus_1 = 10
+    dr_bw_put_bits(bw, 1919, 11);  # max_frame_width_minus_1 = 1919
+    dr_bw_put_bits(bw, 1079, 11);  # max_frame_height_minus_1 = 1079
+    dr_bw_put_bit(bw, 0);          # frame_id_numbers_present_flag = 0
+    dr_bw_put_bit(bw, 1);          # use_128x128_superblock = 1
+    dr_bw_put_bit(bw, 0);          # enable_filter_intra
+    dr_bw_put_bit(bw, 0);          # enable_intra_edge_filter
+    dr_bw_put_bit(bw, 0);          # enable_interintra_compound
+    dr_bw_put_bit(bw, 0);          # enable_masked_compound
+    dr_bw_put_bit(bw, 0);          # enable_warped_motion
+    dr_bw_put_bit(bw, 0);          # enable_dual_filter
+    dr_bw_put_bit(bw, 1);          # enable_order_hint = 1
+    dr_bw_put_bit(bw, 0);          # enable_jnt_comp
+    dr_bw_put_bit(bw, 0);          # enable_ref_frame_mvs
+    dr_bw_put_bit(bw, 1);          # seq_choose_screen_content_tools = 1 (-> SELECT)
+    dr_bw_put_bit(bw, 1);          # seq_choose_integer_mv = 1 (force_sct > 0)
+    dr_bw_put_bits(bw, 6, 3);      # order_hint_bits_minus_1 = 6
+    dr_bw_put_bit(bw, 0);          # enable_superres
+    dr_bw_put_bit(bw, 1);          # enable_cdef = 1
+    dr_bw_put_bit(bw, 1);          # enable_restoration = 1
+    # color_config() — 5.5.2
+    dr_bw_put_bit(bw, 0);          # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 0);          # mono_chrome = 0
+    dr_bw_put_bit(bw, 0);          # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);          # color_range = 0
+    dr_bw_put_bits(bw, 1, 2);      # chroma_sample_position (4:2:0 path)
+    dr_bw_put_bit(bw, 0);          # separate_uv_delta_q
+    dr_bw_put_bit(bw, 0);          # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    assert(n > 0, "full header built");
+    var e = 0;
+    var s = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    assert(s != 0, "full seq header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_seq_profile(s), 0, "profile 0");
+    assert_eq(av1_seq_still(s), 0, "not still");
+    assert_eq(av1_seq_reduced(s), 0, "not reduced");
+    assert_eq(av1_seq_width(s), 1920, "width 1920");
+    assert_eq(av1_seq_height(s), 1080, "height 1080");
+    assert_eq(av1_seq_bitdepth(s), 8, "8-bit");
+    assert_eq(av1_seq_mono(s), 0, "not monochrome");
+    return 0;
+}
+
+fn test_av1_seq_full_timing() {
+    # Full path exercising every skip helper: timing_info +
+    # decoder_model_info + initial display delay + TWO operating
+    # points, the first with operating_parameters_info. 640x360.
+    var bw = dr_bw_init(64);
+    dr_bw_put_bits(bw, 0, 3);      # seq_profile = 0
+    dr_bw_put_bit(bw, 0);          # still_picture = 0
+    dr_bw_put_bit(bw, 0);          # reduced_still_picture_header = 0
+    dr_bw_put_bit(bw, 1);          # timing_info_present_flag = 1
+    # timing_info() — 5.5.3
+    dr_bw_put_bits(bw, 1000, 32);  #   num_units_in_display_tick = 1000
+    dr_bw_put_bits(bw, 25000, 32); #   time_scale = 25000
+    dr_bw_put_bit(bw, 1);          #   equal_picture_interval = 1
+    dr_bw_put_bit(bw, 1);          #   num_ticks_per_picture_minus_1 uvlc(0) = '1'
+    dr_bw_put_bit(bw, 1);          # decoder_model_info_present_flag = 1
+    # decoder_model_info() — 5.5.4
+    dr_bw_put_bits(bw, 15, 5);     #   buffer_delay_length_minus_1 = 15 (-> f(16))
+    dr_bw_put_bits(bw, 1000, 32);  #   num_units_in_decoding_tick = 1000
+    dr_bw_put_bits(bw, 9, 5);      #   buffer_removal_time_length_minus_1 = 9
+    dr_bw_put_bits(bw, 9, 5);      #   frame_presentation_time_length_minus_1 = 9
+    dr_bw_put_bit(bw, 1);          # initial_display_delay_present_flag = 1
+    dr_bw_put_bits(bw, 1, 5);      # operating_points_cnt_minus_1 = 1 (two ops)
+    # op 0
+    dr_bw_put_bits(bw, 0, 12);     #   operating_point_idc[0] = 0
+    dr_bw_put_bits(bw, 8, 5);      #   seq_level_idx[0] = 8 -> tier coded
+    dr_bw_put_bit(bw, 0);          #   seq_tier[0] = 0
+    dr_bw_put_bit(bw, 1);          #   decoder_model_present_for_this_op[0] = 1
+    # operating_parameters_info(0) — 5.5.5, n = 16
+    dr_bw_put_bits(bw, 30000, 16); #     decoder_buffer_delay[0]
+    dr_bw_put_bits(bw, 20000, 16); #     encoder_buffer_delay[0]
+    dr_bw_put_bit(bw, 0);          #     low_delay_mode_flag[0]
+    dr_bw_put_bit(bw, 1);          #   initial_display_delay_present_for_this_op[0] = 1
+    dr_bw_put_bits(bw, 1, 4);      #     initial_display_delay_minus_1[0] = 1
+    # op 1
+    dr_bw_put_bits(bw, 257, 12);   #   operating_point_idc[1] = 0x101
+    dr_bw_put_bits(bw, 4, 5);      #   seq_level_idx[1] = 4 (<= 7 -> tier implied)
+    dr_bw_put_bit(bw, 0);          #   decoder_model_present_for_this_op[1] = 0
+    dr_bw_put_bit(bw, 0);          #   initial_display_delay_present_for_this_op[1] = 0
+    # frame size
+    dr_bw_put_bits(bw, 9, 4);      # frame_width_bits_minus_1 = 9 (-> f(10))
+    dr_bw_put_bits(bw, 8, 4);      # frame_height_bits_minus_1 = 8 (-> f(9))
+    dr_bw_put_bits(bw, 639, 10);   # max_frame_width_minus_1 = 639
+    dr_bw_put_bits(bw, 359, 9);    # max_frame_height_minus_1 = 359
+    dr_bw_put_bit(bw, 1);          # frame_id_numbers_present_flag = 1
+    dr_bw_put_bits(bw, 5, 4);      #   delta_frame_id_length_minus_2 = 5
+    dr_bw_put_bits(bw, 2, 3);      #   additional_frame_id_length_minus_1 = 2
+    dr_bw_put_bit(bw, 0);          # use_128x128_superblock
+    dr_bw_put_bit(bw, 1);          # enable_filter_intra
+    dr_bw_put_bit(bw, 1);          # enable_intra_edge_filter
+    dr_bw_put_bit(bw, 1);          # enable_interintra_compound
+    dr_bw_put_bit(bw, 1);          # enable_masked_compound
+    dr_bw_put_bit(bw, 1);          # enable_warped_motion
+    dr_bw_put_bit(bw, 1);          # enable_dual_filter
+    dr_bw_put_bit(bw, 1);          # enable_order_hint = 1
+    dr_bw_put_bit(bw, 1);          #   enable_jnt_comp
+    dr_bw_put_bit(bw, 1);          #   enable_ref_frame_mvs
+    dr_bw_put_bit(bw, 0);          # seq_choose_screen_content_tools = 0
+    dr_bw_put_bit(bw, 1);          #   seq_force_screen_content_tools = 1
+    dr_bw_put_bit(bw, 0);          #   seq_choose_integer_mv = 0 (force_sct > 0)
+    dr_bw_put_bit(bw, 1);          #     seq_force_integer_mv = 1
+    dr_bw_put_bits(bw, 6, 3);      # order_hint_bits_minus_1 = 6
+    dr_bw_put_bit(bw, 1);          # enable_superres
+    dr_bw_put_bit(bw, 1);          # enable_cdef
+    dr_bw_put_bit(bw, 1);          # enable_restoration
+    # color_config()
+    dr_bw_put_bit(bw, 0);          # high_bitdepth = 0
+    dr_bw_put_bit(bw, 0);          # mono_chrome = 0
+    dr_bw_put_bit(bw, 0);          # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 1);          # color_range = 1
+    dr_bw_put_bits(bw, 2, 2);      # chroma_sample_position = 2 (colocated)
+    dr_bw_put_bit(bw, 0);          # separate_uv_delta_q
+    dr_bw_put_bit(bw, 1);          # film_grain_params_present = 1
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var s = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    assert(s != 0, "timing-laden header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_seq_width(s), 640, "width survives the skips");
+    assert_eq(av1_seq_height(s), 360, "height survives the skips");
+    assert_eq(av1_seq_bitdepth(s), 8, "8-bit");
+    assert_eq(av1_seq_mono(s), 0, "not mono");
+    return 0;
+}
+
+# ================================================================
+# Sequence header — color_config bit-depth / monochrome branches
+# (reduced path used as the shortest spec-legal wrapper)
+# ================================================================
+
+# Shared reduced-path prefix: profile (arg), still 1, reduced 1,
+# level 0, 4-bit dimension fields, 16x16, six tool bits = 0.
+# Leaves the writer positioned AT color_config().
+fn fx_av1_seq_reduced_prefix(bw, profile) {
+    dr_bw_put_bits(bw, profile, 3);   # seq_profile
+    dr_bw_put_bit(bw, 1);        # still_picture = 1
+    dr_bw_put_bit(bw, 1);        # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);    # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 3, 4);    # frame_width_bits_minus_1 = 3 (-> f(4))
+    dr_bw_put_bits(bw, 3, 4);    # frame_height_bits_minus_1 = 3
+    dr_bw_put_bits(bw, 15, 4);   # max_frame_width_minus_1 = 15
+    dr_bw_put_bits(bw, 15, 4);   # max_frame_height_minus_1 = 15
+    dr_bw_put_bit(bw, 0);        # use_128x128_superblock
+    dr_bw_put_bit(bw, 0);        # enable_filter_intra
+    dr_bw_put_bit(bw, 0);        # enable_intra_edge_filter
+    dr_bw_put_bit(bw, 0);        # enable_superres
+    dr_bw_put_bit(bw, 0);        # enable_cdef
+    dr_bw_put_bit(bw, 0);        # enable_restoration
+    return 0;
+}
+
+fn test_av1_seq_bitdepth_12() {
+    # Profile 2, high_bitdepth + twelve_bit -> 12-bit; 4:2:0 via the
+    # explicit profile-2 12-bit subsampling bits.
+    var bw = dr_bw_init(16);
+    fx_av1_seq_reduced_prefix(bw, 2);
+    dr_bw_put_bit(bw, 1);          # high_bitdepth = 1
+    dr_bw_put_bit(bw, 1);          # twelve_bit = 1 -> BitDepth 12
+    dr_bw_put_bit(bw, 0);          # mono_chrome = 0 (coded: profile 2)
+    dr_bw_put_bit(bw, 0);          # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);          # color_range
+    dr_bw_put_bit(bw, 1);          # subsampling_x = 1 (profile 2, 12-bit)
+    dr_bw_put_bit(bw, 1);          # subsampling_y = 1
+    dr_bw_put_bits(bw, 0, 2);      # chroma_sample_position (ssx && ssy)
+    dr_bw_put_bit(bw, 0);          # separate_uv_delta_q
+    dr_bw_put_bit(bw, 0);          # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var s = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    assert(s != 0, "12-bit header parses");
+    assert_eq(av1_seq_profile(s), 2, "profile 2");
+    assert_eq(av1_seq_bitdepth(s), 12, "12-bit");
+    assert_eq(av1_seq_width(s), 16, "width 16");
+    return 0;
+}
+
+fn test_av1_seq_bitdepth_10() {
+    # Profile 2, high_bitdepth without twelve_bit -> 10-bit; 4:2:2 is
+    # implied (no subsampling bits coded at 10-bit profile 2).
+    var bw = dr_bw_init(16);
+    fx_av1_seq_reduced_prefix(bw, 2);
+    dr_bw_put_bit(bw, 1);          # high_bitdepth = 1
+    dr_bw_put_bit(bw, 0);          # twelve_bit = 0 -> BitDepth 10
+    dr_bw_put_bit(bw, 0);          # mono_chrome = 0
+    dr_bw_put_bit(bw, 0);          # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);          # color_range
+    # ssx/ssy implied 1/0 -> no chroma_sample_position
+    dr_bw_put_bit(bw, 0);          # separate_uv_delta_q
+    dr_bw_put_bit(bw, 0);          # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var s = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    assert(s != 0, "10-bit header parses");
+    assert_eq(av1_seq_bitdepth(s), 10, "10-bit");
+    assert_eq(av1_seq_mono(s), 0, "not mono");
+    return 0;
+}
+
+fn test_av1_seq_mono() {
+    # Profile 0 monochrome: 5.5.2 mono path reads color_range then
+    # returns — no subsampling / separate_uv_delta_q bits.
+    var bw = dr_bw_init(16);
+    fx_av1_seq_reduced_prefix(bw, 0);
+    dr_bw_put_bit(bw, 0);          # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 1);          # mono_chrome = 1
+    dr_bw_put_bit(bw, 0);          # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 1);          # color_range = 1 (then mono path returns)
+    dr_bw_put_bit(bw, 0);          # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var s = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    assert(s != 0, "mono header parses");
+    assert_eq(av1_seq_mono(s), 1, "monochrome");
+    assert_eq(av1_seq_bitdepth(s), 8, "8-bit mono");
+    return 0;
+}
+
+fn test_av1_seq_profile1_srgb() {
+    # Profile 1 (4:4:4): mono_chrome is NOT coded. sRGB description
+    # (CP_BT_709=1, TC_SRGB=13, MC_IDENTITY=0) implies color_range and
+    # subsampling — no color_range bit on that branch (5.5.2).
+    var bw = dr_bw_init(16);
+    fx_av1_seq_reduced_prefix(bw, 1);
+    dr_bw_put_bit(bw, 1);          # high_bitdepth = 1 -> 10-bit (profile 1)
+    # (mono_chrome not coded for profile 1)
+    dr_bw_put_bit(bw, 1);          # color_description_present_flag = 1
+    dr_bw_put_bits(bw, 1, 8);      # color_primaries = CP_BT_709
+    dr_bw_put_bits(bw, 13, 8);     # transfer_characteristics = TC_SRGB
+    dr_bw_put_bits(bw, 0, 8);      # matrix_coefficients = MC_IDENTITY
+    # sRGB branch: no color_range / subsampling / chroma position bits
+    dr_bw_put_bit(bw, 0);          # separate_uv_delta_q
+    dr_bw_put_bit(bw, 0);          # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var s = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    assert(s != 0, "profile-1 sRGB header parses");
+    assert_eq(av1_seq_profile(s), 1, "profile 1");
+    assert_eq(av1_seq_bitdepth(s), 10, "10-bit");
+    assert_eq(av1_seq_mono(s), 0, "mono forced 0 for profile 1");
+    return 0;
+}
+
+# ================================================================
+# Sequence header — adversarial rejection
+# ================================================================
+
+fn test_av1_seq_reject() {
+    var len = 0;
+    var b = fx_av1_seq_reduced_64(&len);
+    var e = 0;
+    # Truncation: 3 bytes end exactly after max_frame_width_minus_1;
+    # max_frame_height_minus_1 has 0 of its 6 bits.
+    assert_eq(av1_seq_parse(b, 3, &e), 0, "3-byte payload rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "3 bytes -> truncated");
+    # Empty.
+    assert_eq(av1_seq_parse(b, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    # Negative length.
+    assert_eq(av1_seq_parse(b, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len -> bounds");
+    # Reserved profile: 0x60 = 011 0 0000 -> seq_profile 3 (6.4.1).
+    var b2 = alloc(2);
+    store8(b2, 0x60);
+    store8(b2 + 1, 0x00);
+    assert_eq(av1_seq_parse(b2, 2, &e), 0, "profile 3 rejected");
+    assert_eq(e, AV1_ERR_BAD_PROFILE, "profile 3 -> AV1_ERR_BAD_PROFILE");
+    assert(AV1_ERR_BAD_PROFILE >= 10, "family code in the AV1 band (low)");
+    assert(AV1_ERR_BAD_PROFILE <= 29, "family code in the AV1 band (high)");
+    assert(dr_err_name(AV1_ERR_BAD_PROFILE) != 0, "band name resolves");
+    # reduced_still_picture_header without still_picture:
+    # 0x08 = 000 0 1 000 -> still 0, reduced 1 (6.4.1 violation).
+    store8(b2, 0x08);
+    assert_eq(av1_seq_parse(b2, 2, &e), 0, "reduced w/o still rejected");
+    assert_eq(e, AV1_ERR_BAD_SEQ, "reduced w/o still -> AV1_ERR_BAD_SEQ");
+    # Full-path truncation inside the operating-point loop: profile 0,
+    # still 0, reduced 0, timing 0, idd 0, ops_m1 0 -> 12-bit idc needs
+    # more than the single byte provides.
+    # 0x00 = 000 0 0 0 0 0 (profile, still, reduced, timing, idd + 1st
+    # bit of ops_m1); one byte total.
+    store8(b2, 0x00);
+    assert_eq(av1_seq_parse(b2, 1, &e), 0, "op-loop truncation rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "op-loop truncation -> truncated");
+    return 0;
+}
+
+# ================================================================
+# Integration — OBU walk feeding the sequence-header parser, with the
+# stream assembled by the encode-seed writer
+# ================================================================
+
+fn test_av1_obu_seq_integration() {
+    var slen = 0;
+    var seq = fx_av1_seq_reduced_64(&slen);
+    # Assemble TD + SEQUENCE_HEADER(payload) with the writer.
+    var bw = dr_bw_init(16);
+    assert_eq(av1_obu_write_header(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0, 0, 1, 0),
+    DR_OK, "TD written");
+    assert_eq(av1_obu_write_header(bw, AV1_OBU_SEQUENCE_HEADER, 0, 0, 0, 1, slen),
+    DR_OK, "seq OBU header written");
+    var i = 0;
+    while (i < slen) {
+        dr_bw_put_bits(bw, load8(seq + i), 8);   # seq payload bytes
+        i = i + 1;
+    }
+    var n = dr_bw_flush(bw);
+    assert_eq(n, 2 + 2 + slen, "stream is TD + hdr + payload");
+    var buf = dr_bw_buf(bw);
+    # Walk it and decode the sequence header we find.
+    var it = av1_obu_iter_init(buf, n);
+    var t = 0; var off = 0; var sz = 0;
+    var seen_seq = 0;
+    while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+        if (t == AV1_OBU_SEQUENCE_HEADER) {
+            var e = 0;
+            var s = av1_seq_parse(buf + off, sz, &e);
+            assert(s != 0, "walked seq header parses");
+            assert_eq(av1_seq_width(s), 64, "walked width 64");
+            assert_eq(av1_seq_height(s), 64, "walked height 64");
+            assert_eq(av1_seq_bitdepth(s), 8, "walked 8-bit");
+            seen_seq = seen_seq + 1;
+        }
+    }
+    assert_eq(av1_obu_iter_err(it), DR_OK, "walk ended cleanly");
+    assert_eq(seen_seq, 1, "exactly one sequence header found");
+    assert(av1_obu_type_name(AV1_OBU_SEQUENCE_HEADER) != 0, "type name resolves");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("av1 obu parse");
+    test_av1_obu_parse_min();
+    test_av1_obu_parse_ext();
+    test_av1_obu_parse_nosize();
+    test_av1_obu_reserved_ignored();
+    test_av1_obu_parse_reject();
+    test_group("av1 obu walk");
+    test_av1_obu_walk();
+    test_av1_obu_walk_nosize();
+    test_av1_obu_walk_reject();
+    test_group("av1 obu write");
+    test_av1_obu_write_exact_bytes();
+    test_av1_obu_write_parse_roundtrip();
+    test_av1_obu_write_reject();
+    test_group("av1 sequence header");
+    test_av1_seq_reduced();
+    test_av1_seq_reduced_builder_crosscheck();
+    test_av1_seq_full();
+    test_av1_seq_full_timing();
+    test_av1_seq_bitdepth_12();
+    test_av1_seq_bitdepth_10();
+    test_av1_seq_mono();
+    test_av1_seq_profile1_srgb();
+    test_av1_seq_reject();
+    test_group("av1 integration");
+    test_av1_obu_seq_integration();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

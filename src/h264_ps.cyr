@@ -1,0 +1,534 @@
+# @public — drishti H.264/AVC parameter sets: SPS parse (spec 7.3.2.1.1,
+# including the High-profile branch and scaling-matrix skip) and a
+# minimal PPS parse (spec 7.3.2.2). Input is the RBSP — callers run
+# h264_rbsp_extract on the NAL payload (bytes after the header byte)
+# first.
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_*), src/bits.cyr (DrBr + ue/se exp-Golomb)
+# and src/h264_nal.cyr (H264_ERR_* band codes). Every symbol carries
+# the h264_ family prefix.
+#
+# Spec: ITU-T Rec. H.264 (authoritative) —
+#   7.3.2.1.1    seq_parameter_set_data() syntax
+#   7.3.2.1.1.1  scaling_list() syntax
+#   7.4.2.1.1    SPS semantics (field ranges, CropUnitX/Y, dims)
+#   7.4.2.1.1.1  delta_scale range
+#   7.3.2.2 / 7.4.2.2  PPS syntax + semantics
+#   Table 6-1    SubWidthC / SubHeightC per chroma_format_idc
+# Cross-checks: openh264 ParseSps/ParsePps (au_parser.cpp), x264
+# x264_sps_init serialization order, JM reference InterpretSPS.
+#
+# H264Sps record layout (224 bytes, heap) — raw spec field values
+# (spec names, spec units) plus the two COMPUTED display dimensions:
+#   +0:   profile_idc
+#   +8:   constraint_flags — bit i = constraint_set{i}_flag, i in 0..5
+#   +16:  level_idc
+#   +24:  sps_id (seq_parameter_set_id)
+#   +32:  chroma_format_idc          (INFERRED 1 = 4:2:0 when the
+#                                     High-profile branch is absent)
+#   +40:  separate_colour_plane_flag
+#   +48:  bit_depth_luma_minus8
+#   +56:  bit_depth_chroma_minus8
+#   +64:  qpprime_y_zero_transform_bypass_flag
+#   +72:  seq_scaling_matrix_present_flag
+#   +80:  log2_max_frame_num_minus4
+#   +88:  pic_order_cnt_type          (0 or 2; type 1 is unsupported)
+#   +96:  log2_max_pic_order_cnt_lsb_minus4 (0 unless poc type == 0)
+#   +104: max_num_ref_frames
+#   +112: gaps_in_frame_num_value_allowed_flag
+#   +120: pic_width_in_mbs_minus1
+#   +128: pic_height_in_map_units_minus1
+#   +136: frame_mbs_only_flag
+#   +144: mb_adaptive_frame_field_flag (mbaff; 0 when frame_mbs_only)
+#   +152: direct_8x8_inference_flag
+#   +160: frame_cropping_flag
+#   +168: frame_crop_left_offset
+#   +176: frame_crop_right_offset
+#   +184: frame_crop_top_offset
+#   +192: frame_crop_bottom_offset
+#   +200: vui_parameters_present_flag (VUI itself is NOT parsed in 0.1.x)
+#   +208: width  — computed cropped luma width in samples (7.4.2.1.1)
+#   +216: height — computed cropped luma height in samples
+#
+# H264Pps record layout (120 bytes, heap) — raw spec field values:
+#   +0:   pps_id (pic_parameter_set_id)
+#   +8:   sps_id (seq_parameter_set_id)
+#   +16:  entropy_coding_mode_flag (0 = CAVLC, 1 = CABAC)
+#   +24:  bottom_field_pic_order_in_frame_present_flag
+#   +32:  num_slice_groups_minus1 (only 0 supported — FMO is out of scope)
+#   +40:  num_ref_idx_l0_default_active_minus1
+#   +48:  num_ref_idx_l1_default_active_minus1
+#   +56:  weighted_pred_flag
+#   +64:  weighted_bipred_idc
+#   +72:  pic_init_qp_minus26 (signed)
+#   +80:  pic_init_qs_minus26 (signed)
+#   +88:  chroma_qp_index_offset (signed)
+#   +96:  deblocking_filter_control_present_flag
+#   +104: constrained_intra_pred_flag
+#   +112: redundant_pic_cnt_present_flag
+
+# Bomb guard: pic_width_in_mbs_minus1 / pic_height_in_map_units_minus1
+# above this yield DR_ERR_OVERSIZE. 1024 MBs = 16384 luma samples per
+# axis — beyond every defined level's MaxFS (levels top out at 6.2 =
+# 139264 total MBs, 8K frames), so any real SPS fits with margin.
+enum H264PsLimits {
+    H264_PS_MAX_MBS_MINUS1 = 1023;
+}
+
+# Internal helper: latch an error into *out_err and return 0 (the
+# "no record" result) so parse call sites stay one-liners.
+fn h264_ps_fail(out_err, code): i64 {
+    store64(out_err, code);
+    return 0;
+}
+
+# True (1) when profile_idc selects the extended 7.3.2.1.1 branch
+# (chroma format / bit depth / scaling matrix fields present). The
+# thirteen-value list is verbatim from the spec's if-condition:
+# 100 High, 110 High 10, 122 High 4:2:2, 244 High 4:4:4 Predictive,
+# 44 CAVLC 4:4:4 Intra, 83/86 Scalable (Annex G), 118 Multiview High /
+# 128 Stereo High (Annex H), 138/139 Multiview Depth (Annex I),
+# 134/135 MFC (Annex H).
+fn h264_ps_is_high_profile(profile_idc): i64 {
+    if (profile_idc == 100) { return 1; }
+    if (profile_idc == 110) { return 1; }
+    if (profile_idc == 122) { return 1; }
+    if (profile_idc == 244) { return 1; }
+    if (profile_idc == 44)  { return 1; }
+    if (profile_idc == 83)  { return 1; }
+    if (profile_idc == 86)  { return 1; }
+    if (profile_idc == 118) { return 1; }
+    if (profile_idc == 128) { return 1; }
+    if (profile_idc == 138) { return 1; }
+    if (profile_idc == 139) { return 1; }
+    if (profile_idc == 134) { return 1; }
+    if (profile_idc == 135) { return 1; }
+    return 0;
+}
+
+# Skip one scaling_list() of `size` entries (16 for the 4x4 lists,
+# 64 for 8x8) — spec 7.3.2.1.1.1. We only SKIP in 0.1.x (the lists
+# feed dequant, which lands with the 0.3.x transform milestone), but
+# skipping still has to walk the exact syntax: delta_scale symbols
+# stop as soon as nextScale hits 0 ("use default" signal).
+# Returns DR_OK; DR_ERR_TRUNCATED / DR_ERR_BAD_VLC from the reader;
+# H264_ERR_BAD_SPS when delta_scale leaves [-128, 127] (7.4.2.1.1.1).
+fn h264_ps_skip_scaling_list(br, size): i64 {
+    var last_scale = 8;
+    var next_scale = 8;
+    var j = 0;
+    while (j < size) {
+        if (next_scale != 0) {
+            var delta = 0;
+            var rc = dr_se_read(br, &delta);
+            if (rc != DR_OK) { return rc; }
+            if ((delta < (0 - 128)) || (delta > 127)) {
+                return H264_ERR_BAD_SPS;
+            }
+            # nextScale = (lastScale + delta_scale + 256) % 256 —
+            # operand range [128, 638] keeps the &255 form exact.
+            next_scale = (last_scale + delta + 256) & 255;
+        }
+        if (next_scale != 0) { last_scale = next_scale; }
+        j = j + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# SPS parse — spec 7.3.2.1.1 seq_parameter_set_data()
+# ================================================================
+
+# Parse an SPS RBSP (rbsp[0..len)). Returns an H264Sps record, or 0
+# with the error at *out_err:
+#   DR_ERR_TRUNCATED   — RBSP ends mid-field
+#   DR_ERR_BAD_VLC     — exp-Golomb overflow (> 31 leading zeros)
+#   DR_ERR_BOUNDS      — negative len
+#   H264_ERR_BAD_SPS   — a field outside its 7.4.2.1.1 range, or
+#                        cropping that consumes the whole frame
+#   DR_ERR_OVERSIZE    — width/height in MBs above the bomb guard
+#   DR_ERR_UNSUPPORTED — pic_order_cnt_type == 1 (out of 0.1.x scope)
+#   DR_ERR_OOM         — allocation failure
+fn h264_sps_parse(rbsp, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (len < 0) { return h264_ps_fail(out_err, DR_ERR_BOUNDS); }
+    var br = dr_br_init(rbsp, len);
+    if (br == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
+
+    # profile_idc u(8), constraint byte u(8), level_idc u(8).
+    var profile_idc = dr_br_read_bits(br, 8);
+    var cbyte = dr_br_read_bits(br, 8);
+    var level_idc = dr_br_read_bits(br, 8);
+    var e = dr_br_err(br);
+    if (e != DR_OK) { return h264_ps_fail(out_err, e); }
+    # constraint_set0..5_flag are the byte's bits 7..2 (MSB first);
+    # reserved_zero_2bits (bits 1-0) are IGNORED per 7.4.2.1.1
+    # ("decoders shall ignore the value" — reserved for future use).
+    var cflags = 0;
+    if (cbyte & 0x80) { cflags = cflags + 1; }    # constraint_set0_flag
+    if (cbyte & 0x40) { cflags = cflags + 2; }    # constraint_set1_flag
+    if (cbyte & 0x20) { cflags = cflags + 4; }    # constraint_set2_flag
+    if (cbyte & 0x10) { cflags = cflags + 8; }    # constraint_set3_flag
+    if (cbyte & 0x08) { cflags = cflags + 16; }   # constraint_set4_flag
+    if (cbyte & 0x04) { cflags = cflags + 32; }   # constraint_set5_flag
+
+    # seq_parameter_set_id ue(v), range [0, 31] (7.4.2.1.1).
+    var sps_id = 0;
+    var rc = dr_ue_read(br, &sps_id);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (sps_id > 31) { return h264_ps_fail(out_err, H264_ERR_BAD_SPS); }
+
+    # High-profile branch defaults (7.4.2.1.1 inference rules): when
+    # absent, chroma_format_idc = 1 (4:2:0) and both bit depths = 8.
+    var chroma_format_idc = 1;
+    var separate_colour_plane = 0;
+    var bit_depth_luma_m8 = 0;
+    var bit_depth_chroma_m8 = 0;
+    var qpprime_flag = 0;
+    var scaling_matrix_flag = 0;
+    if (h264_ps_is_high_profile(profile_idc)) {
+        # chroma_format_idc ue(v), range [0, 3].
+        rc = dr_ue_read(br, &chroma_format_idc);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        if (chroma_format_idc > 3) {
+            return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
+        }
+        if (chroma_format_idc == 3) {
+            separate_colour_plane = dr_br_read_bit(br);
+        }
+        # bit_depth_luma_minus8 / bit_depth_chroma_minus8 ue(v),
+        # range [0, 6] (8..14-bit).
+        rc = dr_ue_read(br, &bit_depth_luma_m8);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        if (bit_depth_luma_m8 > 6) {
+            return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
+        }
+        rc = dr_ue_read(br, &bit_depth_chroma_m8);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        if (bit_depth_chroma_m8 > 6) {
+            return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
+        }
+        qpprime_flag = dr_br_read_bit(br);
+        scaling_matrix_flag = dr_br_read_bit(br);
+        e = dr_br_err(br);
+        if (e != DR_OK) { return h264_ps_fail(out_err, e); }
+        if (scaling_matrix_flag) {
+            # 8 lists for 4:2:0/4:2:2 (six 4x4 + two 8x8), 12 for
+            # 4:4:4 (six 4x4 + six 8x8) — 7.3.2.1.1.
+            var nlists = 8;
+            if (chroma_format_idc == 3) { nlists = 12; }
+            var i = 0;
+            while (i < nlists) {
+                var present = dr_br_read_bit(br);
+                e = dr_br_err(br);
+                if (e != DR_OK) { return h264_ps_fail(out_err, e); }
+                if (present) {
+                    var lsize = 16;              # lists 0-5: 4x4
+                    if (i >= 6) { lsize = 64; }  # lists 6+:  8x8
+                    rc = h264_ps_skip_scaling_list(br, lsize);
+                    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+                }
+                i = i + 1;
+            }
+        }
+    }
+
+    # log2_max_frame_num_minus4 ue(v), range [0, 12].
+    var log2_mfn_m4 = 0;
+    rc = dr_ue_read(br, &log2_mfn_m4);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (log2_mfn_m4 > 12) { return h264_ps_fail(out_err, H264_ERR_BAD_SPS); }
+
+    # pic_order_cnt_type ue(v), range [0, 2]. Type 1 (expected-delta
+    # POC) is DR_ERR_UNSUPPORTED in 0.1.x — vanishingly rare in real
+    # streams; support is a 0.2.x slice-header-lane item.
+    var poc_type = 0;
+    rc = dr_ue_read(br, &poc_type);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (poc_type > 2) { return h264_ps_fail(out_err, H264_ERR_BAD_SPS); }
+    if (poc_type == 1) { return h264_ps_fail(out_err, DR_ERR_UNSUPPORTED); }
+    var log2_poc_lsb_m4 = 0;
+    if (poc_type == 0) {
+        # log2_max_pic_order_cnt_lsb_minus4 ue(v), range [0, 12].
+        rc = dr_ue_read(br, &log2_poc_lsb_m4);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        if (log2_poc_lsb_m4 > 12) {
+            return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
+        }
+    }
+
+    # max_num_ref_frames ue(v), range [0, MaxDpbFrames] <= 16.
+    var max_ref = 0;
+    rc = dr_ue_read(br, &max_ref);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (max_ref > 16) { return h264_ps_fail(out_err, H264_ERR_BAD_SPS); }
+
+    var gaps_flag = dr_br_read_bit(br);
+
+    # Frame geometry in macroblock units.
+    var pw_m1 = 0;
+    rc = dr_ue_read(br, &pw_m1);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (pw_m1 > H264_PS_MAX_MBS_MINUS1) {
+        return h264_ps_fail(out_err, DR_ERR_OVERSIZE);
+    }
+    var ph_m1 = 0;
+    rc = dr_ue_read(br, &ph_m1);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (ph_m1 > H264_PS_MAX_MBS_MINUS1) {
+        return h264_ps_fail(out_err, DR_ERR_OVERSIZE);
+    }
+
+    var frame_mbs_only = dr_br_read_bit(br);
+    var mbaff = 0;
+    if (frame_mbs_only == 0) {
+        mbaff = dr_br_read_bit(br);
+    }
+    var direct_8x8 = dr_br_read_bit(br);
+
+    var cropping = dr_br_read_bit(br);
+    var crop_left = 0;
+    var crop_right = 0;
+    var crop_top = 0;
+    var crop_bottom = 0;
+    if (cropping) {
+        rc = dr_ue_read(br, &crop_left);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        rc = dr_ue_read(br, &crop_right);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        rc = dr_ue_read(br, &crop_top);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+        rc = dr_ue_read(br, &crop_bottom);
+        if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    }
+    var vui_flag = dr_br_read_bit(br);
+    e = dr_br_err(br);
+    if (e != DR_OK) { return h264_ps_fail(out_err, e); }
+    # VUI parameters (Annex E) are not parsed in 0.1.x — the flag is
+    # recorded and the remaining RBSP bits are left unread.
+
+    # ---- Computed display dimensions (7.4.2.1.1) -------------------
+    # PicWidthInSamplesL = (pic_width_in_mbs_minus1 + 1) * 16
+    # FrameHeightInMbs   = (2 - frame_mbs_only_flag) *
+    #                      (pic_height_in_map_units_minus1 + 1)
+    var w = (pw_m1 + 1) * 16;
+    var h = (2 - frame_mbs_only) * (ph_m1 + 1) * 16;
+    # ChromaArrayType: 0 when separate_colour_plane_flag, else
+    # chroma_format_idc. SubWidthC/SubHeightC from Table 6-1.
+    var chroma_array_type = chroma_format_idc;
+    if (separate_colour_plane != 0) { chroma_array_type = 0; }
+    var sub_w = 1;
+    var sub_h = 1;
+    if (chroma_format_idc == 1) { sub_w = 2; sub_h = 2; }   # 4:2:0
+    if (chroma_format_idc == 2) { sub_w = 2; sub_h = 1; }   # 4:2:2
+    # CropUnitX/Y (7.4.2.1.1): ChromaArrayType 0 -> 1 / (2 - fmbs);
+    # else SubWidthC / SubHeightC * (2 - fmbs).
+    var crop_unit_x = 1;
+    var crop_unit_y = 2 - frame_mbs_only;
+    if (chroma_array_type != 0) {
+        crop_unit_x = sub_w;
+        crop_unit_y = sub_h * (2 - frame_mbs_only);
+    }
+    var cx = crop_unit_x * (crop_left + crop_right);
+    var cy = crop_unit_y * (crop_top + crop_bottom);
+    # Cropping must leave at least one luma sample per axis.
+    if ((cx >= w) || (cy >= h)) {
+        return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
+    }
+
+    var sps = alloc(224);
+    if (sps == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
+    store64(sps, profile_idc);
+    store64(sps + 8, cflags);
+    store64(sps + 16, level_idc);
+    store64(sps + 24, sps_id);
+    store64(sps + 32, chroma_format_idc);
+    store64(sps + 40, separate_colour_plane);
+    store64(sps + 48, bit_depth_luma_m8);
+    store64(sps + 56, bit_depth_chroma_m8);
+    store64(sps + 64, qpprime_flag);
+    store64(sps + 72, scaling_matrix_flag);
+    store64(sps + 80, log2_mfn_m4);
+    store64(sps + 88, poc_type);
+    store64(sps + 96, log2_poc_lsb_m4);
+    store64(sps + 104, max_ref);
+    store64(sps + 112, gaps_flag);
+    store64(sps + 120, pw_m1);
+    store64(sps + 128, ph_m1);
+    store64(sps + 136, frame_mbs_only);
+    store64(sps + 144, mbaff);
+    store64(sps + 152, direct_8x8);
+    store64(sps + 160, cropping);
+    store64(sps + 168, crop_left);
+    store64(sps + 176, crop_right);
+    store64(sps + 184, crop_top);
+    store64(sps + 192, crop_bottom);
+    store64(sps + 200, vui_flag);
+    store64(sps + 208, w - cx);
+    store64(sps + 216, h - cy);
+    return sps;
+}
+
+# ---- H264Sps accessors (raw spec fields + computed dims) -----------
+fn h264_sps_profile_idc(sps): i64 { return load64(sps); }
+fn h264_sps_constraint_flags(sps): i64 { return load64(sps + 8); }
+fn h264_sps_level_idc(sps): i64 { return load64(sps + 16); }
+fn h264_sps_id(sps): i64 { return load64(sps + 24); }
+fn h264_sps_chroma_format_idc(sps): i64 { return load64(sps + 32); }
+fn h264_sps_separate_colour_plane(sps): i64 { return load64(sps + 40); }
+fn h264_sps_bit_depth_luma_minus8(sps): i64 { return load64(sps + 48); }
+fn h264_sps_bit_depth_chroma_minus8(sps): i64 { return load64(sps + 56); }
+fn h264_sps_qpprime_flag(sps): i64 { return load64(sps + 64); }
+fn h264_sps_scaling_matrix_flag(sps): i64 { return load64(sps + 72); }
+fn h264_sps_log2_max_frame_num_minus4(sps): i64 { return load64(sps + 80); }
+fn h264_sps_pic_order_cnt_type(sps): i64 { return load64(sps + 88); }
+fn h264_sps_log2_max_poc_lsb_minus4(sps): i64 { return load64(sps + 96); }
+fn h264_sps_max_num_ref_frames(sps): i64 { return load64(sps + 104); }
+fn h264_sps_gaps_flag(sps): i64 { return load64(sps + 112); }
+fn h264_sps_pic_width_in_mbs_minus1(sps): i64 { return load64(sps + 120); }
+fn h264_sps_pic_height_in_map_units_minus1(sps): i64 { return load64(sps + 128); }
+fn h264_sps_frame_mbs_only(sps): i64 { return load64(sps + 136); }
+fn h264_sps_mbaff(sps): i64 { return load64(sps + 144); }
+fn h264_sps_direct_8x8(sps): i64 { return load64(sps + 152); }
+fn h264_sps_cropping_flag(sps): i64 { return load64(sps + 160); }
+fn h264_sps_crop_left(sps): i64 { return load64(sps + 168); }
+fn h264_sps_crop_right(sps): i64 { return load64(sps + 176); }
+fn h264_sps_crop_top(sps): i64 { return load64(sps + 184); }
+fn h264_sps_crop_bottom(sps): i64 { return load64(sps + 192); }
+fn h264_sps_vui_flag(sps): i64 { return load64(sps + 200); }
+fn h264_sps_width(sps): i64 { return load64(sps + 208); }
+fn h264_sps_height(sps): i64 { return load64(sps + 216); }
+
+# ================================================================
+# PPS parse — spec 7.3.2.2 pic_parameter_set_rbsp(), minimal:
+# through redundant_pic_cnt_present_flag. The optional tail
+# (transform_8x8_mode_flag / pic_scaling_matrix /
+# second_chroma_qp_index_offset, gated on more_rbsp_data()) is a
+# 0.5.x High-profile item and is left unread.
+# ================================================================
+
+# Parse a PPS RBSP (rbsp[0..len)). Returns an H264Pps record, or 0
+# with the error at *out_err:
+#   DR_ERR_TRUNCATED   — RBSP ends mid-field
+#   DR_ERR_BAD_VLC     — exp-Golomb overflow
+#   DR_ERR_BOUNDS      — negative len
+#   H264_ERR_BAD_PPS   — a field outside its 7.4.2.2 range
+#   DR_ERR_UNSUPPORTED — num_slice_groups_minus1 > 0 (FMO)
+#   DR_ERR_OOM         — allocation failure
+fn h264_pps_parse(rbsp, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (len < 0) { return h264_ps_fail(out_err, DR_ERR_BOUNDS); }
+    var br = dr_br_init(rbsp, len);
+    if (br == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
+
+    # pic_parameter_set_id ue(v), range [0, 255] (7.4.2.2).
+    var pps_id = 0;
+    var rc = dr_ue_read(br, &pps_id);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (pps_id > 255) { return h264_ps_fail(out_err, H264_ERR_BAD_PPS); }
+
+    # seq_parameter_set_id ue(v), range [0, 31].
+    var sps_id = 0;
+    rc = dr_ue_read(br, &sps_id);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (sps_id > 31) { return h264_ps_fail(out_err, H264_ERR_BAD_PPS); }
+
+    # entropy_coding_mode_flag u(1): 0 = CAVLC, 1 = CABAC.
+    var entropy = dr_br_read_bit(br);
+    # bottom_field_pic_order_in_frame_present_flag u(1)
+    # (pic_order_present_flag in older spec editions).
+    var bottom_field = dr_br_read_bit(br);
+
+    # num_slice_groups_minus1 ue(v), range [0, 7]. > 0 selects FMO
+    # slice-group maps (Baseline-only, essentially extinct) — out of
+    # drishti's scope, DR_ERR_UNSUPPORTED.
+    var nsg_m1 = 0;
+    rc = dr_ue_read(br, &nsg_m1);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (nsg_m1 > 7) { return h264_ps_fail(out_err, H264_ERR_BAD_PPS); }
+    if (nsg_m1 > 0) { return h264_ps_fail(out_err, DR_ERR_UNSUPPORTED); }
+
+    # num_ref_idx_l0/l1_default_active_minus1 ue(v), range [0, 31].
+    var l0_m1 = 0;
+    rc = dr_ue_read(br, &l0_m1);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (l0_m1 > 31) { return h264_ps_fail(out_err, H264_ERR_BAD_PPS); }
+    var l1_m1 = 0;
+    rc = dr_ue_read(br, &l1_m1);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if (l1_m1 > 31) { return h264_ps_fail(out_err, H264_ERR_BAD_PPS); }
+
+    # weighted_pred_flag u(1), weighted_bipred_idc u(2) (range [0, 2]).
+    var wp = dr_br_read_bit(br);
+    var wbi = dr_br_read_bits(br, 2);
+    var e = dr_br_err(br);
+    if (e != DR_OK) { return h264_ps_fail(out_err, e); }
+    if (wbi > 2) { return h264_ps_fail(out_err, H264_ERR_BAD_PPS); }
+
+    # pic_init_qp_minus26 se(v), range [-(26 + QpBdOffsetY), +25].
+    # QpBdOffsetY = 6 * bit_depth_luma_minus8 <= 36; the PPS doesn't
+    # know its SPS here, so the permissive bound [-62, 25] is used.
+    var init_qp = 0;
+    rc = dr_se_read(br, &init_qp);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if ((init_qp < (0 - 62)) || (init_qp > 25)) {
+        return h264_ps_fail(out_err, H264_ERR_BAD_PPS);
+    }
+    # pic_init_qs_minus26 se(v), range [-26, +25] (SP/SI, no BD offset).
+    var init_qs = 0;
+    rc = dr_se_read(br, &init_qs);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if ((init_qs < (0 - 26)) || (init_qs > 25)) {
+        return h264_ps_fail(out_err, H264_ERR_BAD_PPS);
+    }
+    # chroma_qp_index_offset se(v), range [-12, +12].
+    var cqp = 0;
+    rc = dr_se_read(br, &cqp);
+    if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
+    if ((cqp < (0 - 12)) || (cqp > 12)) {
+        return h264_ps_fail(out_err, H264_ERR_BAD_PPS);
+    }
+
+    var deblock = dr_br_read_bit(br);
+    var constrained = dr_br_read_bit(br);
+    var redundant = dr_br_read_bit(br);
+    e = dr_br_err(br);
+    if (e != DR_OK) { return h264_ps_fail(out_err, e); }
+
+    var pps = alloc(120);
+    if (pps == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
+    store64(pps, pps_id);
+    store64(pps + 8, sps_id);
+    store64(pps + 16, entropy);
+    store64(pps + 24, bottom_field);
+    store64(pps + 32, nsg_m1);
+    store64(pps + 40, l0_m1);
+    store64(pps + 48, l1_m1);
+    store64(pps + 56, wp);
+    store64(pps + 64, wbi);
+    store64(pps + 72, init_qp);
+    store64(pps + 80, init_qs);
+    store64(pps + 88, cqp);
+    store64(pps + 96, deblock);
+    store64(pps + 104, constrained);
+    store64(pps + 112, redundant);
+    return pps;
+}
+
+# ---- H264Pps accessors ---------------------------------------------
+fn h264_pps_id(pps): i64 { return load64(pps); }
+fn h264_pps_sps_id(pps): i64 { return load64(pps + 8); }
+fn h264_pps_entropy_coding_mode(pps): i64 { return load64(pps + 16); }
+fn h264_pps_bottom_field_poc_flag(pps): i64 { return load64(pps + 24); }
+fn h264_pps_num_slice_groups_minus1(pps): i64 { return load64(pps + 32); }
+fn h264_pps_ref_idx_l0_default_minus1(pps): i64 { return load64(pps + 40); }
+fn h264_pps_ref_idx_l1_default_minus1(pps): i64 { return load64(pps + 48); }
+fn h264_pps_weighted_pred_flag(pps): i64 { return load64(pps + 56); }
+fn h264_pps_weighted_bipred_idc(pps): i64 { return load64(pps + 64); }
+fn h264_pps_init_qp_minus26(pps): i64 { return load64(pps + 72); }
+fn h264_pps_init_qs_minus26(pps): i64 { return load64(pps + 80); }
+fn h264_pps_chroma_qp_index_offset(pps): i64 { return load64(pps + 88); }
+fn h264_pps_deblocking_flag(pps): i64 { return load64(pps + 96); }
+fn h264_pps_constrained_intra_pred(pps): i64 { return load64(pps + 104); }
+fn h264_pps_redundant_pic_cnt_flag(pps): i64 { return load64(pps + 112); }

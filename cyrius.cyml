@@ -1,0 +1,38 @@
+[package]
+name = "drishti"
+version = "${file:VERSION}"
+description = "drishti (दृष्टि — sight/vision) — sovereign video codecs for AGNOS: AV1 (decode+encode), H.264/AVC (decode+encode), H.265/HEVC (decode), VP8/VP9 (decode+encode) as one library. Replaces dav1d, rav1e, openh264, libde265, libvpx. No C, no FFI, no libav*."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/drishti"
+language = "cyrius"
+cyrius = "6.4.43"
+
+[build]
+entry = "programs/smoke.cyr"
+output = "build/drishti-smoke"
+
+# `[lib]` feeds `cyrius distlib` — module order matters: flat domain
+# modules in dependency order (stdlib is NOT listed; it auto-resolves
+# from [deps].stdlib). Codec families APPEND their modules here (and
+# mirror the order in src/main.cyr's include chain): core first, then
+# av1_*, h264_*, h265_*, vp8_*/vp9_*/vpx_* in leaf-to-root order.
+# Don't reorder without re-running `cyrius distlib` and verifying the
+# bundle still compiles clean.
+[lib]
+modules = [
+    "src/drishti.cyr",
+    "src/bits.cyr",
+    "src/ivf.cyr",
+    "src/av1_obu.cyr",
+    "src/av1_seq.cyr",
+    "src/h264_nal.cyr",
+    "src/h264_ps.cyr",
+    "src/h265_nal.cyr",
+    "src/h265_ps.cyr",
+    "src/vpx_bool.cyr",
+    "src/vp8.cyr",
+    "src/vp9.cyr",
+]
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]

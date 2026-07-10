@@ -1,0 +1,451 @@
+# @public — drishti VP8/VP9: the boolean arithmetic coder (bounds-checked
+# DECODER + ENCODER), the foundation every VP8/VP9 layer sits on.
+#
+# FLAT module (no includes) — wiring in src/main.cyr; until this family
+# is wired into [lib], the standalone suite tests/vpx.tcyr includes it
+# explicitly after the lib root. Depends on src/drishti.cyr (DR_ERR_*
+# codes) only — it does NOT use the core DrBr/DrBw bit I/O: the bool
+# coder is an arithmetic coder with its own range/value state machine,
+# not a plain bit packer.
+#
+# Derived from RFC 6386 "VP8 Data Format and Decoding Guide" — the RFC
+# is code-as-spec; section numbers cited inline:
+#   7.1  underlying theory (range subdivision by 8-bit probability)
+#   7.3  bool_decoder: init_bool_decoder() / bool_decode() reference code
+#   7.3  bool_encoder: init_bool_encoder() / write_bool() /
+#        flush_bool_encoder() / add_one_to_output() reference code
+#   7.3  read_literal(): n bools at probability 128, MSB-first
+#   9.x  signed values are coded magnitude-then-sign (e.g. 9.6 delta_q:
+#        L(4) magnitude followed by a sign bit, sign 1 = negative)
+# VP9 uses the IDENTICAL coder ("VP9 Bitstream & Decoding Process
+# Specification" 9.2 bool decoding) — one implementation serves both.
+# Cross-checked against libvpx vp8/decoder/dboolhuff.h (vp8dx_decode_bool)
+# and vp8/encoder/boolhuff.c (vp8_encode_bool): same split arithmetic,
+# same carry-at-renormalization propagation.
+#
+# BOUNDS / ERROR POLICY (this implementation; the RFC reference reads
+# unchecked past the buffer):
+#   * Errors are STICKY (core DrBr/DrBw pattern): after the first fault
+#     every later op is a no-op returning 0 / the sticky code.
+#   * Decoder: a renormalization that needs a byte past buf+len shifts
+#     in a zero AND latches DR_ERR_TRUNCATED. The bool being decoded by
+#     the CURRENT call was already resolved before renormalization, so
+#     the current call still returns it; every LATER call returns 0.
+#     A properly flushed stream never overreads while decoding exactly
+#     the symbols that were encoded: the decoder consumes at most
+#     2 + floor(shifts/8) bytes while the encoder emitted at least that
+#     many (flush pads 32 bits, RFC 7.3), so round-trips stay clean.
+#   * Encoder: the output buffer is OWNED and auto-grows by doubling up
+#     to VBOOL_ENC_MAX_BYTES (DR_ERR_OVERSIZE past it, DR_ERR_OOM on a
+#     failed allocation).
+#
+# VboolDec decoder layout (56 bytes, heap):
+#   +0:  buf       — input byte buffer (BORROWED, caller keeps it alive)
+#   +8:  len       — buffer length in BYTES
+#   +16: pos       — index of the next byte to shift in
+#   +24: value     — decoder window, at most 16 significant bits (RFC 7.3
+#                    primes it with two bytes: "raise to power of 16")
+#   +32: range     — current range, 128 <= range <= 255 after renorm
+#   +40: bit_count — renorm shifts since the last byte fill (0..7)
+#   +48: err       — sticky error code (DR_OK until first fault)
+#
+# VboolEnc encoder layout (56 bytes, heap):
+#   +0:  buf       — output buffer (OWNED, may move on growth — snapshot
+#                    via vbool_enc_buf AFTER vbool_enc_flush)
+#   +8:  cap       — current capacity in BYTES
+#   +16: len       — bytes emitted so far
+#   +24: range     — current range, 128 <= range <= 255 after renorm
+#   +32: bottom    — pending low end of the interval (32-bit window;
+#                    carries propagate into already-emitted bytes)
+#   +40: bit_count — bits until the next byte is emitted (starts 24,
+#                    RFC 7.3 init_bool_encoder)
+#   +48: err       — sticky error code
+
+# Hard cap on encoder output growth: 1 GiB (mirrors core DR_BW_MAX_BYTES).
+enum VboolLimits {
+    VBOOL_ENC_MAX_BYTES = 1073741824;   # 1 << 30
+}
+
+# ================================================================
+# Decoder — RFC 6386 7.3 bool_decoder
+# ================================================================
+
+# Create a bool decoder over buf[0..len) (buffer BORROWED). Returns the
+# VboolDec handle, or 0 on negative len / allocation failure.
+# RFC 7.3 init_bool_decoder(): value is primed with TWO bytes. A buffer
+# shorter than 2 bytes is already truncated (a flushed stream is always
+# >= 4 bytes: flush writes 32 bits, RFC 7.3): the decoder is still
+# constructed (missing bytes prime as zero) but starts with sticky
+# DR_ERR_TRUNCATED so the caller sees a clean error, not garbage bools.
+fn vbool_dec_init(buf, len): i64 {
+    if (len < 0) { return 0; }
+    var d = alloc(56);
+    if (d == 0) { return 0; }
+    var value = 0;
+    var pos = 0;
+    var err = DR_OK;
+    # "for (v = 0; v < 2; v++) value = (value << 8) | *input++"  (7.3)
+    var i = 0;
+    while (i < 2) {
+        value = value << 8;
+        if (pos < len) {
+            value = value + load8(buf + pos);
+            pos = pos + 1;
+        } else {
+            err = DR_ERR_TRUNCATED;
+        }
+        i = i + 1;
+    }
+    store64(d, buf);
+    store64(d + 8, len);
+    store64(d + 16, pos);
+    store64(d + 24, value);
+    store64(d + 32, 255);   # "initial range is full"  (7.3)
+    store64(d + 40, 0);     # "have not yet shifted out any bits"
+    store64(d + 48, err);
+    return d;
+}
+
+# Sticky error code (DR_OK if the decoder has never faulted).
+fn vbool_dec_err(d): i64 {
+    return load64(d + 48);
+}
+
+# Bytes consumed so far (includes the two init-priming bytes).
+fn vbool_dec_pos(d): i64 {
+    return load64(d + 16);
+}
+
+# Decode one bool with the given 8-bit probability-of-zero (0..255).
+# RFC 6386 7.3 bool_decode(), verbatim arithmetic:
+#   split = 1 + (((range - 1) * prob) >> 8)
+#   value >= (split << 8)  ->  1: value -= split<<8; range -= split
+#   else                   ->  0: range = split
+#   then renormalize while range < 128: shift value/range left one bit,
+#   refilling one input byte into value's low bits every 8 shifts.
+# prob outside [0,255] latches sticky DR_ERR_BOUNDS and returns 0. A
+# renorm refill past buf+len shifts in zero bits and latches sticky
+# DR_ERR_TRUNCATED; the CURRENT call's bool was resolved before renorm
+# and is still returned (module-header policy); later calls return 0.
+fn vbool_dec_bool(d, prob): i64 {
+    if (load64(d + 48) != DR_OK) { return 0; }
+    if ((prob < 0) || (prob > 255)) {
+        store64(d + 48, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var range = load64(d + 32);
+    var value = load64(d + 24);
+    var split = 1 + (((range - 1) * prob) >> 8);
+    var big_split = split << 8;   # "SPLIT = split << 8" — 16-bit scale
+    var ret = 0;
+    if (value >= big_split) {
+        ret = 1;                       # "encoded a one"
+        value = value - big_split;
+        range = range - split;
+    } else {
+        range = split;                 # "encoded a zero"
+    }
+    # Renormalization (7.3). value stays < 2^16: before each shift
+    # range < 128 bounds value < range << 8 < 2^15.
+    var buf = load64(d);
+    var len = load64(d + 8);
+    var pos = load64(d + 16);
+    var bit_count = load64(d + 40);
+    while (range < 128) {
+        value = value << 1;
+        range = range << 1;
+        bit_count = bit_count + 1;
+        if (bit_count == 8) {          # "shift in new byte"
+            bit_count = 0;
+            if (pos < len) {
+                value = value + load8(buf + pos);
+                pos = pos + 1;
+            } else {
+                # Past the end: zero-fill (value's low 8 bits are
+                # already zero after the shifts) + sticky truncation.
+                store64(d + 48, DR_ERR_TRUNCATED);
+            }
+        }
+    }
+    store64(d + 16, pos);
+    store64(d + 24, value);
+    store64(d + 32, range);
+    store64(d + 40, bit_count);
+    return ret;
+}
+
+# Decode an n-bit unsigned literal (0 <= n <= 32), MSB-first, each bit
+# a bool at probability 128 — RFC 6386 7.3 read_literal():
+#   "uint32 read_literal(d, i) { v = 0; while (i--) v = (v << 1) +
+#    bool_decode(d, 128); return v; }"
+# n outside [0,32] latches sticky DR_ERR_BOUNDS. n == 0 is a legal
+# no-op returning 0. Faulted decoders return 0.
+fn vbool_dec_literal(d, n): i64 {
+    if (load64(d + 48) != DR_OK) { return 0; }
+    if ((n < 0) || (n > 32)) {
+        store64(d + 48, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        v = (v << 1) + vbool_dec_bool(d, 128);
+        i = i + 1;
+    }
+    return v;
+}
+
+# Decode a sign-magnitude signed value: an n-bit magnitude literal
+# followed by one sign bool (sign 1 = negative) — the RFC 6386 9.x
+# coding of signed header fields (e.g. 9.6 delta_q: L(4) then sign).
+# Errors as vbool_dec_literal; a faulted decoder returns 0.
+fn vbool_dec_signed(d, n): i64 {
+    var mag = vbool_dec_literal(d, n);
+    var sign = vbool_dec_bool(d, 128);
+    if (load64(d + 48) != DR_OK) { return 0; }
+    if (sign) { return 0 - mag; }
+    return mag;
+}
+
+# ================================================================
+# Encoder — RFC 6386 7.3 bool_encoder
+# ================================================================
+
+# Create a bool encoder with an initial output-capacity hint in bytes
+# (values < 16 round up to 16; the buffer auto-grows by doubling up to
+# VBOOL_ENC_MAX_BYTES). Returns the VboolEnc handle, or 0 on allocation
+# failure / hint above the cap.
+# RFC 7.3 init_bool_encoder(): range = 255, bottom = 0, bit_count = 24.
+fn vbool_enc_init(cap_hint): i64 {
+    var cap = cap_hint;
+    if (cap < 16) { cap = 16; }
+    if (cap > VBOOL_ENC_MAX_BYTES) { return 0; }
+    var buf = alloc(cap);
+    if (buf == 0) { return 0; }
+    var e = alloc(56);
+    if (e == 0) { return 0; }
+    store64(e, buf);
+    store64(e + 8, cap);
+    store64(e + 16, 0);
+    store64(e + 24, 255);   # range
+    store64(e + 32, 0);     # bottom
+    store64(e + 40, 24);    # bit_count — 24 shifts before the 1st byte
+    store64(e + 48, DR_OK);
+    return e;
+}
+
+# Sticky error code (DR_OK if the encoder has never faulted).
+fn vbool_enc_err(e): i64 {
+    return load64(e + 48);
+}
+
+# Bytes emitted so far (call after vbool_enc_flush for the final size).
+fn vbool_enc_bytes(e): i64 {
+    return load64(e + 16);
+}
+
+# Output buffer pointer. OWNED by the encoder; stable only until the
+# next write (growth may reallocate). Snapshot after vbool_enc_flush.
+fn vbool_enc_buf(e): i64 {
+    return load64(e);
+}
+
+# Internal: ensure room for extra more output bytes, doubling the
+# buffer. Sticky DR_ERR_OVERSIZE past VBOOL_ENC_MAX_BYTES, DR_ERR_OOM
+# on failed allocation. Returns DR_OK / error code.
+fn vbool_enc_ensure(e, extra): i64 {
+    var err = load64(e + 48);
+    if (err != DR_OK) { return err; }
+    var need = load64(e + 16) + extra;
+    var cap = load64(e + 8);
+    if (need <= cap) { return DR_OK; }
+    var new_cap = cap;
+    while (new_cap < need) {
+        new_cap = new_cap << 1;
+        if (new_cap > VBOOL_ENC_MAX_BYTES) {
+            store64(e + 48, DR_ERR_OVERSIZE);
+            return DR_ERR_OVERSIZE;
+        }
+    }
+    var new_buf = alloc(new_cap);
+    if (new_buf == 0) {
+        store64(e + 48, DR_ERR_OOM);
+        return DR_ERR_OOM;
+    }
+    memcpy(new_buf, load64(e), load64(e + 16));
+    store64(e, new_buf);
+    store64(e + 8, new_cap);
+    return DR_OK;
+}
+
+# Internal: append one output byte. Returns DR_OK / error code.
+fn vbool_enc_put_byte(e, b): i64 {
+    var rc = vbool_enc_ensure(e, 1);
+    if (rc != DR_OK) { return rc; }
+    var len = load64(e + 16);
+    store8(load64(e) + len, b & 255);
+    store64(e + 16, len + 1);
+    return DR_OK;
+}
+
+# Internal: RFC 6386 7.3 add_one_to_output() — propagate an arithmetic
+# carry into the already-emitted bytes: walk back over 0xFF bytes
+# (zeroing them) and increment the first non-0xFF byte.
+#   "void add_one_to_output(uint8_t *q) { while (*--q == 255) *q = 0;
+#    ++*q; }"
+# The reference walks unchecked before the buffer start; a carry can
+# only reach position -1 if EVERY emitted byte is 0xFF, which the coder
+# never produces (a carry into a 0xFF byte would have rippled at emit
+# time) — but this port bounds-checks anyway and latches DR_ERR_OTHER
+# instead of corrupting memory. Returns DR_OK / error code.
+fn vbool_enc_carry(e): i64 {
+    var err = load64(e + 48);
+    if (err != DR_OK) { return err; }
+    var buf = load64(e);
+    var x = load64(e + 16) - 1;
+    while ((x >= 0) && (load8(buf + x) == 255)) {
+        store8(buf + x, 0);
+        x = x - 1;
+    }
+    if (x < 0) {
+        store64(e + 48, DR_ERR_OTHER);   # can't-happen guard (see above)
+        return DR_ERR_OTHER;
+    }
+    store8(buf + x, load8(buf + x) + 1);
+    return DR_OK;
+}
+
+# Encode one bool with the given 8-bit probability-of-zero (0..255).
+# RFC 6386 7.3 write_bool(), verbatim arithmetic:
+#   split = 1 + (((range - 1) * prob) >> 8)
+#   bool 1: bottom += split; range -= split      bool 0: range = split
+#   then renormalize while range < 128: detect a carry out of bottom's
+#   32-bit window (reference: "if (e->bottom & (1 << 31)) detect carry"
+#   before the shift), shift bottom left, and emit bottom's top byte
+#   every 8 shifts, keeping the low 3 bytes.
+# The reference keeps bottom in a uint32; this port keeps it in an i64
+# and additionally propagates a carry OUT of bit 31 produced by the
+# `bottom += split` add itself (in uint32 arithmetic that add wraps; the
+# wrapped-away bit is exactly one carry into the emitted bytes), then
+# masks back to 32 bits — same stream, no lost carry.
+# prob outside [0,255] latches sticky DR_ERR_BOUNDS; any nonzero
+# bool_value writes a 1. Returns DR_OK / error code.
+fn vbool_enc_bool(e, prob, bool_value): i64 {
+    var err = load64(e + 48);
+    if (err != DR_OK) { return err; }
+    if ((prob < 0) || (prob > 255)) {
+        store64(e + 48, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    var range = load64(e + 24);
+    var bottom = load64(e + 32);
+    var split = 1 + (((range - 1) * prob) >> 8);
+    if (bool_value) {
+        bottom = bottom + split;       # "move up bottom of interval"
+        range = range - split;
+        if (bottom > 0xFFFFFFFF) {     # carry out of the 32-bit window
+            var rc = vbool_enc_carry(e);
+            if (rc != DR_OK) { return rc; }
+            bottom = bottom & 0xFFFFFFFF;
+        }
+    } else {
+        range = split;                 # "decrease range, leaving bottom alone"
+    }
+    var bit_count = load64(e + 40);
+    while (range < 128) {
+        range = range << 1;
+        if (bottom & 0x80000000) {     # "detect carry" (bit 31 set)
+            var rc2 = vbool_enc_carry(e);
+            if (rc2 != DR_OK) { return rc2; }
+        }
+        bottom = (bottom << 1) & 0xFFFFFFFF;   # "before shifting bottom"
+        bit_count = bit_count - 1;
+        if (bit_count == 0) {          # "write out high byte of bottom"
+            var rc3 = vbool_enc_put_byte(e, (bottom >> 24) & 255);
+            if (rc3 != DR_OK) { return rc3; }
+            bottom = bottom & 0xFFFFFF;   # "keeping low 3 bytes"
+            bit_count = 8;                # "8 shifts until next output"
+        }
+    }
+    store64(e + 24, range);
+    store64(e + 32, bottom);
+    store64(e + 40, bit_count);
+    return DR_OK;
+}
+
+# Encode the low n bits of value (0 <= n <= 32) as an MSB-first literal,
+# each bit a bool at probability 128 — the exact inverse of
+# vbool_dec_literal / RFC 7.3 read_literal(). Bits of value above n are
+# ignored (masked by iteration). n outside [0,32] latches sticky
+# DR_ERR_BOUNDS. Returns DR_OK / error code.
+fn vbool_enc_literal(e, value, n): i64 {
+    var err = load64(e + 48);
+    if (err != DR_OK) { return err; }
+    if ((n < 0) || (n > 32)) {
+        store64(e + 48, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    var i = n;
+    while (i > 0) {
+        i = i - 1;
+        var rc = vbool_enc_bool(e, 128, (value >> i) & 1);
+        if (rc != DR_OK) { return rc; }
+    }
+    return DR_OK;
+}
+
+# Encode a sign-magnitude signed value: n-bit magnitude then one sign
+# bool (sign 1 = negative) — inverse of vbool_dec_signed. The magnitude
+# |value| must fit in n bits (|value| < 2^n) or sticky DR_ERR_BOUNDS.
+# Returns DR_OK / error code.
+fn vbool_enc_signed(e, value, n): i64 {
+    var err = load64(e + 48);
+    if (err != DR_OK) { return err; }
+    if ((n < 0) || (n > 32)) {
+        store64(e + 48, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    var mag = value;
+    var sign = 0;
+    if (value < 0) {
+        mag = 0 - value;
+        sign = 1;
+    }
+    if (mag >= (1 << n)) {
+        store64(e + 48, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    var rc = vbool_enc_literal(e, mag, n);
+    if (rc != DR_OK) { return rc; }
+    return vbool_enc_bool(e, 128, sign);
+}
+
+# Terminate the stream — RFC 6386 7.3 flush_bool_encoder(), verbatim:
+# propagate a final carry if bit (32 - bit_count) of bottom is set,
+# left-align the remaining payload bits, and emit 4 more bytes (the
+# stream is zero-padded; a flushed stream is therefore always >= 4
+# bytes). Returns the total output length in BYTES, or 0 if the encoder
+# faulted. Call ONCE; the encoder must not be written to afterwards.
+fn vbool_enc_flush(e): i64 {
+    if (load64(e + 48) != DR_OK) { return 0; }
+    var c = load64(e + 40);
+    var v = load64(e + 32);
+    if (v & (1 << (32 - c))) {        # "propagate (unlikely) carry"
+        var rc = vbool_enc_carry(e);
+        if (rc != DR_OK) { return 0; }
+    }
+    v = (v << (c & 7)) & 0xFFFFFFFF;  # "before shifting remaining output"
+    c = c >> 3;                       # "to top of internal buffer"
+    while (c > 0) {
+        c = c - 1;
+        v = (v << 8) & 0xFFFFFFFF;
+    }
+    var i = 0;
+    while (i < 4) {                   # "write remaining data, possibly padded"
+        var rc2 = vbool_enc_put_byte(e, (v >> 24) & 255);
+        if (rc2 != DR_OK) { return 0; }
+        v = (v << 8) & 0xFFFFFFFF;
+        i = i + 1;
+    }
+    return load64(e + 16);
+}

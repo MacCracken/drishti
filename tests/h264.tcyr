@@ -1,0 +1,1192 @@
+# tests/h264.tcyr — H.264/AVC family suite: Annex-B start-code scan
+# (3-/4-byte mixes, zero_byte attribution, resync, trailing-zero strip),
+# NAL header vectors (Table 7-1, forbidden_zero_bit), EPB strip <->
+# insert round-trips across every 00 00 0x boundary case, hand-built
+# Baseline QCIF SPS (every field commented, cross-checked byte-for-byte
+# against the core dr_bw/dr_ue exp-Golomb writer), cropping / High-
+# profile / interlaced SPS cases, PPS CAVLC/CABAC vectors, and
+# adversarial truncation / lying-value rejections.
+#
+# Spec: ITU-T Rec. H.264 — 7.3.1/7.4.1 (NAL), Annex B (byte stream),
+# 7.3.2.1.1/7.4.2.1.1 (SPS), 7.3.2.2/7.4.2.2 (PPS), 9.1/9.1.1
+# (exp-Golomb). Cross-checks: RFC 6184 §1.3, openh264 au_parser.cpp,
+# x264 sps init serialization, ffmpeg h2645_parse.c.
+#
+# Suites explicitly include the lib root + not-yet-wired family modules:
+# `cyrius test` auto-includes stdlib only, never [lib] modules (verified
+# at pin 6.4.43). Once main.cyr wires h264_*, these become no-ops
+# (cyrius dedupes includes by path).
+include "src/main.cyr"
+include "src/h264_nal.cyr"
+include "src/h264_ps.cyr"
+
+# ================================================================
+# Fixtures
+# ================================================================
+
+# Byte-buffer equality: 1 if a[0..n) == b[0..n).
+fn fx_h264_bytes_eq(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Hand-built Baseline SPS RBSP for QCIF 176x144 — every field derived
+# by hand from spec 7.3.2.1.1 and packed MSB-first (9.1 exp-Golomb):
+#
+#   byte 0: 0x42  profile_idc = 66 (Baseline)
+#   byte 1: 0xC0  constraint_set0_flag=1, constraint_set1_flag=1,
+#                 constraint_set2..5_flag=0, reserved_zero_2bits=00
+#                 (bits MSB->LSB: 1 1 0 0 0 0 0 0)
+#   byte 2: 0x0B  level_idc = 11 (Level 1.1 — QCIF@30 fits)
+#   bytes 3-6, bit-packed (26 payload bits + stop bit + 5 pad bits):
+#     1        seq_parameter_set_id            ue(0)
+#     1        log2_max_frame_num_minus4       ue(0)  -> MaxFrameNum 16
+#     1        pic_order_cnt_type              ue(0)
+#     1        log2_max_pic_order_cnt_lsb_minus4 ue(0) -> MaxPocLsb 16
+#     010      max_num_ref_frames              ue(1)
+#     0        gaps_in_frame_num_value_allowed_flag
+#     0001011  pic_width_in_mbs_minus1         ue(10) -> 11 MBs = 176 px
+#     0001001  pic_height_in_map_units_minus1  ue(8)  ->  9 MBs = 144 px
+#     1        frame_mbs_only_flag = 1
+#     1        direct_8x8_inference_flag = 1
+#     0        frame_cropping_flag = 0
+#     0        vui_parameters_present_flag = 0
+#     1        rbsp_stop_one_bit (7.3.2.11 rbsp_trailing_bits)
+#     00000    rbsp_alignment_zero_bit x5
+#   packed: 1111'0100 0001'0110 0010'0111 0010'0000
+#         =   0xF4      0x16      0x27      0x20
+fn fx_h264_sps_qcif(out_len): i64 {
+    var b = alloc(7);
+    store8(b, 0x42);       # profile_idc 66
+    store8(b + 1, 0xC0);   # constraint flags: set0+set1
+    store8(b + 2, 0x0B);   # level_idc 11
+    store8(b + 3, 0xF4);   # see bit map above
+    store8(b + 4, 0x16);
+    store8(b + 5, 0x27);
+    store8(b + 6, 0x20);
+    store64(out_len, 7);
+    return b;
+}
+
+# Hand-built CABAC PPS RBSP — spec 7.3.2.2 field order, MSB-first:
+#     1    pic_parameter_set_id                 ue(0)
+#     1    seq_parameter_set_id                 ue(0)
+#     1    entropy_coding_mode_flag = 1 (CABAC)
+#     0    bottom_field_pic_order_in_frame_present_flag = 0
+#     1    num_slice_groups_minus1              ue(0)
+#     1    num_ref_idx_l0_default_active_minus1 ue(0)
+#     1    num_ref_idx_l1_default_active_minus1 ue(0)
+#     0    weighted_pred_flag = 0
+#     00   weighted_bipred_idc u(2) = 0
+#     1    pic_init_qp_minus26                  se(0)
+#     1    pic_init_qs_minus26                  se(0)
+#     1    chroma_qp_index_offset               se(0)
+#     1    deblocking_filter_control_present_flag = 1
+#     0    constrained_intra_pred_flag = 0
+#     0    redundant_pic_cnt_present_flag = 0
+#     1    rbsp_stop_one_bit + 7 pad zeros
+#   packed: 1110'1110 0011'1100 1000'0000 = 0xEE 0x3C 0x80
+fn fx_h264_pps_cabac(out_len): i64 {
+    var b = alloc(3);
+    store8(b, 0xEE);
+    store8(b + 1, 0x3C);
+    store8(b + 2, 0x80);
+    store64(out_len, 3);
+    return b;
+}
+
+# Bitwriter head shared by writer-built SPS vectors: profile_idc,
+# constraint byte 0x00, level_idc 30 — the three fixed u(8) fields.
+fn fx_h264_bw_sps_head(profile): i64 {
+    var bw = dr_bw_init(64);
+    dr_bw_put_bits(bw, profile, 8);   # profile_idc
+    dr_bw_put_bits(bw, 0, 8);         # constraint flags + reserved: all 0
+    dr_bw_put_bits(bw, 30, 8);        # level_idc 30
+    return bw;
+}
+
+# Finish a writer-built RBSP: rbsp_stop_one_bit + zero-pad (7.3.2.11),
+# returns the buffer with byte length at *out_len.
+fn fx_h264_bw_take(bw, out_len): i64 {
+    dr_bw_put_bit(bw, 1);   # rbsp_stop_one_bit
+    var n = dr_bw_flush(bw);
+    store64(out_len, n);
+    return dr_bw_buf(bw);
+}
+
+# ================================================================
+# Start-code search — Annex B B.1.1/B.1.2
+# ================================================================
+fn test_h264_find_start_code() {
+    var sc_len = 0;
+    # 3-byte start code at offset 0.
+    var b = alloc(4);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 1); store8(b + 3, 0x41);
+    assert_eq(h264_find_start_code(b, 4, 0, &sc_len), 0, "3-byte sc at 0");
+    assert_eq(sc_len, 3, "3-byte sc length");
+    # 4-byte start code (zero_byte + prefix) at offset 0.
+    b = alloc(5);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 1);
+    store8(b + 4, 0x41);
+    assert_eq(h264_find_start_code(b, 5, 0, &sc_len), 0, "4-byte sc at 0");
+    assert_eq(sc_len, 4, "4-byte sc length");
+    # Extra leading zero: only ONE zero_byte is attributed; the rest is
+    # leading_zero_8bits (ffmpeg h2645_parse attribution rule).
+    b = alloc(6);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 0);
+    store8(b + 4, 1); store8(b + 5, 0x41);
+    assert_eq(h264_find_start_code(b, 6, 0, &sc_len), 1, "00 00 00 00 01: sc at 1");
+    assert_eq(sc_len, 4, "one zero_byte attributed");
+    # Start code mid-buffer; preceding byte nonzero -> 3-byte form.
+    b = alloc(4);
+    store8(b, 0x41); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 1);
+    assert_eq(h264_find_start_code(b, 4, 0, &sc_len), 1, "sc after payload byte");
+    assert_eq(sc_len, 3, "no zero_byte after nonzero");
+    # 00 00 02 is NOT a start code; the real one follows it.
+    b = alloc(6);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 2);
+    store8(b + 3, 0); store8(b + 4, 0); store8(b + 5, 1);
+    assert_eq(h264_find_start_code(b, 6, 0, &sc_len), 3, "00 00 02 skipped");
+    assert_eq(sc_len, 3, "found the following 3-byte sc");
+    # No start code at all.
+    b = alloc(4);
+    store8(b, 0x41); store8(b + 1, 0x42); store8(b + 2, 0x43); store8(b + 3, 0x44);
+    assert_eq(h264_find_start_code(b, 4, 0, &sc_len), H264_NAL_END, "no sc -> END");
+    # `from` past the only start code.
+    b = alloc(4);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 1); store8(b + 3, 0x41);
+    assert_eq(h264_find_start_code(b, 4, 1, &sc_len), H264_NAL_END,
+    "from past sc -> END");
+    return 0;
+}
+
+# ================================================================
+# Annex-B scan — mixed 3-/4-byte stream, four NAL units
+# ================================================================
+fn test_h264_scan_mixed() {
+    # Stream layout (27 bytes):
+    #   0-3   00 00 00 01   4-byte start code
+    #   4-5   67 42         SPS NAL (hdr 0x67 = ref_idc 3, type 7)
+    #   6-8   00 00 01      3-byte start code
+    #   9-12  68 EE 3C 80   PPS NAL (hdr 0x68 = ref_idc 3, type 8)
+    #   13-16 00 00 00 01   4-byte start code
+    #   17-18 65 88         IDR NAL (hdr 0x65 = ref_idc 3, type 5)
+    #   19-21 00 00 01      3-byte start code
+    #   22-24 41 9A 12      non-IDR NAL (hdr 0x41 = ref_idc 2, type 1)
+    #   25-26 00 00         trailing_zero_8bits (stripped per B.1.2)
+    var b = alloc(27);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 1);
+    store8(b + 4, 0x67); store8(b + 5, 0x42);
+    store8(b + 6, 0); store8(b + 7, 0); store8(b + 8, 1);
+    store8(b + 9, 0x68); store8(b + 10, 0xEE); store8(b + 11, 0x3C); store8(b + 12, 0x80);
+    store8(b + 13, 0); store8(b + 14, 0); store8(b + 15, 0); store8(b + 16, 1);
+    store8(b + 17, 0x65); store8(b + 18, 0x88);
+    store8(b + 19, 0); store8(b + 20, 0); store8(b + 21, 1);
+    store8(b + 22, 0x41); store8(b + 23, 0x9A); store8(b + 24, 0x12);
+    store8(b + 25, 0); store8(b + 26, 0);
+
+    var s = h264_scan_init(b, 27);
+    assert(s != 0, "scanner inits");
+    var nal = 0; var sz = 0;
+    var ref = 0; var typ = 0;
+    # NAL 1: SPS behind the 4-byte start code.
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "nal 1 yields");
+    assert_eq(nal, b + 4, "nal 1 starts after 4-byte sc (zero-copy)");
+    assert_eq(sz, 2, "nal 1 size");
+    assert_eq(h264_nal_hdr_parse(nal, sz, &ref, &typ), DR_OK, "nal 1 hdr");
+    assert_eq(ref, 3, "nal 1 ref_idc");
+    assert_eq(typ, H264_NAL_SPS, "nal 1 type SPS");
+    # NAL 2: PPS behind a 3-byte start code.
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "nal 2 yields");
+    assert_eq(nal, b + 9, "nal 2 offset");
+    assert_eq(sz, 4, "nal 2 size (ends at next sc's zero_byte)");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(typ, H264_NAL_PPS, "nal 2 type PPS");
+    # NAL 3: IDR.
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "nal 3 yields");
+    assert_eq(nal, b + 17, "nal 3 offset");
+    assert_eq(sz, 2, "nal 3 size");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(ref, 3, "nal 3 ref_idc");
+    assert_eq(typ, H264_NAL_IDR, "nal 3 type IDR");
+    # NAL 4: non-IDR slice; trailing zeros stripped.
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "nal 4 yields");
+    assert_eq(nal, b + 22, "nal 4 offset");
+    assert_eq(sz, 3, "nal 4 size (trailing_zero_8bits stripped)");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(ref, 2, "nal 4 ref_idc");
+    assert_eq(typ, H264_NAL_SLICE, "nal 4 type non-IDR slice");
+    # Clean end, repeatable.
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "clean end");
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "end repeats");
+    assert_eq(h264_scan_err(s), DR_OK, "clean end is not an error");
+    assert_eq(h264_scan_count(s), 4, "4 nals counted");
+    return 0;
+}
+
+# ================================================================
+# Annex-B scan — edges: resync, zero-length NAL, garbage, empty
+# ================================================================
+fn test_h264_scan_edges() {
+    var nal = 0; var sz = 0;
+    var ref = 0; var typ = 0;
+    # Leading garbage before the first start code: resync past it
+    # (B.1.2 leading_zero_8bits, extended to nonzero garbage like the
+    # reference decoders).
+    var b = alloc(6);
+    store8(b, 0xAB);
+    store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 1);
+    store8(b + 4, 0x06); store8(b + 5, 0x05);
+    var s = h264_scan_init(b, 6);
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "resync past garbage");
+    assert_eq(nal, b + 4, "nal after garbage sc");
+    assert_eq(sz, 2, "nal size");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(ref, 0, "SEI ref_idc 0");
+    assert_eq(typ, H264_NAL_SEI, "SEI type");
+    # Zero-length NAL between adjacent start codes is yielded (size 0);
+    # rejecting it is the header parser's job.
+    b = alloc(7);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 1);
+    store8(b + 3, 0); store8(b + 4, 0); store8(b + 5, 1);
+    store8(b + 6, 0x4A);
+    s = h264_scan_init(b, 7);
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "zero-length nal yields");
+    assert_eq(sz, 0, "size 0");
+    assert_eq(h264_nal_hdr_parse(nal, sz, &ref, &typ), DR_ERR_TRUNCATED,
+    "size-0 nal -> header truncated");
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "second nal yields");
+    assert_eq(sz, 1, "second nal size 1");
+    assert_eq(load8(nal), 0x4A, "second nal byte");
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "then end");
+    # Bare start code at end of buffer: one zero-length NAL.
+    b = alloc(3);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 1);
+    s = h264_scan_init(b, 3);
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "bare sc yields");
+    assert_eq(sz, 0, "bare sc nal size 0");
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "bare sc then end");
+    # Non-empty buffer with no start code: not an Annex-B stream.
+    b = alloc(2);
+    store8(b, 0xAA); store8(b + 1, 0xBB);
+    s = h264_scan_init(b, 2);
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_ERR_NO_START_CODE,
+    "no sc -> error");
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_ERR_NO_START_CODE,
+    "error is sticky");
+    assert_eq(h264_scan_err(s), H264_ERR_NO_START_CODE, "sticky code readable");
+    # All-zero buffer: still no start code (00 00 01 never appears).
+    b = alloc(4);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 0);
+    s = h264_scan_init(b, 4);
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_ERR_NO_START_CODE,
+    "all zeros -> no start code");
+    # Empty buffer: clean end, not an error.
+    s = h264_scan_init(b, 0);
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "empty -> clean end");
+    assert_eq(h264_scan_err(s), DR_OK, "empty is not an error");
+    # Negative length refuses to construct.
+    assert_eq(h264_scan_init(b, -1), 0, "negative len -> no scanner");
+    return 0;
+}
+
+# ================================================================
+# NAL unit header — spec 7.3.1 / 7.4.1 / Table 7-1
+# ================================================================
+fn test_h264_nal_hdr() {
+    var b = alloc(1);
+    var ref = 0; var typ = 0;
+    # 0x67 = 0110 0111: forbidden 0, ref_idc 3, type 7 (SPS).
+    store8(b, 0x67);
+    assert_eq(h264_nal_hdr_parse(b, 1, &ref, &typ), DR_OK, "0x67 parses");
+    assert_eq(ref, 3, "0x67 ref_idc");
+    assert_eq(typ, H264_NAL_SPS, "0x67 = SPS");
+    # 0x68 = ref_idc 3, type 8 (PPS).
+    store8(b, 0x68);
+    h264_nal_hdr_parse(b, 1, &ref, &typ);
+    assert_eq(ref, 3, "0x68 ref_idc");
+    assert_eq(typ, H264_NAL_PPS, "0x68 = PPS");
+    # 0x65 = ref_idc 3, type 5 (IDR).
+    store8(b, 0x65);
+    h264_nal_hdr_parse(b, 1, &ref, &typ);
+    assert_eq(typ, H264_NAL_IDR, "0x65 = IDR");
+    # 0x41 = 0100 0001: ref_idc 2, type 1 (non-IDR slice).
+    store8(b, 0x41);
+    h264_nal_hdr_parse(b, 1, &ref, &typ);
+    assert_eq(ref, 2, "0x41 ref_idc");
+    assert_eq(typ, H264_NAL_SLICE, "0x41 = non-IDR slice");
+    # 0x06 = ref_idc 0, type 6 (SEI).
+    store8(b, 0x06);
+    h264_nal_hdr_parse(b, 1, &ref, &typ);
+    assert_eq(ref, 0, "0x06 ref_idc");
+    assert_eq(typ, H264_NAL_SEI, "0x06 = SEI");
+    # 0x09 = ref_idc 0, type 9 (AUD).
+    store8(b, 0x09);
+    h264_nal_hdr_parse(b, 1, &ref, &typ);
+    assert_eq(typ, H264_NAL_AUD, "0x09 = AUD");
+    # forbidden_zero_bit set (7.4.1: shall be 0): 0xE7 = 0x80 | 0x67.
+    store8(b, 0xE7);
+    assert_eq(h264_nal_hdr_parse(b, 1, &ref, &typ), DR_ERR_FORBIDDEN_BIT,
+    "forbidden bit -> error");
+    # Empty NAL.
+    assert_eq(h264_nal_hdr_parse(b, 0, &ref, &typ), DR_ERR_TRUNCATED,
+    "len 0 -> truncated");
+    # Type names never null.
+    assert(h264_nal_type_name(H264_NAL_SPS) != 0, "SPS name non-null");
+    assert(h264_nal_type_name(17) != 0, "reserved type name non-null");
+    return 0;
+}
+
+# ================================================================
+# EPB strip (decode direction) — spec 7.3.1 / 7.4.1.1
+# ================================================================
+fn test_h264_epb_strip() {
+    var out = 0; var olen = 0;
+    var b = alloc(8);
+    # 00 00 03 00 -> 00 00 00 (the four prohibited-pattern escapes).
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 3); store8(b + 3, 0);
+    assert_eq(h264_rbsp_extract(b, 4, &out, &olen), DR_OK, "strip 000003 00 ok");
+    assert_eq(olen, 3, "1 byte removed");
+    assert_eq(load8(out), 0, "byte 0");
+    assert_eq(load8(out + 1), 0, "byte 1");
+    assert_eq(load8(out + 2), 0, "byte 2 (escaped 00)");
+    # 00 00 03 01 -> 00 00 01.
+    store8(b + 3, 1);
+    h264_rbsp_extract(b, 4, &out, &olen);
+    assert_eq(olen, 3, "strip 000003 01 len");
+    assert_eq(load8(out + 2), 1, "escaped 01");
+    # 00 00 03 02 -> 00 00 02.
+    store8(b + 3, 2);
+    h264_rbsp_extract(b, 4, &out, &olen);
+    assert_eq(olen, 3, "strip 000003 02 len");
+    assert_eq(load8(out + 2), 2, "escaped 02");
+    # 00 00 03 03 -> 00 00 03 (escaped EPB itself).
+    store8(b + 3, 3);
+    h264_rbsp_extract(b, 4, &out, &olen);
+    assert_eq(olen, 3, "strip 000003 03 len");
+    assert_eq(load8(out + 2), 3, "escaped 03");
+    # 00 00 02: no EPB, copied through (lenient reference-decoder rule).
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 2);
+    h264_rbsp_extract(b, 3, &out, &olen);
+    assert_eq(olen, 3, "00 00 02 untouched");
+    assert_eq(load8(out + 2), 2, "02 kept");
+    # 00 03 00: only one zero before the 03 — not an EPB.
+    store8(b, 0); store8(b + 1, 3); store8(b + 2, 0);
+    h264_rbsp_extract(b, 3, &out, &olen);
+    assert_eq(olen, 3, "single-zero 03 kept");
+    assert_eq(load8(out + 1), 3, "03 kept");
+    # 03 alone: kept.
+    store8(b, 3);
+    h264_rbsp_extract(b, 1, &out, &olen);
+    assert_eq(olen, 1, "lone 03 kept");
+    # 00 00 00 03: zeros keep counting through a third 00, so the 03
+    # after 3 zeros is still dropped (zeros >= 2).
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 3);
+    h264_rbsp_extract(b, 4, &out, &olen);
+    assert_eq(olen, 3, "03 after 3 zeros dropped");
+    # Empty input.
+    assert_eq(h264_rbsp_extract(b, 0, &out, &olen), DR_OK, "empty ok");
+    assert_eq(olen, 0, "empty stays empty");
+    # Negative length.
+    assert_eq(h264_rbsp_extract(b, -1, &out, &olen), DR_ERR_BOUNDS,
+    "negative len -> bounds");
+    return 0;
+}
+
+# ================================================================
+# EPB insert (encode direction) + strip<->insert round-trip
+# ================================================================
+fn test_h264_epb_insert() {
+    var out = 0; var olen = 0;
+    var b = alloc(16);
+    # 00 00 00 -> 00 00 03 00.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0);
+    assert_eq(h264_epb_insert(b, 3, &out, &olen), DR_OK, "insert on 000000");
+    assert_eq(olen, 4, "000000 grows to 4");
+    assert_eq(load8(out + 2), 3, "EPB at index 2");
+    assert_eq(load8(out + 3), 0, "escaped byte follows");
+    # 00 00 01 -> 00 00 03 01.
+    store8(b + 2, 1);
+    h264_epb_insert(b, 3, &out, &olen);
+    assert_eq(olen, 4, "000001 grows");
+    assert_eq(load8(out + 2), 3, "EPB before 01");
+    assert_eq(load8(out + 3), 1, "01 preserved");
+    # 00 00 02 -> 00 00 03 02.
+    store8(b + 2, 2);
+    h264_epb_insert(b, 3, &out, &olen);
+    assert_eq(olen, 4, "000002 grows");
+    assert_eq(load8(out + 3), 2, "02 preserved");
+    # 00 00 03 -> 00 00 03 03.
+    store8(b + 2, 3);
+    h264_epb_insert(b, 3, &out, &olen);
+    assert_eq(olen, 4, "000003 grows");
+    assert_eq(load8(out + 2), 3, "inserted EPB");
+    assert_eq(load8(out + 3), 3, "original 03 after it");
+    # 00 00 04: above the escape threshold — unchanged.
+    store8(b + 2, 4);
+    h264_epb_insert(b, 3, &out, &olen);
+    assert_eq(olen, 3, "000004 unchanged");
+    assert_eq(load8(out + 2), 4, "04 kept in place");
+    # Trailing 00 00 with nothing after: left alone (a conforming RBSP
+    # never ends in 0x00 — rbsp_stop_one_bit makes the last byte nonzero).
+    store8(b, 0x7F); store8(b + 1, 0); store8(b + 2, 0);
+    h264_epb_insert(b, 3, &out, &olen);
+    assert_eq(olen, 3, "trailing 00 00 not escaped");
+    # Zero run: 00 00 00 00 00 -> 00 00 03 00 00 03 00.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 0);
+    store8(b + 4, 0);
+    h264_epb_insert(b, 5, &out, &olen);
+    assert_eq(olen, 7, "5-zero run gets 2 EPBs");
+    assert_eq(load8(out + 2), 3, "EPB 1");
+    assert_eq(load8(out + 5), 3, "EPB 2");
+    # Empty input.
+    assert_eq(h264_epb_insert(b, 0, &out, &olen), DR_OK, "empty insert ok");
+    assert_eq(olen, 0, "empty stays empty");
+    # Negative length.
+    assert_eq(h264_epb_insert(b, -1, &out, &olen), DR_ERR_BOUNDS,
+    "negative len -> bounds");
+
+    # Round-trip: extract(insert(x)) == x on a vector hitting every
+    # boundary pattern plus a long zero run.
+    var v = alloc(16);
+    store8(v, 0);  store8(v + 1, 0);  store8(v + 2, 0);  store8(v + 3, 0);
+    store8(v + 4, 1);                                    # ..00 00 00 00 01..
+    store8(v + 5, 0);  store8(v + 6, 0);  store8(v + 7, 2);   # 00 00 02
+    store8(v + 8, 0);  store8(v + 9, 0);  store8(v + 10, 3);  # 00 00 03
+    store8(v + 11, 0x7F);
+    store8(v + 12, 0); store8(v + 13, 0); store8(v + 14, 0);  # 00 00 00
+    store8(v + 15, 0x42);
+    var enc = 0; var elen = 0;
+    assert_eq(h264_epb_insert(v, 16, &enc, &elen), DR_OK, "rt insert");
+    assert(elen > 16, "rt insert grew");
+    # The encapsulated form must contain none of the prohibited
+    # three-byte patterns (7.4.1.1): no 00 00 followed by 00/01/02.
+    var i = 0;
+    var bad = 0;
+    while ((i + 2) < elen) {
+        if ((load8(enc + i) == 0) && (load8(enc + i + 1) == 0)
+        && (load8(enc + i + 2) <= 2)) { bad = 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "no prohibited pattern survives insert");
+    var dec = 0; var dlen = 0;
+    assert_eq(h264_rbsp_extract(enc, elen, &dec, &dlen), DR_OK, "rt extract");
+    assert_eq(dlen, 16, "rt length restored");
+    assert(fx_h264_bytes_eq(dec, v, 16), "rt bytes identical");
+    return 0;
+}
+
+# ================================================================
+# Annex-B composer (encode seed) — wrap + rescan round-trip
+# ================================================================
+fn test_h264_annexb_wrap() {
+    var out = 0; var olen = 0;
+    # Wrap the QCIF SPS with a 4-byte start code.
+    var slen = 0;
+    var sps = fx_h264_sps_qcif(&slen);
+    assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps, slen, 1, &out, &olen),
+    DR_OK, "sps wraps");
+    assert_eq(olen, 4 + 1 + 7, "4-byte sc + hdr + 7 payload (no EPB needed)");
+    assert_eq(load8(out), 0, "sc byte 0");
+    assert_eq(load8(out + 1), 0, "sc byte 1");
+    assert_eq(load8(out + 2), 0, "sc byte 2 (zero_byte)");
+    assert_eq(load8(out + 3), 1, "sc byte 3");
+    assert_eq(load8(out + 4), 0x67, "hdr = ref_idc 3, type 7");
+    assert(fx_h264_bytes_eq(out + 5, sps, 7), "payload verbatim");
+    # Short start code form.
+    assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps, slen, 0, &out, &olen),
+    DR_OK, "short-sc wrap");
+    assert_eq(olen, 3 + 1 + 7, "3-byte sc + hdr + payload");
+    assert_eq(load8(out + 2), 1, "3-byte sc");
+    assert_eq(load8(out + 3), 0x67, "hdr after 3-byte sc");
+    # Payload containing a raw start-code pattern must be escaped and
+    # the wrapped NAL must scan back as ONE unit.
+    var raw = alloc(5);
+    store8(raw, 0xAA);
+    store8(raw + 1, 0); store8(raw + 2, 0); store8(raw + 3, 1);   # 00 00 01 inside
+    store8(raw + 4, 0xBB);
+    assert_eq(h264_annexb_wrap(2, H264_NAL_SLICE, raw, 5, 1, &out, &olen),
+    DR_OK, "hostile payload wraps");
+    assert_eq(olen, 4 + 1 + 6, "one EPB inserted");
+    var s = h264_scan_init(out, olen);
+    var nal = 0; var nsz = 0;
+    assert_eq(h264_scan_next(s, &nal, &nsz), DR_OK, "wrapped stream scans");
+    assert_eq(nsz, olen - 4, "whole nal yielded (not split by escaped sc)");
+    assert_eq(h264_scan_next(s, &nal, &nsz), H264_NAL_END, "exactly one nal");
+    # Unwrap: header + EPB strip returns the original payload.
+    var ref = 0; var typ = 0;
+    nal = out + 4;
+    assert_eq(h264_nal_hdr_parse(nal, olen - 4, &ref, &typ), DR_OK, "hdr ok");
+    assert_eq(ref, 2, "ref_idc round-trips");
+    assert_eq(typ, H264_NAL_SLICE, "type round-trips");
+    var dec = 0; var dlen = 0;
+    assert_eq(h264_rbsp_extract(nal + 1, olen - 5, &dec, &dlen), DR_OK,
+    "payload extracts");
+    assert_eq(dlen, 5, "payload length restored");
+    assert(fx_h264_bytes_eq(dec, raw, 5), "payload bytes restored");
+    # 7.4.1 header validation on the encode side.
+    assert_eq(h264_annexb_wrap(0, H264_NAL_SPS, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "ref_idc 0 SPS rejected");
+    assert_eq(h264_annexb_wrap(0, H264_NAL_IDR, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "ref_idc 0 IDR rejected");
+    assert_eq(h264_annexb_wrap(3, H264_NAL_SEI, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "ref_idc 3 SEI rejected");
+    assert_eq(h264_annexb_wrap(1, H264_NAL_AUD, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "ref_idc 1 AUD rejected");
+    assert_eq(h264_annexb_wrap(3, 0, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "type 0 rejected");
+    assert_eq(h264_annexb_wrap(3, 32, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "type 32 rejected");
+    assert_eq(h264_annexb_wrap(4, H264_NAL_SPS, sps, slen, 1, &out, &olen),
+    DR_ERR_BAD_HEADER, "ref_idc 4 rejected");
+    assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps, -1, 1, &out, &olen),
+    DR_ERR_BOUNDS, "negative payload len rejected");
+    return 0;
+}
+
+# ================================================================
+# SPS — hand-built Baseline QCIF vector, every field asserted
+# ================================================================
+fn test_h264_sps_qcif() {
+    var slen = 0;
+    var rbsp = fx_h264_sps_qcif(&slen);
+    var e = 0;
+    var sps = h264_sps_parse(rbsp, slen, &e);
+    assert(sps != 0, "qcif sps parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h264_sps_profile_idc(sps), 66, "profile Baseline");
+    assert_eq(h264_sps_constraint_flags(sps), 3, "constraint set0+set1");
+    assert_eq(h264_sps_level_idc(sps), 11, "level 1.1");
+    assert_eq(h264_sps_id(sps), 0, "sps_id 0");
+    assert_eq(h264_sps_chroma_format_idc(sps), 1, "chroma inferred 4:2:0");
+    assert_eq(h264_sps_separate_colour_plane(sps), 0, "no separate planes");
+    assert_eq(h264_sps_bit_depth_luma_minus8(sps), 0, "8-bit luma");
+    assert_eq(h264_sps_bit_depth_chroma_minus8(sps), 0, "8-bit chroma");
+    assert_eq(h264_sps_qpprime_flag(sps), 0, "no transform bypass");
+    assert_eq(h264_sps_scaling_matrix_flag(sps), 0, "no scaling matrix");
+    assert_eq(h264_sps_log2_max_frame_num_minus4(sps), 0, "log2_mfn_m4 0");
+    assert_eq(h264_sps_pic_order_cnt_type(sps), 0, "poc type 0");
+    assert_eq(h264_sps_log2_max_poc_lsb_minus4(sps), 0, "poc lsb 0");
+    assert_eq(h264_sps_max_num_ref_frames(sps), 1, "1 ref frame");
+    assert_eq(h264_sps_gaps_flag(sps), 0, "no gaps");
+    assert_eq(h264_sps_pic_width_in_mbs_minus1(sps), 10, "11 MBs wide");
+    assert_eq(h264_sps_pic_height_in_map_units_minus1(sps), 8, "9 MBs tall");
+    assert_eq(h264_sps_frame_mbs_only(sps), 1, "frame mbs only");
+    assert_eq(h264_sps_mbaff(sps), 0, "no mbaff");
+    assert_eq(h264_sps_direct_8x8(sps), 1, "direct 8x8 inference");
+    assert_eq(h264_sps_cropping_flag(sps), 0, "no cropping");
+    assert_eq(h264_sps_crop_left(sps), 0, "crop left 0");
+    assert_eq(h264_sps_crop_right(sps), 0, "crop right 0");
+    assert_eq(h264_sps_crop_top(sps), 0, "crop top 0");
+    assert_eq(h264_sps_crop_bottom(sps), 0, "crop bottom 0");
+    assert_eq(h264_sps_vui_flag(sps), 0, "no vui");
+    assert_eq(h264_sps_width(sps), 176, "computed width 176");
+    assert_eq(h264_sps_height(sps), 144, "computed height 144");
+    return 0;
+}
+
+# ================================================================
+# SPS — core exp-Golomb writer reproduces the hand vector bit-exact
+# (independent encodings cross-check each other; 9.1 both ways)
+# ================================================================
+fn test_h264_sps_writer_crosscheck() {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 66, 8);     # profile_idc 66
+    dr_bw_put_bits(bw, 0xC0, 8);   # constraint_set0+1, reserved 00
+    dr_bw_put_bits(bw, 11, 8);     # level_idc 11
+    dr_ue_write(bw, 0);            # seq_parameter_set_id
+    dr_ue_write(bw, 0);            # log2_max_frame_num_minus4
+    dr_ue_write(bw, 0);            # pic_order_cnt_type
+    dr_ue_write(bw, 0);            # log2_max_pic_order_cnt_lsb_minus4
+    dr_ue_write(bw, 1);            # max_num_ref_frames
+    dr_bw_put_bit(bw, 0);          # gaps_in_frame_num_value_allowed_flag
+    dr_ue_write(bw, 10);           # pic_width_in_mbs_minus1
+    dr_ue_write(bw, 8);            # pic_height_in_map_units_minus1
+    dr_bw_put_bit(bw, 1);          # frame_mbs_only_flag
+    dr_bw_put_bit(bw, 1);          # direct_8x8_inference_flag
+    dr_bw_put_bit(bw, 0);          # frame_cropping_flag
+    dr_bw_put_bit(bw, 0);          # vui_parameters_present_flag
+    dr_bw_put_bit(bw, 1);          # rbsp_stop_one_bit
+    var n = dr_bw_flush(bw);
+    assert_eq(dr_bw_err(bw), DR_OK, "writer clean");
+    assert_eq(n, 7, "writer emits 7 bytes");
+    var hlen = 0;
+    var hand = fx_h264_sps_qcif(&hlen);
+    assert(fx_h264_bytes_eq(dr_bw_buf(bw), hand, 7),
+    "writer output == hand vector, byte for byte");
+    # And the writer-built bytes parse to the same geometry.
+    var e = 0;
+    var sps = h264_sps_parse(dr_bw_buf(bw), n, &e);
+    assert(sps != 0, "writer-built sps parses");
+    assert_eq(h264_sps_width(sps), 176, "writer-built width");
+    assert_eq(h264_sps_height(sps), 144, "writer-built height");
+    return 0;
+}
+
+# ================================================================
+# SPS — frame cropping (1080p: 1088-line coded frame cropped to 1080)
+# ================================================================
+fn test_h264_sps_cropping() {
+    var bw = fx_h264_bw_sps_head(66);   # profile 66, cflags 0, level 30
+    dr_ue_write(bw, 1);      # seq_parameter_set_id = 1
+    dr_ue_write(bw, 0);      # log2_max_frame_num_minus4
+    dr_ue_write(bw, 2);      # pic_order_cnt_type = 2 (no poc-lsb field)
+    dr_ue_write(bw, 2);      # max_num_ref_frames = 2
+    dr_bw_put_bit(bw, 0);    # gaps flag
+    dr_ue_write(bw, 119);    # pic_width_in_mbs_minus1: 120 MBs = 1920 px
+    dr_ue_write(bw, 67);     # pic_height_in_map_units_minus1: 68 MBs = 1088 px
+    dr_bw_put_bit(bw, 1);    # frame_mbs_only_flag
+    dr_bw_put_bit(bw, 1);    # direct_8x8_inference_flag
+    dr_bw_put_bit(bw, 1);    # frame_cropping_flag = 1
+    dr_ue_write(bw, 0);      # frame_crop_left_offset
+    dr_ue_write(bw, 0);      # frame_crop_right_offset
+    dr_ue_write(bw, 0);      # frame_crop_top_offset
+    dr_ue_write(bw, 4);      # frame_crop_bottom_offset: 4 * CropUnitY(2) = 8 rows
+    dr_bw_put_bit(bw, 0);    # vui flag
+    var blen = 0;
+    var rbsp = fx_h264_bw_take(bw, &blen);
+    var e = 0;
+    var sps = h264_sps_parse(rbsp, blen, &e);
+    assert(sps != 0, "1080p sps parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h264_sps_id(sps), 1, "sps_id 1");
+    assert_eq(h264_sps_pic_order_cnt_type(sps), 2, "poc type 2");
+    assert_eq(h264_sps_cropping_flag(sps), 1, "cropping on");
+    assert_eq(h264_sps_crop_bottom(sps), 4, "crop bottom 4 units");
+    # 7.4.2.1.1: CropUnitY = SubHeightC * (2 - frame_mbs_only) = 2 for
+    # 4:2:0 frame coding, so 4 units = 8 luma rows: 1088 - 8 = 1080.
+    assert_eq(h264_sps_width(sps), 1920, "width 1920");
+    assert_eq(h264_sps_height(sps), 1080, "height 1088 cropped to 1080");
+    return 0;
+}
+
+# ================================================================
+# SPS — High profile branch (chroma/depth fields + scaling list skip)
+# ================================================================
+fn test_h264_sps_high_profile() {
+    var bw = dr_bw_init(64);
+    dr_bw_put_bits(bw, 100, 8);   # profile_idc 100 (High)
+    dr_bw_put_bits(bw, 0, 8);     # constraint flags 0
+    dr_bw_put_bits(bw, 40, 8);    # level_idc 40 (Level 4.0)
+    dr_ue_write(bw, 0);           # seq_parameter_set_id
+    dr_ue_write(bw, 1);           # chroma_format_idc = 1 (4:2:0)
+    dr_ue_write(bw, 0);           # bit_depth_luma_minus8
+    dr_ue_write(bw, 0);           # bit_depth_chroma_minus8
+    dr_bw_put_bit(bw, 0);         # qpprime_y_zero_transform_bypass_flag
+    dr_bw_put_bit(bw, 1);         # seq_scaling_matrix_present_flag = 1
+    # List 0 present: one delta_scale = -8 makes nextScale hit 0
+    # ((8 - 8 + 256) % 256 = 0 = "use default"), terminating the list
+    # after a single symbol (7.3.2.1.1.1 early-out).
+    dr_bw_put_bit(bw, 1);         # seq_scaling_list_present_flag[0]
+    dr_se_write(bw, -8);          # delta_scale -> nextScale 0, list done
+    dr_bw_put_bit(bw, 0);         # present_flag[1]
+    dr_bw_put_bit(bw, 0);         # present_flag[2]
+    dr_bw_put_bit(bw, 0);         # present_flag[3]
+    dr_bw_put_bit(bw, 0);         # present_flag[4]
+    dr_bw_put_bit(bw, 0);         # present_flag[5]
+    dr_bw_put_bit(bw, 0);         # present_flag[6] (8x8)
+    dr_bw_put_bit(bw, 0);         # present_flag[7] (8x8)
+    dr_ue_write(bw, 0);           # log2_max_frame_num_minus4
+    dr_ue_write(bw, 2);           # pic_order_cnt_type = 2
+    dr_ue_write(bw, 4);           # max_num_ref_frames = 4
+    dr_bw_put_bit(bw, 1);         # gaps flag = 1
+    dr_ue_write(bw, 79);          # pic_width_in_mbs_minus1: 80 MBs = 1280
+    dr_ue_write(bw, 44);          # pic_height_in_map_units_minus1: 45 MBs = 720
+    dr_bw_put_bit(bw, 1);         # frame_mbs_only_flag
+    dr_bw_put_bit(bw, 1);         # direct_8x8_inference_flag
+    dr_bw_put_bit(bw, 0);         # frame_cropping_flag
+    dr_bw_put_bit(bw, 1);         # vui_parameters_present_flag = 1
+    var blen = 0;
+    var rbsp = fx_h264_bw_take(bw, &blen);
+    var e = 0;
+    var sps = h264_sps_parse(rbsp, blen, &e);
+    assert(sps != 0, "high-profile sps parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h264_sps_profile_idc(sps), 100, "profile High");
+    assert_eq(h264_sps_level_idc(sps), 40, "level 4.0");
+    assert_eq(h264_sps_chroma_format_idc(sps), 1, "explicit 4:2:0");
+    assert_eq(h264_sps_bit_depth_luma_minus8(sps), 0, "8-bit luma");
+    assert_eq(h264_sps_scaling_matrix_flag(sps), 1, "scaling matrix present");
+    assert_eq(h264_sps_pic_order_cnt_type(sps), 2, "poc type 2");
+    assert_eq(h264_sps_max_num_ref_frames(sps), 4, "4 refs");
+    assert_eq(h264_sps_gaps_flag(sps), 1, "gaps allowed");
+    assert_eq(h264_sps_vui_flag(sps), 1, "vui flag recorded");
+    assert_eq(h264_sps_width(sps), 1280, "width 1280");
+    assert_eq(h264_sps_height(sps), 720, "height 720");
+    return 0;
+}
+
+# ================================================================
+# SPS — interlaced (frame_mbs_only 0): mbaff bit + doubled height
+# ================================================================
+fn test_h264_sps_interlaced() {
+    var bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);      # sps_id
+    dr_ue_write(bw, 0);      # log2_max_frame_num_minus4
+    dr_ue_write(bw, 2);      # pic_order_cnt_type 2
+    dr_ue_write(bw, 2);      # max_num_ref_frames
+    dr_bw_put_bit(bw, 0);    # gaps
+    dr_ue_write(bw, 21);     # 22 MBs = 352 px wide (CIF)
+    dr_ue_write(bw, 8);      # 9 map units: FIELD pairs, so 288 rows
+    dr_bw_put_bit(bw, 0);    # frame_mbs_only_flag = 0 (interlace allowed)
+    dr_bw_put_bit(bw, 1);    # mb_adaptive_frame_field_flag = 1 (mbaff)
+    dr_bw_put_bit(bw, 1);    # direct_8x8
+    dr_bw_put_bit(bw, 0);    # cropping
+    dr_bw_put_bit(bw, 0);    # vui
+    var blen = 0;
+    var rbsp = fx_h264_bw_take(bw, &blen);
+    var e = 0;
+    var sps = h264_sps_parse(rbsp, blen, &e);
+    assert(sps != 0, "interlaced sps parses");
+    assert_eq(h264_sps_frame_mbs_only(sps), 0, "fields allowed");
+    assert_eq(h264_sps_mbaff(sps), 1, "mbaff flag");
+    # FrameHeightInMbs = (2 - frame_mbs_only) * (ph_m1 + 1) = 2 * 9.
+    assert_eq(h264_sps_width(sps), 352, "width 352");
+    assert_eq(h264_sps_height(sps), 288, "height doubled to 288");
+    return 0;
+}
+
+# ================================================================
+# SPS — adversarial rejection: truncation, lying values, bombs
+# ================================================================
+fn test_h264_sps_reject() {
+    var e = 0;
+    var slen = 0;
+    var qcif = fx_h264_sps_qcif(&slen);
+    # Truncated inside the fixed 3-byte head.
+    assert_eq(h264_sps_parse(qcif, 2, &e), 0, "len 2 rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "len 2 -> truncated");
+    # Truncated mid-VLC (exactly at the pic_width field boundary).
+    assert_eq(h264_sps_parse(qcif, 4, &e), 0, "len 4 rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "len 4 -> truncated");
+    # Empty.
+    assert_eq(h264_sps_parse(qcif, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    # Negative length.
+    assert_eq(h264_sps_parse(qcif, -1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len -> bounds");
+    # Malformed exp-Golomb: 40 zero bits after the head (> 31 leading
+    # zeros, 9.1 codeNum bound).
+    var vlc = alloc(8);
+    store8(vlc, 66); store8(vlc + 1, 0); store8(vlc + 2, 30);
+    store8(vlc + 3, 0); store8(vlc + 4, 0); store8(vlc + 5, 0);
+    store8(vlc + 6, 0); store8(vlc + 7, 0);
+    assert_eq(h264_sps_parse(vlc, 8, &e), 0, "vlc bomb rejected");
+    assert_eq(e, DR_ERR_BAD_VLC, "all-zero VLC -> bad vlc");
+    # sps_id 32 (7.4.2.1.1: range [0, 31]).
+    var bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 32);
+    var blen = 0;
+    var rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "sps_id 32 rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "sps_id 32 -> bad sps");
+    # log2_max_frame_num_minus4 = 13 (range [0, 12]).
+    bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 13);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "log2_mfn 13 rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "log2_mfn 13 -> bad sps");
+    # pic_order_cnt_type 1: valid per spec but out of 0.1.x scope.
+    bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 1);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "poc type 1 refused");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "poc type 1 -> unsupported");
+    # pic_order_cnt_type 3 (range [0, 2]).
+    bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 3);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "poc type 3 rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "poc type 3 -> bad sps");
+    # max_num_ref_frames 17 (> MaxDpbFrames bound 16).
+    bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 2);
+    dr_ue_write(bw, 17);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "17 refs rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "17 refs -> bad sps");
+    # Geometry bomb: pic_width_in_mbs_minus1 = 2000 (> guard 1023).
+    bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 2);
+    dr_ue_write(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 2000);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "width bomb rejected");
+    assert_eq(e, DR_ERR_OVERSIZE, "2000-MB width -> oversize");
+    # Cropping that consumes the whole frame: 1 MB (16 px) wide, crop
+    # left 4 + right 4 units * CropUnitX 2 = 16 samples >= 16.
+    bw = fx_h264_bw_sps_head(66);
+    dr_ue_write(bw, 0);      # sps_id
+    dr_ue_write(bw, 0);      # log2_mfn
+    dr_ue_write(bw, 2);      # poc type 2
+    dr_ue_write(bw, 1);      # max refs
+    dr_bw_put_bit(bw, 0);    # gaps
+    dr_ue_write(bw, 0);      # 1 MB wide = 16 px
+    dr_ue_write(bw, 0);      # 1 MB tall
+    dr_bw_put_bit(bw, 1);    # fmbs
+    dr_bw_put_bit(bw, 1);    # direct8x8
+    dr_bw_put_bit(bw, 1);    # cropping
+    dr_ue_write(bw, 4);      # crop left 4
+    dr_ue_write(bw, 4);      # crop right 4
+    dr_ue_write(bw, 0);      # crop top
+    dr_ue_write(bw, 0);      # crop bottom
+    dr_bw_put_bit(bw, 0);    # vui
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "total crop rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "crop >= frame -> bad sps");
+    # High profile: chroma_format_idc 4 (range [0, 3]).
+    bw = fx_h264_bw_sps_head(100);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 4);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "chroma idc 4 rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "chroma idc 4 -> bad sps");
+    # High profile: bit_depth_luma_minus8 = 7 (range [0, 6]).
+    bw = fx_h264_bw_sps_head(100);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 1);
+    dr_ue_write(bw, 7);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "depth 15-bit rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "bit depth 7 -> bad sps");
+    # Scaling list delta_scale out of [-128, 127] (7.4.2.1.1.1).
+    bw = fx_h264_bw_sps_head(100);
+    dr_ue_write(bw, 0);      # sps_id
+    dr_ue_write(bw, 1);      # chroma 4:2:0
+    dr_ue_write(bw, 0);      # depth luma
+    dr_ue_write(bw, 0);      # depth chroma
+    dr_bw_put_bit(bw, 0);    # qpprime
+    dr_bw_put_bit(bw, 1);    # scaling matrix present
+    dr_bw_put_bit(bw, 1);    # list 0 present
+    dr_se_write(bw, 128);    # delta_scale 128 > 127
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "delta_scale 128 rejected");
+    assert_eq(e, H264_ERR_BAD_SPS, "delta_scale 128 -> bad sps");
+    # Truncated INSIDE the scaling-list skip.
+    bw = fx_h264_bw_sps_head(100);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 1);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 0);
+    dr_bw_put_bit(bw, 1);    # scaling matrix present
+    dr_bw_put_bit(bw, 1);    # list 0 present... and the stream ends
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_sps_parse(rbsp, blen, &e), 0, "truncated scaling list");
+    assert_eq(e, DR_ERR_TRUNCATED, "mid-scaling-list end -> truncated");
+    return 0;
+}
+
+# ================================================================
+# PPS — hand-built CABAC vector, every field asserted
+# ================================================================
+fn test_h264_pps_cabac() {
+    var plen = 0;
+    var rbsp = fx_h264_pps_cabac(&plen);
+    var e = 0;
+    var pps = h264_pps_parse(rbsp, plen, &e);
+    assert(pps != 0, "cabac pps parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h264_pps_id(pps), 0, "pps_id 0");
+    assert_eq(h264_pps_sps_id(pps), 0, "sps_id 0");
+    assert_eq(h264_pps_entropy_coding_mode(pps), 1, "CABAC selected");
+    assert_eq(h264_pps_bottom_field_poc_flag(pps), 0, "no bottom-field poc");
+    assert_eq(h264_pps_num_slice_groups_minus1(pps), 0, "1 slice group");
+    assert_eq(h264_pps_ref_idx_l0_default_minus1(pps), 0, "l0 default 1 ref");
+    assert_eq(h264_pps_ref_idx_l1_default_minus1(pps), 0, "l1 default 1 ref");
+    assert_eq(h264_pps_weighted_pred_flag(pps), 0, "no weighted pred");
+    assert_eq(h264_pps_weighted_bipred_idc(pps), 0, "wbi 0");
+    assert_eq(h264_pps_init_qp_minus26(pps), 0, "init qp 26");
+    assert_eq(h264_pps_init_qs_minus26(pps), 0, "init qs 26");
+    assert_eq(h264_pps_chroma_qp_index_offset(pps), 0, "cqp offset 0");
+    assert_eq(h264_pps_deblocking_flag(pps), 1, "deblock control present");
+    assert_eq(h264_pps_constrained_intra_pred(pps), 0, "no constrained intra");
+    assert_eq(h264_pps_redundant_pic_cnt_flag(pps), 0, "no redundant cnt");
+    return 0;
+}
+
+# ================================================================
+# PPS — CAVLC variant with signed fields, built on the core writer
+# ================================================================
+fn test_h264_pps_cavlc() {
+    var bw = dr_bw_init(16);
+    dr_ue_write(bw, 3);        # pic_parameter_set_id = 3
+    dr_ue_write(bw, 1);        # seq_parameter_set_id = 1
+    dr_bw_put_bit(bw, 0);      # entropy_coding_mode_flag = 0 (CAVLC)
+    dr_bw_put_bit(bw, 1);      # bottom_field_pic_order_in_frame_present
+    dr_ue_write(bw, 0);        # num_slice_groups_minus1
+    dr_ue_write(bw, 2);        # num_ref_idx_l0_default_active_minus1
+    dr_ue_write(bw, 0);        # num_ref_idx_l1_default_active_minus1
+    dr_bw_put_bit(bw, 1);      # weighted_pred_flag
+    dr_bw_put_bits(bw, 2, 2);  # weighted_bipred_idc = 2 (implicit)
+    dr_se_write(bw, -6);       # pic_init_qp_minus26 = -6 (QP 20)
+    dr_se_write(bw, 25);       # pic_init_qs_minus26 = +25 (upper bound)
+    dr_se_write(bw, -12);      # chroma_qp_index_offset = -12 (lower bound)
+    dr_bw_put_bit(bw, 0);      # deblocking_filter_control_present_flag
+    dr_bw_put_bit(bw, 1);      # constrained_intra_pred_flag
+    dr_bw_put_bit(bw, 1);      # redundant_pic_cnt_present_flag
+    var blen = 0;
+    var rbsp = fx_h264_bw_take(bw, &blen);
+    var e = 0;
+    var pps = h264_pps_parse(rbsp, blen, &e);
+    assert(pps != 0, "cavlc pps parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h264_pps_id(pps), 3, "pps_id 3");
+    assert_eq(h264_pps_sps_id(pps), 1, "sps_id 1");
+    assert_eq(h264_pps_entropy_coding_mode(pps), 0, "CAVLC selected");
+    assert_eq(h264_pps_bottom_field_poc_flag(pps), 1, "bottom-field poc");
+    assert_eq(h264_pps_ref_idx_l0_default_minus1(pps), 2, "l0 3 refs");
+    assert_eq(h264_pps_weighted_pred_flag(pps), 1, "weighted pred");
+    assert_eq(h264_pps_weighted_bipred_idc(pps), 2, "implicit bipred");
+    assert_eq(h264_pps_init_qp_minus26(pps), -6, "signed qp round-trips");
+    assert_eq(h264_pps_init_qs_minus26(pps), 25, "qs at upper bound");
+    assert_eq(h264_pps_chroma_qp_index_offset(pps), -12, "cqp at lower bound");
+    assert_eq(h264_pps_deblocking_flag(pps), 0, "no deblock control");
+    assert_eq(h264_pps_constrained_intra_pred(pps), 1, "constrained intra");
+    assert_eq(h264_pps_redundant_pic_cnt_flag(pps), 1, "redundant cnt");
+    return 0;
+}
+
+# ================================================================
+# PPS — adversarial rejection
+# ================================================================
+fn test_h264_pps_reject() {
+    var e = 0;
+    var plen = 0;
+    var hand = fx_h264_pps_cabac(&plen);
+    # Truncated after 8 bits (wbi's 2-bit read runs off the end).
+    assert_eq(h264_pps_parse(hand, 1, &e), 0, "len 1 rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "len 1 -> truncated");
+    # Empty / negative.
+    assert_eq(h264_pps_parse(hand, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    assert_eq(h264_pps_parse(hand, -1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len -> bounds");
+    # pps_id 256 (7.4.2.2: range [0, 255]).
+    var bw = dr_bw_init(16);
+    dr_ue_write(bw, 256);
+    var blen = 0;
+    var rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "pps_id 256 rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "pps_id 256 -> bad pps");
+    # num_slice_groups_minus1 = 1: FMO, valid per spec, unsupported here.
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 1);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "FMO refused");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "FMO -> unsupported");
+    # num_slice_groups_minus1 = 8 (range [0, 7]).
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 8);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "9 slice groups rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "nsg 8 -> bad pps");
+    # num_ref_idx_l0_default_active_minus1 = 32 (range [0, 31]).
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 32);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "l0 33 refs rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "l0 32 -> bad pps");
+    # weighted_bipred_idc = 3 (range [0, 2]).
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 0);
+    dr_bw_put_bits(bw, 3, 2);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "wbi 3 rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "wbi 3 -> bad pps");
+    # pic_init_qp_minus26 = +26 (upper bound is +25).
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 0);
+    dr_bw_put_bits(bw, 0, 2);
+    dr_se_write(bw, 26);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "qp +26 rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "qp +26 -> bad pps");
+    # pic_init_qp_minus26 = -63 (permissive lower bound is -62).
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 0);
+    dr_bw_put_bits(bw, 0, 2);
+    dr_se_write(bw, -63);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "qp -63 rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "qp -63 -> bad pps");
+    # chroma_qp_index_offset = 13 (range [-12, +12]).
+    bw = dr_bw_init(16);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_ue_write(bw, 0);
+    dr_bw_put_bit(bw, 0);
+    dr_bw_put_bits(bw, 0, 2);
+    dr_se_write(bw, 0);
+    dr_se_write(bw, 0);
+    dr_se_write(bw, 13);
+    rbsp = fx_h264_bw_take(bw, &blen);
+    assert_eq(h264_pps_parse(rbsp, blen, &e), 0, "cqp 13 rejected");
+    assert_eq(e, H264_ERR_BAD_PPS, "cqp 13 -> bad pps");
+    return 0;
+}
+
+# ================================================================
+# End-to-end: compose SPS+PPS+SEI+IDR with the encode seed, then
+# scan + classify + unwrap + parse — the full decode front door
+# ================================================================
+fn test_h264_stream_end_to_end() {
+    var e = 0;
+    # Wrap the four NALs (each returns a fresh buffer).
+    var slen = 0;
+    var sps_rbsp = fx_h264_sps_qcif(&slen);
+    var plen = 0;
+    var pps_rbsp = fx_h264_pps_cabac(&plen);
+    var sei_rbsp = alloc(4);   # fake SEI payload
+    store8(sei_rbsp, 0x05); store8(sei_rbsp + 1, 0x01);
+    store8(sei_rbsp + 2, 0xAA); store8(sei_rbsp + 3, 0x80);
+    var idr_rbsp = alloc(9);   # fake IDR payload with hostile patterns
+    store8(idr_rbsp, 0x88);
+    store8(idr_rbsp + 1, 0); store8(idr_rbsp + 2, 0); store8(idr_rbsp + 3, 0);
+    store8(idr_rbsp + 4, 0x84);
+    store8(idr_rbsp + 5, 0); store8(idr_rbsp + 6, 0); store8(idr_rbsp + 7, 1);
+    store8(idr_rbsp + 8, 0x77);
+    var n0 = 0; var l0 = 0;
+    var n1 = 0; var l1 = 0;
+    var n2 = 0; var l2 = 0;
+    var n3 = 0; var l3 = 0;
+    assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps_rbsp, slen, 1, &n0, &l0),
+    DR_OK, "sps wraps");
+    assert_eq(h264_annexb_wrap(3, H264_NAL_PPS, pps_rbsp, plen, 1, &n1, &l1),
+    DR_OK, "pps wraps");
+    assert_eq(h264_annexb_wrap(0, H264_NAL_SEI, sei_rbsp, 4, 0, &n2, &l2),
+    DR_OK, "sei wraps");
+    assert_eq(h264_annexb_wrap(3, H264_NAL_IDR, idr_rbsp, 9, 1, &n3, &l3),
+    DR_OK, "idr wraps");
+    # Concatenate into one Annex-B stream.
+    var total = l0 + l1 + l2 + l3;
+    var stream = alloc(total);
+    memcpy(stream, n0, l0);
+    memcpy(stream + l0, n1, l1);
+    memcpy(stream + l0 + l1, n2, l2);
+    memcpy(stream + l0 + l1 + l2, n3, l3);
+    # Sniff agrees this is an Annex-B stream.
+    assert_eq(dr_sniff(stream, total), DR_SNIFF_ANNEXB, "stream sniffs Annex-B");
+    # Scan and classify all four.
+    var s = h264_scan_init(stream, total);
+    var nal = 0; var sz = 0;
+    var ref = 0; var typ = 0;
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "e2e nal 1");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(typ, H264_NAL_SPS, "e2e nal 1 = SPS");
+    # Unwrap + parse the SPS through the real decode path.
+    var rb = 0; var rblen = 0;
+    assert_eq(h264_rbsp_extract(nal + 1, sz - 1, &rb, &rblen), DR_OK,
+    "sps rbsp extracts");
+    var sps = h264_sps_parse(rb, rblen, &e);
+    assert(sps != 0, "e2e sps parses");
+    assert_eq(h264_sps_width(sps), 176, "e2e sps width");
+    assert_eq(h264_sps_height(sps), 144, "e2e sps height");
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "e2e nal 2");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(typ, H264_NAL_PPS, "e2e nal 2 = PPS");
+    assert_eq(h264_rbsp_extract(nal + 1, sz - 1, &rb, &rblen), DR_OK,
+    "pps rbsp extracts");
+    var pps = h264_pps_parse(rb, rblen, &e);
+    assert(pps != 0, "e2e pps parses");
+    assert_eq(h264_pps_entropy_coding_mode(pps), 1, "e2e pps is CABAC");
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "e2e nal 3");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(typ, H264_NAL_SEI, "e2e nal 3 = SEI");
+    assert_eq(ref, 0, "e2e sei ref_idc 0");
+    assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "e2e nal 4");
+    h264_nal_hdr_parse(nal, sz, &ref, &typ);
+    assert_eq(typ, H264_NAL_IDR, "e2e nal 4 = IDR");
+    # The hostile IDR payload survives the EPB round trip on the wire.
+    assert_eq(h264_rbsp_extract(nal + 1, sz - 1, &rb, &rblen), DR_OK,
+    "idr rbsp extracts");
+    assert_eq(rblen, 9, "idr payload length restored");
+    assert(fx_h264_bytes_eq(rb, idr_rbsp, 9), "idr payload bytes restored");
+    assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "e2e clean end");
+    assert_eq(h264_scan_count(s), 4, "e2e 4 nals");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("h264 start-code scan");
+    test_h264_find_start_code();
+    test_h264_scan_mixed();
+    test_h264_scan_edges();
+    test_group("h264 nal header");
+    test_h264_nal_hdr();
+    test_group("h264 emulation prevention");
+    test_h264_epb_strip();
+    test_h264_epb_insert();
+    test_group("h264 annexb composer");
+    test_h264_annexb_wrap();
+    test_group("h264 sps");
+    test_h264_sps_qcif();
+    test_h264_sps_writer_crosscheck();
+    test_h264_sps_cropping();
+    test_h264_sps_high_profile();
+    test_h264_sps_interlaced();
+    test_h264_sps_reject();
+    test_group("h264 pps");
+    test_h264_pps_cabac();
+    test_h264_pps_cavlc();
+    test_h264_pps_reject();
+    test_group("h264 end-to-end");
+    test_h264_stream_end_to_end();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

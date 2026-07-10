@@ -1,0 +1,311 @@
+# @public — drishti IVF container read + write. Shared by the AV1 and
+# VP8/VP9 families (AV1/VP8/VP9 conformance and test vectors ship as IVF).
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_*, DR_FOURCC_*) and src/bits.cyr (dr_rd_le*/
+# dr_wr_le* byte helpers).
+#
+# IVF has no formal spec; the format is fixed by convention. Derived from
+# TWO sources, cross-checked: the multimedia.cx wiki "IVF" page and
+# libvpx tools/ivfenc.c + ivfdec.c (mem_put_le16/32 field order).
+#
+# 32-byte file header:
+#   bytes  0-3   magic "DKIF" (0x44 0x4B 0x49 0x46)
+#   bytes  4-5   version, u16 LE — must be 0
+#   bytes  6-7   header size, u16 LE — 32 for version 0 (writers emit 32;
+#                the reader accepts >= 32 and skips the extra, the libvpx
+#                ivfdec tolerance)
+#   bytes  8-11  codec FourCC (e.g. "AV01" / "VP80" / "VP90"), u32 LE
+#   bytes 12-13  width in pixels, u16 LE
+#   bytes 14-15  height in pixels, u16 LE
+#   bytes 16-19  timebase DENOMINATOR (rate), u32 LE   — libvpx writes
+#   bytes 20-23  timebase NUMERATOR (scale), u32 LE      cfg.g_timebase
+#   bytes 24-27  frame count, u32 LE — ADVISORY: real files lie; the
+#                reader iterates to end-of-buffer and never trusts it
+#   bytes 28-31  unused
+#
+# 12-byte frame header (before each frame payload):
+#   bytes  0-3   payload size in bytes, u32 LE (excludes these 12 bytes)
+#   bytes  4-11  presentation timestamp, u64 LE (units of num/den)
+#
+# DrIvfHdr layout (64 bytes, heap) — all fields widened to i64:
+#   +0:  fourcc        — u32 LE fourcc value
+#   +8:  width
+#   +16: height
+#   +24: timebase num  (scale)
+#   +32: timebase den  (rate)
+#   +40: frame_count   — header field, advisory only
+#   +48: hdr_size      — header field (>= 32)
+#   +56: version       — header field (0)
+#
+# DrIvfReader layout (40 bytes, heap):
+#   +0:  buf — whole-file buffer (borrowed)
+#   +8:  len — buffer length in bytes
+#   +16: pos — byte cursor (starts at hdr_size)
+#   +24: hdr — DrIvfHdr pointer
+#   +32: err — sticky error code
+#
+# DrIvfWriter layout (40 bytes, heap):
+#   +0:  buf — owned output buffer (auto-grows by doubling)
+#   +8:  cap — capacity in bytes
+#   +16: len — bytes written
+#   +24: frames — frames appended so far
+#   +32: err — sticky error code
+
+enum DrIvfLimits {
+    # A single frame payload larger than 256 MiB is rejected as a bomb
+    # (the largest real AV1/VP9 keyframes are a few MiB).
+    DR_IVF_MAX_FRAME  = 268435456;    # 1 << 28
+    # Whole-file writer cap, mirroring DR_BW_MAX_BYTES.
+    DR_IVF_MAX_TOTAL  = 1073741824;   # 1 << 30
+}
+
+# dr_ivf_next_frame result code: no more frames (clean end of file).
+# Distinct from every DR_ERR_* (those are > 0) and from DR_OK (0).
+# Module-global var, not an enum member — cyrius enums don't accept
+# negative literals (see lib/fdlopen.cyr:108).
+var DR_IVF_END = -1;
+
+# ================================================================
+# Header parse + accessors
+# ================================================================
+
+# Parse a 32-byte IVF file header from buf[0..len). Returns a DrIvfHdr
+# pointer, or 0 with the error code stored at *out_err:
+#   DR_ERR_TRUNCATED   — len < 32 or hdr_size > len
+#   DR_ERR_BAD_HEADER  — magic != "DKIF" or hdr_size < 32
+#   DR_ERR_UNSUPPORTED — version != 0
+#   DR_ERR_OOM         — allocation failure
+fn dr_ivf_parse_header(buf, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (len < 32) {
+        store64(out_err, DR_ERR_TRUNCATED);
+        return 0;
+    }
+    if ((load8(buf) != 0x44) || (load8(buf + 1) != 0x4B)
+    || (load8(buf + 2) != 0x49) || (load8(buf + 3) != 0x46)) {
+        store64(out_err, DR_ERR_BAD_HEADER);
+        return 0;
+    }
+    var version = dr_rd_le16(buf + 4);
+    if (version != 0) {
+        store64(out_err, DR_ERR_UNSUPPORTED);
+        return 0;
+    }
+    var hdr_size = dr_rd_le16(buf + 6);
+    if (hdr_size < 32) {
+        store64(out_err, DR_ERR_BAD_HEADER);
+        return 0;
+    }
+    if (hdr_size > len) {
+        store64(out_err, DR_ERR_TRUNCATED);
+        return 0;
+    }
+    var h = alloc(64);
+    if (h == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(h, dr_rd_le32(buf + 8));            # fourcc
+    store64(h + 8, dr_rd_le16(buf + 12));       # width
+    store64(h + 16, dr_rd_le16(buf + 14));      # height
+    store64(h + 24, dr_rd_le32(buf + 20));      # timebase num (scale)
+    store64(h + 32, dr_rd_le32(buf + 16));      # timebase den (rate)
+    store64(h + 40, dr_rd_le32(buf + 24));      # frame count (advisory)
+    store64(h + 48, hdr_size);
+    store64(h + 56, version);
+    return h;
+}
+
+fn dr_ivf_hdr_fourcc(h): i64 { return load64(h); }
+fn dr_ivf_hdr_width(h): i64 { return load64(h + 8); }
+fn dr_ivf_hdr_height(h): i64 { return load64(h + 16); }
+fn dr_ivf_hdr_tb_num(h): i64 { return load64(h + 24); }
+fn dr_ivf_hdr_tb_den(h): i64 { return load64(h + 32); }
+# Advisory frame count from the header — do NOT size loops with it;
+# iterate dr_ivf_next_frame to DR_IVF_END instead.
+fn dr_ivf_hdr_frame_count(h): i64 { return load64(h + 40); }
+fn dr_ivf_hdr_size(h): i64 { return load64(h + 48); }
+fn dr_ivf_hdr_version(h): i64 { return load64(h + 56); }
+
+# ================================================================
+# Reader — frame iterator over an in-memory IVF file
+# ================================================================
+
+# Create a reader over buf[0..len) (buffer BORROWED — keep it alive).
+# Parses + validates the file header and positions the cursor at the
+# first frame. Returns the DrIvfReader, or 0 with the error at *out_err
+# (codes as dr_ivf_parse_header, plus DR_ERR_OOM).
+fn dr_ivf_reader_init(buf, len, out_err): i64 {
+    var h = dr_ivf_parse_header(buf, len, out_err);
+    if (h == 0) { return 0; }
+    var r = alloc(40);
+    if (r == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(r, buf);
+    store64(r + 8, len);
+    store64(r + 16, dr_ivf_hdr_size(h));
+    store64(r + 24, h);
+    store64(r + 32, DR_OK);
+    return r;
+}
+
+# The parsed DrIvfHdr (owned by the reader).
+fn dr_ivf_reader_hdr(r): i64 { return load64(r + 24); }
+
+# Sticky error code (DR_OK until a fault).
+fn dr_ivf_reader_err(r): i64 { return load64(r + 32); }
+
+# Byte offset of the next unread frame header.
+fn dr_ivf_reader_pos(r): i64 { return load64(r + 16); }
+
+# Advance to the next frame. On success stores:
+#   *out_payload — pointer INTO the reader's buffer (zero-copy, borrowed)
+#   *out_size    — payload size in bytes
+#   *out_pts     — 64-bit presentation timestamp
+# and returns 0 (DR_OK). Returns DR_IVF_END (-1) at a clean end of
+# file (cursor exactly at len). Otherwise returns a sticky error:
+#   DR_ERR_TRUNCATED — trailing bytes < 12, or payload runs past len
+#   DR_ERR_OVERSIZE  — payload size field > DR_IVF_MAX_FRAME
+fn dr_ivf_next_frame(r, out_payload, out_size, out_pts): i64 {
+    var e = load64(r + 32);
+    if (e != DR_OK) { return e; }
+    var len = load64(r + 8);
+    var pos = load64(r + 16);
+    if (pos == len) { return DR_IVF_END; }
+    if ((len - pos) < 12) {
+        store64(r + 32, DR_ERR_TRUNCATED);
+        return DR_ERR_TRUNCATED;
+    }
+    var buf = load64(r);
+    var size = dr_rd_le32(buf + pos);
+    if (size > DR_IVF_MAX_FRAME) {
+        store64(r + 32, DR_ERR_OVERSIZE);
+        return DR_ERR_OVERSIZE;
+    }
+    if (size > (len - pos - 12)) {
+        store64(r + 32, DR_ERR_TRUNCATED);
+        return DR_ERR_TRUNCATED;
+    }
+    store64(out_payload, buf + pos + 12);
+    store64(out_size, size);
+    store64(out_pts, dr_rd_le64(buf + pos + 4));
+    store64(r + 16, pos + 12 + size);
+    return DR_OK;
+}
+
+# ================================================================
+# Writer — build an IVF file in memory, round-trip-able through the
+# reader above
+# ================================================================
+
+# Internal: ensure the writer has room for extra bytes (doubling
+# growth, DR_IVF_MAX_TOTAL cap). Returns DR_OK / sticky error.
+fn dr_ivf_writer_ensure(w, extra): i64 {
+    var e = load64(w + 32);
+    if (e != DR_OK) { return e; }
+    var need = load64(w + 16) + extra;
+    if (need > DR_IVF_MAX_TOTAL) {
+        store64(w + 32, DR_ERR_OVERSIZE);
+        return DR_ERR_OVERSIZE;
+    }
+    var cap = load64(w + 8);
+    if (need <= cap) { return DR_OK; }
+    var new_cap = cap;
+    while (new_cap < need) { new_cap = new_cap << 1; }
+    if (new_cap > DR_IVF_MAX_TOTAL) { new_cap = DR_IVF_MAX_TOTAL; }
+    var new_buf = alloc(new_cap);
+    if (new_buf == 0) {
+        store64(w + 32, DR_ERR_OOM);
+        return DR_ERR_OOM;
+    }
+    memcpy(new_buf, load64(w), load64(w + 16));
+    store64(w, new_buf);
+    store64(w + 8, new_cap);
+    return DR_OK;
+}
+
+# Create an IVF writer and emit the 32-byte header (version 0,
+# hdr_size 32, frame count 0 — patched by dr_ivf_writer_finish).
+# Validates: width/height in [0, 65535], tb_num/tb_den in
+# [0, 0xFFFFFFFF] (u16/u32 fields — DR_ERR_BAD_HEADER otherwise).
+# fourcc is any u32 (use DR_FOURCC_*). Returns the DrIvfWriter, or 0
+# on validation/allocation failure.
+fn dr_ivf_writer_init(fourcc, width, height, tb_num, tb_den): i64 {
+    if ((width < 0) || (width > 65535)) { return 0; }
+    if ((height < 0) || (height > 65535)) { return 0; }
+    if ((tb_num < 0) || (tb_num > 0xFFFFFFFF)) { return 0; }
+    if ((tb_den < 0) || (tb_den > 0xFFFFFFFF)) { return 0; }
+    if ((fourcc < 0) || (fourcc > 0xFFFFFFFF)) { return 0; }
+    var buf = alloc(1024);
+    if (buf == 0) { return 0; }
+    var w = alloc(40);
+    if (w == 0) { return 0; }
+    store64(w, buf);
+    store64(w + 8, 1024);
+    store64(w + 16, 32);
+    store64(w + 24, 0);
+    store64(w + 32, DR_OK);
+    store8(buf, 0x44);           # 'D'
+    store8(buf + 1, 0x4B);       # 'K'
+    store8(buf + 2, 0x49);       # 'I'
+    store8(buf + 3, 0x46);       # 'F'
+    dr_wr_le16(buf + 4, 0);      # version 0
+    dr_wr_le16(buf + 6, 32);     # header size
+    dr_wr_le32(buf + 8, fourcc);
+    dr_wr_le16(buf + 12, width);
+    dr_wr_le16(buf + 14, height);
+    dr_wr_le32(buf + 16, tb_den);   # rate (libvpx field order)
+    dr_wr_le32(buf + 20, tb_num);   # scale
+    dr_wr_le32(buf + 24, 0);     # frame count — patched at finish
+    dr_wr_le32(buf + 28, 0);     # unused
+    return w;
+}
+
+# Sticky error code.
+fn dr_ivf_writer_err(w): i64 { return load64(w + 32); }
+
+# Total bytes written so far (header + frames).
+fn dr_ivf_writer_len(w): i64 { return load64(w + 16); }
+
+# Frames appended so far.
+fn dr_ivf_writer_frames(w): i64 { return load64(w + 24); }
+
+# Append one frame: 12-byte frame header (size, pts) + payload copy.
+# size must be in [0, DR_IVF_MAX_FRAME] (DR_ERR_OVERSIZE otherwise —
+# sticky). pts is stored as the full 64-bit LE field. Returns DR_OK /
+# sticky error code.
+fn dr_ivf_write_frame(w, payload, size, pts): i64 {
+    var e = load64(w + 32);
+    if (e != DR_OK) { return e; }
+    if ((size < 0) || (size > DR_IVF_MAX_FRAME)) {
+        store64(w + 32, DR_ERR_OVERSIZE);
+        return DR_ERR_OVERSIZE;
+    }
+    var rc = dr_ivf_writer_ensure(w, 12 + size);
+    if (rc != DR_OK) { return rc; }
+    var buf = load64(w);
+    var len = load64(w + 16);
+    dr_wr_le32(buf + len, size);
+    dr_wr_le64(buf + len + 4, pts);
+    memcpy(buf + len + 12, payload, size);
+    store64(w + 16, len + 12 + size);
+    store64(w + 24, load64(w + 24) + 1);
+    return DR_OK;
+}
+
+# Finish the file: patch the frame count into header bytes 24-27 and
+# return the buffer pointer (OWNED by the writer; total length stored
+# at *out_len). Returns 0 with *out_len = 0 if the writer faulted.
+fn dr_ivf_writer_finish(w, out_len): i64 {
+    if (load64(w + 32) != DR_OK) {
+        store64(out_len, 0);
+        return 0;
+    }
+    var buf = load64(w);
+    dr_wr_le32(buf + 24, load64(w + 24));
+    store64(out_len, load64(w + 16));
+    return buf;
+}

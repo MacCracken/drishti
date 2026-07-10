@@ -1,0 +1,298 @@
+# @public — drishti AV1: OBU (Open Bitstream Unit) layer — header
+# parse, buffer walk (iterator), header write (the encode-lane seed).
+#
+# FLAT module (no includes) — wiring in src/main.cyr; until this family
+# is wired into [lib], the standalone suite tests/av1.tcyr includes it
+# explicitly after the lib root. Depends on src/drishti.cyr (DR_ERR_*)
+# and src/bits.cyr (DrBr/DrBw bit I/O, leb128 read/write).
+#
+# Derived from the "AV1 Bitstream & Decoding Process Specification"
+# v1.0.0 with Errata 1 (AOMedia) — section numbers cited inline:
+#   5.3.1 open_bitstream_unit()  — obu_size = sz - 1 - obu_extension_flag
+#                                  when obu_has_size_field == 0
+#   5.3.2 obu_header()           — forbidden(1) type(4) ext(1) has_size(1)
+#                                  reserved(1)
+#   5.3.3 obu_extension_header() — temporal_id(3) spatial_id(2) reserved(3)
+#   4.10.5 leb128()              — obu_size coding (core dr_leb128_*)
+#   6.2.2 OBU header semantics   — obu_type table; obu_forbidden_bit
+#                                  "must be set to 0"; obu_reserved_1bit
+#                                  "must be set to 0. ... ignored by a
+#                                  decoder" (parsed, NOT rejected)
+#   6.2.3 OBU extension header semantics — reserved 3 bits likewise
+#                                  decoder-ignored
+# Cross-checked against dav1d src/obu.c (dav1d_parse_obus) and libaom
+# av1/common/obu_util.c (aom_read_obu_header) — both reject the
+# forbidden bit and ignore the reserved bits, matching the reading above.
+#
+# Av1Obu record layout (56 bytes, heap) — one parsed OBU header:
+#   +0:  type     — obu_type (AV1_OBU_* below)
+#   +8:  ext      — obu_extension_flag (0/1)
+#   +16: tid      — temporal_id (0 when ext == 0)
+#   +24: sid      — spatial_id  (0 when ext == 0)
+#   +32: has_size — obu_has_size_field (0/1)
+#   +40: size     — payload size in bytes (from leb128 obu_size, or
+#                   derived per 5.3.1 when has_size == 0)
+#   +48: hdr_size — header bytes consumed (1..2 fixed + 0..8 leb128);
+#                   the payload starts at buf + hdr_size
+#
+# Av1ObuIter layout (40 bytes, heap):
+#   +0:  buf — whole-stream buffer (BORROWED — caller keeps it alive)
+#   +8:  len — buffer length in bytes
+#   +16: pos — byte cursor (start of the next unparsed OBU)
+#   +24: err — sticky error code (DR_OK until first fault)
+#   +32: obu — Av1Obu record of the last OBU yielded (0 before first)
+
+# obu_type constants — AV1 spec 6.2.2 obu_type table. Values 0 and
+# 9..14 are reserved (a decoder "must ignore" reserved-type OBUs; the
+# walk yields them and callers skip what they don't handle).
+enum Av1ObuType {
+    AV1_OBU_SEQUENCE_HEADER        = 1;
+    AV1_OBU_TEMPORAL_DELIMITER     = 2;
+    AV1_OBU_FRAME_HEADER           = 3;
+    AV1_OBU_TILE_GROUP             = 4;
+    AV1_OBU_METADATA               = 5;
+    AV1_OBU_FRAME                  = 6;
+    AV1_OBU_REDUNDANT_FRAME_HEADER = 7;
+    AV1_OBU_TILE_LIST              = 8;
+    AV1_OBU_PADDING                = 15;
+}
+
+# av1_obu_next result code: no more OBUs (clean end of buffer).
+# Distinct from DR_OK (0) and every DR_ERR_* (> 0). Module-global var,
+# not an enum member — cyrius enums reject negative literals (same
+# pattern as DR_IVF_END in src/ivf.cyr).
+var AV1_OBU_END = -1;
+
+# ================================================================
+# OBU header parse
+# ================================================================
+
+# Parse one OBU header at buf[0..len). Returns an Av1Obu record, or 0
+# with the error code stored at *out_err:
+#   DR_ERR_BOUNDS        — len < 0
+#   DR_ERR_TRUNCATED     — buffer ends inside the header, or the leb128
+#                          obu_size claims more payload bytes than the
+#                          buffer holds (lying size)
+#   DR_ERR_FORBIDDEN_BIT — obu_forbidden_bit set (6.2.2: must be 0)
+#   DR_ERR_BAD_LEB128    — malformed obu_size (4.10.5 conformance)
+#   DR_ERR_OOM           — allocation failure
+# The reserved bits (obu_reserved_1bit, extension_header_reserved_3bits)
+# are parsed and IGNORED per 6.2.2/6.2.3 ("ignored by a decoder").
+# When has_size == 0 the OBU extends to the end of the supplied buffer:
+# size = len - hdr_size, the 5.3.1 rule with the container-provided
+# sz taken to be len.
+fn av1_obu_parse_header(buf, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (len < 0) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var br = dr_br_init(buf, len);
+    if (br == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    # 5.3.2 obu_header() — fixed first byte.
+    var forbidden = dr_br_read_bit(br);    # obu_forbidden_bit  f(1)
+    var type = dr_br_read_bits(br, 4);     # obu_type           f(4)
+    var ext = dr_br_read_bit(br);          # obu_extension_flag f(1)
+    var has_size = dr_br_read_bit(br);     # obu_has_size_field f(1)
+    dr_br_read_bit(br);                    # obu_reserved_1bit  f(1) — 6.2.2: ignored
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    if (forbidden != 0) {
+        store64(out_err, DR_ERR_FORBIDDEN_BIT);
+        return 0;
+    }
+    var tid = 0;
+    var sid = 0;
+    if (ext) {
+        # 5.3.3 obu_extension_header() — one more byte.
+        tid = dr_br_read_bits(br, 3);      # temporal_id f(3)
+        sid = dr_br_read_bits(br, 2);      # spatial_id  f(2)
+        dr_br_read_bits(br, 3);            # extension_header_reserved_3bits — 6.2.3: ignored
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+    }
+    var size = 0;
+    if (has_size) {
+        # 5.3.1: obu_size leb128() — reader is byte-aligned here
+        # (8 or 16 bits consumed).
+        var rc = dr_leb128_read(br, &size);
+        if (rc != DR_OK) {
+            store64(out_err, rc);
+            return 0;
+        }
+    }
+    var hdr_size = dr_br_byte_pos(br);
+    if (has_size) {
+        # Lying size: the payload must lie inside the supplied buffer.
+        if (size > (len - hdr_size)) {
+            store64(out_err, DR_ERR_TRUNCATED);
+            return 0;
+        }
+    } else {
+        # 5.3.1: obu_size = sz - 1 - obu_extension_flag, sz = len.
+        size = len - hdr_size;
+    }
+    var o = alloc(56);
+    if (o == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(o, type);
+    store64(o + 8, ext);
+    store64(o + 16, tid);
+    store64(o + 24, sid);
+    store64(o + 32, has_size);
+    store64(o + 40, size);
+    store64(o + 48, hdr_size);
+    return o;
+}
+
+fn av1_obu_type(o): i64 { return load64(o); }
+fn av1_obu_ext(o): i64 { return load64(o + 8); }
+fn av1_obu_tid(o): i64 { return load64(o + 16); }
+fn av1_obu_sid(o): i64 { return load64(o + 24); }
+fn av1_obu_has_size(o): i64 { return load64(o + 32); }
+fn av1_obu_size(o): i64 { return load64(o + 40); }
+fn av1_obu_hdr_size(o): i64 { return load64(o + 48); }
+
+# obu_type -> printable cstring (never null). Table from spec 6.2.2.
+fn av1_obu_type_name(type): i64 {
+    if (type == AV1_OBU_SEQUENCE_HEADER)        { return "sequence_header"; }
+    if (type == AV1_OBU_TEMPORAL_DELIMITER)     { return "temporal_delimiter"; }
+    if (type == AV1_OBU_FRAME_HEADER)           { return "frame_header"; }
+    if (type == AV1_OBU_TILE_GROUP)             { return "tile_group"; }
+    if (type == AV1_OBU_METADATA)               { return "metadata"; }
+    if (type == AV1_OBU_FRAME)                  { return "frame"; }
+    if (type == AV1_OBU_REDUNDANT_FRAME_HEADER) { return "redundant_frame_header"; }
+    if (type == AV1_OBU_TILE_LIST)              { return "tile_list"; }
+    if (type == AV1_OBU_PADDING)                { return "padding"; }
+    return "reserved";
+}
+
+# ================================================================
+# OBU walk — iterate the OBUs of a low-overhead bitstream buffer
+# (the layout inside an IVF frame payload, spec Annex A / 5.3.1)
+# ================================================================
+
+# Create an iterator over buf[0..len) (buffer BORROWED — caller keeps
+# it alive for the iterator's lifetime). Returns the Av1ObuIter handle,
+# or 0 on negative len / allocation failure.
+fn av1_obu_iter_init(buf, len): i64 {
+    if (len < 0) { return 0; }
+    var it = alloc(40);
+    if (it == 0) { return 0; }
+    store64(it, buf);
+    store64(it + 8, len);
+    store64(it + 16, 0);
+    store64(it + 24, DR_OK);
+    store64(it + 32, 0);
+    return it;
+}
+
+# Sticky error code (DR_OK until a fault).
+fn av1_obu_iter_err(it): i64 { return load64(it + 24); }
+
+# Byte offset of the next unparsed OBU.
+fn av1_obu_iter_pos(it): i64 { return load64(it + 16); }
+
+# Av1Obu record of the last OBU yielded (0 before the first yield) —
+# for temporal_id / spatial_id / has_size beyond the three outs of
+# av1_obu_next.
+fn av1_obu_iter_obu(it): i64 { return load64(it + 32); }
+
+# Advance to the next OBU. On success stores:
+#   *out_type — obu_type (compare against AV1_OBU_*)
+#   *out_off  — byte offset FROM THE BUFFER BASE of the payload
+#   *out_size — payload size in bytes (0 is legal, e.g. a temporal
+#               delimiter)
+# and returns 0 (DR_OK). Returns AV1_OBU_END (-1) at a clean end of
+# buffer (cursor exactly at len; repeatable, not sticky). Otherwise
+# returns a sticky error with av1_obu_parse_header's codes. An OBU
+# without a size field consumes the rest of the buffer (5.3.1), so it
+# is always the last one yielded.
+fn av1_obu_next(it, out_type, out_off, out_size): i64 {
+    var e = load64(it + 24);
+    if (e != DR_OK) { return e; }
+    var len = load64(it + 8);
+    var pos = load64(it + 16);
+    if (pos == len) { return AV1_OBU_END; }
+    var buf = load64(it);
+    var perr = 0;
+    var o = av1_obu_parse_header(buf + pos, len - pos, &perr);
+    if (o == 0) {
+        store64(it + 24, perr);
+        return perr;
+    }
+    var hdr_size = av1_obu_hdr_size(o);
+    var size = av1_obu_size(o);
+    store64(it + 32, o);
+    store64(out_type, av1_obu_type(o));
+    store64(out_off, pos + hdr_size);
+    store64(out_size, size);
+    # parse_header proved size <= len - pos - hdr_size, so the new
+    # cursor lands at most on len.
+    store64(it + 16, pos + hdr_size + size);
+    return DR_OK;
+}
+
+# ================================================================
+# OBU header write — the encode-lane seed (inverse of the parser)
+# ================================================================
+
+# Append an OBU header to a byte-aligned bitwriter: the 5.3.2 header
+# byte, the 5.3.3 extension byte when ext is nonzero, and a minimal
+# leb128 obu_size when has_size is nonzero. Forbidden and reserved
+# bits are emitted as 0 (6.2.2/6.2.3). Arguments:
+#   type in [0, 15], tid in [0, 7], sid in [0, 3] — DR_ERR_BOUNDS
+#     (sticky) otherwise; tid/sid are only coded when ext is nonzero
+#     but are validated regardless
+#   size — payload byte count, only coded when has_size is nonzero;
+#     range-checked by dr_leb128_write (DR_ERR_BAD_LEB128 outside
+#     [0, 0xFFFFFFFF])
+# A misaligned writer faults sticky DR_ERR_BOUNDS (OBUs are byte
+# entities). Returns DR_OK / sticky error code.
+fn av1_obu_write_header(bw, type, ext, tid, sid, has_size, size): i64 {
+    var e = dr_bw_err(bw);
+    if (e != DR_OK) { return e; }
+    if (dr_bw_bit_pos(bw) & 7) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    if ((type < 0) || (type > 15)) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    if ((tid < 0) || (tid > 7)) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    if ((sid < 0) || (sid > 3)) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    var e1 = 0;
+    if (ext != 0) { e1 = 1; }
+    var h1 = 0;
+    if (has_size != 0) { h1 = 1; }
+    # 5.3.2 obu_header()
+    dr_bw_put_bit(bw, 0);            # obu_forbidden_bit  = 0 (6.2.2)
+    dr_bw_put_bits(bw, type, 4);     # obu_type
+    dr_bw_put_bit(bw, e1);           # obu_extension_flag
+    dr_bw_put_bit(bw, h1);           # obu_has_size_field
+    dr_bw_put_bit(bw, 0);            # obu_reserved_1bit  = 0 (6.2.2)
+    if (e1) {
+        # 5.3.3 obu_extension_header()
+        dr_bw_put_bits(bw, tid, 3);  # temporal_id
+        dr_bw_put_bits(bw, sid, 2);  # spatial_id
+        dr_bw_put_bits(bw, 0, 3);    # extension_header_reserved_3bits = 0 (6.2.3)
+    }
+    if (h1) {
+        # 5.3.1 obu_size leb128() — writer is byte-aligned here.
+        var rc = dr_leb128_write(bw, size);
+        if (rc != DR_OK) { return rc; }
+    }
+    return dr_bw_err(bw);
+}

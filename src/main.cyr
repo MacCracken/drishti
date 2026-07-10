@@ -1,0 +1,54 @@
+# drishti — library module. Re-exported via dist/drishti.cyr (cyrius distlib).
+# Add domain modules below or in sibling files; programs/smoke.cyr proves
+# the include chain compiles end-to-end.
+#
+# drishti (दृष्टि — sight/vision) — sovereign video codecs for AGNOS.
+# ONE repo, codec families as flat [lib] modules (the shravan model):
+# AV1 / H.264 / H.265 / VP8-VP9 land as src/av1_*.cyr, src/h264_*.cyr,
+# src/h265_*.cyr, src/vp8_*.cyr + src/vp9_*.cyr (+ shared src/vpx_*.cyr)
+# siblings of the core below.
+#
+# Stdlib is NOT included here — `cyrius build` / `cyrius test` auto-
+# resolve [deps].stdlib from cyrius.cyml and prepend it. Domain modules
+# are FLAT (no includes inside them); this file is the single place the
+# include chain is wired, which is what lets `cyrius distlib` emit a
+# compile-clean dist/drishti.cyr.
+#
+# RULES for codec-family agents adding modules:
+#   1. Keep modules flat — no include lines inside src/<family>_*.cyr.
+#   2. Append includes here in dependency order (core first, then your
+#      family's leaf-to-root order), and mirror the same order in
+#      cyrius.cyml [lib].modules.
+#   3. Prefix EVERY symbol (public + helpers) with your family prefix
+#      (core dr_ / av1_ / h264_ / h265_ / vbool_ / vp8_ / vp9_) —
+#      cyrius has no module-private scoping; duplicate names silently
+#      shadow (last-def-wins, warn-only).
+#   4. Error codes: reuse core DR_ERR_* for generic faults; mint family
+#      codes only inside your reserved band (see src/drishti.cyr).
+
+# ================================================================
+# drishti core — dependency order:
+#   drishti.cyr — dep-free root (errors, version, sniff)
+#   bits.cyr    — bit I/O + VLCs; uses drishti.cyr's DR_ERR_* codes
+#   ivf.cyr     — IVF container; uses drishti.cyr + bits.cyr helpers
+# ================================================================
+include "src/drishti.cyr"
+include "src/bits.cyr"
+include "src/ivf.cyr"
+
+# ================================================================
+# Codec families (flat modules, leaf-to-root within each family):
+#   AV1     — OBU framing, then the sequence header built on it
+#   H.264   — Annex-B/NAL/EPB layer, then SPS/PPS built on it
+#   H.265   — Annex-B/2-byte-NAL layer, then PTL + VPS/SPS/PPS
+#   VP8/VP9 — the shared boolean coder, then per-codec frame headers
+# ================================================================
+include "src/av1_obu.cyr"
+include "src/av1_seq.cyr"
+include "src/h264_nal.cyr"
+include "src/h264_ps.cyr"
+include "src/h265_nal.cyr"
+include "src/h265_ps.cyr"
+include "src/vpx_bool.cyr"
+include "src/vp8.cyr"
+include "src/vp9.cyr"

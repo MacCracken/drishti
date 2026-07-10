@@ -1,0 +1,178 @@
+# tests/drishti.tcyr — drishti core suite: DrErr record, error codes,
+# drishti_version, dr_sniff / dr_sniff_fourcc vectors.
+#
+# Include pattern (established empirically at pin 6.4.43): `cyrius test`
+# auto-includes ONLY [deps].stdlib from cyrius.cyml — [lib] modules are
+# NOT auto-included, so every suite explicitly includes the lib root.
+# Includes are deduped by path, so also including an individual module
+# a suite exercises is harmless.
+include "src/main.cyr"
+
+# ================================================================
+# Error code constants — distinct, and the family bands stay clear
+# ================================================================
+fn test_error_codes() {
+    assert_eq(DR_OK, 0, "DR_OK is 0");
+    assert_eq(DR_ERR_TRUNCATED, 1, "truncated = 1");
+    assert_eq(DR_ERR_BOUNDS, 2, "bounds = 2");
+    assert_eq(DR_ERR_FORBIDDEN_BIT, 3, "forbidden_bit = 3");
+    assert_eq(DR_ERR_BAD_LEB128, 4, "bad_leb128 = 4");
+    assert_eq(DR_ERR_BAD_VLC, 5, "bad_vlc = 5");
+    assert_eq(DR_ERR_BAD_HEADER, 6, "bad_header = 6");
+    assert_eq(DR_ERR_UNSUPPORTED, 7, "unsupported = 7");
+    assert_eq(DR_ERR_OVERSIZE, 8, "oversize = 8");
+    assert_eq(DR_ERR_OOM, 9, "oom = 9");
+    assert_eq(DR_ERR_OTHER, 99, "other = 99");
+    # All core codes live below the family bands (10-89).
+    assert(DR_ERR_OOM < 10, "core codes below family bands");
+    return 0;
+}
+
+# ================================================================
+# DrErr record — 16 bytes {code, detail-ptr}, chitra ChitraErr pattern
+# ================================================================
+fn test_dr_err_new() {
+    var e = dr_err_new(DR_ERR_BAD_HEADER, "ivf magic mismatch");
+    assert(e != 0, "dr_err_new allocates");
+    assert_eq(dr_err_code(e), DR_ERR_BAD_HEADER, "code stored at +0");
+    var d = dr_err_detail(e);
+    assert(d != 0, "detail stored at +8");
+    assert_eq(strlen(d), 18, "detail string length");
+    return 0;
+}
+
+fn test_dr_err_no_detail() {
+    var e = dr_err(DR_ERR_TRUNCATED);
+    assert(e != 0, "dr_err allocates");
+    assert_eq(dr_err_code(e), DR_ERR_TRUNCATED, "code stored");
+    assert_eq(dr_err_detail(e), 0, "no detail -> 0");
+    return 0;
+}
+
+# ================================================================
+# dr_err_name — core names, family-band fallbacks, unknown fallback
+# ================================================================
+fn test_dr_err_name() {
+    assert(streq(dr_err_name(DR_OK), "ok"), "ok name");
+    assert(streq(dr_err_name(DR_ERR_TRUNCATED), "truncated input"), "truncated name");
+    assert(streq(dr_err_name(DR_ERR_BAD_LEB128), "bad leb128"), "leb128 name");
+    assert(streq(dr_err_name(DR_ERR_OVERSIZE), "oversize field"), "oversize name");
+    # Family bands map to per-family fallbacks.
+    assert(streq(dr_err_name(10), "AV1 error"), "AV1 band low");
+    assert(streq(dr_err_name(29), "AV1 error"), "AV1 band high");
+    assert(streq(dr_err_name(30), "H.264 error"), "H.264 band low");
+    assert(streq(dr_err_name(50), "H.265 error"), "H.265 band low");
+    assert(streq(dr_err_name(89), "VP8/VP9 error"), "VPX band high");
+    # Unknown code -> non-null fallback, never a null deref.
+    assert(streq(dr_err_name(12345), "unknown error"), "unknown fallback");
+    assert(streq(dr_err_name(98), "unknown error"), "reserved band unknown");
+    return 0;
+}
+
+# ================================================================
+# drishti_version() — MAJOR*10000 + MINOR*100 + PATCH
+# ================================================================
+fn test_drishti_version() {
+    assert_eq(drishti_version(), 100, "version 0.1.0 packs to 100");
+    return 0;
+}
+
+# ================================================================
+# dr_sniff — IVF magic
+# ================================================================
+fn test_sniff_ivf() {
+    # Minimal 12-byte IVF prefix: "DKIF" + version 0 + hdrsize 32 + "AV01".
+    var b = alloc(12);
+    store8(b, 0x44); store8(b + 1, 0x4B); store8(b + 2, 0x49); store8(b + 3, 0x46);  # "DKIF"
+    store8(b + 4, 0); store8(b + 5, 0);      # version 0 (LE u16)
+    store8(b + 6, 32); store8(b + 7, 0);     # header size 32 (LE u16)
+    store8(b + 8, 0x41); store8(b + 9, 0x56); store8(b + 10, 0x30); store8(b + 11, 0x31);  # "AV01"
+    assert_eq(dr_sniff(b, 12), DR_SNIFF_IVF, "DKIF -> IVF");
+    assert_eq(dr_sniff_fourcc(b, 12), DR_FOURCC_AV01, "fourcc AV01");
+    # VP80 fourcc.
+    store8(b + 8, 0x56); store8(b + 9, 0x50); store8(b + 10, 0x38); store8(b + 11, 0x30);  # "VP80"
+    assert_eq(dr_sniff_fourcc(b, 12), DR_FOURCC_VP80, "fourcc VP80");
+    # VP90 fourcc.
+    store8(b + 10, 0x39);                    # "VP80" -> "VP90"
+    assert_eq(dr_sniff_fourcc(b, 12), DR_FOURCC_VP90, "fourcc VP90");
+    # Magic alone (4 bytes) sniffs IVF but is too short for a fourcc.
+    assert_eq(dr_sniff(b, 4), DR_SNIFF_IVF, "4-byte DKIF sniffs IVF");
+    assert_eq(dr_sniff_fourcc(b, 4), 0, "no fourcc under 12 bytes");
+    # 11 bytes: fourcc field incomplete -> 0, no OOB read.
+    assert_eq(dr_sniff_fourcc(b, 11), 0, "no fourcc at 11 bytes");
+    return 0;
+}
+
+# ================================================================
+# dr_sniff — Annex-B start codes (H.264/H.265 Annex B byte streams)
+# ================================================================
+fn test_sniff_annexb() {
+    var b = alloc(8);
+    # 4-byte start code 00 00 00 01 + NAL-ish byte.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 1);
+    store8(b + 4, 0x67);   # SPS NAL header byte (decor — sniff ignores it)
+    assert_eq(dr_sniff(b, 5), DR_SNIFF_ANNEXB, "00 00 00 01 -> Annex-B");
+    # 3-byte start code 00 00 01.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 1); store8(b + 3, 0x67);
+    assert_eq(dr_sniff(b, 4), DR_SNIFF_ANNEXB, "00 00 01 -> Annex-B");
+    assert_eq(dr_sniff(b, 3), DR_SNIFF_ANNEXB, "exactly 3 bytes 00 00 01");
+    return 0;
+}
+
+# ================================================================
+# dr_sniff — rejections (short, near-miss, garbage)
+# ================================================================
+fn test_sniff_unknown() {
+    var b = alloc(8);
+    # Empty / tiny buffers.
+    assert_eq(dr_sniff(b, 0), DR_SNIFF_UNKNOWN, "len 0 -> unknown");
+    store8(b, 0); store8(b + 1, 0);
+    assert_eq(dr_sniff(b, 2), DR_SNIFF_UNKNOWN, "00 00 (2 bytes) -> unknown");
+    # 00 00 02 — near-miss start code.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 2); store8(b + 3, 1);
+    assert_eq(dr_sniff(b, 4), DR_SNIFF_UNKNOWN, "00 00 02 -> unknown");
+    # Truncated magic "DKI".
+    store8(b, 0x44); store8(b + 1, 0x4B); store8(b + 2, 0x49);
+    assert_eq(dr_sniff(b, 3), DR_SNIFF_UNKNOWN, "DKI (3 bytes) -> unknown");
+    # Wrong last magic byte "DKIx".
+    store8(b + 3, 0x78);
+    assert_eq(dr_sniff(b, 4), DR_SNIFF_UNKNOWN, "DKIx -> unknown");
+    # Plain garbage.
+    store8(b, 0xDE); store8(b + 1, 0xAD); store8(b + 2, 0xBE); store8(b + 3, 0xEF);
+    assert_eq(dr_sniff(b, 4), DR_SNIFF_UNKNOWN, "garbage -> unknown");
+    return 0;
+}
+
+# ================================================================
+# FourCC constants — spot-check the LE packing math
+# ================================================================
+fn test_fourcc_constants() {
+    # "DKIF" = 'D'(0x44) | 'K'(0x4B)<<8 | 'I'(0x49)<<16 | 'F'(0x46)<<24.
+    assert_eq(DR_FOURCC_DKIF, 0x46494B44, "DKIF packs LE");
+    assert_eq(DR_FOURCC_AV01, 0x31305641, "AV01 packs LE");
+    assert_eq(DR_FOURCC_VP80, 0x30385056, "VP80 packs LE");
+    assert_eq(DR_FOURCC_VP90, 0x30395056, "VP90 packs LE");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("error codes");
+    test_error_codes();
+    test_group("DrErr record");
+    test_dr_err_new();
+    test_dr_err_no_detail();
+    test_group("dr_err_name");
+    test_dr_err_name();
+    test_group("version");
+    test_drishti_version();
+    test_group("sniff");
+    test_sniff_ivf();
+    test_sniff_annexb();
+    test_sniff_unknown();
+    test_fourcc_constants();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

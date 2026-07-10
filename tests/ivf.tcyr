@@ -1,0 +1,290 @@
+# tests/ivf.tcyr — IVF container suite: hand-built header + frame
+# vectors, reader iteration, truncation/bomb rejection, writer
+# round-trip. Field layout cross-checked against the multimedia.cx
+# IVF page and libvpx ivfenc.c/ivfdec.c (see src/ivf.cyr header).
+#
+# Suites explicitly include the lib root: `cyrius test` auto-includes
+# stdlib only, never [lib] modules (verified at pin 6.4.43).
+include "src/main.cyr"
+
+# Build a valid IVF file by hand: 32-byte header + 2 frames.
+#   header: "DKIF", v0, hdrsize 32, "VP80", 176x144, tb 30000/1001
+#           (den=30000 at 16, num=1001 at 20), frame count 2
+#   frame 0: size 3, pts 0, payload AA BB CC
+#   frame 1: size 1, pts 1, payload DD
+# Total: 32 + 12 + 3 + 12 + 1 = 60 bytes. Returns the buffer; length
+# stored at *out_len.
+fn fx_ivf_two_frames(out_len): i64 {
+    var b = alloc(60);
+    store8(b, 0x44); store8(b + 1, 0x4B); store8(b + 2, 0x49); store8(b + 3, 0x46);  # "DKIF"
+    dr_wr_le16(b + 4, 0);        # version 0
+    dr_wr_le16(b + 6, 32);       # header size 32
+    dr_wr_le32(b + 8, DR_FOURCC_VP80);   # fourcc "VP80"
+    dr_wr_le16(b + 12, 176);     # width
+    dr_wr_le16(b + 14, 144);     # height
+    dr_wr_le32(b + 16, 30000);   # timebase denominator (rate)
+    dr_wr_le32(b + 20, 1001);    # timebase numerator (scale)
+    dr_wr_le32(b + 24, 2);       # frame count
+    dr_wr_le32(b + 28, 0);       # unused
+    # frame 0 header + payload
+    dr_wr_le32(b + 32, 3);       # payload size 3
+    dr_wr_le64(b + 36, 0);       # pts 0
+    store8(b + 44, 0xAA); store8(b + 45, 0xBB); store8(b + 46, 0xCC);
+    # frame 1 header + payload
+    dr_wr_le32(b + 47, 1);       # payload size 1
+    dr_wr_le64(b + 51, 1);       # pts 1
+    store8(b + 59, 0xDD);
+    store64(out_len, 60);
+    return b;
+}
+
+# ================================================================
+# Header parse + accessors
+# ================================================================
+fn test_ivf_parse_header() {
+    var len = 0;
+    var b = fx_ivf_two_frames(&len);
+    var e = 0;
+    var h = dr_ivf_parse_header(b, len, &e);
+    assert(h != 0, "valid header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(dr_ivf_hdr_fourcc(h), DR_FOURCC_VP80, "fourcc");
+    assert_eq(dr_ivf_hdr_width(h), 176, "width");
+    assert_eq(dr_ivf_hdr_height(h), 144, "height");
+    assert_eq(dr_ivf_hdr_tb_num(h), 1001, "timebase num (scale, bytes 20-23)");
+    assert_eq(dr_ivf_hdr_tb_den(h), 30000, "timebase den (rate, bytes 16-19)");
+    assert_eq(dr_ivf_hdr_frame_count(h), 2, "advisory frame count");
+    assert_eq(dr_ivf_hdr_size(h), 32, "header size");
+    assert_eq(dr_ivf_hdr_version(h), 0, "version");
+    return 0;
+}
+
+# ================================================================
+# Header rejection — truncation, magic, version, hdr_size
+# ================================================================
+fn test_ivf_header_reject() {
+    var len = 0;
+    var b = fx_ivf_two_frames(&len);
+    var e = 0;
+    # 31 bytes: one short of a header.
+    assert_eq(dr_ivf_parse_header(b, 31, &e), 0, "31 bytes rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "31 bytes -> truncated");
+    # Empty.
+    assert_eq(dr_ivf_parse_header(b, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    # Bad magic.
+    var save = load8(b);
+    store8(b, 0x58);   # 'X'
+    assert_eq(dr_ivf_parse_header(b, len, &e), 0, "bad magic rejected");
+    assert_eq(e, DR_ERR_BAD_HEADER, "bad magic -> bad_header");
+    store8(b, save);
+    # Version 1 (only version 0 exists).
+    dr_wr_le16(b + 4, 1);
+    assert_eq(dr_ivf_parse_header(b, len, &e), 0, "version 1 rejected");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "version 1 -> unsupported");
+    dr_wr_le16(b + 4, 0);
+    # hdr_size 16 < 32.
+    dr_wr_le16(b + 6, 16);
+    assert_eq(dr_ivf_parse_header(b, len, &e), 0, "hdr_size 16 rejected");
+    assert_eq(e, DR_ERR_BAD_HEADER, "hdr_size < 32 -> bad_header");
+    # hdr_size 4096 > len: the header claims more bytes than exist.
+    dr_wr_le16(b + 6, 4096);
+    assert_eq(dr_ivf_parse_header(b, len, &e), 0, "hdr_size > len rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "hdr_size > len -> truncated");
+    dr_wr_le16(b + 6, 32);
+    return 0;
+}
+
+# ================================================================
+# Reader — frame iteration to clean end
+# ================================================================
+fn test_ivf_read_frames() {
+    var len = 0;
+    var b = fx_ivf_two_frames(&len);
+    var e = 0;
+    var r = dr_ivf_reader_init(b, len, &e);
+    assert(r != 0, "reader inits");
+    assert_eq(dr_ivf_reader_pos(r), 32, "cursor after header");
+    assert_eq(dr_ivf_hdr_fourcc(dr_ivf_reader_hdr(r)), DR_FOURCC_VP80,
+    "hdr reachable from reader");
+    var p = 0; var sz = 0; var pts = 0;
+    # Frame 0.
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "frame 0 reads");
+    assert_eq(sz, 3, "frame 0 size");
+    assert_eq(pts, 0, "frame 0 pts");
+    assert_eq(p, b + 44, "frame 0 payload is zero-copy into buf");
+    assert_eq(load8(p), 0xAA, "frame 0 byte 0");
+    assert_eq(load8(p + 2), 0xCC, "frame 0 byte 2");
+    # Frame 1.
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "frame 1 reads");
+    assert_eq(sz, 1, "frame 1 size");
+    assert_eq(pts, 1, "frame 1 pts");
+    assert_eq(load8(p), 0xDD, "frame 1 payload");
+    # Clean end.
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_IVF_END, "end -> DR_IVF_END");
+    assert_eq(dr_ivf_reader_err(r), DR_OK, "clean end is not an error");
+    # End is repeatable.
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_IVF_END, "end repeats");
+    return 0;
+}
+
+# ================================================================
+# Reader — truncation + bomb rejection
+# ================================================================
+fn test_ivf_read_reject() {
+    var len = 0;
+    var e = 0;
+    var p = 0; var sz = 0; var pts = 0;
+    # Trailing garbage shorter than a frame header: 32 + 5 bytes.
+    var b = fx_ivf_two_frames(&len);
+    var r = dr_ivf_reader_init(b, 37, &e);
+    assert(r != 0, "37-byte file inits (header ok)");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
+    "5 trailing bytes < 12 -> truncated");
+    assert_eq(dr_ivf_reader_err(r), DR_ERR_TRUNCATED, "reader fault sticky");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
+    "sticky on repeat");
+    # Lying size: frame 0 claims 100 bytes, only 16 remain after its header.
+    b = fx_ivf_two_frames(&len);
+    dr_wr_le32(b + 32, 100);
+    r = dr_ivf_reader_init(b, len, &e);
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
+    "lying size -> truncated");
+    # Exact-fit boundary: frame 1 claims 2 bytes, 1 remains.
+    b = fx_ivf_two_frames(&len);
+    dr_wr_le32(b + 47, 2);
+    r = dr_ivf_reader_init(b, len, &e);
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "frame 0 still fine");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
+    "one-over size -> truncated");
+    # Bomb: size field 0x20000000 (512 MiB) > DR_IVF_MAX_FRAME.
+    b = fx_ivf_two_frames(&len);
+    dr_wr_le32(b + 32, 0x20000000);
+    r = dr_ivf_reader_init(b, len, &e);
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_OVERSIZE,
+    "512 MiB frame -> oversize");
+    # Zero-size frame is legal (e.g. dropped frame): still iterates.
+    b = fx_ivf_two_frames(&len);
+    dr_wr_le32(b + 47, 0);
+    r = dr_ivf_reader_init(b, 59, &e);   # 60 - 1: drop the now-orphan payload byte
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "frame 0 ok");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "zero-size frame ok");
+    assert_eq(sz, 0, "zero size reported");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_IVF_END, "then clean end");
+    return 0;
+}
+
+# ================================================================
+# Writer — write then read back (round-trip)
+# ================================================================
+fn test_ivf_write_read_roundtrip() {
+    var w = dr_ivf_writer_init(DR_FOURCC_AV01, 640, 360, 1, 30);
+    assert(w != 0, "writer inits");
+    assert_eq(dr_ivf_writer_len(w), 32, "header written");
+    assert_eq(dr_ivf_writer_frames(w), 0, "no frames yet");
+    # Two payloads.
+    var f0 = alloc(4);
+    store8(f0, 1); store8(f0 + 1, 2); store8(f0 + 2, 3); store8(f0 + 3, 4);
+    var f1 = alloc(2);
+    store8(f1, 9); store8(f1 + 1, 8);
+    assert_eq(dr_ivf_write_frame(w, f0, 4, 0), DR_OK, "frame 0 written");
+    assert_eq(dr_ivf_write_frame(w, f1, 2, 3003), DR_OK, "frame 1 written");
+    assert_eq(dr_ivf_writer_frames(w), 2, "2 frames counted");
+    assert_eq(dr_ivf_writer_len(w), 62, "32 + 16 + 14 bytes");
+    var flen = 0;
+    var fbuf = dr_ivf_writer_finish(w, &flen);
+    assert(fbuf != 0, "finish returns buffer");
+    assert_eq(flen, 62, "finish length");
+    # Sniff agrees.
+    assert_eq(dr_sniff(fbuf, flen), DR_SNIFF_IVF, "written file sniffs IVF");
+    assert_eq(dr_sniff_fourcc(fbuf, flen), DR_FOURCC_AV01, "sniff fourcc");
+    # Read back and compare every field.
+    var e = 0;
+    var r = dr_ivf_reader_init(fbuf, flen, &e);
+    assert(r != 0, "written file parses");
+    var h = dr_ivf_reader_hdr(r);
+    assert_eq(dr_ivf_hdr_fourcc(h), DR_FOURCC_AV01, "rt fourcc");
+    assert_eq(dr_ivf_hdr_width(h), 640, "rt width");
+    assert_eq(dr_ivf_hdr_height(h), 360, "rt height");
+    assert_eq(dr_ivf_hdr_tb_num(h), 1, "rt tb num");
+    assert_eq(dr_ivf_hdr_tb_den(h), 30, "rt tb den");
+    assert_eq(dr_ivf_hdr_frame_count(h), 2, "rt frame count patched");
+    var p = 0; var sz = 0; var pts = 0;
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "rt frame 0");
+    assert_eq(sz, 4, "rt frame 0 size");
+    assert_eq(pts, 0, "rt frame 0 pts");
+    assert_eq(load8(p), 1, "rt frame 0 byte 0");
+    assert_eq(load8(p + 3), 4, "rt frame 0 byte 3");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "rt frame 1");
+    assert_eq(sz, 2, "rt frame 1 size");
+    assert_eq(pts, 3003, "rt frame 1 pts");
+    assert_eq(load8(p), 9, "rt frame 1 byte 0");
+    assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_IVF_END, "rt clean end");
+    return 0;
+}
+
+# ================================================================
+# Writer — growth across many frames + validation rejections
+# ================================================================
+fn test_ivf_writer_edges() {
+    # Field validation at init: width > u16.
+    assert_eq(dr_ivf_writer_init(DR_FOURCC_VP90, 70000, 100, 1, 30), 0,
+    "width > 65535 rejected");
+    assert_eq(dr_ivf_writer_init(DR_FOURCC_VP90, 100, -1, 1, 30), 0,
+    "negative height rejected");
+    assert_eq(dr_ivf_writer_init(DR_FOURCC_VP90, 100, 100, 0x100000000, 30), 0,
+    "tb_num > u32 rejected");
+    # Growth: 200 frames of 64 bytes blows well past the 1 KiB initial cap.
+    var w = dr_ivf_writer_init(DR_FOURCC_VP90, 320, 240, 1, 25);
+    var payload = alloc(64);
+    var i = 0;
+    while (i < 64) { store8(payload + i, i); i = i + 1; }
+    i = 0;
+    while (i < 200) {
+        assert_eq(dr_ivf_write_frame(w, payload, 64, i), DR_OK, "frame appends");
+        i = i + 1;
+    }
+    var flen = 0;
+    var fbuf = dr_ivf_writer_finish(w, &flen);
+    assert_eq(flen, 32 + (200 * 76), "200 frames of 64+12 bytes");
+    # Full re-read: every frame intact after growth.
+    var e = 0;
+    var r = dr_ivf_reader_init(fbuf, flen, &e);
+    assert_eq(dr_ivf_hdr_frame_count(dr_ivf_reader_hdr(r)), 200, "count patched");
+    var p = 0; var sz = 0; var pts = 0;
+    var n = 0;
+    while (dr_ivf_next_frame(r, &p, &sz, &pts) == DR_OK) {
+        assert_eq(sz, 64, "frame size preserved");
+        assert_eq(pts, n, "pts preserved");
+        assert_eq(load8(p + 63), 63, "payload tail preserved");
+        n = n + 1;
+    }
+    assert_eq(n, 200, "all 200 frames read back");
+    assert_eq(dr_ivf_reader_err(r), DR_OK, "loop ended cleanly");
+    # Oversize frame rejected by the writer.
+    w = dr_ivf_writer_init(DR_FOURCC_VP90, 320, 240, 1, 25);
+    assert_eq(dr_ivf_write_frame(w, payload, 0x20000000, 0), DR_ERR_OVERSIZE,
+    "512 MiB write rejected");
+    assert_eq(dr_ivf_writer_err(w), DR_ERR_OVERSIZE, "writer fault sticky");
+    var flen2 = 0;
+    assert_eq(dr_ivf_writer_finish(w, &flen2), 0, "finish on faulted -> 0");
+    assert_eq(flen2, 0, "faulted finish length 0");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("ivf header");
+    test_ivf_parse_header();
+    test_ivf_header_reject();
+    test_group("ivf reader");
+    test_ivf_read_frames();
+    test_ivf_read_reject();
+    test_group("ivf writer");
+    test_ivf_write_read_roundtrip();
+    test_ivf_writer_edges();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,73 @@
+# drishti — Sources
+
+> Last Updated: 2026-07-10
+
+The citation index for drishti's algorithmic and domain content. AGNOS
+codec crates carry a sources file so every nontrivial parse/coding step
+is traceable to a spec or primary reference, and so a future maintainer
+can re-derive (or audit) any of it. Entries are grouped by module
+family. Discipline: the SPEC is the derivation; implementations are
+cross-checks — multiple of them, never a single source
+(redesign-don't-reinvent).
+
+## Core (`src/drishti.cyr`, `src/bits.cyr`, `src/ivf.cyr`)
+
+- **AV1 Bitstream & Decoding Process Specification** v1.0.0 w/ Errata 1
+  (AOMedia) — 4.10.3 uvlc(), 4.10.5 leb128() (the ≤8-byte / ≤32-bit
+  conformance bounds `dr_leb128_read` enforces).
+- **ITU-T Rec. H.264** — 9.1/9.1.1 ue(v)/se(v) exp-Golomb parsing
+  process (shared verbatim by H.265 9.2) — `dr_ue_read`/`dr_se_read`
+  and the writer inverses.
+- **IVF container** — the de-facto libvpx/AOM test-bench format
+  (32-byte `DKIF` header + 12-byte frame headers); layout cross-checked
+  against libvpx `ivfdec.c`/`ivfenc.c` and dav1d's `tools/input/ivf.c`.
+
+## AV1
+
+- **"AV1 Bitstream & Decoding Process Specification"** v1.0.0 with Errata 1, Alliance for Open Media, 2019 — authoritative. Sections used this cut (cited inline in the modules): 4.10.3 uvlc(), 4.10.5 leb128(), 5.3.1 open_bitstream_unit(), 5.3.2 obu_header(), 5.3.3 obu_extension_header(), 5.5.1 sequence_header_obu(), 5.5.2 color_config(), 5.5.3 timing_info(), 5.5.4 decoder_model_info(), 5.5.5 operating_parameters_info(), 6.2.2/6.2.3 OBU semantics (forbidden bit must be 0; reserved bits decoder-ignored), 6.4.1 sequence-header semantics (reserved profiles; reduced implies still).
+- **dav1d** (VideoLAN) — `src/obu.c` (`dav1d_parse_obus`, `parse_seq_hdr`) — decode cross-check: forbidden-bit rejection, reserved-bit tolerance, sequence-header field order and conditional branches.
+- **libaom** (AOMedia reference codec) — `av1/common/obu_util.c` (`aom_read_obu_header`), `av1/decoder/obu.c` (`read_sequence_header_obu`) — independent second cross-check of the same surfaces.
+- **rav1e** (Xiph) — encode-lane lineage; the 0.7.x encoder bring-up derives its structure from rav1e's keyframe path rather than libaom's.
+
+## H.264/AVC
+
+- **ITU-T Rec. H.264 — Advanced video coding for generic audiovisual services** — AUTHORITATIVE. Sections used: 7.3.1/7.4.1 + Table 7-1 (NAL unit syntax/semantics), 7.4.1.1 (emulation prevention encapsulation), Annex B B.1.1/B.1.2 (byte-stream format, zero_byte, leading/trailing_zero_8bits), 7.3.2.1.1/7.4.2.1.1 (SPS syntax/semantics, CropUnitX/Y, Table 6-1 SubWidthC/SubHeightC), 7.3.2.1.1.1/7.4.2.1.1.1 (scaling_list, delta_scale range), 7.3.2.2/7.4.2.2 (PPS), 9.1/9.1.1 (ue(v)/se(v) exp-Golomb).
+- **RFC 6184 — RTP Payload Format for H.264 Video** — §1.3 NAL header field recap; cross-check for header bit layout and type semantics.
+- **openh264** (Cisco) — `codec/decoder/core/src/au_parser.cpp` ParseSps/ParsePps and bit-reader EPB handling; primary decoder cross-check (the implementation drishti's H.264 family replaces).
+- **x264** — SPS/PPS serialization order (`encoder/set.c`); encode-side field-order cross-check.
+- **JM reference software** (ITU/ISO) — `ldecod` InterpretSPS/InterpretPPS; reference-decoder semantics cross-check.
+- **ffmpeg** — `libavcodec/h2645_parse.c`; start-code resync and 4-byte zero_byte attribution behavior cross-check.
+
+## H.265/HEVC
+
+- **ITU-T Rec. H.265 (HEVC)** — authoritative. Sections used at 0.1.x: 7.3.1.2 / 7.4.2.2 (two-byte NAL unit header semantics), Table 7-1 (nal_unit_type), Annex B B.2.2 (byte-stream NAL unit decoding), 7.3.1.1 / 7.4.2 (emulation_prevention_three_byte), 7.3.3 / 7.4.4 (profile_tier_level incl. the 43+1 reserved constraint tail), 7.3.2.1 / 7.4.3.1 (VPS), 7.3.2.2 / 7.4.3.2.1 (SPS + conformance-window crop math), 7.3.2.3 / 7.4.3.3.1 (PPS), Table 6-1 (SubWidthC / SubHeightC), A.4.1 / A.4.2 + Table A.8 (level limits — the dimension bomb guard).
+- **libde265** (`nal.cc`, `nal-parser.cc`, `vps.cc`, `sps.cc`, `pps.cc`) — cross-check for NAL header layout, EPB behavior (incl. trailing-EPB strip), and parameter-set field ordering. The library this family replaces.
+- **ffmpeg** (`libavcodec/h2645_parse.c`, `hevc_ps.c`, `hevc_parse.c`) — second cross-check for Annex-B scanning and PS parsing; drishti is deliberately stricter (rejects non-zero bytes before start codes instead of resyncing).
+- **HM reference model** — planned conformance-vector source for the 0.5.x battery (not yet consumed).
+- Real-stream sanity anchor: parameter-set headers pack to the canonical on-wire bytes `40 01` (VPS) / `42 01` (SPS) / `44 01` (PPS), asserted in the suite.
+
+## VP8/VP9
+
+- **RFC 6386 — "VP8 Data Format and Decoding Guide"** — authoritative
+  for VP8, and code-as-spec (it carries the reference implementation).
+  Sections used at 0.1.x: 7.1 (range-subdivision theory), 7.3
+  (bool_decoder / bool_encoder / read_literal / flush_bool_encoder /
+  add_one_to_output — ported verbatim, then bounds-hardened), 9.1
+  (uncompressed data chunk: frame tag, start code, dimensions), 9.2
+  (version number semantics, 0-3 defined), 9.x sign-magnitude coding
+  of signed header fields (e.g. 9.6 delta_q).
+- **"VP9 Bitstream & Decoding Process Specification"** v0.7
+  (Grange / de Rivaz / Hunt, Google) — authoritative for VP9. Sections
+  used: 6.2 uncompressed_header(), 6.2.1 frame_sync_code(), 6.2.2
+  color_config(), 6.2.3 frame_size(), 6.2.4 render_size(), 7.2 frame
+  type semantics, 7.2.2 color_space enumeration, 9.2 bool decoding
+  (identical coder to VP8's — one implementation serves both).
+- **libvpx** — `vp8/decoder/dboolhuff.h` (`vp8dx_decode_bool`),
+  `vp8/encoder/boolhuff.c` (`vp8_encode_bool`),
+  `vp9/decoder/vp9_decodeframe.c` (`read_uncompressed_header`,
+  `read_bitdepth_colorspace_sampling`) — cross-check for the coder
+  arithmetic, carry propagation, and the VP9 header rejection set
+  ("4:4:4 color not supported in profile 0 or 2"). The library this
+  family replaces.
+- **ffmpeg** — `libavcodec/vp8.c` / `vp9.c` header parsers — second
+  cross-check of field order and the profile bit split.

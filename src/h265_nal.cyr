@@ -1,0 +1,304 @@
+# @public — drishti H.265/HEVC NAL layer: Annex-B byte-stream scan,
+# two-byte NAL unit header parse, emulation-prevention (EPB) strip.
+# DECODE-ONLY charter (replaces libde265) — no writers in this family.
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_* codes) only. Every symbol carries the h265_
+# prefix (Cyrius has no module-private scoping).
+#
+# Derived from ITU-T Rec. H.265 (section numbers cited inline);
+# cross-checked against libde265 (nal.cc / nal-parser.cc) and ffmpeg
+# (libavcodec/hevc_parse.c, h2645_parse.c).
+#
+# Spec map:
+#   7.3.1.2 nal_unit_header()      — two-byte header layout
+#   7.4.2.2 header semantics       — forbidden_zero_bit == 0,
+#                                    nuh_temporal_id_plus1 != 0
+#   Table 7-1                      — nal_unit_type codes
+#   7.3.1.1 / 7.4.2                — emulation_prevention_three_byte
+#   Annex B (B.2.2)                — byte-stream NAL unit decoding
+
+# ================================================================
+# H.265 family error band: 50-69 (see src/drishti.cyr). Generic
+# faults (truncation, bounds, OOM, forbidden bit, bad VLC) reuse the
+# core DR_ERR_* codes; only codec-specific failures are minted here.
+# ================================================================
+enum H265Err {
+    # nuh_temporal_id_plus1 == 0 — spec 7.4.2.2: "nuh_temporal_id_plus1
+    # shall not be equal to 0" (TemporalId = nuh_temporal_id_plus1 - 1
+    # would underflow).
+    H265_ERR_TEMPORAL_ID0 = 50;
+    # A syntax element decoded outside its spec-mandated range
+    # (7.4.3.x "shall be in the range of ..." constraints).
+    H265_ERR_RANGE        = 51;
+}
+
+# ================================================================
+# nal_unit_type — spec Table 7-1. Types 0..31 are VCL, 32..63 non-VCL.
+# ================================================================
+enum H265NalType {
+    H265_NAL_TRAIL_N        = 0;    # non-TSA, non-STSA trailing, non-ref
+    H265_NAL_TRAIL_R        = 1;    # non-TSA, non-STSA trailing, ref
+    H265_NAL_TSA_N          = 2;    # temporal sub-layer access, non-ref
+    H265_NAL_TSA_R          = 3;    # temporal sub-layer access, ref
+    H265_NAL_STSA_N         = 4;    # step-wise TSA, non-ref
+    H265_NAL_STSA_R         = 5;    # step-wise TSA, ref
+    H265_NAL_RADL_N         = 6;    # random access decodable leading, non-ref
+    H265_NAL_RADL_R         = 7;    # random access decodable leading, ref
+    H265_NAL_RASL_N         = 8;    # random access skipped leading, non-ref
+    H265_NAL_RASL_R         = 9;    # random access skipped leading, ref
+    H265_NAL_BLA_W_LP       = 16;   # broken link access, with leading pics
+    H265_NAL_BLA_W_RADL     = 17;   # broken link access, with RADL
+    H265_NAL_BLA_N_LP       = 18;   # broken link access, no leading pics
+    H265_NAL_IDR_W_RADL     = 19;   # IDR, may have RADL pictures
+    H265_NAL_IDR_N_LP       = 20;   # IDR, no leading pictures
+    H265_NAL_CRA_NUT        = 21;   # clean random access
+    H265_NAL_RSV_IRAP_VCL22 = 22;   # reserved IRAP
+    H265_NAL_RSV_IRAP_VCL23 = 23;   # reserved IRAP
+    H265_NAL_VPS_NUT        = 32;   # video parameter set
+    H265_NAL_SPS_NUT        = 33;   # sequence parameter set
+    H265_NAL_PPS_NUT        = 34;   # picture parameter set
+    H265_NAL_AUD_NUT        = 35;   # access unit delimiter
+    H265_NAL_EOS_NUT        = 36;   # end of sequence
+    H265_NAL_EOB_NUT        = 37;   # end of bitstream
+    H265_NAL_FD_NUT         = 38;   # filler data
+    H265_NAL_PREFIX_SEI_NUT = 39;   # SEI, prefix
+    H265_NAL_SUFFIX_SEI_NUT = 40;   # SEI, suffix
+}
+
+# h265_ab_next result code: no more NAL units (clean end of stream).
+# Distinct from every DR_ERR_* (> 0) and from DR_OK (0). Module-global
+# var, not an enum member — cyrius enums reject negative literals
+# (same pattern as DR_IVF_END in src/ivf.cyr).
+var H265_AB_END = -1;
+
+# ================================================================
+# Family error names — the two minted band codes, falling through to
+# dr_err_name for everything else (core codes + band fallback).
+# ================================================================
+fn h265_err_name(code): i64 {
+    if (code == H265_ERR_TEMPORAL_ID0) { return "H.265: nuh_temporal_id_plus1 is zero"; }
+    if (code == H265_ERR_RANGE)        { return "H.265: syntax element out of range"; }
+    return dr_err_name(code);
+}
+
+# ================================================================
+# NAL unit type predicates — spec Table 7-1 classification.
+# ================================================================
+
+# VCL NAL unit: nal_unit_type in [0, 31] (Table 7-1).
+fn h265_nal_is_vcl(t): i64 {
+    if ((t >= 0) && (t <= 31)) { return 1; }
+    return 0;
+}
+
+# IRAP picture: nal_unit_type in [BLA_W_LP, RSV_IRAP_VCL23] = [16, 23]
+# (spec 3.73 / Table 7-1 note).
+fn h265_nal_is_irap(t): i64 {
+    if ((t >= H265_NAL_BLA_W_LP) && (t <= H265_NAL_RSV_IRAP_VCL23)) { return 1; }
+    return 0;
+}
+
+# IDR picture: IDR_W_RADL (19) or IDR_N_LP (20).
+fn h265_nal_is_idr(t): i64 {
+    if ((t == H265_NAL_IDR_W_RADL) || (t == H265_NAL_IDR_N_LP)) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# nal_unit_header() — spec 7.3.1.2, TWO bytes:
+#
+#   forbidden_zero_bit        f(1)   — shall be 0 (7.4.2.2)
+#   nal_unit_type             u(6)
+#   nuh_layer_id              u(6)
+#   nuh_temporal_id_plus1     u(3)   — shall NOT be 0 (7.4.2.2)
+#
+# Bit layout across the two bytes (MSB-first):
+#   byte0: F TTTTTT L      (F = forbidden, T = type, L = layer_id bit 5)
+#   byte1: LLLLL III       (L = layer_id bits 4..0, I = tid_plus1)
+# ================================================================
+
+# Parse the two-byte NAL unit header at buf[0..len). On DR_OK stores
+# nal_unit_type at *out_type, nuh_layer_id at *out_layer, and the
+# DERIVED TemporalId (nuh_temporal_id_plus1 - 1, spec 7.4.2.2) at
+# *out_tid. Errors (outputs untouched):
+#   DR_ERR_TRUNCATED      — len < 2
+#   DR_ERR_FORBIDDEN_BIT  — forbidden_zero_bit set
+#   H265_ERR_TEMPORAL_ID0 — nuh_temporal_id_plus1 == 0
+fn h265_nal_hdr_parse(buf, len, out_type, out_layer, out_tid): i64 {
+    if (len < 2) { return DR_ERR_TRUNCATED; }
+    var b0 = load8(buf);
+    var b1 = load8(buf + 1);
+    # forbidden_zero_bit — byte0 bit 7 (7.4.2.2: shall be 0).
+    if (b0 & 0x80) { return DR_ERR_FORBIDDEN_BIT; }
+    # nuh_temporal_id_plus1 — byte1 bits 2..0 (7.4.2.2: shall not be 0).
+    var tid_plus1 = b1 & 7;
+    if (tid_plus1 == 0) { return H265_ERR_TEMPORAL_ID0; }
+    # nal_unit_type — byte0 bits 6..1.
+    store64(out_type, (b0 >> 1) & 0x3F);
+    # nuh_layer_id — byte0 bit 0 (MSB) then byte1 bits 7..3.
+    store64(out_layer, ((b0 & 1) << 5) + (b1 >> 3));
+    store64(out_tid, tid_plus1 - 1);
+    return DR_OK;
+}
+
+# ================================================================
+# Annex-B byte-stream scanner — spec B.2.2 decoding process.
+#
+# A byte-stream NAL unit is: leading_zero_8bits* (0x00 only),
+# [zero_byte] start_code_prefix_one_3bytes (00 00 01), nal_unit(),
+# trailing_zero_8bits* (0x00 only). Per B.2.2 step 3 the NAL unit
+# extends up to (not including) the next byte-aligned three-byte
+# sequence equal to 00 00 00 or 00 00 01, or the end of the stream —
+# this single rule handles 3-byte codes, 4-byte codes (zero_byte +
+# prefix) and trailing zeros uniformly, and is why the scanner never
+# needs to trim trailing bytes.
+#
+# Strictness: only 0x00 bytes may precede a start code (B.2.2 step 1 +
+# leading_zero_8bits semantics "equal to 0x00"). A non-zero byte where
+# a start code prefix is required is DR_ERR_BAD_HEADER (sticky).
+# libde265/ffmpeg resync instead; drishti rejects — adversarial input
+# gets a clean error, not a guess.
+#
+# H265AbScan layout (32 bytes, heap):
+#   +0:  buf — byte-stream buffer (BORROWED, caller keeps it alive)
+#   +8:  len — buffer length in bytes
+#   +16: pos — byte cursor (start of the not-yet-consumed region)
+#   +24: err — sticky error code (DR_OK until first fault)
+# ================================================================
+
+# Create an Annex-B scanner over buf[0..len). Returns the handle, or
+# 0 on negative len / allocation failure.
+fn h265_ab_init(buf, len): i64 {
+    if (len < 0) { return 0; }
+    var sc = alloc(32);
+    if (sc == 0) { return 0; }
+    store64(sc, buf);
+    store64(sc + 8, len);
+    store64(sc + 16, 0);
+    store64(sc + 24, DR_OK);
+    return sc;
+}
+
+# Sticky error code (DR_OK if the scanner has never faulted).
+fn h265_ab_err(sc): i64 {
+    return load64(sc + 24);
+}
+
+# Byte cursor position (start of the unconsumed region).
+fn h265_ab_pos(sc): i64 {
+    return load64(sc + 16);
+}
+
+# Advance to the next NAL unit. On DR_OK stores a ZERO-COPY pointer to
+# the NAL's first byte (its header byte, PAST the start code) at
+# *out_nal and the NAL length in bytes at *out_size. Returns:
+#   DR_OK             — NAL found (size may be 0 for a degenerate
+#                       start-code-then-boundary stream; the header
+#                       parse rejects it as DR_ERR_TRUNCATED)
+#   H265_AB_END (-1)  — clean end of stream (only zeros / nothing
+#                       left); repeatable, not sticky
+#   DR_ERR_BAD_HEADER — sticky: non-zero byte where a start code
+#                       prefix is required, or a lone 01 with fewer
+#                       than two zero bytes before it (B.2.2)
+fn h265_ab_next(sc, out_nal, out_size): i64 {
+    var e = load64(sc + 24);
+    if (e != DR_OK) { return e; }
+    var buf = load64(sc);
+    var len = load64(sc + 8);
+    var pos = load64(sc + 16);
+    # --- B.2.2 step 1: consume leading/trailing zero bytes up to the
+    # start code. Find the first non-zero byte at or after pos.
+    var i = pos;
+    while ((i < len) && (load8(buf + i) == 0)) {
+        i = i + 1;
+    }
+    if (i >= len) {
+        # Nothing but zeros (or nothing at all) left: clean end.
+        return H265_AB_END;
+    }
+    # The non-zero byte must be the 0x01 of a start code prefix with at
+    # least two zero bytes in front of it (00 00 01; a third zero is
+    # the optional zero_byte / trailing zeros of the previous unit).
+    if (load8(buf + i) != 1) {
+        store64(sc + 24, DR_ERR_BAD_HEADER);
+        return DR_ERR_BAD_HEADER;
+    }
+    if ((i - pos) < 2) {
+        store64(sc + 24, DR_ERR_BAD_HEADER);
+        return DR_ERR_BAD_HEADER;
+    }
+    var start = i + 1;   # first byte of nal_unit()
+    # --- B.2.2 step 3: NumBytesInNalUnit = bytes up to the next
+    # byte-aligned 00 00 00 or 00 00 01, or end of stream.
+    var j = start;
+    var end = len;
+    while ((j + 2) < len) {
+        if ((load8(buf + j) == 0) && (load8(buf + j + 1) == 0)) {
+            var b2 = load8(buf + j + 2);
+            if ((b2 == 0) || (b2 == 1)) {
+                end = j;
+                break;
+            }
+        }
+        j = j + 1;
+    }
+    store64(out_nal, buf + start);
+    store64(out_size, end - start);
+    store64(sc + 16, end);
+    return DR_OK;
+}
+
+# ================================================================
+# EPB strip — RBSP extraction, spec 7.3.1.1 nal_unit():
+#
+#   for (i = 0; i < NumBytes; i++)
+#     if (i + 2 < NumBytes && next_bits(24) == 0x000003) {
+#       rbsp_byte; rbsp_byte;            // the two 0x00s
+#       i += 2;
+#       emulation_prevention_three_byte  // the 0x03, discarded
+#     } else
+#       rbsp_byte
+#
+# 7.4.2 constrains the encoder (00 00 03 must be followed by
+# 00/01/02/03; bare 00 00 00 / 00 00 01 / 00 00 02 never occur inside
+# a NAL). The DECODER algorithm above needs no such check — drishti
+# strips exactly per 7.3.1.1 and stays lenient on encoder-side
+# violations (matching libde265 and ffmpeg h2645_parse behavior).
+# ================================================================
+
+# Extract the RBSP from ebsp[0..size) — the NAL payload AFTER the
+# two-byte header (pass nal + 2, size - 2). Allocates a fresh buffer
+# (never larger than size + 1 bytes), stores its pointer at *out_rbsp
+# and the RBSP byte count at *out_size. Returns:
+#   DR_OK          — extracted (size 0 in -> empty RBSP out, valid ptr)
+#   DR_ERR_BOUNDS  — negative size
+#   DR_ERR_OOM     — allocation failure
+fn h265_rbsp_extract(ebsp, size, out_rbsp, out_size): i64 {
+    if (size < 0) { return DR_ERR_BOUNDS; }
+    # RBSP is never longer than the EBSP; +1 keeps alloc(0) out of play.
+    var rbsp = alloc(size + 1);
+    if (rbsp == 0) { return DR_ERR_OOM; }
+    var i = 0;
+    var n = 0;
+    while (i < size) {
+        # 7.3.1.1 window: bytes i, i+1, i+2 all inside the payload.
+        if ((i + 2) < size) {
+            if ((load8(ebsp + i) == 0) && (load8(ebsp + i + 1) == 0)
+            && (load8(ebsp + i + 2) == 3)) {
+                # Copy the two zeros, discard the 0x03 EPB.
+                store8(rbsp + n, 0);
+                store8(rbsp + n + 1, 0);
+                n = n + 2;
+                i = i + 3;
+                continue;
+            }
+        }
+        store8(rbsp + n, load8(ebsp + i));
+        n = n + 1;
+        i = i + 1;
+    }
+    store64(out_rbsp, rbsp);
+    store64(out_size, n);
+    return DR_OK;
+}

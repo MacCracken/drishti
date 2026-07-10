@@ -1,0 +1,59 @@
+# drishti smoke test — proves the library compiles end-to-end, the
+# stdlib include chain resolves, and every codec family is reachable:
+# one real operation per family (parse or round-trip), exit 0 only if
+# all five answer correctly. CI builds this to confirm no regression
+# in the dist bundle.
+#
+# Build: cyrius build programs/smoke.cyr build/drishti-smoke
+# Run:   ./build/drishti-smoke   (exit 0 on success)
+
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+    # core: version + a leb128 round-trip through writer and reader.
+    if (drishti_version() != 100) { return 1; }
+    var bw = dr_bw_init(16);
+    dr_leb128_write(bw, 300);
+    var blen = dr_bw_flush(bw);
+    var br = dr_br_init(dr_bw_buf(bw), blen);
+    var lv = 0;
+    if (dr_leb128_read(br, &lv) != DR_OK) { return 1; }
+    if (lv != 300) { return 1; }
+    # av1: parse the canonical 2-byte temporal-delimiter OBU (12 00).
+    var ob = alloc(2);
+    store8(ob, 0x12);
+    store8(ob + 1, 0x00);
+    var e = 0;
+    var obu = av1_obu_parse_header(ob, 2, &e);
+    if ((obu == 0) || (e != DR_OK)) { return 2; }
+    # h264: exp-Golomb ue round-trip through the core writer/reader.
+    var hw = dr_bw_init(16);
+    dr_ue_write(hw, 176);
+    var hlen = dr_bw_flush(hw);
+    var hr = dr_br_init(dr_bw_buf(hw), hlen);
+    var uv = 0;
+    if (dr_ue_read(hr, &uv) != DR_OK) { return 3; }
+    if (uv != 176) { return 3; }
+    # h265: parse a two-byte SPS_NUT NAL header (type 33): 0x42 0x01.
+    var nb = alloc(2);
+    store8(nb, 0x42);
+    store8(nb + 1, 0x01);
+    var ntype = 0;
+    var nlayer = 0;
+    var ntid = 0;
+    if (h265_nal_hdr_parse(nb, 2, &ntype, &nlayer, &ntid) != DR_OK) { return 4; }
+    if (ntype != 33) { return 4; }
+    # vpx: boolean-coder round-trip of a 4-bit literal.
+    var enc = vbool_enc_init(16);
+    vbool_enc_literal(enc, 5, 4);
+    var n = vbool_enc_flush(enc);
+    var dec = vbool_dec_init(vbool_enc_buf(enc), n);
+    if (vbool_dec_literal(dec, 4) != 5) { return 5; }
+    if (vbool_dec_err(dec) != DR_OK) { return 5; }
+    println("drishti smoke ok — core + av1 + h264 + h265 + vp8/vp9 answer");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

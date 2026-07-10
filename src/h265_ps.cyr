@@ -1,0 +1,601 @@
+# @public — drishti H.265/HEVC parameter sets: profile_tier_level,
+# minimal VPS, SPS through the sizing block (with computed display
+# dimensions), minimal PPS. DECODE-ONLY charter (replaces libde265).
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_*), src/bits.cyr (DrBr + dr_ue/dr_se), and
+# src/h265_nal.cyr (H265_ERR_* band codes). Every symbol carries the
+# h265_ prefix (Cyrius has no module-private scoping).
+#
+# All parse entry points take an RBSP buffer — the NAL payload AFTER
+# the two-byte header, with emulation-prevention bytes already
+# stripped (h265_nal_hdr_parse + h265_rbsp_extract feed this module).
+#
+# Derived from ITU-T Rec. H.265 (section numbers cited inline);
+# cross-checked against libde265 (vps.cc / sps.cc / pps.cc) and ffmpeg
+# (libavcodec/hevc_ps.c).
+#
+# Spec map:
+#   7.3.3    profile_tier_level()      7.4.4    its semantics
+#   7.3.2.1  video_parameter_set_rbsp  7.4.3.1  its semantics
+#   7.3.2.2  seq_parameter_set_rbsp    7.4.3.2.1 its semantics
+#   7.3.2.3  pic_parameter_set_rbsp    7.4.3.3.1 its semantics
+#   Table 6-1  SubWidthC / SubHeightC per chroma_format_idc
+#   A.4.1/A.4.2  level limits (dimension bomb guard)
+#
+# Reserved-vs-forbidden policy: RESERVED fields (the PTL 43+1 tail —
+# constraint flags for Annex-A extension profiles — vps_reserved_
+# 0xffff_16bits, reserved_zero_2bits) are CAPTURED, never rejected:
+# the spec directs decoders to ignore their values for forward
+# compatibility. Range constraints ("shall be in the range of ...")
+# ARE enforced: violations return H265_ERR_RANGE.
+
+enum H265Limits {
+    # Dimension bomb guard. A.4.2: pic_width/height_in_luma_samples
+    # <= Sqrt(MaxLumaPs * 8); Table A.8 level 6.2 MaxLumaPs =
+    # 35,651,584 -> Sqrt(35651584 * 8) = 16888. Nothing conforming to
+    # any Annex-A level exceeds it; larger values are rejected with
+    # DR_ERR_OVERSIZE before any dimension math happens.
+    H265_MAX_DIM = 16888;
+}
+
+# ================================================================
+# profile_tier_level — spec 7.3.3 (general block, profilePresentFlag):
+#
+#   general_profile_space                    u(2)
+#   general_tier_flag                        u(1)
+#   general_profile_idc                      u(5)
+#   general_profile_compatibility_flag[32]   u(1) each
+#   general_progressive_source_flag          u(1)
+#   general_interlaced_source_flag           u(1)
+#   general_non_packed_constraint_flag       u(1)
+#   general_frame_only_constraint_flag       u(1)
+#   43 bits — extension-profile constraint flags (max_12bit ... ) or
+#             general_reserved_zero_43bits, profile-dependent (7.4.4);
+#             captured raw, never validated
+#   1 bit  — general_inbld_flag or general_reserved_zero_bit (7.4.4)
+#   general_level_idc                        u(8)
+#   sub_layer_profile_present_flag[i]        u(1)   i in [0, mslm1)
+#   sub_layer_level_present_flag[i]          u(1)   i in [0, mslm1)
+#   if (mslm1 > 0) reserved_zero_2bits[i]    u(2)   i in [mslm1, 8)
+#   per sub-layer: profile block (88 bits) if profile-present,
+#                  sub_layer_level_idc u(8) if level-present
+#
+# Sub-layer PTL values are parsed for ALIGNMENT (the bit cursor must
+# land exactly at the end of the structure) and discarded at 0.1.x.
+#
+# H265Ptl layout (96 bytes, heap) — all fields widened to i64:
+#   +0:  profile_space           +8:  tier_flag
+#   +16: profile_idc             +24: compat_flags (32-bit raw;
+#                                     flag[j] = bit (31 - j))
+#   +32: progressive_source_flag +40: interlaced_source_flag
+#   +48: non_packed_flag         +56: frame_only_flag
+#   +64: constraint_43 (raw 43-bit tail, MSB-first)
+#   +72: inbld_flag              +80: level_idc
+#   +88: max_sub_layers_minus1 (as parsed against)
+# ================================================================
+
+# Parse profile_tier_level from a DrBr positioned at its first bit.
+# profile_present is profilePresentFlag; max_sub_layers_minus1 must be
+# in [0, 6] (7.4.3.1 / 7.4.3.2.1 bound both callers). Returns the
+# H265Ptl handle, or 0 with the fault latched in the reader's sticky
+# error: DR_ERR_TRUNCATED (bits run out), H265_ERR_RANGE (bad
+# max_sub_layers_minus1), DR_ERR_OOM.
+fn h265_ptl_parse(br, profile_present, max_sub_layers_minus1): i64 {
+    if (dr_br_err(br) != DR_OK) { return 0; }
+    if ((max_sub_layers_minus1 < 0) || (max_sub_layers_minus1 > 6)) {
+        store64(br + 24, H265_ERR_RANGE);
+        return 0;
+    }
+    var ptl = alloc(96);
+    if (ptl == 0) {
+        store64(br + 24, DR_ERR_OOM);
+        return 0;
+    }
+    store64(ptl, 0);
+    store64(ptl + 8, 0);
+    store64(ptl + 16, 0);
+    store64(ptl + 24, 0);
+    store64(ptl + 32, 0);
+    store64(ptl + 40, 0);
+    store64(ptl + 48, 0);
+    store64(ptl + 56, 0);
+    store64(ptl + 64, 0);
+    store64(ptl + 72, 0);
+    store64(ptl + 80, 0);
+    store64(ptl + 88, max_sub_layers_minus1);
+    if (profile_present) {
+        store64(ptl, dr_br_read_bits(br, 2));        # general_profile_space
+        store64(ptl + 8, dr_br_read_bits(br, 1));    # general_tier_flag
+        store64(ptl + 16, dr_br_read_bits(br, 5));   # general_profile_idc
+        # 32 compatibility flags as one MSB-first word: flag[0] lands
+        # in bit 31, flag[j] in bit (31 - j).
+        store64(ptl + 24, dr_br_read_bits(br, 32));
+        store64(ptl + 32, dr_br_read_bits(br, 1));   # progressive_source
+        store64(ptl + 40, dr_br_read_bits(br, 1));   # interlaced_source
+        store64(ptl + 48, dr_br_read_bits(br, 1));   # non_packed_constraint
+        store64(ptl + 56, dr_br_read_bits(br, 1));   # frame_only_constraint
+        # 43-bit tail — dr_br_read_bits caps at 32, so 32 + 11.
+        var hi = dr_br_read_bits(br, 32);
+        var lo = dr_br_read_bits(br, 11);
+        store64(ptl + 64, (hi << 11) + lo);
+        store64(ptl + 72, dr_br_read_bits(br, 1));   # inbld / reserved bit
+    }
+    store64(ptl + 80, dr_br_read_bits(br, 8));       # general_level_idc
+    # Sub-layer presence flags + alignment + (discarded) payloads.
+    # sub_layer_*_present_flag[i] pairs pack into one word: profile-
+    # present in bit (2i + 1), level-present in bit (2i) of the read.
+    var present = 0;
+    if (max_sub_layers_minus1 > 0) {
+        present = dr_br_read_bits(br, max_sub_layers_minus1 * 2);
+        # reserved_zero_2bits[i] for i in [mslm1, 8) — captured to
+        # keep alignment, value ignored (reserved; 7.3.3).
+        dr_br_read_bits(br, (8 - max_sub_layers_minus1) * 2);
+    }
+    var i = 0;
+    while (i < max_sub_layers_minus1) {
+        var shift = (max_sub_layers_minus1 - 1 - i) * 2;
+        if ((present >> (shift + 1)) & 1) {
+            # sub_layer profile block: 2+1+5+32+4+43+1 = 88 bits,
+            # same shape as the general block (7.3.3). Discarded.
+            dr_br_read_bits(br, 32);
+            dr_br_read_bits(br, 32);
+            dr_br_read_bits(br, 24);
+        }
+        if ((present >> shift) & 1) {
+            dr_br_read_bits(br, 8);   # sub_layer_level_idc[i]
+        }
+        i = i + 1;
+    }
+    if (dr_br_err(br) != DR_OK) { return 0; }
+    return ptl;
+}
+
+fn h265_ptl_profile_space(ptl): i64 { return load64(ptl); }
+fn h265_ptl_tier_flag(ptl): i64 { return load64(ptl + 8); }
+fn h265_ptl_profile_idc(ptl): i64 { return load64(ptl + 16); }
+fn h265_ptl_compat_flags(ptl): i64 { return load64(ptl + 24); }
+
+# general_profile_compatibility_flag[j] (7.3.3), j in [0, 31];
+# out-of-range j returns 0.
+fn h265_ptl_compat_flag(ptl, j): i64 {
+    if ((j < 0) || (j > 31)) { return 0; }
+    return (load64(ptl + 24) >> (31 - j)) & 1;
+}
+
+fn h265_ptl_progressive_source(ptl): i64 { return load64(ptl + 32); }
+fn h265_ptl_interlaced_source(ptl): i64 { return load64(ptl + 40); }
+fn h265_ptl_non_packed(ptl): i64 { return load64(ptl + 48); }
+fn h265_ptl_frame_only(ptl): i64 { return load64(ptl + 56); }
+fn h265_ptl_constraint_bits(ptl): i64 { return load64(ptl + 64); }
+fn h265_ptl_inbld(ptl): i64 { return load64(ptl + 72); }
+fn h265_ptl_level_idc(ptl): i64 { return load64(ptl + 80); }
+fn h265_ptl_max_sub_layers_minus1(ptl): i64 { return load64(ptl + 88); }
+
+# ================================================================
+# VPS (minimal) — spec 7.3.2.1 video_parameter_set_rbsp() prefix:
+#
+#   vps_video_parameter_set_id     u(4)
+#   vps_base_layer_internal_flag   u(1)
+#   vps_base_layer_available_flag  u(1)
+#   vps_max_layers_minus1          u(6)
+#   vps_max_sub_layers_minus1      u(3)   — [0, 6] (7.4.3.1)
+#   vps_temporal_id_nesting_flag   u(1)
+#   vps_reserved_0xffff_16bits     u(16)  — captured, never rejected
+#                                    (7.4.3.1: decoders ignore value)
+#   profile_tier_level(1, vps_max_sub_layers_minus1)
+#   ... (sub-layer ordering info et seq. — out of the 0.1.x cut)
+#
+# H265Vps layout (64 bytes, heap):
+#   +0:  vps_id                   +8:  base_layer_internal_flag
+#   +16: base_layer_available_flag +24: max_layers_minus1
+#   +32: max_sub_layers_minus1    +40: temporal_id_nesting_flag
+#   +48: reserved_0xffff_16bits   +56: H265Ptl handle
+# ================================================================
+
+# Parse the minimal VPS prefix from rbsp[0..len) (EPB-stripped, header
+# excluded). Returns the H265Vps handle, or 0 with the code at
+# *out_err: DR_ERR_TRUNCATED, H265_ERR_RANGE (vps_max_sub_layers_
+# minus1 > 6), DR_ERR_OOM, DR_ERR_BOUNDS (negative len).
+fn h265_vps_parse(rbsp, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    var br = dr_br_init(rbsp, len);
+    if (br == 0) {
+        if (len < 0) { store64(out_err, DR_ERR_BOUNDS); } else { store64(out_err, DR_ERR_OOM); }
+        return 0;
+    }
+    var vps_id = dr_br_read_bits(br, 4);       # vps_video_parameter_set_id
+    var bl_int = dr_br_read_bits(br, 1);       # vps_base_layer_internal_flag
+    var bl_avail = dr_br_read_bits(br, 1);     # vps_base_layer_available_flag
+    var max_layers_m1 = dr_br_read_bits(br, 6);   # vps_max_layers_minus1
+    var max_sub_m1 = dr_br_read_bits(br, 3);   # vps_max_sub_layers_minus1
+    var nesting = dr_br_read_bits(br, 1);      # vps_temporal_id_nesting_flag
+    var reserved = dr_br_read_bits(br, 16);    # vps_reserved_0xffff_16bits
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    # 7.4.3.1: vps_max_sub_layers_minus1 shall be in [0, 6].
+    if (max_sub_m1 > 6) {
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var ptl = h265_ptl_parse(br, 1, max_sub_m1);
+    if (ptl == 0) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    var vps = alloc(64);
+    if (vps == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(vps, vps_id);
+    store64(vps + 8, bl_int);
+    store64(vps + 16, bl_avail);
+    store64(vps + 24, max_layers_m1);
+    store64(vps + 32, max_sub_m1);
+    store64(vps + 40, nesting);
+    store64(vps + 48, reserved);
+    store64(vps + 56, ptl);
+    return vps;
+}
+
+fn h265_vps_id(v): i64 { return load64(v); }
+fn h265_vps_base_layer_internal(v): i64 { return load64(v + 8); }
+fn h265_vps_base_layer_available(v): i64 { return load64(v + 16); }
+fn h265_vps_max_layers_minus1(v): i64 { return load64(v + 24); }
+fn h265_vps_max_sub_layers_minus1(v): i64 { return load64(v + 32); }
+fn h265_vps_temporal_id_nesting(v): i64 { return load64(v + 40); }
+fn h265_vps_reserved_0xffff(v): i64 { return load64(v + 48); }
+fn h265_vps_ptl(v): i64 { return load64(v + 56); }
+
+# ================================================================
+# SPS through the sizing block — spec 7.3.2.2 seq_parameter_set_rbsp()
+# prefix:
+#
+#   sps_video_parameter_set_id           u(4)
+#   sps_max_sub_layers_minus1            u(3)   — [0, 6]
+#   sps_temporal_id_nesting_flag         u(1)
+#   profile_tier_level(1, sps_max_sub_layers_minus1)
+#   sps_seq_parameter_set_id             ue(v)  — [0, 15]
+#   chroma_format_idc                    ue(v)  — [0, 3]
+#   if (chroma_format_idc == 3)
+#     separate_colour_plane_flag         u(1)
+#   pic_width_in_luma_samples            ue(v)  — != 0
+#   pic_height_in_luma_samples           ue(v)  — != 0
+#   conformance_window_flag              u(1)
+#   if (conformance_window_flag)
+#     conf_win_{left,right,top,bottom}_offset  ue(v) x4
+#   bit_depth_luma_minus8                ue(v)  — [0, 8]
+#   bit_depth_chroma_minus8              ue(v)  — [0, 8]
+#   log2_max_pic_order_cnt_lsb_minus4    ue(v)  — [0, 12]
+#   --- 0.1.x stops cleanly here (sizing block complete) ---
+#
+# Computed output dimensions (7.4.3.2.1, Table 6-1): the conformance
+# cropping window is expressed in chroma units —
+#   width  = pic_width  - SubWidthC  * (conf_win_left + conf_win_right)
+#   height = pic_height - SubHeightC * (conf_win_top  + conf_win_bottom)
+# SubWidthC/SubHeightC: idc 0 (mono) -> 1,1; 1 (4:2:0) -> 2,2;
+# 2 (4:2:2) -> 2,1; 3 (4:4:4) -> 1,1 (also 1,1 when separate_colour_
+# plane_flag == 1: ChromaArrayType == 0, Table 6-1).
+#
+# H265Sps layout (144 bytes, heap):
+#   +0:   vps_id                    +8:   max_sub_layers_minus1
+#   +16:  temporal_id_nesting_flag  +24:  H265Ptl handle
+#   +32:  sps_id                    +40:  chroma_format_idc
+#   +48:  separate_colour_plane_flag
+#   +56:  pic_width_in_luma_samples +64:  pic_height_in_luma_samples
+#   +72:  conf_win_left_offset      +80:  conf_win_right_offset
+#   +88:  conf_win_top_offset       +96:  conf_win_bottom_offset
+#   +104: bit_depth_luma  (BitDepthY  = minus8 + 8, 7.4.3.2.1)
+#   +112: bit_depth_chroma (BitDepthC = minus8 + 8)
+#   +120: log2_max_pic_order_cnt_lsb (minus4 + 4, range [4, 16])
+#   +128: width  (computed cropped display width)
+#   +136: height (computed cropped display height)
+# ================================================================
+
+# Parse the SPS sizing prefix from rbsp[0..len) (EPB-stripped, header
+# excluded). Returns the H265Sps handle, or 0 with the code at
+# *out_err:
+#   DR_ERR_TRUNCATED — bits run out mid-field
+#   DR_ERR_BAD_VLC   — malformed exp-Golomb (> 31 leading zeros)
+#   H265_ERR_RANGE   — a "shall be in the range" constraint violated
+#                      (7.4.3.2.1), incl. zero dimensions and a
+#                      cropping window that consumes the whole picture
+#   DR_ERR_OVERSIZE  — width/height > H265_MAX_DIM (A.4.2 bomb guard)
+#   DR_ERR_OOM / DR_ERR_BOUNDS (negative len)
+fn h265_sps_parse(rbsp, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    var br = dr_br_init(rbsp, len);
+    if (br == 0) {
+        if (len < 0) { store64(out_err, DR_ERR_BOUNDS); } else { store64(out_err, DR_ERR_OOM); }
+        return 0;
+    }
+    var vps_id = dr_br_read_bits(br, 4);      # sps_video_parameter_set_id
+    var max_sub_m1 = dr_br_read_bits(br, 3);  # sps_max_sub_layers_minus1
+    var nesting = dr_br_read_bits(br, 1);     # sps_temporal_id_nesting_flag
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    # 7.4.3.2.1: sps_max_sub_layers_minus1 shall be in [0, 6].
+    if (max_sub_m1 > 6) {
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var ptl = h265_ptl_parse(br, 1, max_sub_m1);
+    if (ptl == 0) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    var sps_id = 0;
+    var rc = dr_ue_read(br, &sps_id);         # sps_seq_parameter_set_id
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    if (sps_id > 15) {                        # 7.4.3.2.1: [0, 15]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var chroma = 0;
+    rc = dr_ue_read(br, &chroma);             # chroma_format_idc
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    if (chroma > 3) {                         # 7.4.3.2.1: [0, 3]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var sep_plane = 0;
+    if (chroma == 3) {
+        sep_plane = dr_br_read_bits(br, 1);   # separate_colour_plane_flag
+    }
+    var pic_w = 0;
+    rc = dr_ue_read(br, &pic_w);              # pic_width_in_luma_samples
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    var pic_h = 0;
+    rc = dr_ue_read(br, &pic_h);              # pic_height_in_luma_samples
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    # 7.4.3.2.1: shall not be equal to 0.
+    if ((pic_w == 0) || (pic_h == 0)) {
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    # A.4.2 bomb guard: no Annex-A level admits a dimension beyond
+    # Sqrt(MaxLumaPs * 8) = 16888 (level 6.2, Table A.8).
+    if ((pic_w > H265_MAX_DIM) || (pic_h > H265_MAX_DIM)) {
+        store64(out_err, DR_ERR_OVERSIZE);
+        return 0;
+    }
+    var win_l = 0;
+    var win_r = 0;
+    var win_t = 0;
+    var win_b = 0;
+    var conf_win = dr_br_read_bits(br, 1);    # conformance_window_flag
+    if (conf_win) {
+        rc = dr_ue_read(br, &win_l);          # conf_win_left_offset
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        rc = dr_ue_read(br, &win_r);          # conf_win_right_offset
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        rc = dr_ue_read(br, &win_t);          # conf_win_top_offset
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        rc = dr_ue_read(br, &win_b);          # conf_win_bottom_offset
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    }
+    var bd_luma_m8 = 0;
+    rc = dr_ue_read(br, &bd_luma_m8);         # bit_depth_luma_minus8
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    var bd_chroma_m8 = 0;
+    rc = dr_ue_read(br, &bd_chroma_m8);       # bit_depth_chroma_minus8
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    var log2_poc_m4 = 0;
+    rc = dr_ue_read(br, &log2_poc_m4);        # log2_max_pic_order_cnt_lsb_minus4
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    if (dr_br_err(br) != DR_OK) {
+        # Catches the unchecked separate_colour_plane_flag /
+        # conformance_window_flag single-bit reads.
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    # 7.4.3.2.1 ranges.
+    if ((bd_luma_m8 > 8) || (bd_chroma_m8 > 8)) {    # [0, 8]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    if (log2_poc_m4 > 12) {                          # [0, 12]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    # Table 6-1: SubWidthC / SubHeightC. separate_colour_plane == 1
+    # means ChromaArrayType == 0 -> treated as monochrome (1, 1).
+    var sub_w = 1;
+    var sub_h = 1;
+    if (sep_plane == 0) {
+        if (chroma == 1) { sub_w = 2; sub_h = 2; }   # 4:2:0
+        if (chroma == 2) { sub_w = 2; sub_h = 1; }   # 4:2:2
+    }
+    # 7.4.3.2.1: the cropping window shall not consume the picture —
+    # SubWidthC*(left+right) < pic_width, SubHeightC*(top+bottom) <
+    # pic_height.
+    var crop_w = sub_w * (win_l + win_r);
+    var crop_h = sub_h * (win_t + win_b);
+    if ((crop_w >= pic_w) || (crop_h >= pic_h)) {
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var sps = alloc(144);
+    if (sps == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(sps, vps_id);
+    store64(sps + 8, max_sub_m1);
+    store64(sps + 16, nesting);
+    store64(sps + 24, ptl);
+    store64(sps + 32, sps_id);
+    store64(sps + 40, chroma);
+    store64(sps + 48, sep_plane);
+    store64(sps + 56, pic_w);
+    store64(sps + 64, pic_h);
+    store64(sps + 72, win_l);
+    store64(sps + 80, win_r);
+    store64(sps + 88, win_t);
+    store64(sps + 96, win_b);
+    store64(sps + 104, bd_luma_m8 + 8);      # BitDepthY (7.4.3.2.1)
+    store64(sps + 112, bd_chroma_m8 + 8);    # BitDepthC
+    store64(sps + 120, log2_poc_m4 + 4);     # MaxPicOrderCntLsb = 2^this
+    store64(sps + 128, pic_w - crop_w);      # cropped display width
+    store64(sps + 136, pic_h - crop_h);      # cropped display height
+    return sps;
+}
+
+fn h265_sps_vps_id(s): i64 { return load64(s); }
+fn h265_sps_max_sub_layers_minus1(s): i64 { return load64(s + 8); }
+fn h265_sps_temporal_id_nesting(s): i64 { return load64(s + 16); }
+fn h265_sps_ptl(s): i64 { return load64(s + 24); }
+fn h265_sps_id(s): i64 { return load64(s + 32); }
+fn h265_sps_chroma_format_idc(s): i64 { return load64(s + 40); }
+fn h265_sps_separate_colour_plane(s): i64 { return load64(s + 48); }
+fn h265_sps_pic_width(s): i64 { return load64(s + 56); }
+fn h265_sps_pic_height(s): i64 { return load64(s + 64); }
+fn h265_sps_conf_win_left(s): i64 { return load64(s + 72); }
+fn h265_sps_conf_win_right(s): i64 { return load64(s + 80); }
+fn h265_sps_conf_win_top(s): i64 { return load64(s + 88); }
+fn h265_sps_conf_win_bottom(s): i64 { return load64(s + 96); }
+fn h265_sps_bit_depth_luma(s): i64 { return load64(s + 104); }
+fn h265_sps_bit_depth_chroma(s): i64 { return load64(s + 112); }
+fn h265_sps_log2_max_poc_lsb(s): i64 { return load64(s + 120); }
+fn h265_sps_width(s): i64 { return load64(s + 128); }
+fn h265_sps_height(s): i64 { return load64(s + 136); }
+
+# ================================================================
+# PPS (minimal) — spec 7.3.2.3 pic_parameter_set_rbsp() prefix:
+#
+#   pps_pic_parameter_set_id               ue(v) — [0, 63]
+#   pps_seq_parameter_set_id               ue(v) — [0, 15]
+#   dependent_slice_segments_enabled_flag  u(1)
+#   output_flag_present_flag               u(1)
+#   num_extra_slice_header_bits            u(3)  — reserved > 2;
+#                                            captured, not rejected
+#   sign_data_hiding_enabled_flag          u(1)
+#   cabac_init_present_flag                u(1)
+#   num_ref_idx_l0_default_active_minus1   ue(v) — [0, 14]
+#   num_ref_idx_l1_default_active_minus1   ue(v) — [0, 14]
+#   init_qp_minus26                        se(v) — [-(26+QpBdOffsetY), 25];
+#                                            QpBdOffsetY unknown at PPS
+#                                            time, checked at loosest
+#                                            bound [-74, 25] (bd 16)
+#   constrained_intra_pred_flag            u(1)
+#   transform_skip_enabled_flag            u(1)
+#   cu_qp_delta_enabled_flag               u(1)
+#   if (cu_qp_delta_enabled_flag)
+#     diff_cu_qp_delta_depth               ue(v) — inferred 0 if absent
+#   --- 0.1.x stops cleanly here ---
+#
+# H265Pps layout (112 bytes, heap):
+#   +0:   pps_id                    +8:   sps_id
+#   +16:  dependent_slice_segments_enabled
+#   +24:  output_flag_present       +32:  num_extra_slice_header_bits
+#   +40:  sign_data_hiding_enabled  +48:  cabac_init_present
+#   +56:  num_ref_idx_l0_default_active_minus1
+#   +64:  num_ref_idx_l1_default_active_minus1
+#   +72:  init_qp_minus26 (SIGNED)  +80:  constrained_intra_pred
+#   +88:  transform_skip_enabled    +96:  cu_qp_delta_enabled
+#   +104: diff_cu_qp_delta_depth (0 when flag off, 7.4.3.3.1)
+# ================================================================
+
+# Parse the minimal PPS prefix from rbsp[0..len) (EPB-stripped, header
+# excluded). Returns the H265Pps handle, or 0 with the code at
+# *out_err: DR_ERR_TRUNCATED, DR_ERR_BAD_VLC, H265_ERR_RANGE,
+# DR_ERR_OOM, DR_ERR_BOUNDS (negative len).
+fn h265_pps_parse(rbsp, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    var br = dr_br_init(rbsp, len);
+    if (br == 0) {
+        if (len < 0) { store64(out_err, DR_ERR_BOUNDS); } else { store64(out_err, DR_ERR_OOM); }
+        return 0;
+    }
+    var pps_id = 0;
+    var rc = dr_ue_read(br, &pps_id);         # pps_pic_parameter_set_id
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    if (pps_id > 63) {                        # 7.4.3.3.1: [0, 63]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var sps_id = 0;
+    rc = dr_ue_read(br, &sps_id);             # pps_seq_parameter_set_id
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    if (sps_id > 15) {                        # 7.4.3.3.1: [0, 15]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var dep_slices = dr_br_read_bits(br, 1);  # dependent_slice_segments_enabled_flag
+    var out_flag = dr_br_read_bits(br, 1);    # output_flag_present_flag
+    var extra_bits = dr_br_read_bits(br, 3);  # num_extra_slice_header_bits
+    var sdh = dr_br_read_bits(br, 1);         # sign_data_hiding_enabled_flag
+    var cabac_init = dr_br_read_bits(br, 1);  # cabac_init_present_flag
+    var l0 = 0;
+    rc = dr_ue_read(br, &l0);                 # num_ref_idx_l0_default_active_minus1
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    var l1 = 0;
+    rc = dr_ue_read(br, &l1);                 # num_ref_idx_l1_default_active_minus1
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    if ((l0 > 14) || (l1 > 14)) {             # 7.4.3.3.1: [0, 14]
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var init_qp = 0;
+    rc = dr_se_read(br, &init_qp);            # init_qp_minus26
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    # 7.4.3.3.1: [-(26 + QpBdOffsetY), 25]; QpBdOffsetY = 6 *
+    # bit_depth_luma_minus8 <= 48, so the loosest legal bound is -74.
+    if ((init_qp < (0 - 74)) || (init_qp > 25)) {
+        store64(out_err, H265_ERR_RANGE);
+        return 0;
+    }
+    var cip = dr_br_read_bits(br, 1);         # constrained_intra_pred_flag
+    var tskip = dr_br_read_bits(br, 1);       # transform_skip_enabled_flag
+    var cu_qp = dr_br_read_bits(br, 1);       # cu_qp_delta_enabled_flag
+    var diff_depth = 0;
+    if (dr_br_err(br) != DR_OK) {
+        # Catches truncation in the seven unchecked flag reads above.
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    if (cu_qp) {
+        rc = dr_ue_read(br, &diff_depth);     # diff_cu_qp_delta_depth
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    }
+    var pps = alloc(112);
+    if (pps == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(pps, pps_id);
+    store64(pps + 8, sps_id);
+    store64(pps + 16, dep_slices);
+    store64(pps + 24, out_flag);
+    store64(pps + 32, extra_bits);
+    store64(pps + 40, sdh);
+    store64(pps + 48, cabac_init);
+    store64(pps + 56, l0);
+    store64(pps + 64, l1);
+    store64(pps + 72, init_qp);
+    store64(pps + 80, cip);
+    store64(pps + 88, tskip);
+    store64(pps + 96, cu_qp);
+    store64(pps + 104, diff_depth);
+    return pps;
+}
+
+fn h265_pps_id(p): i64 { return load64(p); }
+fn h265_pps_sps_id(p): i64 { return load64(p + 8); }
+fn h265_pps_dependent_slice_segments(p): i64 { return load64(p + 16); }
+fn h265_pps_output_flag_present(p): i64 { return load64(p + 24); }
+fn h265_pps_num_extra_slice_header_bits(p): i64 { return load64(p + 32); }
+fn h265_pps_sign_data_hiding(p): i64 { return load64(p + 40); }
+fn h265_pps_cabac_init_present(p): i64 { return load64(p + 48); }
+fn h265_pps_num_ref_idx_l0_minus1(p): i64 { return load64(p + 56); }
+fn h265_pps_num_ref_idx_l1_minus1(p): i64 { return load64(p + 64); }
+fn h265_pps_init_qp_minus26(p): i64 { return load64(p + 72); }
+fn h265_pps_constrained_intra_pred(p): i64 { return load64(p + 80); }
+fn h265_pps_transform_skip(p): i64 { return load64(p + 88); }
+fn h265_pps_cu_qp_delta_enabled(p): i64 { return load64(p + 96); }
+fn h265_pps_diff_cu_qp_delta_depth(p): i64 { return load64(p + 104); }

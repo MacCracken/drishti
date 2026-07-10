@@ -1,0 +1,1030 @@
+# tests/h265.tcyr — H.265/HEVC family suite: two-byte NAL unit header
+# parse (spec 7.3.1.2/7.4.2.2, Table 7-1), Annex-B scan (B.2.2), EPB
+# strip / RBSP extraction (7.3.1.1), profile_tier_level (7.3.3), minimal
+# VPS (7.3.2.1), SPS through the sizing block with computed display
+# dims (7.3.2.2/7.4.3.2.1, Table 6-1), minimal PPS (7.3.2.3), plus
+# adversarial vectors (truncation, forbidden bit, temporal-id-plus1==0,
+# out-of-range fields, dimension bombs). All vectors hand-built from
+# ITU-T Rec. H.265, every byte commented; layouts cross-checked against
+# libde265 and ffmpeg hevc_ps.c. DECODE-ONLY family — no writers.
+#
+# Suites explicitly include the lib root + this family's not-yet-wired
+# modules: `cyrius test` auto-includes stdlib only, never [lib] modules
+# (verified at pin 6.4.43). Once h265_* are wired into src/main.cyr the
+# self-includes below dedupe into no-ops.
+include "src/main.cyr"
+include "src/h265_nal.cyr"
+include "src/h265_ps.cyr"
+
+# ================================================================
+# Fixture: general profile_tier_level block — Main profile, Main tier,
+# level 1.0 (7.3.3, profilePresentFlag = 1, maxNumSubLayersMinus1 = 0).
+# 96 bits = 12 bytes, written at b (caller allocates >= 12):
+#
+#   byte 0  = 0x01: general_profile_space  u(2) = 00
+#                   general_tier_flag      u(1) = 0    (Main tier)
+#                   general_profile_idc    u(5) = 00001 (Main, A.3.2)
+#   bytes 1-4 = 40 00 00 00:
+#                   general_profile_compatibility_flag[32] — flag[1]=1
+#                   (Main), rest 0; flag[j] sits at bit (31-j) of the
+#                   MSB-first word -> 0x40000000
+#   byte 5  = 0x90: general_progressive_source_flag    = 1
+#                   general_interlaced_source_flag     = 0
+#                   general_non_packed_constraint_flag = 0
+#                   general_frame_only_constraint_flag = 1
+#                   + first 4 of the 43 reserved/constraint zeros
+#   bytes 6-10 = 00 x5: remaining 39 reserved zeros + inbld/reserved 0
+#                   (43 + 1 = 44 bits, all zero for Main; 7.4.4)
+#   byte 11 = 0x1E: general_level_idc u(8) = 30 (level 1.0 = 30x level)
+# ================================================================
+fn fx_h265_ptl_main(b): i64 {
+    store8(b, 0x01);
+    store8(b + 1, 0x40); store8(b + 2, 0x00);
+    store8(b + 3, 0x00); store8(b + 4, 0x00);
+    store8(b + 5, 0x90);
+    store8(b + 6, 0x00); store8(b + 7, 0x00); store8(b + 8, 0x00);
+    store8(b + 9, 0x00); store8(b + 10, 0x00);
+    store8(b + 11, 0x1E);
+    return 12;
+}
+
+# ================================================================
+# Fixture: minimal SPS RBSP — Main profile, 8-bit, 64x64, 4:2:0, no
+# conformance window (7.3.2.2, EPB already stripped, NAL header
+# excluded). 18 bytes:
+#
+#   byte 0 = 0x01: sps_video_parameter_set_id   u(4) = 0
+#                  sps_max_sub_layers_minus1    u(3) = 0
+#                  sps_temporal_id_nesting_flag u(1) = 1
+#   bytes 1-12: profile_tier_level (fx_h265_ptl_main, 12 bytes)
+#   bytes 13-17 = A0 20 81 05 94, bit-packed MSB-first:
+#     sps_seq_parameter_set_id  ue(0)  = "1"
+#     chroma_format_idc         ue(1)  = "010"           (4:2:0)
+#     pic_width_in_luma_samples ue(64) = "0000001000001" (6 lz, 65)
+#     pic_height_in_luma_samples ue(64)= "0000001000001"
+#     conformance_window_flag   u(1)   = "0"
+#     bit_depth_luma_minus8     ue(0)  = "1"             (-> 8-bit)
+#     bit_depth_chroma_minus8   ue(0)  = "1"
+#     log2_max_pic_order_cnt_lsb_minus4 ue(4) = "00101"  (-> 8)
+#     byte-pad                          = "00"
+#   packed: 10100000 00100000 10000001 00000101 10010100
+#         =    0xA0     0x20     0x81     0x05     0x94
+# ================================================================
+fn fx_h265_sps_main64(out_len): i64 {
+    var b = alloc(18);
+    store8(b, 0x01);
+    fx_h265_ptl_main(b + 1);
+    store8(b + 13, 0xA0);
+    store8(b + 14, 0x20);
+    store8(b + 15, 0x81);
+    store8(b + 16, 0x05);
+    store8(b + 17, 0x94);
+    store64(out_len, 18);
+    return b;
+}
+
+# ================================================================
+# Fixture: SPS with a conformance window — Main, 8-bit, 64x64, 4:2:0,
+# conf_win right = 2, bottom = 2 (SubWidthC = SubHeightC = 2 -> cropped
+# 60x60; 7.4.3.2.1). 19 bytes; byte 0 + PTL as fx_h265_sps_main64, then
+# bytes 13-18 = A0 20 81 07 77 C0:
+#     sps_seq_parameter_set_id  ue(0)  = "1"
+#     chroma_format_idc         ue(1)  = "010"
+#     pic_width  ue(64) = "0000001000001"
+#     pic_height ue(64) = "0000001000001"
+#     conformance_window_flag u(1) = "1"
+#     conf_win_left_offset   ue(0) = "1"
+#     conf_win_right_offset  ue(2) = "011"
+#     conf_win_top_offset    ue(0) = "1"
+#     conf_win_bottom_offset ue(2) = "011"
+#     bit_depth_luma_minus8   ue(0) = "1"
+#     bit_depth_chroma_minus8 ue(0) = "1"
+#     log2_max_pic_order_cnt_lsb_minus4 ue(0) = "1"      (-> 4)
+#     byte-pad = "000000"
+#   packed: 10100000 00100000 10000001 00000111 01110111 11000000
+#         =    0xA0     0x20     0x81     0x07     0x77     0xC0
+# ================================================================
+fn fx_h265_sps_cropped(out_len): i64 {
+    var b = alloc(19);
+    store8(b, 0x01);
+    fx_h265_ptl_main(b + 1);
+    store8(b + 13, 0xA0);
+    store8(b + 14, 0x20);
+    store8(b + 15, 0x81);
+    store8(b + 16, 0x07);
+    store8(b + 17, 0x77);
+    store8(b + 18, 0xC0);
+    store64(out_len, 19);
+    return b;
+}
+
+# ================================================================
+# Fixture: SPS 4:4:4 with separate_colour_plane_flag = 1 — chroma
+# planes coded as monochrome, so SubWidthC = SubHeightC = 1 (Table 6-1,
+# ChromaArrayType == 0). 64x64, conf_win left = 1, right = 1 -> cropped
+# 62x64. 19 bytes; byte 0 + PTL as above, then bytes 13-18 packed:
+#     sps_seq_parameter_set_id ue(0) = "1"
+#     chroma_format_idc        ue(3) = "00100"           (4:4:4)
+#     separate_colour_plane_flag u(1) = "1"
+#     pic_width  ue(64) = "0000001000001"
+#     pic_height ue(64) = "0000001000001"
+#     conformance_window_flag u(1) = "1"
+#     conf_win_left_offset   ue(1) = "010"
+#     conf_win_right_offset  ue(1) = "010"
+#     conf_win_top_offset    ue(0) = "1"
+#     conf_win_bottom_offset ue(0) = "1"
+#     bit_depth_luma_minus8   ue(0) = "1"
+#     bit_depth_chroma_minus8 ue(0) = "1"
+#     log2_max_pic_order_cnt_lsb_minus4 ue(0) = "1"
+#     byte-pad = "000"
+#   packed: 10010010 00000100 00010000 00100000 11010010 11111000
+#         =    0x92     0x04     0x10     0x20     0xD2     0xF8
+# ================================================================
+fn fx_h265_sps_444_sep(out_len): i64 {
+    var b = alloc(19);
+    store8(b, 0x01);
+    fx_h265_ptl_main(b + 1);
+    store8(b + 13, 0x92);
+    store8(b + 14, 0x04);
+    store8(b + 15, 0x10);
+    store8(b + 16, 0x20);
+    store8(b + 17, 0xD2);
+    store8(b + 18, 0xF8);
+    store64(out_len, 19);
+    return b;
+}
+
+# ================================================================
+# Fixture: minimal VPS RBSP prefix (7.3.2.1). 16 bytes:
+#
+#   byte 0 = 0x0C: vps_video_parameter_set_id   u(4) = 0
+#                  vps_base_layer_internal_flag u(1) = 1
+#                  vps_base_layer_available_flag u(1) = 1
+#                  vps_max_layers_minus1 (bits 5-4)   = 00
+#   byte 1 = 0x01: vps_max_layers_minus1 (bits 3-0)   = 0000
+#                  vps_max_sub_layers_minus1    u(3) = 000
+#                  vps_temporal_id_nesting_flag u(1) = 1
+#   bytes 2-3 = FF FF: vps_reserved_0xffff_16bits u(16) — captured,
+#                  never validated (7.4.3.1: decoders ignore value)
+#   bytes 4-15: profile_tier_level (fx_h265_ptl_main)
+# ================================================================
+fn fx_h265_vps_main(out_len): i64 {
+    var b = alloc(16);
+    store8(b, 0x0C);
+    store8(b + 1, 0x01);
+    store8(b + 2, 0xFF);
+    store8(b + 3, 0xFF);
+    fx_h265_ptl_main(b + 4);
+    store64(out_len, 16);
+    return b;
+}
+
+# ================================================================
+# Fixture: minimal PPS RBSP prefix (7.3.2.3). 3 bytes, bit-packed:
+#     pps_pic_parameter_set_id ue(0) = "1"
+#     pps_seq_parameter_set_id ue(0) = "1"
+#     dependent_slice_segments_enabled_flag u(1) = "0"
+#     output_flag_present_flag u(1) = "0"
+#     num_extra_slice_header_bits u(3) = "000"
+#     sign_data_hiding_enabled_flag u(1) = "1"
+#     cabac_init_present_flag u(1) = "0"
+#     num_ref_idx_l0_default_active_minus1 ue(0) = "1"
+#     num_ref_idx_l1_default_active_minus1 ue(0) = "1"
+#     init_qp_minus26 se(0) = "1"          (codeNum 0)
+#     constrained_intra_pred_flag u(1) = "0"
+#     transform_skip_enabled_flag u(1) = "1"
+#     cu_qp_delta_enabled_flag u(1) = "1"
+#     diff_cu_qp_delta_depth ue(1) = "010"
+#     byte-pad = "000000"
+#   packed: 11000001 01110110 10000000 = 0xC1 0x76 0x80
+# ================================================================
+fn fx_h265_pps_min(out_len): i64 {
+    var b = alloc(3);
+    store8(b, 0xC1);
+    store8(b + 1, 0x76);
+    store8(b + 2, 0x80);
+    store64(out_len, 3);
+    return b;
+}
+
+# ================================================================
+# NAL unit header — spec 7.3.1.2 positive vectors. Real-stream
+# cross-check: HEVC parameter sets famously start "40 01" (VPS),
+# "42 01" (SPS), "44 01" (PPS) — byte0 = type << 1, byte1 = 0x01
+# (layer 0, temporal_id_plus1 1).
+# ================================================================
+
+fn test_h265_nal_hdr_types() {
+    var b = alloc(2);
+    var t = 0; var l = 0; var tid = 0;
+    # VPS_NUT (32): 0x40 = 0 100000 0, 0x01 = 00000 001
+    store8(b, 0x40); store8(b + 1, 0x01);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "VPS header parses");
+    assert_eq(t, H265_NAL_VPS_NUT, "type VPS (32)");
+    assert_eq(l, 0, "layer 0");
+    assert_eq(tid, 0, "TemporalId 0 (plus1 = 1)");
+    # SPS_NUT (33): 0x42 = 0 100001 0
+    store8(b, 0x42);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "SPS header parses");
+    assert_eq(t, H265_NAL_SPS_NUT, "type SPS (33)");
+    # PPS_NUT (34): 0x44 = 0 100010 0
+    store8(b, 0x44);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "PPS header parses");
+    assert_eq(t, H265_NAL_PPS_NUT, "type PPS (34)");
+    # IDR_W_RADL (19): 0x26 = 0 010011 0
+    store8(b, 0x26);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "IDR_W_RADL parses");
+    assert_eq(t, H265_NAL_IDR_W_RADL, "type IDR_W_RADL (19)");
+    # IDR_N_LP (20): 0x28 = 0 010100 0
+    store8(b, 0x28);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "IDR_N_LP parses");
+    assert_eq(t, H265_NAL_IDR_N_LP, "type IDR_N_LP (20)");
+    # TRAIL_R (1): 0x02 = 0 000001 0
+    store8(b, 0x02);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "TRAIL_R parses");
+    assert_eq(t, H265_NAL_TRAIL_R, "type TRAIL_R (1)");
+    return 0;
+}
+
+fn test_h265_nal_hdr_layer_tid() {
+    # nuh_layer_id = 33 = 100001b: bit 5 in byte0 bit 0, bits 4-0 in
+    # byte1 bits 7-3. nuh_temporal_id_plus1 = 3 -> TemporalId 2.
+    # byte0 = 0x43 = 0 100001 1 (SPS, layer MSB set)
+    # byte1 = 0x0B = 00001 011 (layer low bits 00001, tid_plus1 3)
+    var b = alloc(2);
+    store8(b, 0x43); store8(b + 1, 0x0B);
+    var t = 0; var l = 0; var tid = 0;
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_OK, "layered header parses");
+    assert_eq(t, 33, "type 33 with layer MSB split off");
+    assert_eq(l, 33, "nuh_layer_id 33 spans the byte boundary");
+    assert_eq(tid, 2, "TemporalId = plus1 - 1 = 2");
+    return 0;
+}
+
+fn test_h265_nal_predicates() {
+    assert_eq(h265_nal_is_vcl(H265_NAL_TRAIL_R), 1, "TRAIL_R is VCL");
+    assert_eq(h265_nal_is_vcl(31), 1, "type 31 is VCL (Table 7-1 upper edge)");
+    assert_eq(h265_nal_is_vcl(H265_NAL_VPS_NUT), 0, "VPS is non-VCL");
+    assert_eq(h265_nal_is_irap(H265_NAL_BLA_W_LP), 1, "BLA_W_LP (16) is IRAP");
+    assert_eq(h265_nal_is_irap(H265_NAL_IDR_W_RADL), 1, "IDR_W_RADL is IRAP");
+    assert_eq(h265_nal_is_irap(H265_NAL_CRA_NUT), 1, "CRA is IRAP");
+    assert_eq(h265_nal_is_irap(23), 1, "RSV_IRAP_VCL23 is IRAP (edge)");
+    assert_eq(h265_nal_is_irap(15), 0, "type 15 not IRAP");
+    assert_eq(h265_nal_is_irap(24), 0, "type 24 not IRAP");
+    assert_eq(h265_nal_is_idr(H265_NAL_IDR_W_RADL), 1, "IDR_W_RADL is IDR");
+    assert_eq(h265_nal_is_idr(H265_NAL_IDR_N_LP), 1, "IDR_N_LP is IDR");
+    assert_eq(h265_nal_is_idr(H265_NAL_CRA_NUT), 0, "CRA not IDR");
+    return 0;
+}
+
+fn test_h265_nal_hdr_reject() {
+    var b = alloc(2);
+    var t = 99; var l = 99; var tid = 99;
+    # forbidden_zero_bit set (7.4.2.2): 0xC2 = 1 100001 0
+    store8(b, 0xC2); store8(b + 1, 0x01);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_ERR_FORBIDDEN_BIT,
+    "forbidden bit -> DR_ERR_FORBIDDEN_BIT");
+    # nuh_temporal_id_plus1 == 0 (7.4.2.2): byte1 = 0x00
+    store8(b, 0x42); store8(b + 1, 0x00);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), H265_ERR_TEMPORAL_ID0,
+    "tid_plus1 0 -> H265_ERR_TEMPORAL_ID0");
+    assert(H265_ERR_TEMPORAL_ID0 >= 50, "family code in the H.265 band (low)");
+    assert(H265_ERR_TEMPORAL_ID0 <= 69, "family code in the H.265 band (high)");
+    # Both faults at once: forbidden bit checked first.
+    store8(b, 0xC2); store8(b + 1, 0x00);
+    assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_ERR_FORBIDDEN_BIT,
+    "forbidden bit wins over tid0");
+    # Truncation: fewer than 2 header bytes.
+    assert_eq(h265_nal_hdr_parse(b, 1, &t, &l, &tid), DR_ERR_TRUNCATED,
+    "1 byte -> truncated");
+    assert_eq(h265_nal_hdr_parse(b, 0, &t, &l, &tid), DR_ERR_TRUNCATED,
+    "0 bytes -> truncated");
+    # Outputs untouched on every reject path above.
+    assert_eq(t, 99, "out_type untouched on reject");
+    assert_eq(l, 99, "out_layer untouched on reject");
+    assert_eq(tid, 99, "out_tid untouched on reject");
+    # Error names resolve for the family band.
+    assert(h265_err_name(H265_ERR_TEMPORAL_ID0) != 0, "tid0 name resolves");
+    assert(h265_err_name(H265_ERR_RANGE) != 0, "range name resolves");
+    assert(h265_err_name(DR_ERR_TRUNCATED) != 0, "core name passes through");
+    assert(dr_err_name(55) != 0, "unmapped band code gets band fallback");
+    return 0;
+}
+
+# ================================================================
+# Annex-B byte-stream scan — spec B.2.2
+# ================================================================
+
+fn test_h265_annexb_scan() {
+    # Stream: [00 00 01] 40 01 [00 00 01] 42 01 AA [00 00 00 01] 44 01 BB CC
+    # Three NALs: 3-byte code, 3-byte code, 4-byte code (zero_byte +
+    # prefix); last NAL runs to end of stream. 19 bytes.
+    var s = alloc(19);
+    store8(s, 0x00); store8(s + 1, 0x00); store8(s + 2, 0x01);       # start code
+    store8(s + 3, 0x40); store8(s + 4, 0x01);                        # VPS hdr
+    store8(s + 5, 0x00); store8(s + 6, 0x00); store8(s + 7, 0x01);   # start code
+    store8(s + 8, 0x42); store8(s + 9, 0x01); store8(s + 10, 0xAA);  # SPS hdr + 1
+    store8(s + 11, 0x00); store8(s + 12, 0x00); store8(s + 13, 0x00);
+    store8(s + 14, 0x01);                                            # 4-byte code
+    store8(s + 15, 0x44); store8(s + 16, 0x01);                      # PPS hdr
+    store8(s + 17, 0xBB); store8(s + 18, 0xCC);                      # + 2 payload
+    # Core sniff agrees this is Annex-B.
+    assert_eq(dr_sniff(s, 19), DR_SNIFF_ANNEXB, "core sniff says Annex-B");
+    var sc = h265_ab_init(s, 19);
+    assert(sc != 0, "scanner allocates");
+    var nal = 0; var sz = 0;
+    # NAL 1: [40 01], ends at the next 00 00 01 boundary.
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_OK, "NAL 1 found");
+    assert_eq(nal, s + 3, "NAL 1 zero-copy ptr past start code");
+    assert_eq(sz, 2, "NAL 1 size 2");
+    assert_eq(load8(nal), 0x40, "NAL 1 is the VPS header");
+    # NAL 2: [42 01 AA], ends at the 00 00 00 of the 4-byte code.
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_OK, "NAL 2 found");
+    assert_eq(nal, s + 8, "NAL 2 ptr");
+    assert_eq(sz, 3, "NAL 2 size 3");
+    # NAL 3: [44 01 BB CC], runs to end of stream.
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_OK, "NAL 3 found");
+    assert_eq(nal, s + 15, "NAL 3 ptr past 4-byte code");
+    assert_eq(sz, 4, "NAL 3 size 4");
+    # Clean end, repeatable (not sticky).
+    assert_eq(h265_ab_next(sc, &nal, &sz), H265_AB_END, "clean end");
+    assert_eq(h265_ab_next(sc, &nal, &sz), H265_AB_END, "end repeats");
+    assert_eq(h265_ab_err(sc), DR_OK, "no sticky error after clean end");
+    # Header of each NAL parses (walk + parse smoke).
+    var t = 0; var l = 0; var tid = 0;
+    assert_eq(h265_nal_hdr_parse(s + 3, 2, &t, &l, &tid), DR_OK, "VPS hdr ok");
+    assert_eq(t, 32, "walked type VPS");
+    return 0;
+}
+
+fn test_h265_annexb_edge() {
+    # Trailing zeros only after the last NAL: 00 00 01 40 01 00 00
+    # B.2.2 step 3: fewer than 3 trailing bytes can't form a boundary,
+    # so they belong to the NAL (callers see them as cabac_zero_word-
+    # style tail; header parse is unaffected).
+    var s = alloc(7);
+    store8(s, 0); store8(s + 1, 0); store8(s + 2, 1);
+    store8(s + 3, 0x40); store8(s + 4, 0x01);
+    store8(s + 5, 0); store8(s + 6, 0);
+    var sc = h265_ab_init(s, 7);
+    var nal = 0; var sz = 0;
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_OK, "NAL with 2 trailing zeros");
+    assert_eq(sz, 4, "2 trailing zeros stay in the NAL (no 3-byte boundary)");
+    assert_eq(h265_ab_next(sc, &nal, &sz), H265_AB_END, "then clean end");
+    # THREE trailing zeros DO form a 00 00 00 boundary -> trimmed.
+    var s3 = alloc(8);
+    store8(s3, 0); store8(s3 + 1, 0); store8(s3 + 2, 1);
+    store8(s3 + 3, 0x40); store8(s3 + 4, 0x01);
+    store8(s3 + 5, 0); store8(s3 + 6, 0); store8(s3 + 7, 0);
+    var sc3 = h265_ab_init(s3, 8);
+    assert_eq(h265_ab_next(sc3, &nal, &sz), DR_OK, "NAL before zero run");
+    assert_eq(sz, 2, "3 trailing zeros form a boundary and are trimmed");
+    assert_eq(h265_ab_next(sc3, &nal, &sz), H265_AB_END, "zero run -> clean end");
+    # Empty stream and all-zeros stream are clean ends, not errors.
+    var z = alloc(4);
+    store8(z, 0); store8(z + 1, 0); store8(z + 2, 0); store8(z + 3, 0);
+    var sc4 = h265_ab_init(z, 0);
+    assert_eq(h265_ab_next(sc4, &nal, &sz), H265_AB_END, "empty stream -> end");
+    var sc5 = h265_ab_init(z, 4);
+    assert_eq(h265_ab_next(sc5, &nal, &sz), H265_AB_END, "all zeros -> end");
+    return 0;
+}
+
+fn test_h265_annexb_reject() {
+    var nal = 0; var sz = 0;
+    # Garbage before any start code: B.2.2 allows only 0x00 there.
+    var s = alloc(6);
+    store8(s, 0xAA); store8(s + 1, 0x00); store8(s + 2, 0x00);
+    store8(s + 3, 0x01); store8(s + 4, 0x40); store8(s + 5, 0x01);
+    var sc = h265_ab_init(s, 6);
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_ERR_BAD_HEADER,
+    "non-zero byte before start code rejected");
+    assert_eq(h265_ab_err(sc), DR_ERR_BAD_HEADER, "error is sticky");
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_ERR_BAD_HEADER,
+    "sticky: same error on retry");
+    # Short prefix: 00 01 is not a start code (needs two zeros).
+    var s2 = alloc(4);
+    store8(s2, 0x00); store8(s2 + 1, 0x01);
+    store8(s2 + 2, 0x42); store8(s2 + 3, 0x01);
+    var sc2 = h265_ab_init(s2, 4);
+    assert_eq(h265_ab_next(sc2, &nal, &sz), DR_ERR_BAD_HEADER,
+    "lone 00 01 rejected (B.2.2 needs 00 00 01)");
+    # Negative length refused at init.
+    assert_eq(h265_ab_init(s2, 0 - 1), 0, "negative len -> no scanner");
+    return 0;
+}
+
+# ================================================================
+# EPB strip / RBSP extraction — spec 7.3.1.1
+# ================================================================
+
+fn test_h265_epb_strip() {
+    var rb = 0; var n = 0;
+    # 00 00 03 01 -> 00 00 01 (the classic protected start code).
+    var b = alloc(4);
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 3); store8(b + 3, 1);
+    assert_eq(h265_rbsp_extract(b, 4, &rb, &n), DR_OK, "strip ok");
+    assert_eq(n, 3, "one EPB removed");
+    assert_eq(load8(rb), 0, "byte 0");
+    assert_eq(load8(rb + 1), 0, "byte 1");
+    assert_eq(load8(rb + 2), 1, "the 0x01 survives");
+    # 00 00 03 03 -> 00 00 03: first 03 is the EPB, second is payload.
+    store8(b + 3, 3);
+    assert_eq(h265_rbsp_extract(b, 4, &rb, &n), DR_OK, "strip ok");
+    assert_eq(n, 3, "one EPB removed");
+    assert_eq(load8(rb + 2), 3, "payload 0x03 survives");
+    # Two EPBs back to back: 00 00 03 00 00 03 02 -> 00 00 00 00 02.
+    var c = alloc(7);
+    store8(c, 0); store8(c + 1, 0); store8(c + 2, 3);
+    store8(c + 3, 0); store8(c + 4, 0); store8(c + 5, 3);
+    store8(c + 6, 2);
+    assert_eq(h265_rbsp_extract(c, 7, &rb, &n), DR_OK, "double strip ok");
+    assert_eq(n, 5, "two EPBs removed");
+    assert_eq(load8(rb), 0, "b0"); assert_eq(load8(rb + 1), 0, "b1");
+    assert_eq(load8(rb + 2), 0, "b2"); assert_eq(load8(rb + 3), 0, "b3");
+    assert_eq(load8(rb + 4), 2, "b4");
+    # 7.3.1.1 window edge: 00 00 03 as the LAST three bytes IS an EPB —
+    # the loop condition i + 2 < NumBytes means "the 3-byte window
+    # fits", and i+2 = NumBytes-1 satisfies it. This is how protected
+    # trailing cabac_zero_words look on the wire (H.264 7.4.1.1 analog);
+    # ffmpeg h2645_parse and libde265 strip it too.
+    var d = alloc(3);
+    store8(d, 0); store8(d + 1, 0); store8(d + 2, 3);
+    assert_eq(h265_rbsp_extract(d, 3, &rb, &n), DR_OK, "tail case ok");
+    assert_eq(n, 2, "trailing 00 00 03 -> trailing EPB stripped");
+    assert_eq(load8(rb), 0, "two zeros survive (b0)");
+    assert_eq(load8(rb + 1), 0, "two zeros survive (b1)");
+    # No EPB: passthrough.
+    var e = alloc(4);
+    store8(e, 1); store8(e + 1, 2); store8(e + 2, 3); store8(e + 3, 4);
+    assert_eq(h265_rbsp_extract(e, 4, &rb, &n), DR_OK, "passthrough ok");
+    assert_eq(n, 4, "no EPB, same size");
+    assert_eq(load8(rb), 1, "payload intact");
+    # Empty payload is legal; negative size is not.
+    assert_eq(h265_rbsp_extract(e, 0, &rb, &n), DR_OK, "empty ok");
+    assert_eq(n, 0, "empty RBSP");
+    assert_eq(h265_rbsp_extract(e, 0 - 1, &rb, &n), DR_ERR_BOUNDS,
+    "negative size -> bounds");
+    return 0;
+}
+
+# ================================================================
+# profile_tier_level — spec 7.3.3
+# ================================================================
+
+fn test_h265_ptl_main() {
+    var b = alloc(12);
+    fx_h265_ptl_main(b);
+    var br = dr_br_init(b, 12);
+    var ptl = h265_ptl_parse(br, 1, 0);
+    assert(ptl != 0, "Main PTL parses");
+    assert_eq(dr_br_err(br), DR_OK, "reader clean");
+    assert_eq(dr_br_bit_pos(br), 96, "general block is exactly 96 bits");
+    assert_eq(h265_ptl_profile_space(ptl), 0, "profile space 0");
+    assert_eq(h265_ptl_tier_flag(ptl), 0, "Main tier");
+    assert_eq(h265_ptl_profile_idc(ptl), 1, "profile idc 1 (Main)");
+    assert_eq(h265_ptl_compat_flags(ptl), 0x40000000, "compat word");
+    assert_eq(h265_ptl_compat_flag(ptl, 1), 1, "compat flag[1] set");
+    assert_eq(h265_ptl_compat_flag(ptl, 0), 0, "compat flag[0] clear");
+    assert_eq(h265_ptl_compat_flag(ptl, 2), 0, "compat flag[2] clear");
+    assert_eq(h265_ptl_compat_flag(ptl, 32), 0, "flag index OOB -> 0");
+    assert_eq(h265_ptl_progressive_source(ptl), 1, "progressive");
+    assert_eq(h265_ptl_interlaced_source(ptl), 0, "not interlaced");
+    assert_eq(h265_ptl_non_packed(ptl), 0, "non-packed clear");
+    assert_eq(h265_ptl_frame_only(ptl), 1, "frame-only");
+    assert_eq(h265_ptl_constraint_bits(ptl), 0, "43-bit reserved tail zero");
+    assert_eq(h265_ptl_inbld(ptl), 0, "inbld/reserved bit zero");
+    assert_eq(h265_ptl_level_idc(ptl), 30, "level idc 30 (level 1.0)");
+    assert_eq(h265_ptl_max_sub_layers_minus1(ptl), 0, "mslm1 recorded");
+    return 0;
+}
+
+fn test_h265_ptl_no_profile() {
+    # profilePresentFlag = 0: the PTL degenerates to general_level_idc
+    # alone (7.3.3) — one byte.
+    var b = alloc(1);
+    store8(b, 0x5A);   # general_level_idc = 90 (level 3.0)
+    var br = dr_br_init(b, 1);
+    var ptl = h265_ptl_parse(br, 0, 0);
+    assert(ptl != 0, "level-only PTL parses");
+    assert_eq(dr_br_bit_pos(br), 8, "consumed exactly 8 bits");
+    assert_eq(h265_ptl_level_idc(ptl), 90, "level idc 90");
+    assert_eq(h265_ptl_profile_idc(ptl), 0, "profile fields zeroed");
+    return 0;
+}
+
+fn test_h265_ptl_sublayer_level() {
+    # maxNumSubLayersMinus1 = 1, sub-layer 0 has level only:
+    #   bytes 0-11: general block (fx_h265_ptl_main)
+    #   byte 12 = 0x40: sub_layer_profile_present_flag[0] = 0,
+    #                   sub_layer_level_present_flag[0]   = 1,
+    #                   + first 6 of reserved_zero_2bits[1..8) (14 bits)
+    #   byte 13 = 0x00: remaining 8 reserved bits
+    #   byte 14 = 0x1E: sub_layer_level_idc[0] = 30 (parsed for
+    #                   alignment, discarded at 0.1.x)
+    var b = alloc(15);
+    fx_h265_ptl_main(b);
+    store8(b + 12, 0x40);
+    store8(b + 13, 0x00);
+    store8(b + 14, 0x1E);
+    var br = dr_br_init(b, 15);
+    var ptl = h265_ptl_parse(br, 1, 1);
+    assert(ptl != 0, "sub-layer-level PTL parses");
+    assert_eq(dr_br_bit_pos(br), 120, "96 + 16 flags/reserved + 8 level");
+    assert_eq(h265_ptl_level_idc(ptl), 30, "general level unchanged");
+    assert_eq(h265_ptl_max_sub_layers_minus1(ptl), 1, "mslm1 1");
+    return 0;
+}
+
+fn test_h265_ptl_sublayer_profile() {
+    # maxNumSubLayersMinus1 = 1, sub-layer 0 has a full 88-bit profile
+    # block and no level:
+    #   byte 12 = 0x80: profile_present 1, level_present 0 + reserved
+    #   byte 13 = 0x00: remaining reserved bits
+    #   bytes 14-24: 88-bit sub-layer profile block (2+1+5+32+4+43+1,
+    #                same shape as the general block; discarded) —
+    #                content mirrors the Main general block sans level
+    var b = alloc(25);
+    fx_h265_ptl_main(b);
+    store8(b + 12, 0x80);
+    store8(b + 13, 0x00);
+    store8(b + 14, 0x01); store8(b + 15, 0x40); store8(b + 16, 0x00);
+    store8(b + 17, 0x00); store8(b + 18, 0x00); store8(b + 19, 0x90);
+    store8(b + 20, 0x00); store8(b + 21, 0x00); store8(b + 22, 0x00);
+    store8(b + 23, 0x00); store8(b + 24, 0x00);
+    var br = dr_br_init(b, 25);
+    var ptl = h265_ptl_parse(br, 1, 1);
+    assert(ptl != 0, "sub-layer-profile PTL parses");
+    assert_eq(dr_br_bit_pos(br), 200, "96 + 16 + 88-bit profile block");
+    return 0;
+}
+
+fn test_h265_ptl_reject() {
+    var b = alloc(12);
+    fx_h265_ptl_main(b);
+    # Truncation mid-block: only 5 of 12 bytes.
+    var br = dr_br_init(b, 5);
+    assert_eq(h265_ptl_parse(br, 1, 0), 0, "truncated PTL rejected");
+    assert_eq(dr_br_err(br), DR_ERR_TRUNCATED, "sticky truncated");
+    # max_sub_layers_minus1 out of [0, 6] (7.4.3.1/7.4.3.2.1).
+    var br2 = dr_br_init(b, 12);
+    assert_eq(h265_ptl_parse(br2, 1, 7), 0, "mslm1 7 rejected");
+    assert_eq(dr_br_err(br2), H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    var br3 = dr_br_init(b, 12);
+    assert_eq(h265_ptl_parse(br3, 1, 0 - 1), 0, "mslm1 -1 rejected");
+    assert_eq(dr_br_err(br3), H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    # Already-faulted reader: no-op, returns 0.
+    var br4 = dr_br_init(b, 1);
+    dr_br_read_bits(br4, 32);   # force DR_ERR_TRUNCATED
+    assert_eq(h265_ptl_parse(br4, 1, 0), 0, "faulted reader -> 0");
+    assert_eq(dr_br_err(br4), DR_ERR_TRUNCATED, "first fault preserved");
+    return 0;
+}
+
+# ================================================================
+# VPS (minimal) — spec 7.3.2.1
+# ================================================================
+
+fn test_h265_vps_parse() {
+    var len = 0;
+    var b = fx_h265_vps_main(&len);
+    var e = 99;
+    var v = h265_vps_parse(b, len, &e);
+    assert(v != 0, "minimal VPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_vps_id(v), 0, "vps_id 0");
+    assert_eq(h265_vps_base_layer_internal(v), 1, "base layer internal");
+    assert_eq(h265_vps_base_layer_available(v), 1, "base layer available");
+    assert_eq(h265_vps_max_layers_minus1(v), 0, "max_layers_minus1 0");
+    assert_eq(h265_vps_max_sub_layers_minus1(v), 0, "max_sub_layers_minus1 0");
+    assert_eq(h265_vps_temporal_id_nesting(v), 1, "temporal nesting");
+    assert_eq(h265_vps_reserved_0xffff(v), 0xFFFF, "reserved 16 bits captured");
+    var ptl = h265_vps_ptl(v);
+    assert(ptl != 0, "VPS carries a PTL");
+    assert_eq(h265_ptl_profile_idc(ptl), 1, "PTL profile Main");
+    assert_eq(h265_ptl_level_idc(ptl), 30, "PTL level 30");
+    return 0;
+}
+
+fn test_h265_vps_reserved_not_enforced() {
+    # vps_reserved_0xffff_16bits with a non-0xFFFF value: 7.4.3.1 says
+    # decoders shall IGNORE the value — captured, never rejected.
+    var len = 0;
+    var b = fx_h265_vps_main(&len);
+    store8(b + 2, 0x00); store8(b + 3, 0x00);
+    var e = 99;
+    var v = h265_vps_parse(b, len, &e);
+    assert(v != 0, "VPS with zeroed reserved field still parses");
+    assert_eq(h265_vps_reserved_0xffff(v), 0, "captured raw value");
+    return 0;
+}
+
+fn test_h265_vps_sublayer() {
+    # vps_max_sub_layers_minus1 = 1 with a level-only sub-layer PTL:
+    # byte 1 = 0x03 (max_layers 0000, mslm1 001, nesting 1); PTL grows
+    # the 2 flag bytes + 1 sub-layer level byte of
+    # test_h265_ptl_sublayer_level. 19 bytes total.
+    var b = alloc(19);
+    store8(b, 0x0C);
+    store8(b + 1, 0x03);
+    store8(b + 2, 0xFF); store8(b + 3, 0xFF);
+    fx_h265_ptl_main(b + 4);
+    store8(b + 16, 0x40);   # profile 0 / level 1 + reserved
+    store8(b + 17, 0x00);   # reserved
+    store8(b + 18, 0x1E);   # sub_layer_level_idc[0]
+    var e = 99;
+    var v = h265_vps_parse(b, 19, &e);
+    assert(v != 0, "sub-layered VPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_vps_max_sub_layers_minus1(v), 1, "mslm1 1");
+    assert_eq(h265_ptl_max_sub_layers_minus1(h265_vps_ptl(v)), 1,
+    "PTL parsed against mslm1 1");
+    return 0;
+}
+
+fn test_h265_vps_reject() {
+    var len = 0;
+    var b = fx_h265_vps_main(&len);
+    var e = 0;
+    # vps_max_sub_layers_minus1 = 7 > 6 (7.4.3.1): byte 1 = 0x0F.
+    var b2 = alloc(4);
+    store8(b2, 0x0C); store8(b2 + 1, 0x0F);
+    store8(b2 + 2, 0xFF); store8(b2 + 3, 0xFF);
+    assert_eq(h265_vps_parse(b2, 4, &e), 0, "mslm1 7 rejected");
+    assert_eq(e, H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    # Truncation inside the fixed 32-bit prefix.
+    assert_eq(h265_vps_parse(b, 3, &e), 0, "3-byte VPS rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "-> truncated");
+    # Truncation inside the PTL.
+    assert_eq(h265_vps_parse(b, 10, &e), 0, "PTL-truncated VPS rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "-> truncated");
+    # Empty and negative length.
+    assert_eq(h265_vps_parse(b, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    assert_eq(h265_vps_parse(b, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len -> bounds");
+    return 0;
+}
+
+# ================================================================
+# SPS through the sizing block — spec 7.3.2.2 / 7.4.3.2.1
+# ================================================================
+
+fn test_h265_sps_main64() {
+    var len = 0;
+    var b = fx_h265_sps_main64(&len);
+    var e = 99;
+    var s = h265_sps_parse(b, len, &e);
+    assert(s != 0, "Main 64x64 SPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_sps_vps_id(s), 0, "sps_video_parameter_set_id 0");
+    assert_eq(h265_sps_max_sub_layers_minus1(s), 0, "max_sub_layers_minus1 0");
+    assert_eq(h265_sps_temporal_id_nesting(s), 1, "temporal nesting 1");
+    assert_eq(h265_sps_id(s), 0, "sps_seq_parameter_set_id 0");
+    assert_eq(h265_sps_chroma_format_idc(s), 1, "chroma 4:2:0");
+    assert_eq(h265_sps_separate_colour_plane(s), 0, "no separate planes");
+    assert_eq(h265_sps_pic_width(s), 64, "pic_width 64");
+    assert_eq(h265_sps_pic_height(s), 64, "pic_height 64");
+    assert_eq(h265_sps_conf_win_left(s), 0, "no left crop");
+    assert_eq(h265_sps_conf_win_right(s), 0, "no right crop");
+    assert_eq(h265_sps_conf_win_top(s), 0, "no top crop");
+    assert_eq(h265_sps_conf_win_bottom(s), 0, "no bottom crop");
+    assert_eq(h265_sps_bit_depth_luma(s), 8, "BitDepthY 8");
+    assert_eq(h265_sps_bit_depth_chroma(s), 8, "BitDepthC 8");
+    assert_eq(h265_sps_log2_max_poc_lsb(s), 8, "log2 max POC lsb 4+4");
+    assert_eq(h265_sps_width(s), 64, "display width 64 (no crop)");
+    assert_eq(h265_sps_height(s), 64, "display height 64");
+    var ptl = h265_sps_ptl(s);
+    assert(ptl != 0, "SPS carries a PTL");
+    assert_eq(h265_ptl_profile_idc(ptl), 1, "SPS PTL profile Main");
+    assert_eq(h265_ptl_tier_flag(ptl), 0, "SPS PTL Main tier");
+    assert_eq(h265_ptl_level_idc(ptl), 30, "SPS PTL level 30");
+    return 0;
+}
+
+fn test_h265_sps_conf_window() {
+    # 4:2:0 -> SubWidthC = SubHeightC = 2 (Table 6-1); right=2, bottom=2
+    # -> width 64 - 2*(0+2) = 60, height 64 - 2*(0+2) = 60 (7.4.3.2.1).
+    var len = 0;
+    var b = fx_h265_sps_cropped(&len);
+    var e = 99;
+    var s = h265_sps_parse(b, len, &e);
+    assert(s != 0, "cropped SPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_sps_conf_win_left(s), 0, "left 0");
+    assert_eq(h265_sps_conf_win_right(s), 2, "right 2");
+    assert_eq(h265_sps_conf_win_top(s), 0, "top 0");
+    assert_eq(h265_sps_conf_win_bottom(s), 2, "bottom 2");
+    assert_eq(h265_sps_pic_width(s), 64, "coded width still 64");
+    assert_eq(h265_sps_width(s), 60, "display width 60 (chroma-unit crop)");
+    assert_eq(h265_sps_height(s), 60, "display height 60");
+    assert_eq(h265_sps_log2_max_poc_lsb(s), 4, "log2 max POC lsb 0+4");
+    return 0;
+}
+
+fn test_h265_sps_444_separate() {
+    # 4:4:4 + separate_colour_plane_flag = 1: ChromaArrayType == 0 ->
+    # SubWidthC = SubHeightC = 1 (Table 6-1); left=1, right=1 ->
+    # width 64 - 1*(1+1) = 62, height uncropped.
+    var len = 0;
+    var b = fx_h265_sps_444_sep(&len);
+    var e = 99;
+    var s = h265_sps_parse(b, len, &e);
+    assert(s != 0, "4:4:4 separate-plane SPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_sps_chroma_format_idc(s), 3, "chroma 4:4:4");
+    assert_eq(h265_sps_separate_colour_plane(s), 1, "separate planes");
+    assert_eq(h265_sps_width(s), 62, "display width 62 (luma-unit crop)");
+    assert_eq(h265_sps_height(s), 64, "display height 64");
+    return 0;
+}
+
+fn test_h265_sps_reject() {
+    var len = 0;
+    var b = fx_h265_sps_main64(&len);
+    var e = 0;
+    # Truncation mid-PTL (10 of 18 bytes).
+    assert_eq(h265_sps_parse(b, 10, &e), 0, "PTL-truncated SPS rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "-> truncated");
+    # Truncation mid-sizing-block (14 bytes: ue fields cut off).
+    assert_eq(h265_sps_parse(b, 14, &e), 0, "sizing-truncated SPS rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "-> truncated");
+    # Empty / negative.
+    assert_eq(h265_sps_parse(b, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    assert_eq(h265_sps_parse(b, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "-> bounds");
+    # sps_max_sub_layers_minus1 = 7 (u(3) ceiling; 7.4.3.2.1 caps at 6):
+    # 0x0E = 0000 111 0 — fails before the PTL, one byte is enough.
+    var b2 = alloc(1);
+    store8(b2, 0x0E);
+    assert_eq(h265_sps_parse(b2, 1, &e), 0, "mslm1 7 rejected");
+    assert_eq(e, H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    # Malformed exp-Golomb where sps_seq_parameter_set_id should be:
+    # header byte + PTL + 5 zero bytes = a 40-zero-bit run > 31 (9.2).
+    var b3 = alloc(18);
+    store8(b3, 0x01);
+    fx_h265_ptl_main(b3 + 1);
+    store8(b3 + 13, 0x00); store8(b3 + 14, 0x00); store8(b3 + 15, 0x00);
+    store8(b3 + 16, 0x00); store8(b3 + 17, 0x00);
+    assert_eq(h265_sps_parse(b3, 18, &e), 0, "zero-run ue rejected");
+    assert_eq(e, DR_ERR_BAD_VLC, "-> bad VLC");
+    # Zero dimensions (7.4.3.2.1: pic_width/height shall not be 0):
+    # post-PTL bits "1"(sps_id 0) "010"(chroma 1) "1"(w ue = 0)
+    # "1"(h ue = 0) + pad -> 0xAC = 10101100.
+    var b4 = alloc(14);
+    store8(b4, 0x01);
+    fx_h265_ptl_main(b4 + 1);
+    store8(b4 + 13, 0xAC);
+    assert_eq(h265_sps_parse(b4, 14, &e), 0, "zero dims rejected");
+    assert_eq(e, H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    return 0;
+}
+
+fn test_h265_sps_bomb_guard() {
+    # pic_width = pic_height = 32768 > 16888 (A.4.2 level-6.2 ceiling):
+    # a lying-dimensions bomb — rejected before any dimension math.
+    # Post-PTL bits: "1"(sps_id) "010"(chroma) then ue(32768) twice:
+    # 32769 = 1000000000000001b (16 bits) -> 15 lz + 16 = 31 bits each.
+    #   1 010 [15x0]1000000000000001 [15x0]1000000000000001 + 6 pad
+    # = A0 00 10 00 20 00 20 00 40
+    var b = alloc(22);
+    store8(b, 0x01);
+    fx_h265_ptl_main(b + 1);
+    store8(b + 13, 0xA0); store8(b + 14, 0x00); store8(b + 15, 0x10);
+    store8(b + 16, 0x00); store8(b + 17, 0x20); store8(b + 18, 0x00);
+    store8(b + 19, 0x20); store8(b + 20, 0x00); store8(b + 21, 0x40);
+    var e = 0;
+    assert_eq(h265_sps_parse(b, 22, &e), 0, "32768x32768 rejected");
+    assert_eq(e, DR_ERR_OVERSIZE, "-> DR_ERR_OVERSIZE (bomb guard)");
+    return 0;
+}
+
+fn test_h265_sps_crop_consumes_picture() {
+    # Conformance window that eats the whole picture: 64x64 4:2:0 with
+    # left = right = 16 -> SubWidthC*(16+16) = 64 >= pic_width
+    # (7.4.3.2.1 violation). Post-PTL bits:
+    #   "1" "010" w=64(13) h=64(13) "1"(conf)
+    #   left ue(16) = "000010001" (17 = 10001b, 4 lz)
+    #   right ue(16) = "000010001"
+    #   top ue(0)="1" bottom ue(0)="1" bd "1" bd "1" log2 "1" + 2 pad
+    # = A0 20 81 06 11 08 FC
+    var b = alloc(20);
+    store8(b, 0x01);
+    fx_h265_ptl_main(b + 1);
+    store8(b + 13, 0xA0); store8(b + 14, 0x20); store8(b + 15, 0x81);
+    store8(b + 16, 0x06); store8(b + 17, 0x11); store8(b + 18, 0x08);
+    store8(b + 19, 0xFC);
+    var e = 0;
+    assert_eq(h265_sps_parse(b, 20, &e), 0, "full-crop SPS rejected");
+    assert_eq(e, H265_ERR_RANGE, "crop >= picture -> H265_ERR_RANGE");
+    return 0;
+}
+
+# ================================================================
+# PPS (minimal) — spec 7.3.2.3
+# ================================================================
+
+fn test_h265_pps_parse() {
+    var len = 0;
+    var b = fx_h265_pps_min(&len);
+    var e = 99;
+    var p = h265_pps_parse(b, len, &e);
+    assert(p != 0, "minimal PPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_pps_id(p), 0, "pps_id 0");
+    assert_eq(h265_pps_sps_id(p), 0, "sps_id 0");
+    assert_eq(h265_pps_dependent_slice_segments(p), 0, "no dependent slices");
+    assert_eq(h265_pps_output_flag_present(p), 0, "no output flag");
+    assert_eq(h265_pps_num_extra_slice_header_bits(p), 0, "no extra bits");
+    assert_eq(h265_pps_sign_data_hiding(p), 1, "SDH on");
+    assert_eq(h265_pps_cabac_init_present(p), 0, "no cabac init flag");
+    assert_eq(h265_pps_num_ref_idx_l0_minus1(p), 0, "l0 default 0");
+    assert_eq(h265_pps_num_ref_idx_l1_minus1(p), 0, "l1 default 0");
+    assert_eq(h265_pps_init_qp_minus26(p), 0, "init_qp_minus26 0");
+    assert_eq(h265_pps_constrained_intra_pred(p), 0, "no CIP");
+    assert_eq(h265_pps_transform_skip(p), 1, "transform skip on");
+    assert_eq(h265_pps_cu_qp_delta_enabled(p), 1, "cu_qp_delta on");
+    assert_eq(h265_pps_diff_cu_qp_delta_depth(p), 1, "diff depth 1");
+    return 0;
+}
+
+fn test_h265_pps_signed_qp() {
+    # Second PPS exercising se(v) negative and the flag inversions:
+    #   pps_pic_parameter_set_id ue(1) = "010"
+    #   pps_seq_parameter_set_id ue(0) = "1"
+    #   dependent/output flags = "0" "0", extra bits = "000"
+    #   sign_data_hiding = "0", cabac_init_present = "1"
+    #   num_ref_idx_l0 ue(1) = "010", l1 ue(0) = "1"
+    #   init_qp_minus26 se(-4) -> codeNum 8 = "0001001" (9.1.1: even
+    #     k -> -(k/2); ue(8): 3 lz, 9 = 1001b)
+    #   constrained_intra_pred = "1", transform_skip = "0",
+    #   cu_qp_delta_enabled = "0" (no diff field) + 7 pad
+    # packed: 01010000 00101010 00100110 00000000 = 50 2A 26 00
+    var b = alloc(4);
+    store8(b, 0x50); store8(b + 1, 0x2A);
+    store8(b + 2, 0x26); store8(b + 3, 0x00);
+    var e = 99;
+    var p = h265_pps_parse(b, 4, &e);
+    assert(p != 0, "signed-QP PPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_pps_id(p), 1, "pps_id 1");
+    assert_eq(h265_pps_sign_data_hiding(p), 0, "SDH off");
+    assert_eq(h265_pps_cabac_init_present(p), 1, "cabac init on");
+    assert_eq(h265_pps_num_ref_idx_l0_minus1(p), 1, "l0 default 1");
+    assert_eq(h265_pps_num_ref_idx_l1_minus1(p), 0, "l1 default 0");
+    assert_eq(h265_pps_init_qp_minus26(p), 0 - 4, "init_qp_minus26 -4");
+    assert_eq(h265_pps_constrained_intra_pred(p), 1, "CIP on");
+    assert_eq(h265_pps_transform_skip(p), 0, "transform skip off");
+    assert_eq(h265_pps_cu_qp_delta_enabled(p), 0, "cu_qp_delta off");
+    assert_eq(h265_pps_diff_cu_qp_delta_depth(p), 0, "diff depth inferred 0");
+    return 0;
+}
+
+fn test_h265_pps_reject() {
+    var e = 0;
+    # pps_pic_parameter_set_id = 64 > 63 (7.4.3.3.1): ue(64) =
+    # "0000001000001" + 3 pad = 02 08.
+    var b = alloc(2);
+    store8(b, 0x02); store8(b + 1, 0x08);
+    assert_eq(h265_pps_parse(b, 2, &e), 0, "pps_id 64 rejected");
+    assert_eq(e, H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    # init_qp_minus26 = +26 > 25 (7.4.3.3.1): se(26) -> codeNum 51 =
+    # "00000110100" (11 bits). Bits: "1" "1" 0000000(flags) "1" "1"
+    # init "00000110100" "0" "0" "0" + 7 pad
+    # = 11000000 01100000 11010000 00000000 = C0 60 D0 00
+    var b2 = alloc(4);
+    store8(b2, 0xC0); store8(b2 + 1, 0x60);
+    store8(b2 + 2, 0xD0); store8(b2 + 3, 0x00);
+    assert_eq(h265_pps_parse(b2, 4, &e), 0, "init_qp +26 rejected");
+    assert_eq(e, H265_ERR_RANGE, "-> H265_ERR_RANGE");
+    # Truncation: single byte ends inside the flag run.
+    var len = 0;
+    var b3 = fx_h265_pps_min(&len);
+    assert_eq(h265_pps_parse(b3, 1, &e), 0, "1-byte PPS rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "-> truncated");
+    # Empty / negative.
+    assert_eq(h265_pps_parse(b3, 0, &e), 0, "empty rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "empty -> truncated");
+    assert_eq(h265_pps_parse(b3, 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "-> bounds");
+    return 0;
+}
+
+# ================================================================
+# Integration — Annex-B stream carrying an EPB-protected SPS through
+# the full decode-side pipeline: scan -> header -> RBSP -> parse.
+# ================================================================
+
+fn test_h265_integration_sps_pipeline() {
+    # The 18-byte SPS RBSP contains 00 00 00 runs (inside the PTL), so
+    # its on-wire EBSP form REQUIRES emulation prevention (7.4.2).
+    # Encoder-side EPB insertion (derived by hand, 21 bytes):
+    #   RBSP: 01 01 40 00 00|00 90 00 00|00 00|00 1E A0 20 81 05 94
+    #   EBSP: 01 01 40 00 00 03 00 90 00 00 03 00 00 03 00 1E A0 20 81 05 94
+    # Stream: [00 00 00 01] [42 01] [EBSP] = 4 + 2 + 21 = 27 bytes.
+    # The 00 00 03 sequences also prove the B.2.2 scanner does NOT
+    # mistake protected runs for start-code boundaries.
+    var s = alloc(27);
+    store8(s, 0x00); store8(s + 1, 0x00);
+    store8(s + 2, 0x00); store8(s + 3, 0x01);        # 4-byte start code
+    store8(s + 4, 0x42); store8(s + 5, 0x01);        # SPS NAL header
+    store8(s + 6, 0x01);                             # sps hdr byte (vps 0, mslm1 0, nesting 1)
+    store8(s + 7, 0x01);                             # PTL byte 0
+    store8(s + 8, 0x40);                             # PTL compat[1]
+    store8(s + 9, 0x00); store8(s + 10, 0x00);       # PTL zeros...
+    store8(s + 11, 0x03);                            # EPB #1
+    store8(s + 12, 0x00);
+    store8(s + 13, 0x90);                            # PTL source flags
+    store8(s + 14, 0x00); store8(s + 15, 0x00);
+    store8(s + 16, 0x03);                            # EPB #2
+    store8(s + 17, 0x00); store8(s + 18, 0x00);
+    store8(s + 19, 0x03);                            # EPB #3
+    store8(s + 20, 0x00);
+    store8(s + 21, 0x1E);                            # PTL level 30
+    store8(s + 22, 0xA0); store8(s + 23, 0x20);      # sizing block
+    store8(s + 24, 0x81); store8(s + 25, 0x05);
+    store8(s + 26, 0x94);
+    assert_eq(dr_sniff(s, 27), DR_SNIFF_ANNEXB, "sniffs as Annex-B");
+    # Scan: exactly one NAL, EPB runs not mistaken for boundaries.
+    var sc = h265_ab_init(s, 27);
+    var nal = 0; var sz = 0;
+    assert_eq(h265_ab_next(sc, &nal, &sz), DR_OK, "SPS NAL found");
+    assert_eq(nal, s + 4, "NAL starts after the 4-byte code");
+    assert_eq(sz, 23, "NAL spans header + EBSP (EPBs not boundaries)");
+    assert_eq(h265_ab_next(sc, &nal, &sz), H265_AB_END, "single NAL");
+    # Header: SPS, layer 0, TemporalId 0.
+    var t = 0; var l = 0; var tid = 0;
+    assert_eq(h265_nal_hdr_parse(nal, sz, &t, &l, &tid), DR_OK, "hdr ok");
+    assert_eq(t, H265_NAL_SPS_NUT, "type SPS");
+    assert_eq(h265_nal_is_vcl(t), 0, "SPS is non-VCL");
+    # RBSP extraction strips the three EPBs.
+    var rb = 0; var n = 0;
+    assert_eq(h265_rbsp_extract(nal + 2, sz - 2, &rb, &n), DR_OK, "strip ok");
+    assert_eq(n, 18, "21-byte EBSP -> 18-byte RBSP (3 EPBs)");
+    # Byte-exact match against the reference fixture.
+    var reflen = 0;
+    var ref = fx_h265_sps_main64(&reflen);
+    var i = 0;
+    var same = 1;
+    while (i < 18) {
+        if (load8(rb + i) != load8(ref + i)) { same = 0; }
+        i = i + 1;
+    }
+    assert_eq(same, 1, "stripped RBSP matches the reference SPS");
+    # And it decodes.
+    var e = 99;
+    var sps = h265_sps_parse(rb, n, &e);
+    assert(sps != 0, "pipelined SPS parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(h265_sps_width(sps), 64, "width 64 end-to-end");
+    assert_eq(h265_sps_height(sps), 64, "height 64 end-to-end");
+    assert_eq(h265_sps_bit_depth_luma(sps), 8, "8-bit end-to-end");
+    assert_eq(h265_ptl_profile_idc(h265_sps_ptl(sps)), 1, "Main end-to-end");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("h265 nal header");
+    test_h265_nal_hdr_types();
+    test_h265_nal_hdr_layer_tid();
+    test_h265_nal_predicates();
+    test_group("h265 nal header reject");
+    test_h265_nal_hdr_reject();
+    test_group("h265 annexb scan");
+    test_h265_annexb_scan();
+    test_h265_annexb_edge();
+    test_h265_annexb_reject();
+    test_group("h265 epb strip");
+    test_h265_epb_strip();
+    test_group("h265 profile_tier_level");
+    test_h265_ptl_main();
+    test_h265_ptl_no_profile();
+    test_h265_ptl_sublayer_level();
+    test_h265_ptl_sublayer_profile();
+    test_h265_ptl_reject();
+    test_group("h265 vps");
+    test_h265_vps_parse();
+    test_h265_vps_reserved_not_enforced();
+    test_h265_vps_sublayer();
+    test_h265_vps_reject();
+    test_group("h265 sps");
+    test_h265_sps_main64();
+    test_h265_sps_conf_window();
+    test_h265_sps_444_separate();
+    test_group("h265 sps reject");
+    test_h265_sps_reject();
+    test_h265_sps_bomb_guard();
+    test_h265_sps_crop_consumes_picture();
+    test_group("h265 pps");
+    test_h265_pps_parse();
+    test_h265_pps_signed_qp();
+    test_h265_pps_reject();
+    test_group("h265 integration");
+    test_h265_integration_sps_pipeline();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,582 @@
+# tests/bits.tcyr — bit I/O suite: MSB-first bitreader vectors, leb128
+# read/write round-trips (AV1 4.10.5), uvlc (AV1 4.10.3), exp-Golomb
+# ue(v)/se(v) read/write round-trips (H.264 9.1 / 9.1.1), bitwriter,
+# endian byte helpers. All vectors hand-built, every field commented.
+#
+# Suites explicitly include the lib root: `cyrius test` auto-includes
+# stdlib only, never [lib] modules (verified at pin 6.4.43).
+include "src/main.cyr"
+
+# ================================================================
+# Bitreader — single-bit vectors
+# ================================================================
+fn test_br_read_bit() {
+    var b = alloc(2);
+    store8(b, 0xB1);       # 0b1011_0001 -> bits 1,0,1,1,0,0,0,1 MSB-first
+    store8(b + 1, 0x80);   # 0b1000_0000 -> first bit 1
+    var br = dr_br_init(b, 2);
+    assert(br != 0, "reader allocates");
+    assert_eq(dr_br_bits_left(br), 16, "16 bits available");
+    assert_eq(dr_br_read_bit(br), 1, "bit 7 of 0xB1");
+    assert_eq(dr_br_read_bit(br), 0, "bit 6");
+    assert_eq(dr_br_read_bit(br), 1, "bit 5");
+    assert_eq(dr_br_read_bit(br), 1, "bit 4");
+    assert_eq(dr_br_read_bit(br), 0, "bit 3");
+    assert_eq(dr_br_read_bit(br), 0, "bit 2");
+    assert_eq(dr_br_read_bit(br), 0, "bit 1");
+    assert_eq(dr_br_read_bit(br), 1, "bit 0");
+    assert_eq(dr_br_read_bit(br), 1, "crosses into byte 1");
+    assert_eq(dr_br_bit_pos(br), 9, "9 bits consumed");
+    assert_eq(dr_br_byte_pos(br), 1, "cursor inside byte 1");
+    assert_eq(dr_br_bits_left(br), 7, "7 bits left");
+    assert_eq(dr_br_err(br), DR_OK, "no error");
+    return 0;
+}
+
+# ================================================================
+# Bitreader — multi-bit reads, boundary crossing, 32-bit width
+# ================================================================
+fn test_br_read_bits() {
+    var b = alloc(6);
+    store8(b, 0xB1);      # 0b1011_0001
+    store8(b + 1, 0xE5);  # 0b1110_0101
+    store8(b + 2, 0xDE);  # }
+    store8(b + 3, 0xAD);  # } 0xDEADBEEF big-endian
+    store8(b + 4, 0xBE);  # }
+    store8(b + 5, 0xEF);  # }
+    var br = dr_br_init(b, 6);
+    assert_eq(dr_br_read_bits(br, 4), 0xB, "high nibble of 0xB1");
+    assert_eq(dr_br_read_bits(br, 4), 1, "low nibble of 0xB1");
+    # Rewind not supported — fresh reader for the crossing vector.
+    br = dr_br_init(b, 6);
+    assert_eq(dr_br_read_bits(br, 12), 0xB1E, "12 bits cross byte 0->1");
+    assert_eq(dr_br_read_bits(br, 4), 5, "remaining nibble of 0xE5");
+    assert_eq(dr_br_read_bits(br, 32), 0xDEADBEEF, "full 32-bit read");
+    assert_eq(dr_br_bits_left(br), 0, "exhausted");
+    assert_eq(dr_br_err(br), DR_OK, "still clean at exact end");
+    # n = 0 is a legal no-op.
+    br = dr_br_init(b, 6);
+    assert_eq(dr_br_read_bits(br, 0), 0, "n=0 reads nothing");
+    assert_eq(dr_br_bit_pos(br), 0, "n=0 does not advance");
+    assert_eq(dr_br_err(br), DR_OK, "n=0 no error");
+    return 0;
+}
+
+# ================================================================
+# Bitreader — overrun + width faults are sticky
+# ================================================================
+fn test_br_faults() {
+    var b = alloc(1);
+    store8(b, 0xFF);
+    # Overrun: 8 good bits then a 9th faults.
+    var br = dr_br_init(b, 1);
+    assert_eq(dr_br_read_bits(br, 8), 0xFF, "8 bits ok");
+    assert_eq(dr_br_read_bit(br), 0, "overrun returns 0");
+    assert_eq(dr_br_err(br), DR_ERR_TRUNCATED, "overrun -> truncated");
+    assert_eq(dr_br_read_bit(br), 0, "sticky: later reads return 0");
+    assert_eq(dr_br_err(br), DR_ERR_TRUNCATED, "sticky: code preserved");
+    # read_bits larger than remainder must not advance the cursor.
+    br = dr_br_init(b, 1);
+    assert_eq(dr_br_read_bits(br, 4), 0xF, "4 bits ok");
+    assert_eq(dr_br_read_bits(br, 5), 0, "5 > 4 remaining faults");
+    assert_eq(dr_br_err(br), DR_ERR_TRUNCATED, "partial read -> truncated");
+    assert_eq(dr_br_bit_pos(br), 4, "cursor NOT advanced by failed read");
+    # Width fault: n > 32.
+    br = dr_br_init(b, 1);
+    assert_eq(dr_br_read_bits(br, 33), 0, "n=33 returns 0");
+    assert_eq(dr_br_err(br), DR_ERR_BOUNDS, "n=33 -> bounds");
+    # Width fault: n < 0.
+    br = dr_br_init(b, 1);
+    assert_eq(dr_br_read_bits(br, -1), 0, "n=-1 returns 0");
+    assert_eq(dr_br_err(br), DR_ERR_BOUNDS, "n=-1 -> bounds");
+    # Zero-length buffer: first read faults.
+    br = dr_br_init(b, 0);
+    assert_eq(dr_br_bits_left(br), 0, "empty reader has 0 bits");
+    assert_eq(dr_br_read_bit(br), 0, "read on empty returns 0");
+    assert_eq(dr_br_err(br), DR_ERR_TRUNCATED, "read on empty -> truncated");
+    # Negative length is rejected at init.
+    assert_eq(dr_br_init(b, -1), 0, "negative len -> init fails");
+    return 0;
+}
+
+# ================================================================
+# Bitreader — byte_align + alignment predicate
+# ================================================================
+fn test_br_byte_align() {
+    var b = alloc(2);
+    store8(b, 0xA5);      # 0b1010_0101
+    store8(b + 1, 0x3C);  # 0b0011_1100
+    var br = dr_br_init(b, 2);
+    assert_eq(dr_br_is_aligned(br), 1, "aligned at start");
+    dr_br_read_bits(br, 3);
+    assert_eq(dr_br_is_aligned(br), 0, "unaligned after 3 bits");
+    assert_eq(dr_br_byte_align(br), DR_OK, "align succeeds");
+    assert_eq(dr_br_bit_pos(br), 8, "aligned to bit 8");
+    assert_eq(dr_br_read_bits(br, 8), 0x3C, "next byte reads whole");
+    # Aligning an already-aligned reader is a no-op.
+    br = dr_br_init(b, 2);
+    dr_br_read_bits(br, 8);
+    dr_br_byte_align(br);
+    assert_eq(dr_br_bit_pos(br), 8, "align on boundary is a no-op");
+    return 0;
+}
+
+# ================================================================
+# leb128 read — AV1 spec 4.10.5 vectors
+# ================================================================
+fn test_leb128_read() {
+    var b = alloc(10);
+    var v = 0;
+    # Single byte 0x00 -> 0.
+    store8(b, 0x00);
+    var br = dr_br_init(b, 1);
+    assert_eq(dr_leb128_read(br, &v), DR_OK, "0x00 decodes");
+    assert_eq(v, 0, "0x00 -> 0");
+    # Single byte 0x7F -> 127 (max 1-byte value).
+    store8(b, 0x7F);
+    br = dr_br_init(b, 1);
+    assert_eq(dr_leb128_read(br, &v), DR_OK, "0x7F decodes");
+    assert_eq(v, 127, "0x7F -> 127");
+    # 0x80 0x01 -> 128 (first 2-byte value; low group first).
+    store8(b, 0x80); store8(b + 1, 0x01);
+    br = dr_br_init(b, 2);
+    assert_eq(dr_leb128_read(br, &v), DR_OK, "0x80 0x01 decodes");
+    assert_eq(v, 128, "0x80 0x01 -> 128");
+    assert_eq(dr_br_bit_pos(br), 16, "consumed exactly 2 bytes");
+    # Classic 3-byte vector: 0xE5 0x8E 0x26 -> 624485.
+    #   0x65 + (0x0E << 7) + (0x26 << 14) = 101 + 1792 + 622592.
+    store8(b, 0xE5); store8(b + 1, 0x8E); store8(b + 2, 0x26);
+    br = dr_br_init(b, 3);
+    assert_eq(dr_leb128_read(br, &v), DR_OK, "3-byte vector decodes");
+    assert_eq(v, 624485, "0xE5 0x8E 0x26 -> 624485");
+    # Non-minimal (zero-padded) encodings are LEGAL per 4.10.5 — AV1
+    # encoders pad obu_size to fixed width: 0x80 0x80 0x00 -> 0.
+    store8(b, 0x80); store8(b + 1, 0x80); store8(b + 2, 0x00);
+    br = dr_br_init(b, 3);
+    assert_eq(dr_leb128_read(br, &v), DR_OK, "padded encoding accepted");
+    assert_eq(v, 0, "0x80 0x80 0x00 -> 0");
+    # Max 32-bit value 0xFFFFFFFF = 0xFF 0xFF 0xFF 0xFF 0x0F.
+    store8(b, 0xFF); store8(b + 1, 0xFF); store8(b + 2, 0xFF);
+    store8(b + 3, 0xFF); store8(b + 4, 0x0F);
+    br = dr_br_init(b, 5);
+    assert_eq(dr_leb128_read(br, &v), DR_OK, "max u32 decodes");
+    assert_eq(v, 0xFFFFFFFF, "-> 0xFFFFFFFF");
+    return 0;
+}
+
+# ================================================================
+# leb128 read — rejections (4.10.5 conformance bounds)
+# ================================================================
+fn test_leb128_reject() {
+    var b = alloc(10);
+    var v = 0;
+    # Value 2^32 (one over the 32-bit bound): 0x80 0x80 0x80 0x80 0x10.
+    #   0x10 << 28 = 2^32 -> DR_ERR_BAD_LEB128.
+    store8(b, 0x80); store8(b + 1, 0x80); store8(b + 2, 0x80);
+    store8(b + 3, 0x80); store8(b + 4, 0x10);
+    var br = dr_br_init(b, 5);
+    assert_eq(dr_leb128_read(br, &v), DR_ERR_BAD_LEB128, "2^32 rejected");
+    assert_eq(dr_br_err(br), DR_ERR_BAD_LEB128, "fault is sticky");
+    # 8 bytes all with the continuation bit -> >8-byte encoding rejected.
+    var i = 0;
+    while (i < 8) { store8(b + i, 0x80); i = i + 1; }
+    store8(b + 8, 0x00);   # a 9th byte the reader must never reach
+    br = dr_br_init(b, 9);
+    assert_eq(dr_leb128_read(br, &v), DR_ERR_BAD_LEB128, ">8 bytes rejected");
+    # Truncated: continuation bit set, then end of buffer.
+    store8(b, 0x80);
+    br = dr_br_init(b, 1);
+    assert_eq(dr_leb128_read(br, &v), DR_ERR_TRUNCATED, "truncated mid-value");
+    # Unaligned reader: leb128 is a byte-level coding.
+    store8(b, 0x00); store8(b + 1, 0x00);
+    br = dr_br_init(b, 2);
+    dr_br_read_bit(br);
+    assert_eq(dr_leb128_read(br, &v), DR_ERR_BOUNDS, "unaligned rejected");
+    return 0;
+}
+
+# ================================================================
+# leb128 write — round-trips + rejection
+# ================================================================
+fn test_leb128_write_roundtrip() {
+    # Values chosen to hit 1/2/3/5-byte encodings + both bounds.
+    var vals = alloc(48);   # 6 x i64 test values
+    store64(vals, 0);
+    store64(vals + 8, 1);
+    store64(vals + 16, 127);
+    store64(vals + 24, 128);
+    store64(vals + 32, 624485);
+    store64(vals + 40, 0xFFFFFFFF);
+    var i = 0;
+    while (i < 6) {
+        var want = load64(vals + (i * 8));
+        var bw = dr_bw_init(16);
+        assert_eq(dr_leb128_write(bw, want), DR_OK, "leb128 write ok");
+        var nbytes = dr_bw_flush(bw);
+        var br = dr_br_init(dr_bw_buf(bw), nbytes);
+        var got = 0;
+        assert_eq(dr_leb128_read(br, &got), DR_OK, "leb128 reads back");
+        assert_eq(got, want, "leb128 round-trip value");
+        i = i + 1;
+    }
+    # Minimal-length check: 0 encodes as exactly one byte 0x00.
+    var bw2 = dr_bw_init(16);
+    dr_leb128_write(bw2, 0);
+    assert_eq(dr_bw_bytes(bw2), 1, "0 encodes in 1 byte");
+    assert_eq(load8(dr_bw_buf(bw2)), 0x00, "0 encodes as 0x00");
+    # 624485 encodes as the classic 0xE5 0x8E 0x26.
+    bw2 = dr_bw_init(16);
+    dr_leb128_write(bw2, 624485);
+    assert_eq(dr_bw_bytes(bw2), 3, "624485 encodes in 3 bytes");
+    assert_eq(load8(dr_bw_buf(bw2)), 0xE5, "byte 0");
+    assert_eq(load8(dr_bw_buf(bw2) + 1), 0x8E, "byte 1");
+    assert_eq(load8(dr_bw_buf(bw2) + 2), 0x26, "byte 2");
+    # Rejection: 2^32 exceeds the 4.10.5 32-bit bound.
+    bw2 = dr_bw_init(16);
+    assert_eq(dr_leb128_write(bw2, 0x100000000), DR_ERR_BAD_LEB128,
+    "write 2^32 rejected");
+    # Rejection: negative.
+    bw2 = dr_bw_init(16);
+    assert_eq(dr_leb128_write(bw2, -1), DR_ERR_BAD_LEB128, "write -1 rejected");
+    # Rejection: unaligned writer.
+    bw2 = dr_bw_init(16);
+    dr_bw_put_bit(bw2, 1);
+    assert_eq(dr_leb128_write(bw2, 5), DR_ERR_BOUNDS, "unaligned write rejected");
+    return 0;
+}
+
+# ================================================================
+# uvlc — AV1 spec 4.10.3 vectors
+# ================================================================
+fn test_uvlc_read() {
+    var b = alloc(8);
+    var v = 0;
+    # "1" -> 0 (no leading zeros).
+    store8(b, 0x80);   # 0b1000_0000
+    var br = dr_br_init(b, 1);
+    assert_eq(dr_uvlc_read(br, &v), DR_OK, "uvlc '1' decodes");
+    assert_eq(v, 0, "'1' -> 0");
+    assert_eq(dr_br_bit_pos(br), 1, "consumed 1 bit");
+    # "010" -> 1: lz=1, suffix 0 -> 0 + 2^1 - 1 = 1.
+    store8(b, 0x40);   # 0b0100_0000
+    br = dr_br_init(b, 1);
+    assert_eq(dr_uvlc_read(br, &v), DR_OK, "uvlc '010' decodes");
+    assert_eq(v, 1, "'010' -> 1");
+    assert_eq(dr_br_bit_pos(br), 3, "consumed 3 bits");
+    # "011" -> 2: lz=1, suffix 1 -> 1 + 1 = 2.
+    store8(b, 0x60);   # 0b0110_0000
+    br = dr_br_init(b, 1);
+    dr_uvlc_read(br, &v);
+    assert_eq(v, 2, "'011' -> 2");
+    # "00100" -> 3: lz=2, suffix 0b00 -> 0 + 2^2 - 1 = 3.
+    store8(b, 0x20);   # 0b0010_0000
+    br = dr_br_init(b, 1);
+    dr_uvlc_read(br, &v);
+    assert_eq(v, 3, "'00100' -> 3");
+    # "00111" -> 6: lz=2, suffix 0b11 -> 3 + 3 = 6.
+    store8(b, 0x38);   # 0b0011_1000
+    br = dr_br_init(b, 1);
+    dr_uvlc_read(br, &v);
+    assert_eq(v, 6, "'00111' -> 6");
+    # leadingZeros >= 32 -> (1<<32)-1 per spec, NOT an error. Vector:
+    # 32 zero bits then a 1: bytes 00 00 00 00 80. Consumes 33 bits.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 0);
+    store8(b + 4, 0x80);
+    br = dr_br_init(b, 5);
+    assert_eq(dr_uvlc_read(br, &v), DR_OK, "lz>=32 is legal");
+    assert_eq(v, 0xFFFFFFFF, "lz>=32 -> (1<<32)-1");
+    assert_eq(dr_br_bit_pos(br), 33, "consumed 33 bits, no suffix");
+    # Truncation: zeros to end of buffer, no terminating 1.
+    store8(b, 0); store8(b + 1, 0);
+    br = dr_br_init(b, 2);
+    assert_eq(dr_uvlc_read(br, &v), DR_ERR_TRUNCATED, "all-zeros truncates");
+    return 0;
+}
+
+# ================================================================
+# exp-Golomb ue(v) read — H.264 spec 9.1 Table 9-1 vectors
+# ================================================================
+fn test_ue_read() {
+    var b = alloc(8);
+    var v = 0;
+    # Table 9-1: "1" -> 0.
+    store8(b, 0x80);
+    var br = dr_br_init(b, 1);
+    assert_eq(dr_ue_read(br, &v), DR_OK, "ue '1' decodes");
+    assert_eq(v, 0, "'1' -> 0");
+    # "010" -> 1.
+    store8(b, 0x40);
+    br = dr_br_init(b, 1);
+    dr_ue_read(br, &v);
+    assert_eq(v, 1, "'010' -> 1");
+    # "011" -> 2.
+    store8(b, 0x60);
+    br = dr_br_init(b, 1);
+    dr_ue_read(br, &v);
+    assert_eq(v, 2, "'011' -> 2");
+    # "00100" -> 3.
+    store8(b, 0x20);
+    br = dr_br_init(b, 1);
+    dr_ue_read(br, &v);
+    assert_eq(v, 3, "'00100' -> 3");
+    # "00111" -> 6.
+    store8(b, 0x38);
+    br = dr_br_init(b, 1);
+    dr_ue_read(br, &v);
+    assert_eq(v, 6, "'00111' -> 6");
+    # "0001000" -> 7: lz=3, suffix 0b000 -> 2^3 - 1 + 0 = 7.
+    store8(b, 0x10);   # 0b0001_0000
+    br = dr_br_init(b, 1);
+    dr_ue_read(br, &v);
+    assert_eq(v, 7, "'0001000' -> 7");
+    return 0;
+}
+
+# ================================================================
+# ue(v) read — malformed rejection
+# ================================================================
+fn test_ue_reject() {
+    var b = alloc(8);
+    var v = 0;
+    # 32 leading zeros exceed the codeNum <= 2^32-2 bound (lz <= 31):
+    # bytes 00 00 00 00 then 0x80 -> 32 zeros before the 1.
+    store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 0);
+    store8(b + 4, 0x80);
+    var br = dr_br_init(b, 5);
+    assert_eq(dr_ue_read(br, &v), DR_ERR_BAD_VLC, "32 leading zeros rejected");
+    assert_eq(dr_br_err(br), DR_ERR_BAD_VLC, "fault sticky");
+    # Truncation: zero run hits end of buffer.
+    store8(b, 0);
+    br = dr_br_init(b, 1);
+    assert_eq(dr_ue_read(br, &v), DR_ERR_TRUNCATED, "zero run truncates");
+    # Truncation inside the suffix: "0000001" + only 2 of 6 suffix bits.
+    # lz=6 needs 6 suffix bits; buffer has 7+2=9 bits total.
+    store8(b, 0x01);      # 0b0000_0001 -> 7 zeros? no: 7 bits 0 then 1
+    store8(b + 1, 0x40);  # 2 more bits then end (len 2 bytes = 16 bits)
+    br = dr_br_init(b, 2);
+    # lz counts 7 zeros, consumes the 1 at bit 8, needs 7 suffix bits,
+    # only 8 left -> reads fine actually; force real truncation with a
+    # 1-byte buffer instead: "0000 0001" consumed, suffix needs 7, 0 left.
+    br = dr_br_init(b, 1);
+    assert_eq(dr_ue_read(br, &v), DR_ERR_TRUNCATED, "suffix truncated");
+    return 0;
+}
+
+# ================================================================
+# se(v) read — H.264 spec 9.1.1 Table 9-3 mapping
+# ================================================================
+fn test_se_read() {
+    var b = alloc(8);
+    var v = 0;
+    # codeNum 0 ("1") -> 0.
+    store8(b, 0x80);
+    var br = dr_br_init(b, 1);
+    assert_eq(dr_se_read(br, &v), DR_OK, "se '1' decodes");
+    assert_eq(v, 0, "k=0 -> 0");
+    # codeNum 1 ("010") -> +1.
+    store8(b, 0x40);
+    br = dr_br_init(b, 1);
+    dr_se_read(br, &v);
+    assert_eq(v, 1, "k=1 -> +1");
+    # codeNum 2 ("011") -> -1.
+    store8(b, 0x60);
+    br = dr_br_init(b, 1);
+    dr_se_read(br, &v);
+    assert_eq(v, -1, "k=2 -> -1");
+    # codeNum 3 ("00100") -> +2.
+    store8(b, 0x20);
+    br = dr_br_init(b, 1);
+    dr_se_read(br, &v);
+    assert_eq(v, 2, "k=3 -> +2");
+    # codeNum 4 ("00101") -> -2.
+    store8(b, 0x28);   # 0b0010_1000
+    br = dr_br_init(b, 1);
+    dr_se_read(br, &v);
+    assert_eq(v, -2, "k=4 -> -2");
+    return 0;
+}
+
+# ================================================================
+# ue/se write — round-trips: 0 / 1 / large / negative / bounds
+# ================================================================
+fn test_ue_write_roundtrip() {
+    var vals = alloc(56);   # 7 x i64
+    store64(vals, 0);
+    store64(vals + 8, 1);
+    store64(vals + 16, 2);
+    store64(vals + 24, 255);
+    store64(vals + 32, 65535);
+    store64(vals + 40, 1000000);
+    store64(vals + 48, 4294967294);   # 2^32 - 2, the 9.1 max
+    var i = 0;
+    while (i < 7) {
+        var want = load64(vals + (i * 8));
+        var bw = dr_bw_init(16);
+        assert_eq(dr_ue_write(bw, want), DR_OK, "ue write ok");
+        var nbytes = dr_bw_flush(bw);
+        var br = dr_br_init(dr_bw_buf(bw), nbytes);
+        var got = 0;
+        assert_eq(dr_ue_read(br, &got), DR_OK, "ue reads back");
+        assert_eq(got, want, "ue round-trip value");
+        i = i + 1;
+    }
+    # Bit-exact spot check: ue(0) = "1" -> one byte 0x80 after flush.
+    var bw2 = dr_bw_init(16);
+    dr_ue_write(bw2, 0);
+    assert_eq(dr_bw_bit_pos(bw2), 1, "ue(0) is 1 bit");
+    dr_bw_flush(bw2);
+    assert_eq(load8(dr_bw_buf(bw2)), 0x80, "ue(0) -> 0x80 padded");
+    # ue(3) = "00100" -> 5 bits -> 0x20 padded.
+    bw2 = dr_bw_init(16);
+    dr_ue_write(bw2, 3);
+    assert_eq(dr_bw_bit_pos(bw2), 5, "ue(3) is 5 bits");
+    dr_bw_flush(bw2);
+    assert_eq(load8(dr_bw_buf(bw2)), 0x20, "ue(3) -> 0x20 padded");
+    # Rejections: 2^32-1 exceeds the codeNum bound; negatives too.
+    bw2 = dr_bw_init(16);
+    assert_eq(dr_ue_write(bw2, 4294967295), DR_ERR_BAD_VLC, "2^32-1 rejected");
+    bw2 = dr_bw_init(16);
+    assert_eq(dr_ue_write(bw2, -1), DR_ERR_BAD_VLC, "ue(-1) rejected");
+    return 0;
+}
+
+fn test_se_write_roundtrip() {
+    var vals = alloc(64);   # 8 x i64, signed
+    store64(vals, 0);
+    store64(vals + 8, 1);
+    store64(vals + 16, -1);
+    store64(vals + 24, 2);
+    store64(vals + 32, -2);
+    store64(vals + 40, 32767);
+    store64(vals + 48, 2147483647);      # +2^31 - 1, the 9.1.1 max
+    store64(vals + 56, -2147483647);     # -(2^31 - 1), the 9.1.1 min
+    var i = 0;
+    while (i < 8) {
+        var want = load64(vals + (i * 8));
+        var bw = dr_bw_init(32);
+        assert_eq(dr_se_write(bw, want), DR_OK, "se write ok");
+        var nbytes = dr_bw_flush(bw);
+        var br = dr_br_init(dr_bw_buf(bw), nbytes);
+        var got = 0;
+        assert_eq(dr_se_read(br, &got), DR_OK, "se reads back");
+        assert_eq(got, want, "se round-trip value");
+        i = i + 1;
+    }
+    # Rejections: one past each bound.
+    var bw2 = dr_bw_init(16);
+    assert_eq(dr_se_write(bw2, 2147483648), DR_ERR_BAD_VLC, "2^31 rejected");
+    bw2 = dr_bw_init(16);
+    assert_eq(dr_se_write(bw2, -2147483648), DR_ERR_BAD_VLC, "-2^31 rejected");
+    return 0;
+}
+
+# ================================================================
+# Bitwriter — bit patterns, masking, auto-grow, flush
+# ================================================================
+fn test_bw_basics() {
+    var bw = dr_bw_init(16);
+    assert(bw != 0, "writer allocates");
+    # Write 0b1011_0001 1110 as bits then flush -> 0xB1 0xE0.
+    dr_bw_put_bit(bw, 1); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 1);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 1);
+    dr_bw_put_bits(bw, 0xE, 4);
+    assert_eq(dr_bw_bit_pos(bw), 12, "12 bits written");
+    assert_eq(dr_bw_bytes(bw), 2, "12 bits occupy 2 bytes");
+    var n = dr_bw_flush(bw);
+    assert_eq(n, 2, "flush returns byte length");
+    assert_eq(dr_bw_bit_pos(bw), 16, "flush zero-pads to boundary");
+    assert_eq(load8(dr_bw_buf(bw)), 0xB1, "byte 0 = 0xB1");
+    assert_eq(load8(dr_bw_buf(bw) + 1), 0xE0, "byte 1 = 0xE0 (padded)");
+    # put_bits masks value to n bits: writing 0x1FF in 4 bits stores 0xF.
+    bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0x1FF, 4);
+    dr_bw_flush(bw);
+    assert_eq(load8(dr_bw_buf(bw)), 0xF0, "high bits masked off");
+    # put_bits n=0 is a no-op; n=33 faults.
+    bw = dr_bw_init(16);
+    assert_eq(dr_bw_put_bits(bw, 0, 0), DR_OK, "n=0 ok");
+    assert_eq(dr_bw_bit_pos(bw), 0, "n=0 writes nothing");
+    assert_eq(dr_bw_put_bits(bw, 0, 33), DR_ERR_BOUNDS, "n=33 -> bounds");
+    assert_eq(dr_bw_err(bw), DR_ERR_BOUNDS, "writer fault sticky");
+    # 32-bit round-trip through the writer.
+    bw = dr_bw_init(4);
+    dr_bw_put_bits(bw, 0xDEADBEEF, 32);
+    var nb = dr_bw_flush(bw);
+    var br = dr_br_init(dr_bw_buf(bw), nb);
+    assert_eq(dr_br_read_bits(br, 32), 0xDEADBEEF, "32-bit writer round-trip");
+    return 0;
+}
+
+fn test_bw_grow() {
+    # cap_hint 1 rounds to 16; writing 100 bytes forces several doublings.
+    var bw = dr_bw_init(1);
+    var i = 0;
+    while (i < 100) {
+        dr_bw_put_bits(bw, i & 255, 8);
+        i = i + 1;
+    }
+    assert_eq(dr_bw_err(bw), DR_OK, "no fault across growth");
+    assert_eq(dr_bw_bytes(bw), 100, "100 bytes written");
+    # Content preserved across reallocation.
+    var buf = dr_bw_buf(bw);
+    assert_eq(load8(buf), 0, "byte 0 survived growth");
+    assert_eq(load8(buf + 42), 42, "byte 42 survived growth");
+    assert_eq(load8(buf + 99), 99, "byte 99 survived growth");
+    return 0;
+}
+
+# ================================================================
+# Endian byte helpers — write/read round-trips + known bytes
+# ================================================================
+fn test_endian_helpers() {
+    var b = alloc(16);
+    dr_wr_le16(b, 0x1234);
+    assert_eq(load8(b), 0x34, "le16 low byte first");
+    assert_eq(load8(b + 1), 0x12, "le16 high byte second");
+    assert_eq(dr_rd_le16(b), 0x1234, "le16 round-trip");
+    dr_wr_le32(b, 0xDEADBEEF);
+    assert_eq(load8(b), 0xEF, "le32 lowest byte first");
+    assert_eq(dr_rd_le32(b), 0xDEADBEEF, "le32 round-trip");
+    dr_wr_le64(b, 0x1122334455667788);
+    assert_eq(load8(b), 0x88, "le64 lowest byte first");
+    assert_eq(load8(b + 7), 0x11, "le64 highest byte last");
+    assert_eq(dr_rd_le64(b), 0x1122334455667788, "le64 round-trip");
+    dr_wr_be16(b, 0x1234);
+    assert_eq(load8(b), 0x12, "be16 high byte first");
+    assert_eq(dr_rd_be16(b), 0x1234, "be16 round-trip");
+    dr_wr_be32(b, 0xCAFEBABE);
+    assert_eq(load8(b), 0xCA, "be32 high byte first");
+    assert_eq(dr_rd_be32(b), 0xCAFEBABE, "be32 round-trip");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("bitreader bits");
+    test_br_read_bit();
+    test_br_read_bits();
+    test_br_faults();
+    test_br_byte_align();
+    test_group("leb128");
+    test_leb128_read();
+    test_leb128_reject();
+    test_leb128_write_roundtrip();
+    test_group("uvlc");
+    test_uvlc_read();
+    test_group("exp-Golomb");
+    test_ue_read();
+    test_ue_reject();
+    test_se_read();
+    test_ue_write_roundtrip();
+    test_se_write_roundtrip();
+    test_group("bitwriter");
+    test_bw_basics();
+    test_bw_grow();
+    test_group("endian helpers");
+    test_endian_helpers();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

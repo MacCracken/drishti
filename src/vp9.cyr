@@ -1,0 +1,337 @@
+# @public — drishti VP9: the uncompressed frame header — frame marker,
+# profile, show_existing_frame short-circuit, frame type/flags, and the
+# keyframe path (frame sync code, color config, frame size, render
+# size) -> Vp9FrameHdr record.
+#
+# FLAT module (no includes) — wiring in src/main.cyr; until this family
+# is wired into [lib], the standalone suite tests/vpx.tcyr includes it
+# explicitly after the lib root. Depends on src/drishti.cyr (DR_ERR_*
+# codes) and src/bits.cyr (DrBr MSB-first bitreader — VP9's f(n) fields
+# are big-endian MSB-first bit packs, unlike VP8's little-endian tag).
+#
+# Derived from the "VP9 Bitstream & Decoding Process Specification"
+# v0.7 (Grange / de Rivaz / Hunt, Google) — section numbers cited:
+#   6.2    uncompressed_header(): frame_marker f(2) == 2, profile low/
+#          high bits, profile-3 reserved_zero bit, show_existing_frame
+#          (+ frame_to_show_map_idx f(3) short-circuit), frame_type,
+#          show_frame, error_resilient_mode
+#   6.2.1  frame_sync_code(): 0x49 0x83 0x42 (one f(8) each)
+#   6.2.2  color_config(): ten_or_twelve_bit for profile >= 2 (BitDepth
+#          10/12; profiles 0/1 are 8-bit), color_space f(3), and per
+#          color-space/profile: color_range, subsampling_x/y +
+#          reserved_zero for profiles 1/3; profiles 0/2 imply 4:2:0.
+#          CS_RGB implies full range and 4:4:4 (profiles 1/3 only —
+#          RGB in profile 0/2 has no defined subsampling: rejected,
+#          matching libvpx vp9_decodeframe.c "4:4:4 color not supported
+#          in profile 0 or 2").
+#   6.2.3  frame_size(): frame_width_minus_1 f(16), frame_height_minus_1
+#          f(16)
+#   6.2.4  render_size(): render_and_frame_size_different f(1), then
+#          render_width/height_minus_1 f(16) each; otherwise the render
+#          size defaults to the frame size
+#   7.2    frame type semantics: KEY_FRAME = 0, NON_KEY_FRAME = 1
+#   7.2.2  color_space enumeration (CS_UNKNOWN .. CS_RGB)
+# Cross-checked against libvpx vp9/decoder/vp9_decodeframe.c
+# (read_uncompressed_header / read_bitdepth_colorspace_sampling) and
+# ffmpeg libavcodec/vp9.c (decode_frame_header) — field order, the
+# profile bit split (low bit first), and the rejection set all agree.
+#
+# Parsing STOPS after render_size() on the keyframe path — the rest of
+# uncompressed_header() (refresh flags, loop-filter/quant/segmentation/
+# tile syntax, header_size_in_bytes) is the 0.4.x VP9-keyframe-decode
+# milestone. bits_consumed tells the caller exactly where this parse
+# stopped. Inter-frame headers (frame_type == 1) stop right after
+# error_resilient_mode for the same reason.
+#
+# Vp9FrameHdr record layout (128 bytes, heap):
+#   +0:   profile        — 0..3 ((high << 1) + low, 6.2)
+#   +8:   show_existing  — show_existing_frame flag (0/1)
+#   +16:  show_map_idx   — frame_to_show_map_idx (only when
+#                          show_existing == 1; else 0)
+#   +24:  frame_type     — VP9_KEY_FRAME / VP9_NON_KEY_FRAME
+#                          (meaningless when show_existing == 1)
+#   +32:  show_frame     — 0/1
+#   +40:  error_resilient— 0/1
+#   +48:  bit_depth      — 8 / 10 / 12 (keyframe path; else 0)
+#   +56:  color_space    — VP9_CS_* (keyframe path; else 0)
+#   +64:  color_range    — 0 studio / 1 full (keyframe path; else 0)
+#   +72:  subsampling_x  — 0/1 (keyframe path; else 0)
+#   +80:  subsampling_y  — 0/1 (keyframe path; else 0)
+#   +88:  width          — FrameWidth in pixels (keyframe path; else 0)
+#   +96:  height         — FrameHeight in pixels (keyframe path; else 0)
+#   +104: render_width   — RenderWidth (defaults to width, 6.2.4)
+#   +112: render_height  — RenderHeight (defaults to height, 6.2.4)
+#   +120: bits_consumed  — header bits parsed (where this parse stopped)
+
+# Family error band (VP8/VP9 = 70-89, see src/drishti.cyr) — VP8 uses
+# 70..74 (src/vp8.cyr), VP9 mints from 75. Generic faults reuse core
+# codes (truncation, reserved bits, OOM, ...).
+enum Vp9Err {
+    VP9_ERR_BAD_MARKER = 75;   # frame_marker != 2 (6.2)
+    VP9_ERR_BAD_SYNC   = 76;   # frame_sync_code != 49 83 42 (6.2.1)
+}
+
+# Frame types — spec 7.2.
+enum Vp9FrameType {
+    VP9_KEY_FRAME     = 0;
+    VP9_NON_KEY_FRAME = 1;
+}
+
+# color_space — spec 7.2.2.
+enum Vp9ColorSpace {
+    VP9_CS_UNKNOWN   = 0;
+    VP9_CS_BT_601    = 1;
+    VP9_CS_BT_709    = 2;
+    VP9_CS_SMPTE_170 = 3;
+    VP9_CS_SMPTE_240 = 4;
+    VP9_CS_BT_2020   = 5;
+    VP9_CS_RESERVED  = 6;
+    VP9_CS_RGB       = 7;
+}
+
+# frame_sync_code bytes — spec 6.2.1.
+enum Vp9SyncCode {
+    VP9_SYNC_0 = 0x49;
+    VP9_SYNC_1 = 0x83;
+    VP9_SYNC_2 = 0x42;
+}
+
+# ================================================================
+# Parse
+# ================================================================
+
+# Internal: allocate a zeroed Vp9FrameHdr. Returns record or 0 on OOM.
+fn vp9_hdr_alloc(): i64 {
+    var h = alloc(128);
+    if (h == 0) { return 0; }
+    var i = 0;
+    while (i < 128) {
+        store64(h + i, 0);
+        i = i + 8;
+    }
+    return h;
+}
+
+# Parse the uncompressed header at buf[0..len) (spec 6.2). Returns a
+# Vp9FrameHdr record, or 0 with the error code stored at *out_err:
+#   DR_ERR_BOUNDS        — len < 0
+#   DR_ERR_TRUNCATED     — buffer ends inside the header
+#   VP9_ERR_BAD_MARKER   — frame_marker != 2 (6.2)
+#   DR_ERR_FORBIDDEN_BIT — a reserved_zero bit is set (profile-3 bit,
+#                          6.2; color_config reserved bits, 6.2.2)
+#   VP9_ERR_BAD_SYNC     — frame_sync_code != 49 83 42 (6.2.1)
+#   DR_ERR_BAD_HEADER    — CS_RGB in profile 0/2 (6.2.2 conformance;
+#                          libvpx: "4:4:4 color not supported in
+#                          profile 0 or 2")
+#   DR_ERR_OOM           — allocation failure
+# On the show_existing_frame == 1 short-circuit only profile,
+# show_existing, show_map_idx and bits_consumed are meaningful.
+fn vp9_parse_uncompressed_header(buf, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (len < 0) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var br = dr_br_init(buf, len);
+    if (br == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    # 6.2: frame_marker f(2) — "shall be equal to 2".
+    var marker = dr_br_read_bits(br, 2);
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    if (marker != 2) {
+        store64(out_err, VP9_ERR_BAD_MARKER);
+        return 0;
+    }
+    # 6.2: profile_low_bit f(1), profile_high_bit f(1);
+    # Profile = (high << 1) + low. Profile 3 carries reserved_zero f(1).
+    var low = dr_br_read_bit(br);
+    var high = dr_br_read_bit(br);
+    var profile = (high << 1) + low;
+    if (profile == 3) {
+        var rz = dr_br_read_bit(br);
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+        if (rz != 0) {
+            store64(out_err, DR_ERR_FORBIDDEN_BIT);
+            return 0;
+        }
+    }
+    # 6.2: show_existing_frame f(1) — a 1 short-circuits the header to
+    # frame_to_show_map_idx f(3) and nothing else.
+    var show_existing = dr_br_read_bit(br);
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    if (show_existing) {
+        var idx = dr_br_read_bits(br, 3);
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+        var hs = vp9_hdr_alloc();
+        if (hs == 0) {
+            store64(out_err, DR_ERR_OOM);
+            return 0;
+        }
+        store64(hs, profile);
+        store64(hs + 8, 1);
+        store64(hs + 16, idx);
+        store64(hs + 120, dr_br_bit_pos(br));
+        return hs;
+    }
+    # 6.2: frame_type f(1), show_frame f(1), error_resilient_mode f(1).
+    var frame_type = dr_br_read_bit(br);
+    var show_frame = dr_br_read_bit(br);
+    var error_resilient = dr_br_read_bit(br);
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    var bit_depth = 0;
+    var color_space = 0;
+    var color_range = 0;
+    var ssx = 0;
+    var ssy = 0;
+    var width = 0;
+    var height = 0;
+    var render_width = 0;
+    var render_height = 0;
+    if (frame_type == VP9_KEY_FRAME) {
+        # 6.2.1 frame_sync_code(): three fixed bytes 49 83 42.
+        var s0 = dr_br_read_bits(br, 8);
+        var s1 = dr_br_read_bits(br, 8);
+        var s2 = dr_br_read_bits(br, 8);
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+        if ((s0 != VP9_SYNC_0) || (s1 != VP9_SYNC_1) || (s2 != VP9_SYNC_2)) {
+            store64(out_err, VP9_ERR_BAD_SYNC);
+            return 0;
+        }
+        # 6.2.2 color_config().
+        bit_depth = 8;                     # profiles 0/1 are 8-bit
+        if (profile >= 2) {
+            var ten_or_twelve = dr_br_read_bit(br);
+            if (ten_or_twelve) {
+                bit_depth = 12;
+            } else {
+                bit_depth = 10;
+            }
+        }
+        color_space = dr_br_read_bits(br, 3);
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+        if (color_space != VP9_CS_RGB) {
+            color_range = dr_br_read_bit(br);
+            if ((profile == 1) || (profile == 3)) {
+                ssx = dr_br_read_bit(br);
+                ssy = dr_br_read_bit(br);
+                var rz1 = dr_br_read_bit(br);
+                if (dr_br_err(br) != DR_OK) {
+                    store64(out_err, dr_br_err(br));
+                    return 0;
+                }
+                if (rz1 != 0) {            # 6.2.2 reserved_zero
+                    store64(out_err, DR_ERR_FORBIDDEN_BIT);
+                    return 0;
+                }
+            } else {
+                ssx = 1;                   # profiles 0/2: implied 4:2:0
+                ssy = 1;
+            }
+        } else {
+            color_range = 1;               # 6.2.2: CS_RGB implies full range
+            if ((profile == 1) || (profile == 3)) {
+                ssx = 0;                   # implied 4:4:4
+                ssy = 0;
+                var rz2 = dr_br_read_bit(br);
+                if (dr_br_err(br) != DR_OK) {
+                    store64(out_err, dr_br_err(br));
+                    return 0;
+                }
+                if (rz2 != 0) {            # 6.2.2 reserved_zero
+                    store64(out_err, DR_ERR_FORBIDDEN_BIT);
+                    return 0;
+                }
+            } else {
+                # 6.2.2 has no RGB path for profiles 0/2 (4:2:0-only
+                # profiles) — conformance violation.
+                store64(out_err, DR_ERR_BAD_HEADER);
+                return 0;
+            }
+        }
+        # 6.2.3 frame_size(): 16-bit minus_1 fields.
+        width = dr_br_read_bits(br, 16) + 1;
+        height = dr_br_read_bits(br, 16) + 1;
+        # 6.2.4 render_size(): defaults to the frame size.
+        render_width = width;
+        render_height = height;
+        var rdiff = dr_br_read_bit(br);
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+        if (rdiff) {
+            render_width = dr_br_read_bits(br, 16) + 1;
+            render_height = dr_br_read_bits(br, 16) + 1;
+            if (dr_br_err(br) != DR_OK) {
+                store64(out_err, dr_br_err(br));
+                return 0;
+            }
+        }
+    }
+    var h = vp9_hdr_alloc();
+    if (h == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(h, profile);
+    store64(h + 8, 0);
+    store64(h + 16, 0);
+    store64(h + 24, frame_type);
+    store64(h + 32, show_frame);
+    store64(h + 40, error_resilient);
+    store64(h + 48, bit_depth);
+    store64(h + 56, color_space);
+    store64(h + 64, color_range);
+    store64(h + 72, ssx);
+    store64(h + 80, ssy);
+    store64(h + 88, width);
+    store64(h + 96, height);
+    store64(h + 104, render_width);
+    store64(h + 112, render_height);
+    store64(h + 120, dr_br_bit_pos(br));
+    return h;
+}
+
+# ================================================================
+# Accessors
+# ================================================================
+
+fn vp9_hdr_profile(h): i64 { return load64(h); }
+fn vp9_hdr_show_existing(h): i64 { return load64(h + 8); }
+fn vp9_hdr_show_map_idx(h): i64 { return load64(h + 16); }
+fn vp9_hdr_frame_type(h): i64 { return load64(h + 24); }
+fn vp9_hdr_show_frame(h): i64 { return load64(h + 32); }
+fn vp9_hdr_error_resilient(h): i64 { return load64(h + 40); }
+fn vp9_hdr_bit_depth(h): i64 { return load64(h + 48); }
+fn vp9_hdr_color_space(h): i64 { return load64(h + 56); }
+fn vp9_hdr_color_range(h): i64 { return load64(h + 64); }
+fn vp9_hdr_subsampling_x(h): i64 { return load64(h + 72); }
+fn vp9_hdr_subsampling_y(h): i64 { return load64(h + 80); }
+fn vp9_hdr_width(h): i64 { return load64(h + 88); }
+fn vp9_hdr_height(h): i64 { return load64(h + 96); }
+fn vp9_hdr_render_width(h): i64 { return load64(h + 104); }
+fn vp9_hdr_render_height(h): i64 { return load64(h + 112); }
+fn vp9_hdr_bits_consumed(h): i64 { return load64(h + 120); }

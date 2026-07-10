@@ -1,0 +1,375 @@
+# @public — drishti H.264/AVC NAL layer: Annex-B byte-stream scan
+# (3- and 4-byte start codes), NAL unit header parse, and RBSP
+# emulation-prevention handling in BOTH directions (strip 00 00 03 on
+# decode, insert emulation_prevention_three_byte on encode).
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_* codes) only. Every symbol carries the
+# h264_ family prefix (Cyrius has no module-private scoping).
+#
+# Spec: ITU-T Rec. H.264 (authoritative) —
+#   7.3.1     nal_unit() syntax (header bits + emulation prevention)
+#   7.4.1     NAL unit semantics (forbidden_zero_bit, nal_ref_idc
+#             constraints, prohibited three-byte sequences)
+#   7.4.1.1   encapsulation / emulation_prevention_three_byte
+#   Table 7-1 nal_unit_type codes
+#   Annex B   byte-stream format (B.1.1 syntax, B.1.2 decoding:
+#             leading_zero_8bits, zero_byte, start_code_prefix_one_3bytes,
+#             trailing_zero_8bits)
+# Cross-checks: RFC 6184 §1.3 (NAL header field recap), openh264
+# (DecodeNalHeaderExtension/InitBsWithTwoLevels EPB handling), ffmpeg
+# h2645_parse.c (start-code resync + 4-byte zero_byte attribution).
+#
+# H264Scan layout (40 bytes, heap):
+#   +0:  buf   — whole-stream buffer (BORROWED — caller keeps it alive)
+#   +8:  len   — buffer length in bytes
+#   +16: pos   — byte cursor (start of the next start code to consume)
+#   +24: count — NAL units yielded so far
+#   +32: err   — sticky error code (DR_OK until first fault)
+
+# ================================================================
+# H.264 family error band: 30-49 (see src/drishti.cyr). Generic
+# faults reuse the core DR_ERR_* codes; only codec-specific failures
+# are minted here.
+# ================================================================
+enum H264ErrCode {
+    H264_ERR_NO_START_CODE = 30;   # non-empty buffer holds no Annex-B start code at all
+    H264_ERR_BAD_SPS       = 31;   # SPS field outside its spec 7.4.2.1.1 range
+    H264_ERR_BAD_PPS       = 32;   # PPS field outside its spec 7.4.2.2 range
+}
+
+# nal_unit_type codes — spec Table 7-1.
+enum H264NalType {
+    H264_NAL_UNSPEC     = 0;    # unspecified
+    H264_NAL_SLICE      = 1;    # coded slice of a non-IDR picture
+    H264_NAL_DPA        = 2;    # coded slice data partition A
+    H264_NAL_DPB        = 3;    # coded slice data partition B
+    H264_NAL_DPC        = 4;    # coded slice data partition C
+    H264_NAL_IDR        = 5;    # coded slice of an IDR picture
+    H264_NAL_SEI        = 6;    # supplemental enhancement information
+    H264_NAL_SPS        = 7;    # sequence parameter set
+    H264_NAL_PPS        = 8;    # picture parameter set
+    H264_NAL_AUD        = 9;    # access unit delimiter
+    H264_NAL_EOSEQ      = 10;   # end of sequence
+    H264_NAL_EOSTREAM   = 11;   # end of stream
+    H264_NAL_FILLER     = 12;   # filler data
+    H264_NAL_SPS_EXT    = 13;   # sequence parameter set extension
+    H264_NAL_PREFIX     = 14;   # prefix NAL unit (Annex G/H)
+    H264_NAL_SUBSET_SPS = 15;   # subset sequence parameter set (Annex G/H)
+    H264_NAL_DPS        = 16;   # depth parameter set (Annex I/J)
+    H264_NAL_AUX_SLICE  = 19;   # coded slice of an auxiliary coded picture
+    H264_NAL_SLICE_EXT  = 20;   # coded slice extension (Annex G/H)
+    H264_NAL_SLICE_3D   = 21;   # coded slice extension for depth views (Annex I/J)
+}
+
+# h264_scan_next / h264_find_start_code "no more" sentinel. Distinct
+# from DR_OK (0) and every DR_ERR_* / H264_ERR_* (> 0). Module-global
+# var, not an enum member — cyrius enums reject negative literals
+# (same pattern as DR_IVF_END in src/ivf.cyr).
+var H264_NAL_END = -1;
+
+# ================================================================
+# Start-code search — Annex B B.1.1/B.1.2
+#
+# A start code is the 3-byte prefix 00 00 01; a zero_byte immediately
+# before it makes the conventional "4-byte start code" 00 00 00 01
+# (mandatory before SPS/PPS and the first NAL of an access unit).
+# ================================================================
+
+# Find the next start code in buf[from..len). Returns the byte offset
+# of the start code's FIRST byte — including the zero_byte when the
+# 00 00 01 is preceded by 0x00 at or after `from` (the ffmpeg
+# h2645_parse attribution rule) — and stores 3 or 4 at *out_sc_len.
+# Returns H264_NAL_END (-1) when no start code exists in the range.
+# Never reads outside buf[0..len).
+fn h264_find_start_code(buf, len, from, out_sc_len): i64 {
+    var i = from;
+    if (i < 0) { i = 0; }
+    # Pattern needs bytes i, i+1, i+2.
+    while ((i + 2) < len) {
+        if ((load8(buf + i) == 0) && (load8(buf + i + 1) == 0)
+        && (load8(buf + i + 2) == 1)) {
+            # zero_byte attribution: a 0x00 directly before the prefix
+            # (still inside [from, len)) belongs to the start code.
+            if ((i > from) && (load8(buf + i - 1) == 0)) {
+                store64(out_sc_len, 4);
+                return i - 1;
+            }
+            store64(out_sc_len, 3);
+            return i;
+        }
+        i = i + 1;
+    }
+    return H264_NAL_END;
+}
+
+# ================================================================
+# H264Scan — Annex-B NAL unit iterator
+# ================================================================
+
+# Create a scanner over buf[0..len). The buffer is BORROWED — the
+# caller keeps it alive for the scanner's (and every yielded NAL
+# pointer's) lifetime. Returns the H264Scan handle, or 0 on
+# allocation failure / negative len.
+fn h264_scan_init(buf, len): i64 {
+    if (len < 0) { return 0; }
+    var s = alloc(40);
+    if (s == 0) { return 0; }
+    store64(s, buf);
+    store64(s + 8, len);
+    store64(s + 16, 0);
+    store64(s + 24, 0);
+    store64(s + 32, DR_OK);
+    return s;
+}
+
+# Sticky error code (DR_OK if the scanner has never faulted).
+fn h264_scan_err(s): i64 {
+    return load64(s + 32);
+}
+
+# Byte cursor (start of the next start code, or len at end).
+fn h264_scan_pos(s): i64 {
+    return load64(s + 16);
+}
+
+# NAL units yielded so far.
+fn h264_scan_count(s): i64 {
+    return load64(s + 24);
+}
+
+# Yield the next NAL unit: *out_nal = ZERO-COPY pointer to its first
+# byte (the NAL header byte), *out_size = its length in bytes.
+#
+# Per B.1.2 the NAL unit runs from the byte after the start code up to
+# the next start code (a preceding zero_byte counts as part of that
+# next start code) or end of buffer; trailing_zero_8bits are stripped.
+# A zero-length span between adjacent start codes IS yielded (size 0)
+# — rejecting it is the header parser's job (a NAL needs >= 1 byte).
+#
+# Returns DR_OK; H264_NAL_END (-1, repeatable, not sticky) when no
+# start codes remain; sticky H264_ERR_NO_START_CODE when a NON-EMPTY
+# buffer contains no start code at all (not an Annex-B stream).
+# Bytes before the first start code are skipped (B.1.2 permits
+# leading_zero_8bits; we also resync past non-zero garbage, the
+# reference-decoder behavior).
+fn h264_scan_next(s, out_nal, out_size): i64 {
+    var e = load64(s + 32);
+    if (e != DR_OK) { return e; }
+    var buf = load64(s);
+    var len = load64(s + 8);
+    var pos = load64(s + 16);
+    var sc_len = 0;
+    var sc = h264_find_start_code(buf, len, pos, &sc_len);
+    if (sc < 0) {
+        if ((load64(s + 24) == 0) && (len > 0)) {
+            store64(s + 32, H264_ERR_NO_START_CODE);
+            return H264_ERR_NO_START_CODE;
+        }
+        store64(s + 16, len);
+        return H264_NAL_END;
+    }
+    var nal_start = sc + sc_len;
+    # NAL end: at the next start code (including its zero_byte) or len.
+    var next_len = 0;
+    var next_sc = h264_find_start_code(buf, len, nal_start, &next_len);
+    var nal_end = len;
+    if (next_sc >= 0) { nal_end = next_sc; }
+    # Strip trailing_zero_8bits (B.1.2) — not part of the NAL unit.
+    while ((nal_end > nal_start) && (load8(buf + nal_end - 1) == 0)) {
+        nal_end = nal_end - 1;
+    }
+    store64(out_nal, buf + nal_start);
+    store64(out_size, nal_end - nal_start);
+    if (next_sc >= 0) {
+        store64(s + 16, next_sc);
+    } else {
+        store64(s + 16, len);
+    }
+    store64(s + 24, load64(s + 24) + 1);
+    return DR_OK;
+}
+
+# ================================================================
+# NAL unit header — spec 7.3.1 / 7.4.1 (one byte):
+#   forbidden_zero_bit  f(1)  — shall be 0
+#   nal_ref_idc         u(2)
+#   nal_unit_type       u(5)
+# ================================================================
+
+# Parse the header byte of nal[0..len). Stores nal_ref_idc at
+# *out_ref_idc and nal_unit_type at *out_type. Returns DR_OK;
+# DR_ERR_TRUNCATED (len < 1); DR_ERR_FORBIDDEN_BIT (7.4.1:
+# forbidden_zero_bit shall be 0). Decode side does NOT enforce the
+# 7.4.1 nal_ref_idc/type pairing constraints (real streams violate
+# them; the encode-side h264_annexb_wrap DOES enforce them).
+fn h264_nal_hdr_parse(nal, len, out_ref_idc, out_type): i64 {
+    if (len < 1) { return DR_ERR_TRUNCATED; }
+    var b = load8(nal);
+    if (b & 0x80) { return DR_ERR_FORBIDDEN_BIT; }
+    store64(out_ref_idc, (b >> 5) & 3);
+    store64(out_type, b & 31);
+    return DR_OK;
+}
+
+# Human-readable name for a Table 7-1 nal_unit_type (cstring, never null).
+fn h264_nal_type_name(t): i64 {
+    if (t == H264_NAL_SLICE)      { return "slice (non-IDR)"; }
+    if (t == H264_NAL_DPA)        { return "data partition A"; }
+    if (t == H264_NAL_DPB)        { return "data partition B"; }
+    if (t == H264_NAL_DPC)        { return "data partition C"; }
+    if (t == H264_NAL_IDR)        { return "IDR slice"; }
+    if (t == H264_NAL_SEI)        { return "SEI"; }
+    if (t == H264_NAL_SPS)        { return "SPS"; }
+    if (t == H264_NAL_PPS)        { return "PPS"; }
+    if (t == H264_NAL_AUD)        { return "access unit delimiter"; }
+    if (t == H264_NAL_EOSEQ)      { return "end of sequence"; }
+    if (t == H264_NAL_EOSTREAM)   { return "end of stream"; }
+    if (t == H264_NAL_FILLER)     { return "filler data"; }
+    if (t == H264_NAL_SPS_EXT)    { return "SPS extension"; }
+    if (t == H264_NAL_PREFIX)     { return "prefix NAL"; }
+    if (t == H264_NAL_SUBSET_SPS) { return "subset SPS"; }
+    if (t == H264_NAL_DPS)        { return "depth parameter set"; }
+    if (t == H264_NAL_AUX_SLICE)  { return "auxiliary slice"; }
+    if (t == H264_NAL_SLICE_EXT)  { return "slice extension"; }
+    if (t == H264_NAL_SLICE_3D)   { return "3D slice extension"; }
+    return "unspecified/reserved";
+}
+
+# ================================================================
+# RBSP <-> encapsulated payload — spec 7.3.1 / 7.4.1.1
+#
+# Inside a NAL unit the three-byte sequences 00 00 00, 00 00 01 and
+# 00 00 02 shall not occur; the encoder breaks them by inserting an
+# emulation_prevention_three_byte (0x03) after every 00 00 that would
+# be followed by a byte <= 0x03. The decoder strips those 0x03 bytes
+# to recover the raw byte sequence payload (RBSP).
+# ================================================================
+
+# Decode direction: strip emulation prevention from the encapsulated
+# payload buf[0..len) (the bytes AFTER the NAL header byte). Allocates
+# a fresh buffer, stores it at *out_rbsp and its length at *out_len.
+# Returns DR_OK; DR_ERR_BOUNDS (negative len); DR_ERR_OOM.
+#
+# A 0x03 following two zero bytes is dropped unconditionally — the
+# lenient reference-decoder rule (openh264 / ffmpeg both do this
+# without checking that the NEXT byte is <= 0x03); malformed interior
+# 00 00 0x runs are copied through rather than rejected, matching
+# both cross-check sources.
+fn h264_rbsp_extract(buf, len, out_rbsp, out_len): i64 {
+    if (len < 0) { return DR_ERR_BOUNDS; }
+    var dst = alloc(len + 1);
+    if (dst == 0) { return DR_ERR_OOM; }
+    var zeros = 0;
+    var o = 0;
+    var i = 0;
+    while (i < len) {
+        var b = load8(buf + i);
+        if ((zeros >= 2) && (b == 3)) {
+            # emulation_prevention_three_byte — drop it; the 0x03
+            # breaks the zero run (7.4.1.1).
+            zeros = 0;
+        } else {
+            store8(dst + o, b);
+            o = o + 1;
+            if (b == 0) { zeros = zeros + 1; } else { zeros = 0; }
+        }
+        i = i + 1;
+    }
+    store64(out_rbsp, dst);
+    store64(out_len, o);
+    return DR_OK;
+}
+
+# Encode direction: insert emulation_prevention_three_byte. Escapes
+# every 00 00 pair followed by a byte <= 0x03 (spec 7.3.1 encode
+# process: 00 00 00 -> 00 00 03 00, 00 00 01 -> 00 00 03 01,
+# 00 00 02 -> 00 00 03 02, 00 00 03 -> 00 00 03 03). A trailing 00 00
+# with nothing after it is left alone — a conforming RBSP never ends
+# in 0x00 (rbsp_trailing_bits' stop bit makes the last byte nonzero).
+# Worst case growth is len + len/2 (all-zero input). Allocates a
+# fresh buffer at *out_buf, length at *out_len. Returns DR_OK;
+# DR_ERR_BOUNDS (negative len); DR_ERR_OOM.
+# h264_rbsp_extract(h264_epb_insert(x)) == x for every input x.
+fn h264_epb_insert(buf, len, out_buf, out_len): i64 {
+    if (len < 0) { return DR_ERR_BOUNDS; }
+    var dst = alloc(len + (len >> 1) + 4);
+    if (dst == 0) { return DR_ERR_OOM; }
+    var zeros = 0;
+    var o = 0;
+    var i = 0;
+    while (i < len) {
+        var b = load8(buf + i);
+        if ((zeros >= 2) && (b <= 3)) {
+            store8(dst + o, 3);   # emulation_prevention_three_byte
+            o = o + 1;
+            zeros = 0;
+        }
+        store8(dst + o, b);
+        o = o + 1;
+        if (b == 0) { zeros = zeros + 1; } else { zeros = 0; }
+        i = i + 1;
+    }
+    store64(out_buf, dst);
+    store64(out_len, o);
+    return DR_OK;
+}
+
+# ================================================================
+# Annex-B NAL composer — the encode seed
+# ================================================================
+
+# Build a complete Annex-B NAL unit: start code + header byte +
+# emulation-prevented payload. long_sc nonzero emits the 4-byte
+# 00 00 00 01 (required before SPS/PPS and first-NAL-of-AU, B.1.2),
+# else the 3-byte 00 00 01. Allocates the result at *out_buf,
+# length at *out_len.
+#
+# Validates (7.4.1 semantics): ref_idc in [0,3]; type in [1,31]
+# (type 0 is unspecified — refuse to emit it); nal_ref_idc shall NOT
+# be 0 for types 5 (IDR), 7 (SPS), 8 (PPS), 13, 15; nal_ref_idc
+# SHALL be 0 for types 6 (SEI), 9 (AUD), 10, 11, 12. Violations
+# return DR_ERR_BAD_HEADER. Other returns: DR_ERR_BOUNDS (negative
+# rbsp_len), DR_ERR_OOM.
+fn h264_annexb_wrap(ref_idc, type, rbsp, rbsp_len, long_sc, out_buf, out_len): i64 {
+    if ((ref_idc < 0) || (ref_idc > 3)) { return DR_ERR_BAD_HEADER; }
+    if ((type < 1) || (type > 31)) { return DR_ERR_BAD_HEADER; }
+    if (ref_idc == 0) {
+        if ((type == H264_NAL_IDR) || (type == H264_NAL_SPS)
+        || (type == H264_NAL_PPS) || (type == H264_NAL_SPS_EXT)
+        || (type == H264_NAL_SUBSET_SPS)) {
+            return DR_ERR_BAD_HEADER;
+        }
+    }
+    if (ref_idc != 0) {
+        if ((type == H264_NAL_SEI) || (type == H264_NAL_AUD)
+        || (type == H264_NAL_EOSEQ) || (type == H264_NAL_EOSTREAM)
+        || (type == H264_NAL_FILLER)) {
+            return DR_ERR_BAD_HEADER;
+        }
+    }
+    if (rbsp_len < 0) { return DR_ERR_BOUNDS; }
+    var ebuf = 0;
+    var elen = 0;
+    var rc = h264_epb_insert(rbsp, rbsp_len, &ebuf, &elen);
+    if (rc != DR_OK) { return rc; }
+    var sc_len = 3;
+    if (long_sc) { sc_len = 4; }
+    var total = sc_len + 1 + elen;
+    var dst = alloc(total);
+    if (dst == 0) { return DR_ERR_OOM; }
+    var o = 0;
+    if (long_sc) {
+        store8(dst, 0);
+        o = 1;
+    }
+    store8(dst + o, 0);
+    store8(dst + o + 1, 0);
+    store8(dst + o + 2, 1);
+    # Header byte: forbidden_zero_bit 0, nal_ref_idc, nal_unit_type.
+    store8(dst + o + 3, (ref_idc << 5) + type);
+    memcpy(dst + o + 4, ebuf, elen);
+    store64(out_buf, dst);
+    store64(out_len, total);
+    return DR_OK;
+}

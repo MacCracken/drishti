@@ -1,0 +1,179 @@
+# @public — drishti core: error codes, DrErr record, version, stream sniffing.
+# drishti (दृष्टि — sight/vision) — sovereign video codecs for AGNOS.
+#
+# This module is FLAT (no includes) — stdlib resolves via cyrius.cyml and
+# the include chain is wired in src/main.cyr. Every symbol carries the dr_
+# prefix (Cyrius has no module-private scoping; duplicate fn names silently
+# shadow).
+#
+# DrErr struct layout (16 bytes, heap; chitra ChitraErr pattern —
+# layout-compatible with mabda's GpuErr):
+#   +0: code    — error code constant (one of the DR_* below)
+#   +8: detail  — pointer to a detail cstring (or 0)
+
+# ================================================================
+# Error code constants
+#
+# Core codes are 0-9. Codec FAMILIES get reserved bands so their
+# module-local enums never collide with core or each other:
+#   10-29  AV1     (src/av1_*.cyr)
+#   30-49  H.264   (src/h264_*.cyr)
+#   50-69  H.265   (src/h265_*.cyr)
+#   70-89  VP8/VP9 (src/vp8_*.cyr / src/vp9_*.cyr / src/vpx_*.cyr)
+#   90-98  reserved (future families)
+# Families REUSE the core codes for the generic conditions (truncation,
+# bounds, oversize, ...) and mint band codes only for codec-specific
+# failures. DR_ERR_OTHER = 99 is the catch-all.
+# ================================================================
+
+enum DrErrCode {
+    DR_OK                = 0;   # no error
+    DR_ERR_TRUNCATED     = 1;   # input ends before a field/payload completes
+    DR_ERR_BOUNDS        = 2;   # out-of-bounds read/seek, bad offset, misalignment
+    DR_ERR_FORBIDDEN_BIT = 3;   # forbidden/reserved bit set (e.g. H.264 7.4.1 forbidden_zero_bit)
+    DR_ERR_BAD_LEB128    = 4;   # leb128 >8 bytes or value >32 bits (AV1 spec 4.10.5 conformance)
+    DR_ERR_BAD_VLC       = 5;   # malformed variable-length code (uvlc / exp-Golomb overflow)
+    DR_ERR_BAD_HEADER    = 6;   # malformed container/OBU/NAL header (magic, sizes, ordering)
+    DR_ERR_UNSUPPORTED   = 7;   # valid stream, but the feature is out of drishti's scope
+    DR_ERR_OVERSIZE      = 8;   # size field exceeds sanity cap (decompression-bomb guard)
+    DR_ERR_OOM           = 9;   # allocation failed
+    DR_ERR_OTHER         = 99;  # catch-all
+}
+
+# ================================================================
+# Stream/container sniff kinds (dr_sniff result)
+# ================================================================
+
+enum DrSniffKind {
+    DR_SNIFF_UNKNOWN = 0;   # neither IVF nor Annex-B
+    DR_SNIFF_IVF     = 1;   # IVF container ("DKIF" magic)
+    DR_SNIFF_ANNEXB  = 2;   # raw Annex-B byte stream (00 00 01 / 00 00 00 01)
+}
+
+# ================================================================
+# FourCC constants — the u32 you get from a little-endian 32-bit read
+# of the 4 ASCII bytes (byte order in file: 'D','K','I','F' etc.).
+# ================================================================
+
+enum DrFourcc {
+    DR_FOURCC_DKIF = 0x46494B44;   # "DKIF" — IVF magic
+    DR_FOURCC_AV01 = 0x31305641;   # "AV01" — AV1 in IVF
+    DR_FOURCC_VP80 = 0x30385056;   # "VP80" — VP8 in IVF
+    DR_FOURCC_VP90 = 0x30395056;   # "VP90" — VP9 in IVF
+}
+
+# ================================================================
+# Version — MAJOR*10000 + MINOR*100 + PATCH (0.1.0 -> 100).
+# Keep in sync with the VERSION file at each cut.
+# ================================================================
+
+fn drishti_version(): i64 {
+    return 100;
+}
+
+# ================================================================
+# DrErr — 16-byte error record {code, detail-ptr}
+# ================================================================
+
+# Create a DrErr with code and an optional detail cstring (0 = none).
+fn dr_err_new(code, detail): i64 {
+    var e = alloc(16);
+    if (e == 0) { return 0; }
+    store64(e, code);
+    store64(e + 8, detail);
+    return e;
+}
+
+# Create a DrErr with code only (no detail).
+fn dr_err(code): i64 {
+    return dr_err_new(code, 0);
+}
+
+# Get the error code.
+fn dr_err_code(e): i64 {
+    return load64(e);
+}
+
+# Get the detail string pointer (or 0).
+fn dr_err_detail(e): i64 {
+    return load64(e + 8);
+}
+
+# ================================================================
+# Error name lookup — returns a cstring (never null). Family-band
+# codes fall through to per-band names so an unmapped family code
+# still prints something meaningful.
+# ================================================================
+
+fn dr_err_name(code): i64 {
+    if (code == DR_OK)                { return "ok"; }
+    if (code == DR_ERR_TRUNCATED)     { return "truncated input"; }
+    if (code == DR_ERR_BOUNDS)        { return "out-of-bounds read"; }
+    if (code == DR_ERR_FORBIDDEN_BIT) { return "forbidden bit set"; }
+    if (code == DR_ERR_BAD_LEB128)    { return "bad leb128"; }
+    if (code == DR_ERR_BAD_VLC)       { return "bad variable-length code"; }
+    if (code == DR_ERR_BAD_HEADER)    { return "bad header"; }
+    if (code == DR_ERR_UNSUPPORTED)   { return "unsupported feature"; }
+    if (code == DR_ERR_OVERSIZE)      { return "oversize field"; }
+    if (code == DR_ERR_OOM)           { return "out of memory"; }
+    if (code == DR_ERR_OTHER)         { return "other error"; }
+    if ((code >= 10) && (code <= 29)) { return "AV1 error"; }
+    if ((code >= 30) && (code <= 49)) { return "H.264 error"; }
+    if ((code >= 50) && (code <= 69)) { return "H.265 error"; }
+    if ((code >= 70) && (code <= 89)) { return "VP8/VP9 error"; }
+    return "unknown error";
+}
+
+# Print an error name to stderr (fd 2).
+fn dr_err_print_name(code): i64 {
+    var name = dr_err_name(code);
+    syscall(1, 2, name, strlen(name));
+    return 0;
+}
+
+# ================================================================
+# dr_sniff — classify a byte buffer as IVF / Annex-B / unknown.
+#
+# IVF:     bytes 0-3 == "DKIF" (needs len >= 4). Full header
+#          validation is dr_ivf_reader_init's job — sniff is cheap.
+# Annex-B: 4-byte start code 00 00 00 01 checked BEFORE the 3-byte
+#          00 00 01 (the 3-byte probe would match the 4-byte prefix
+#          bytes 0-2 = 00 00 00 and misreport). H.264 spec Annex B /
+#          H.265 Annex B byte-stream NAL unit syntax.
+# Every read is bounds-checked against len; never reads past buf+len.
+# ================================================================
+
+fn dr_sniff(buf, len): i64 {
+    if (len >= 4) {
+        # "DKIF" byte-by-byte — no unaligned 32-bit read needed.
+        if ((load8(buf) == 0x44) && (load8(buf + 1) == 0x4B)
+        && (load8(buf + 2) == 0x49) && (load8(buf + 3) == 0x46)) {
+            return DR_SNIFF_IVF;
+        }
+        if ((load8(buf) == 0) && (load8(buf + 1) == 0)
+        && (load8(buf + 2) == 0) && (load8(buf + 3) == 1)) {
+            return DR_SNIFF_ANNEXB;
+        }
+    }
+    if (len >= 3) {
+        if ((load8(buf) == 0) && (load8(buf + 1) == 0) && (load8(buf + 2) == 1)) {
+            return DR_SNIFF_ANNEXB;
+        }
+    }
+    return DR_SNIFF_UNKNOWN;
+}
+
+# dr_sniff_fourcc — for an IVF buffer, the codec FourCC at header
+# bytes 8-11 as a little-endian u32 (compare against DR_FOURCC_*).
+# Returns 0 if the buffer is not IVF or too short to carry the field.
+# LE read inlined byte-by-byte: drishti.cyr is the dep-free root module
+# and must not reach into bits.cyr (dr_rd_le32).
+fn dr_sniff_fourcc(buf, len): i64 {
+    if (dr_sniff(buf, len) != DR_SNIFF_IVF) { return 0; }
+    if (len < 12) { return 0; }
+    var v = load8(buf + 8);
+    v = v + (load8(buf + 9) << 8);
+    v = v + (load8(buf + 10) << 16);
+    v = v + (load8(buf + 11) << 24);
+    return v;
+}

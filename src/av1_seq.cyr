@@ -1,0 +1,355 @@
+# @public — drishti AV1: sequence_header_obu parse — the stream-level
+# summary every decode needs first (profile, coded dimensions, bit
+# depth, monochrome, still-picture flags).
+#
+# FLAT module (no includes) — wiring in src/main.cyr; until this family
+# is wired into [lib], the standalone suite tests/av1.tcyr includes it
+# explicitly after the lib root. Depends on src/drishti.cyr (DR_ERR_*)
+# and src/bits.cyr (DrBr bit I/O, uvlc).
+#
+# Derived from the "AV1 Bitstream & Decoding Process Specification"
+# v1.0.0 with Errata 1 (AOMedia) — section numbers cited inline:
+#   5.5.1 sequence_header_obu()      — both the reduced_still_picture
+#                                      and the full operating-points path
+#   5.5.2 color_config()             — BitDepth / mono_chrome extraction
+#   5.5.3 timing_info()              — read + discarded (bit-exact skip)
+#   5.5.4 decoder_model_info()       — read + discarded, except
+#                                      buffer_delay_length_minus_1 which
+#                                      sizes 5.5.5's fields
+#   5.5.5 operating_parameters_info()— read + discarded
+#   6.4.1 general semantics          — seq_profile > 2 reserved;
+#                                      reduced_still_picture_header == 1
+#                                      requires still_picture == 1
+# Cross-checked against dav1d src/obu.c (parse_seq_hdr) and libaom
+# av1/decoder/obu.c (read_sequence_header_obu) — field order and the
+# conditional branches match both.
+#
+# drishti 0.1.x extracts a SUMMARY record: fields that later phases
+# (frame-header parse, tile decode) don't yet need are consumed
+# bit-exactly and discarded, so the cursor is always spec-true. The
+# full-fidelity record grows in the 0.2.x frame-header bite.
+#
+# Av1Seq record layout (56 bytes, heap):
+#   +0:  profile  — seq_profile (0/1/2)
+#   +8:  width    — max_frame_width_minus_1 + 1
+#   +16: height   — max_frame_height_minus_1 + 1
+#   +24: bitdepth — 8 / 10 / 12 (5.5.2 high_bitdepth/twelve_bit)
+#   +32: mono     — mono_chrome (0/1; forced 0 for profile 1)
+#   +40: still    — still_picture (0/1)
+#   +48: reduced  — reduced_still_picture_header (0/1)
+
+# AV1 family error codes — minted inside the reserved AV1 band 10-29
+# (src/drishti.cyr); generic faults reuse the core DR_ERR_* codes.
+# AV1_ERR_BAD_SEQ covers sequence-header conformance violations, e.g.
+# reduced_still_picture_header == 1 with still_picture == 0 (6.4.1).
+enum Av1ErrCode {
+    AV1_ERR_BAD_PROFILE = 10;   # seq_profile 3..7 — reserved per 6.4.1
+    AV1_ERR_BAD_SEQ     = 11;   # sequence-header conformance violation
+}
+
+# ================================================================
+# Internal skip helpers — consume spec-exact bits, discard values.
+# All return DR_OK or the reader's (sticky) error code.
+# ================================================================
+
+# timing_info() — 5.5.3. Values discarded (the "must be > 0" conformance
+# on num_units_in_display_tick/time_scale is a display concern, not
+# needed for the summary record; enforcement lands with decoder-model
+# support in a later phase).
+fn av1_timing_info_skip(br): i64 {
+    dr_br_read_bits(br, 32);            # num_units_in_display_tick f(32)
+    dr_br_read_bits(br, 32);            # time_scale                f(32)
+    var equal = dr_br_read_bit(br);     # equal_picture_interval    f(1)
+    if (equal) {
+        var ticks = 0;
+        var rc = dr_uvlc_read(br, &ticks);   # num_ticks_per_picture_minus_1 uvlc()
+        if (rc != DR_OK) { return rc; }
+    }
+    return dr_br_err(br);
+}
+
+# decoder_model_info() — 5.5.4. Stores buffer_delay_length_minus_1 at
+# *out_bdl_m1 (0..31 — it sizes operating_parameters_info's fields);
+# the rest is discarded.
+fn av1_decoder_model_info_skip(br, out_bdl_m1): i64 {
+    store64(out_bdl_m1, dr_br_read_bits(br, 5));   # buffer_delay_length_minus_1 f(5)
+    dr_br_read_bits(br, 32);   # num_units_in_decoding_tick             f(32)
+    dr_br_read_bits(br, 5);    # buffer_removal_time_length_minus_1     f(5)
+    dr_br_read_bits(br, 5);    # frame_presentation_time_length_minus_1 f(5)
+    return dr_br_err(br);
+}
+
+# operating_parameters_info(op) — 5.5.5. n = buffer_delay_length_minus_1
+# + 1 (at most 32, the f(5) bound — always legal for dr_br_read_bits).
+fn av1_operating_parameters_info_skip(br, bdl_m1): i64 {
+    dr_br_read_bits(br, bdl_m1 + 1);   # decoder_buffer_delay[op] f(n)
+    dr_br_read_bits(br, bdl_m1 + 1);   # encoder_buffer_delay[op] f(n)
+    dr_br_read_bit(br);                # low_delay_mode_flag[op]  f(1)
+    return dr_br_err(br);
+}
+
+# color_config() — 5.5.2. Extracts BitDepth (8/10/12) into *out_depth
+# and mono_chrome into *out_mono; every other field is consumed
+# bit-exactly and discarded. profile is the already-validated
+# seq_profile (0/1/2).
+fn av1_color_config_parse(br, profile, out_depth, out_mono): i64 {
+    var depth = 8;
+    var high = dr_br_read_bit(br);          # high_bitdepth f(1)
+    if ((profile == 2) && high) {
+        var twelve = dr_br_read_bit(br);    # twelve_bit f(1)
+        if (twelve) { depth = 12; } else { depth = 10; }
+    } else {
+        # 5.5.2: profiles 0/1 (and profile 2 without high_bitdepth):
+        # BitDepth = high_bitdepth ? 10 : 8.
+        if (high) { depth = 10; }
+    }
+    var mono = 0;
+    if (profile == 1) {
+        mono = 0;                           # 5.5.2: not coded for profile 1
+    } else {
+        mono = dr_br_read_bit(br);          # mono_chrome f(1)
+    }
+    var cp = 2;                             # CP_UNSPECIFIED (6.4.2)
+    var tc = 2;                             # TC_UNSPECIFIED
+    var mc = 2;                             # MC_UNSPECIFIED
+    var desc = dr_br_read_bit(br);          # color_description_present_flag f(1)
+    if (desc) {
+        cp = dr_br_read_bits(br, 8);        # color_primaries          f(8)
+        tc = dr_br_read_bits(br, 8);        # transfer_characteristics f(8)
+        mc = dr_br_read_bits(br, 8);        # matrix_coefficients      f(8)
+    }
+    if (mono) {
+        # 5.5.2 monochrome path: color_range then RETURN — no
+        # subsampling, chroma position, or separate_uv_delta_q coded.
+        dr_br_read_bit(br);                 # color_range f(1)
+        store64(out_depth, depth);
+        store64(out_mono, 1);
+        return dr_br_err(br);
+    }
+    if ((cp == 1) && (tc == 13) && (mc == 0)) {
+        # 5.5.2 sRGB special case (CP_BT_709 + TC_SRGB + MC_IDENTITY):
+        # color_range = 1 and 4:4:4 are IMPLIED — no further bits on
+        # this branch.
+    } else {
+        dr_br_read_bit(br);                 # color_range f(1)
+        var ssx = 1;
+        var ssy = 1;
+        if (profile == 0) {
+            ssx = 1;                        # 5.5.2: profile 0 is 4:2:0
+            ssy = 1;
+        } else {
+            if (profile == 1) {
+                ssx = 0;                    # profile 1 is 4:4:4
+                ssy = 0;
+            } else {
+                if (depth == 12) {
+                    ssx = dr_br_read_bit(br);   # subsampling_x f(1)
+                    if (ssx) {
+                        ssy = dr_br_read_bit(br);   # subsampling_y f(1)
+                    } else {
+                        ssy = 0;
+                    }
+                } else {
+                    ssx = 1;                # profile 2 at 8/10-bit is 4:2:2
+                    ssy = 0;
+                }
+            }
+        }
+        if (ssx && ssy) {
+            dr_br_read_bits(br, 2);         # chroma_sample_position f(2)
+        }
+    }
+    dr_br_read_bit(br);                     # separate_uv_delta_q f(1)
+    store64(out_depth, depth);
+    store64(out_mono, 0);
+    return dr_br_err(br);
+}
+
+# ================================================================
+# sequence_header_obu parse
+# ================================================================
+
+# Parse a sequence_header_obu PAYLOAD (the bytes AFTER the OBU header —
+# feed it av1_obu_next's payload slice) from buf[0..len). Returns an
+# Av1Seq record, or 0 with the error code stored at *out_err:
+#   DR_ERR_BOUNDS       — len < 0
+#   DR_ERR_TRUNCATED    — payload ends mid-field
+#   AV1_ERR_BAD_PROFILE — seq_profile 3..7 (reserved, 6.4.1)
+#   AV1_ERR_BAD_SEQ     — reduced_still_picture_header without
+#                         still_picture (6.4.1)
+#   DR_ERR_OOM          — allocation failure
+# Trailing bits (5.3.4) after film_grain_params_present are not
+# inspected in 0.1.x.
+fn av1_seq_parse(buf, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (len < 0) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var br = dr_br_init(buf, len);
+    if (br == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    # 5.5.1 sequence_header_obu() — leading fixed fields.
+    var profile = dr_br_read_bits(br, 3);   # seq_profile                  f(3)
+    var still = dr_br_read_bit(br);         # still_picture                f(1)
+    var reduced = dr_br_read_bit(br);       # reduced_still_picture_header f(1)
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    if (profile > 2) {
+        store64(out_err, AV1_ERR_BAD_PROFILE);
+        return 0;
+    }
+    if (reduced && (still == 0)) {
+        store64(out_err, AV1_ERR_BAD_SEQ);
+        return 0;
+    }
+    if (reduced) {
+        # 5.5.1 reduced path: a single implied operating point.
+        dr_br_read_bits(br, 5);             # seq_level_idx[0] f(5)
+    } else {
+        var dm_present = 0;
+        var bdl_m1 = 0;
+        var timing = dr_br_read_bit(br);    # timing_info_present_flag f(1)
+        if (timing) {
+            var rc = av1_timing_info_skip(br);
+            if (rc != DR_OK) {
+                store64(out_err, rc);
+                return 0;
+            }
+            dm_present = dr_br_read_bit(br);   # decoder_model_info_present_flag f(1)
+            if (dm_present) {
+                rc = av1_decoder_model_info_skip(br, &bdl_m1);
+                if (rc != DR_OK) {
+                    store64(out_err, rc);
+                    return 0;
+                }
+            }
+        }
+        var idd_present = dr_br_read_bit(br);   # initial_display_delay_present_flag f(1)
+        var ops_m1 = dr_br_read_bits(br, 5);    # operating_points_cnt_minus_1 f(5)
+        if (dr_br_err(br) != DR_OK) {
+            store64(out_err, dr_br_err(br));
+            return 0;
+        }
+        # Loop bound is spec-fixed at 32 (f(5) + 1) — no bomb risk.
+        var i = 0;
+        while (i <= ops_m1) {
+            dr_br_read_bits(br, 12);            # operating_point_idc[i] f(12)
+            var level = dr_br_read_bits(br, 5); # seq_level_idx[i]       f(5)
+            if (level > 7) {
+                dr_br_read_bit(br);             # seq_tier[i] f(1) (else implied 0)
+            }
+            if (dm_present) {
+                var dm_this = dr_br_read_bit(br);   # decoder_model_present_for_this_op[i] f(1)
+                if (dm_this) {
+                    var rc2 = av1_operating_parameters_info_skip(br, bdl_m1);
+                    if (rc2 != DR_OK) {
+                        store64(out_err, rc2);
+                        return 0;
+                    }
+                }
+            }
+            if (idd_present) {
+                var idd_this = dr_br_read_bit(br);  # initial_display_delay_present_for_this_op[i] f(1)
+                if (idd_this) {
+                    dr_br_read_bits(br, 4);         # initial_display_delay_minus_1[i] f(4)
+                }
+            }
+            if (dr_br_err(br) != DR_OK) {
+                store64(out_err, dr_br_err(br));
+                return 0;
+            }
+            i = i + 1;
+        }
+    }
+    # Frame-size bounds — common to both paths.
+    var wbits = dr_br_read_bits(br, 4) + 1;      # frame_width_bits_minus_1  f(4)
+    var hbits = dr_br_read_bits(br, 4) + 1;      # frame_height_bits_minus_1 f(4)
+    var width = dr_br_read_bits(br, wbits) + 1;  # max_frame_width_minus_1   f(wbits)
+    var height = dr_br_read_bits(br, hbits) + 1; # max_frame_height_minus_1  f(hbits)
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    if (reduced == 0) {
+        var fid = dr_br_read_bit(br);       # frame_id_numbers_present_flag f(1)
+        if (fid) {
+            dr_br_read_bits(br, 4);         # delta_frame_id_length_minus_2      f(4)
+            dr_br_read_bits(br, 3);         # additional_frame_id_length_minus_1 f(3)
+        }
+    }
+    dr_br_read_bit(br);                     # use_128x128_superblock   f(1)
+    dr_br_read_bit(br);                     # enable_filter_intra      f(1)
+    dr_br_read_bit(br);                     # enable_intra_edge_filter f(1)
+    if (reduced == 0) {
+        # Inter-tool flags — 5.5.1 full path only (reduced implies all 0
+        # and SELECT_* for the force fields).
+        dr_br_read_bit(br);                 # enable_interintra_compound f(1)
+        dr_br_read_bit(br);                 # enable_masked_compound     f(1)
+        dr_br_read_bit(br);                 # enable_warped_motion       f(1)
+        dr_br_read_bit(br);                 # enable_dual_filter         f(1)
+        var order_hint = dr_br_read_bit(br);    # enable_order_hint f(1)
+        if (order_hint) {
+            dr_br_read_bit(br);             # enable_jnt_comp      f(1)
+            dr_br_read_bit(br);             # enable_ref_frame_mvs f(1)
+        }
+        var choose_sct = dr_br_read_bit(br);    # seq_choose_screen_content_tools f(1)
+        var force_sct = 2;                      # SELECT_SCREEN_CONTENT_TOOLS
+        if (choose_sct == 0) {
+            force_sct = dr_br_read_bit(br);     # seq_force_screen_content_tools f(1)
+        }
+        if (force_sct > 0) {
+            var choose_imv = dr_br_read_bit(br);    # seq_choose_integer_mv f(1)
+            if (choose_imv == 0) {
+                dr_br_read_bit(br);         # seq_force_integer_mv f(1)
+            }
+        }
+        if (order_hint) {
+            dr_br_read_bits(br, 3);         # order_hint_bits_minus_1 f(3)
+        }
+    }
+    dr_br_read_bit(br);                     # enable_superres    f(1)
+    dr_br_read_bit(br);                     # enable_cdef        f(1)
+    dr_br_read_bit(br);                     # enable_restoration f(1)
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    var depth = 0;
+    var mono = 0;
+    var rc3 = av1_color_config_parse(br, profile, &depth, &mono);   # color_config() 5.5.2
+    if (rc3 != DR_OK) {
+        store64(out_err, rc3);
+        return 0;
+    }
+    dr_br_read_bit(br);                     # film_grain_params_present f(1)
+    if (dr_br_err(br) != DR_OK) {
+        store64(out_err, dr_br_err(br));
+        return 0;
+    }
+    var s = alloc(56);
+    if (s == 0) {
+        store64(out_err, DR_ERR_OOM);
+        return 0;
+    }
+    store64(s, profile);
+    store64(s + 8, width);
+    store64(s + 16, height);
+    store64(s + 24, depth);
+    store64(s + 32, mono);
+    store64(s + 40, still);
+    store64(s + 48, reduced);
+    return s;
+}
+
+fn av1_seq_profile(s): i64 { return load64(s); }
+fn av1_seq_width(s): i64 { return load64(s + 8); }
+fn av1_seq_height(s): i64 { return load64(s + 16); }
+fn av1_seq_bitdepth(s): i64 { return load64(s + 24); }
+fn av1_seq_mono(s): i64 { return load64(s + 32); }
+fn av1_seq_still(s): i64 { return load64(s + 40); }
+fn av1_seq_reduced(s): i64 { return load64(s + 48); }
