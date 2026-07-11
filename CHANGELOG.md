@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-07-10
+
+Adds AV1 chroma-from-luma (CfL) prediction — the sixth (and final)
+intra-prediction milestone sub-bite. Derived verbatim from spec 7.11.5,
+cross-checked against libaom `cfl.c` + dav1d `ipred`, and reviewed by a
+5-agent adversarial workflow (spec conformance ×2, multi-source,
+memory-safety/overflow, independent known-answer recompute — all clean).
+**4,080 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 chroma-from-luma prediction** (`src/av1_intra.cyr`):
+  `av1_predict_chroma_from_luma` (7.11.5) forms chroma as
+  `DC(chroma) + alpha·AC(luma)` — the reconstructed luma of the block is
+  subsampled to the chroma grid (summed over the subsampling footprint,
+  left-shifted to 3 fractional bits), its block mean subtracted to leave
+  the AC, scaled by the signed CfL alpha with a 6-bit signed round
+  (`Round2Signed`), and added onto the DC prediction already written by a
+  prior `predict_intra(DC_PRED)`. Handles every subsampling mode
+  (4:4:4 / 4:2:2 / 4:4:0 / 4:2:0) via the `subX`/`subY` footprint.
+  `alpha` (CflAlphaU/V) and `MaxLumaW`/`MaxLumaH` are caller inputs until
+  block/mode-info decode lands; the luma extent is clamped to the luma
+  plane as an out-of-bounds backstop. 202 assertions (up from 172): the
+  hand-computed 4:4:4 and 4:2:0 known answers (positive and negative
+  alpha), the Clip1 saturation at both ends, the MaxLuma edge-replication
+  clamp, and the zero-alpha / flat-luma identity invariants.
+
+### Notes
+- `drishti_version()` → 710. This completes the AV1 **intra prediction**
+  layer (7.11.2 + 7.11.5); coefficient decode (with the default CDF
+  tables) is the next milestone sub-bite toward first pixels.
+
 ## [0.7.9] - 2026-07-10
 
 Adds AV1 recursive filter-intra prediction — the fifth milestone

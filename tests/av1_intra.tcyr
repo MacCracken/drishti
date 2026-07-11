@@ -335,6 +335,147 @@ fn test_intra_filter_known() {
     return 0;
 }
 
+# ================================================================
+# Chroma-from-luma (7.11.5)
+# ================================================================
+# Fill an axis-aligned region [x0,x0+w) x [y0,y0+h) of plane pl with v.
+fn cfl_fill(f, pl, x0, y0, w, h, v): i64 {
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) { dr_frame_set(f, pl, x0 + j, y0 + i, v); j = j + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# alpha == 0 -> the DC prediction is returned unchanged (no AC added).
+fn test_cfl_alpha_zero() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);   # 4:4:4, 3 planes
+    cfl_fill(f, 0, 0, 0, 4, 4, 77);                  # arbitrary luma
+    dr_frame_set(f, 0, 0, 0, 200);                   # a spike (would be AC)
+    cfl_fill(f, 1, 0, 0, 4, 4, 130);                 # DC prediction
+    var rc = av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 0, 4, 4);
+    assert_eq(rc, DR_OK, "cfl alpha0 ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 130, "alpha0 keeps DC");
+    assert_eq(dr_frame_get(f, 1, 3, 3), 130, "alpha0 keeps DC (corner)");
+    return 0;
+}
+
+# A FLAT luma block has zero AC (L[i][j] == lumaAvg everywhere), so CfL
+# leaves the chroma DC unchanged for any alpha and any subsampling.
+fn test_cfl_flat_luma() {
+    var e = 0;
+    # 4:4:4
+    var f = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);
+    cfl_fill(f, 0, 0, 0, 4, 4, 60);
+    cfl_fill(f, 1, 0, 0, 4, 4, 100);
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 7, 4, 4), DR_OK, "cfl flat444 ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 100, "flat444 unchanged [0][0]");
+    assert_eq(dr_frame_get(f, 1, 2, 1), 100, "flat444 unchanged [1][2]");
+    # 4:2:0
+    var f2 = dr_frame_new(16, 16, 3, 1, 1, 8, 0, &e);
+    cfl_fill(f2, 0, 0, 0, 8, 8, 60);
+    cfl_fill(f2, 1, 0, 0, 4, 4, 100);
+    assert_eq(av1_predict_chroma_from_luma(f2, 1, 0, 0, 2, 2, 0 - 5, 8, 8), DR_OK, "cfl flat420 ok");
+    assert_eq(dr_frame_get(f2, 1, 0, 0), 100, "flat420 unchanged [0][0]");
+    assert_eq(dr_frame_get(f2, 1, 3, 3), 100, "flat420 unchanged [3][3]");
+    return 0;
+}
+
+# Hand-computed 4:4:4, 4x4, plane 1, alpha 1. luma[0][0]=100, rest=50.
+# L = luma<<3, so L[0][0]=800, others=400. lumaAvg = Round2(6800,4)=425.
+# [0][0]: Round2Signed(1*(800-425),6) = Round2Signed(375,6) = 6 -> 128+6=134.
+# others: Round2Signed(400-425,6) = -Round2(25,6) = 0 -> 128.
+fn test_cfl_known_444() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);
+    cfl_fill(f, 0, 0, 0, 4, 4, 50);
+    dr_frame_set(f, 0, 0, 0, 100);
+    cfl_fill(f, 1, 0, 0, 4, 4, 128);
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 1, 4, 4), DR_OK, "cfl 444 ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 134, "cfl444 [0][0] = 134");
+    assert_eq(dr_frame_get(f, 1, 1, 0), 128, "cfl444 [0][1] = 128");
+    assert_eq(dr_frame_get(f, 1, 3, 3), 128, "cfl444 [3][3] = 128");
+    return 0;
+}
+
+# Same setup, alpha -2. [0][0]: -Round2(2*375,6) = -12 -> 116.
+# others: Round2Signed(-2*-25,6) = Round2(50,6) = 1 -> 129.
+fn test_cfl_known_444_neg() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);
+    cfl_fill(f, 0, 0, 0, 4, 4, 50);
+    dr_frame_set(f, 0, 0, 0, 100);
+    cfl_fill(f, 1, 0, 0, 4, 4, 128);
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 0 - 2, 4, 4), DR_OK, "cfl 444neg ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 116, "cfl444neg [0][0] = 116");
+    assert_eq(dr_frame_get(f, 1, 1, 0), 129, "cfl444neg [0][1] = 129");
+    return 0;
+}
+
+# Hand-computed 4:2:0, 4x4 chroma, plane 1, alpha 1. The luma 2x2 quad at
+# (0..1,0..1)=80, rest of the 8x8 luma region=40. Each chroma pixel sums a
+# 2x2 luma quad, v = sum<<1: L[0][0]=640, others=320. lumaAvg=Round2(5440,4)=340.
+# [0][0]: Round2Signed(300,6)=5 -> 133. others: Round2Signed(-20,6)=0 -> 128.
+fn test_cfl_known_420() {
+    var e = 0;
+    var f = dr_frame_new(16, 16, 3, 1, 1, 8, 0, &e);
+    cfl_fill(f, 0, 0, 0, 8, 8, 40);
+    cfl_fill(f, 0, 0, 0, 2, 2, 80);                  # the AC spike quad
+    cfl_fill(f, 1, 0, 0, 4, 4, 128);
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 1, 8, 8), DR_OK, "cfl 420 ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 133, "cfl420 [0][0] = 133");
+    assert_eq(dr_frame_get(f, 1, 1, 0), 128, "cfl420 [0][1] = 128");
+    assert_eq(dr_frame_get(f, 1, 3, 3), 128, "cfl420 [3][3] = 128");
+    return 0;
+}
+
+# Clip1 saturates both ends. High: luma[0][0]=255 rest=0, dc=255, alpha=16
+#   -> 255+478 clamps to 255; an AC-negative pixel stays in range (223).
+# Low: luma[0][0]=0 rest=255, dc=0, alpha=16 -> 0-478 clamps to 0.
+fn test_cfl_clip() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);
+    cfl_fill(f, 0, 0, 0, 4, 4, 0);
+    dr_frame_set(f, 0, 0, 0, 255);
+    cfl_fill(f, 1, 0, 0, 4, 4, 255);
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 16, 4, 4), DR_OK, "cfl cliphi ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 255, "cfl clip high -> 255");
+    assert_eq(dr_frame_get(f, 1, 1, 0), 223, "cfl non-clipped negative -> 223");
+    var f2 = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);
+    cfl_fill(f2, 0, 0, 0, 4, 4, 255);
+    dr_frame_set(f2, 0, 0, 0, 0);
+    cfl_fill(f2, 1, 0, 0, 4, 4, 0);
+    assert_eq(av1_predict_chroma_from_luma(f2, 1, 0, 0, 2, 2, 16, 4, 4), DR_OK, "cfl cliplo ok");
+    assert_eq(dr_frame_get(f2, 1, 0, 0), 0, "cfl clip low -> 0");
+    return 0;
+}
+
+# MaxLumaW clamps lumaX to the valid extent: with max_luma_w=2, columns
+# j>=2 replicate column 1. Luma cols 0..3 = 10,20,30,40 (all rows). j=0->10,
+# j=1..3->20 (30/40 are past the extent and must be ignored). v=luma<<3,
+# lumaAvg=Round2(4*(80+160+160+160),4)=Round2(2240,4)=140, alpha=4.
+# j=0: Round2Signed(4*(80-140),6)=-4 -> 124. j=1..3: Round2Signed(4*20,6)=1 -> 129.
+fn test_cfl_maxluma_clamp() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 3, 0, 0, 8, 0, &e);
+    var c = 0;
+    while (c < 4) {
+        var col = 10 + (c * 10);                     # 10,20,30,40
+        cfl_fill(f, 0, c, 0, 1, 4, col);             # column c, rows 0..3
+        c = c + 1;
+    }
+    cfl_fill(f, 1, 0, 0, 4, 4, 128);
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 2, 4, 2, 4), DR_OK, "cfl clamp ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 124, "clamp col0 -> 124");
+    assert_eq(dr_frame_get(f, 1, 1, 0), 129, "clamp col1 -> 129");
+    assert_eq(dr_frame_get(f, 1, 2, 0), 129, "clamp col2 replicates col1 -> 129");
+    assert_eq(dr_frame_get(f, 1, 3, 0), 129, "clamp col3 replicates col1 -> 129");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("intra helpers / tables");
@@ -357,6 +498,14 @@ fn main() {
     test_filter_taps();
     test_intra_filter_flat();
     test_intra_filter_known();
+    test_group("chroma-from-luma");
+    test_cfl_alpha_zero();
+    test_cfl_flat_luma();
+    test_cfl_known_444();
+    test_cfl_known_444_neg();
+    test_cfl_known_420();
+    test_cfl_clip();
+    test_cfl_maxluma_clamp();
     return assert_summary();
 }
 
