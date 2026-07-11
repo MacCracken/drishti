@@ -1,0 +1,408 @@
+# src/av1_modeinfo.cyr — AV1 intra-frame mode-info reads (spec 5.11.16
+# intra_frame_mode_info, intra branch) + the CDF-selection contexts (9.3 /
+# "8.3.2 cdf selection"). Bite 2 of the block/partition decode arc: the
+# per-block mode reads that consume the 0.7.19 non-coeff CDFs (av1_ncdf_*) —
+# read_skip, intra_frame_y_mode, intra_angle_info_y, uv_mode (CfL-allowed
+# selection), read_cfl_alphas, intra_angle_info_uv, filter_intra_mode_info —
+# as decode functions AND their exact-inverse encode functions (the encode
+# lane, round-trip tested through the symbol coder like av1_coeffs).
+#
+# Also carries the block-size CONVERSION TABLES the whole block decode needs
+# (Mi_Width/Height_Log2, Num_4x4_Blocks_Wide/High, Block_Width/Height,
+# Size_Group, Intra_Mode_Context, Subsampled_Size + get_plane_residual_size),
+# extracted from the spec additional-tables annex. Reused by the tx-size,
+# partition, and residual-driver bites later in 0.7.x (roadmap.md).
+#
+# SCOPE (this bite, intra keyframe baseline): the intra branch only. The
+# feature-gated reads deferred to later bites (roadmap.md 0.7.x) that surround
+# it in intra_frame_mode_info are NOT emitted here (they read nothing when
+# their enabling flags are off):
+# intra_segment_id (segmentation), read_cdef, read_delta_qindex/lf (delta-q/lf),
+# use_intrabc (allow_intrabc), palette_mode_info (screen-content). PaletteSizeY
+# is fixed 0. The orchestrator reads exactly what a profile-0 keyframe block
+# with those features disabled reads.
+#
+# FLAT module — wiring in src/main.cyr after av1_noncoeffcdf.cyr. Family av1_.
+# Depends on: av1_symbol (sym read/write), av1_noncoeffcdf (av1_ncdf_*),
+# av1_intra (AV1_DC_PRED / AV1_V_PRED / AV1_D67_PRED, av1_is_directional_mode),
+# av1_frame (av1_min / av1_max), drishti (DR_OK / DR_ERR_*).
+
+enum Av1ModeInfoConst {
+    AV1_MAX_ANGLE_DELTA = 3;        # AngleDelta magnitude bound; 2N+1 = 7 symbols
+    AV1_UV_CFL_PRED     = 13;       # UV mode that triggers read_cfl_alphas
+    AV1_CFL_SIGN_ZERO   = 0;
+    AV1_CFL_SIGN_NEG    = 1;
+    AV1_CFL_SIGN_POS    = 2;
+    AV1_BLOCK_4X4       = 0;
+    AV1_BLOCK_8X8       = 3;        # MiSize >= BLOCK_8X8 gate for angle_delta
+}
+# Subsampled_Size sentinel for an unrepresentable (invalid) residual size.
+# Stored as the literal 0-1; not an enum member (enum inits must be literals).
+
+# ================================================================
+# Block-size conversion tables — one lazily-built blob (211 i64):
+#   [0..21]    Mi_Width_Log2[22]
+#   [22..43]   Mi_Height_Log2[22]
+#   [44..65]   Num_4x4_Blocks_Wide[22]
+#   [66..87]   Num_4x4_Blocks_High[22]
+#   [88..109]  Size_Group[22]
+#   [110..122] Intra_Mode_Context[13]
+#   [123..210] Subsampled_Size[22][2][2]  (row = {[0][0],[0][1],[1][0],[1][1]})
+# ================================================================
+var Av1_BlkTab = 0;
+fn av1_mi_fill22(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11,
+v12, v13, v14, v15, v16, v17, v18, v19, v20, v21) {
+    store64(t + ((off + 0) * 8), v0);    store64(t + ((off + 1) * 8), v1);
+    store64(t + ((off + 2) * 8), v2);    store64(t + ((off + 3) * 8), v3);
+    store64(t + ((off + 4) * 8), v4);    store64(t + ((off + 5) * 8), v5);
+    store64(t + ((off + 6) * 8), v6);    store64(t + ((off + 7) * 8), v7);
+    store64(t + ((off + 8) * 8), v8);    store64(t + ((off + 9) * 8), v9);
+    store64(t + ((off + 10) * 8), v10);  store64(t + ((off + 11) * 8), v11);
+    store64(t + ((off + 12) * 8), v12);  store64(t + ((off + 13) * 8), v13);
+    store64(t + ((off + 14) * 8), v14);  store64(t + ((off + 15) * 8), v15);
+    store64(t + ((off + 16) * 8), v16);  store64(t + ((off + 17) * 8), v17);
+    store64(t + ((off + 18) * 8), v18);  store64(t + ((off + 19) * 8), v19);
+    store64(t + ((off + 20) * 8), v20);  store64(t + ((off + 21) * 8), v21);
+    return 0;
+}
+fn av1_mi_fill13(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) {
+    store64(t + ((off + 0) * 8), v0);    store64(t + ((off + 1) * 8), v1);
+    store64(t + ((off + 2) * 8), v2);    store64(t + ((off + 3) * 8), v3);
+    store64(t + ((off + 4) * 8), v4);    store64(t + ((off + 5) * 8), v5);
+    store64(t + ((off + 6) * 8), v6);    store64(t + ((off + 7) * 8), v7);
+    store64(t + ((off + 8) * 8), v8);    store64(t + ((off + 9) * 8), v9);
+    store64(t + ((off + 10) * 8), v10);  store64(t + ((off + 11) * 8), v11);
+    store64(t + ((off + 12) * 8), v12);
+    return 0;
+}
+# One Subsampled_Size row: {[subx0][suby0], [subx0][suby1], [subx1][suby0], [subx1][suby1]}.
+fn av1_mi_fill4(t, off, a, b, c, d) {
+    store64(t + ((off + 0) * 8), a);   store64(t + ((off + 1) * 8), b);
+    store64(t + ((off + 2) * 8), c);   store64(t + ((off + 3) * 8), d);
+    return 0;
+}
+fn av1_blk_tables(): i64 {
+    if (Av1_BlkTab != 0) { return Av1_BlkTab; }
+    var t = alloc(211 * 8);           # 211 i64
+    if (t == 0) { return 0; }
+    # Mi_Width_Log2[22]
+    av1_mi_fill22(t, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4);
+    # Mi_Height_Log2[22]
+    av1_mi_fill22(t, 22, 0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 2, 0, 3, 1, 4, 2);
+    # Num_4x4_Blocks_Wide[22]
+    av1_mi_fill22(t, 44, 1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16);
+    # Num_4x4_Blocks_High[22]
+    av1_mi_fill22(t, 66, 1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4);
+    # Size_Group[22]
+    av1_mi_fill22(t, 88, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2);
+    # Intra_Mode_Context[13]
+    av1_mi_fill13(t, 110, 0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0);
+    # Subsampled_Size[22][2][2] — BLOCK enum values, -1 = BLOCK_INVALID.
+    av1_mi_fill4(t, 123 + (0 * 4), 0, 0, 0, 0);        # BLOCK_4X4
+    av1_mi_fill4(t, 123 + (1 * 4), 1, 0, 0 - 1, 0);    # BLOCK_4X8
+    av1_mi_fill4(t, 123 + (2 * 4), 2, 0 - 1, 0, 0);    # BLOCK_8X4
+    av1_mi_fill4(t, 123 + (3 * 4), 3, 2, 1, 0);        # BLOCK_8X8
+    av1_mi_fill4(t, 123 + (4 * 4), 4, 3, 0 - 1, 1);    # BLOCK_8X16
+    av1_mi_fill4(t, 123 + (5 * 4), 5, 0 - 1, 3, 2);    # BLOCK_16X8
+    av1_mi_fill4(t, 123 + (6 * 4), 6, 5, 4, 3);        # BLOCK_16X16
+    av1_mi_fill4(t, 123 + (7 * 4), 7, 6, 0 - 1, 4);    # BLOCK_16X32
+    av1_mi_fill4(t, 123 + (8 * 4), 8, 0 - 1, 6, 5);    # BLOCK_32X16
+    av1_mi_fill4(t, 123 + (9 * 4), 9, 8, 7, 6);        # BLOCK_32X32
+    av1_mi_fill4(t, 123 + (10 * 4), 10, 9, 0 - 1, 7);  # BLOCK_32X64
+    av1_mi_fill4(t, 123 + (11 * 4), 11, 0 - 1, 9, 8);  # BLOCK_64X32
+    av1_mi_fill4(t, 123 + (12 * 4), 12, 11, 10, 9);    # BLOCK_64X64
+    av1_mi_fill4(t, 123 + (13 * 4), 13, 12, 0 - 1, 10);# BLOCK_64X128
+    av1_mi_fill4(t, 123 + (14 * 4), 14, 0 - 1, 12, 11);# BLOCK_128X64
+    av1_mi_fill4(t, 123 + (15 * 4), 15, 14, 13, 12);   # BLOCK_128X128
+    av1_mi_fill4(t, 123 + (16 * 4), 16, 1, 0 - 1, 1);  # BLOCK_4X16
+    av1_mi_fill4(t, 123 + (17 * 4), 17, 0 - 1, 2, 2);  # BLOCK_16X4
+    av1_mi_fill4(t, 123 + (18 * 4), 18, 4, 0 - 1, 16); # BLOCK_8X32
+    av1_mi_fill4(t, 123 + (19 * 4), 19, 0 - 1, 5, 17); # BLOCK_32X8
+    av1_mi_fill4(t, 123 + (20 * 4), 20, 7, 0 - 1, 18); # BLOCK_16X64
+    av1_mi_fill4(t, 123 + (21 * 4), 21, 0 - 1, 8, 19); # BLOCK_64X16
+    Av1_BlkTab = t;
+    return t;
+}
+fn av1_mi_width_log2(bsize): i64 { return load64(av1_blk_tables() + (bsize * 8)); }
+fn av1_mi_height_log2(bsize): i64 { return load64(av1_blk_tables() + ((22 + bsize) * 8)); }
+fn av1_num_4x4_w(bsize): i64 { return load64(av1_blk_tables() + ((44 + bsize) * 8)); }
+fn av1_num_4x4_h(bsize): i64 { return load64(av1_blk_tables() + ((66 + bsize) * 8)); }
+fn av1_block_width(bsize): i64 { return 4 * av1_num_4x4_w(bsize); }
+fn av1_block_height(bsize): i64 { return 4 * av1_num_4x4_h(bsize); }
+fn av1_size_group(bsize): i64 { return load64(av1_blk_tables() + ((88 + bsize) * 8)); }
+fn av1_intra_mode_context(mode): i64 { return load64(av1_blk_tables() + ((110 + mode) * 8)); }
+fn av1_subsampled_size(bsize, subx, suby): i64 {
+    return load64(av1_blk_tables() + ((123 + (bsize * 4) + (subx * 2) + suby) * 8));
+}
+# get_plane_residual_size (5.11.38) — plane 0 uses (0,0); plane > 0 the sequence
+# subsampling. Returns a BLOCK size index (or AV1_BLOCK_INVALID).
+fn av1_get_plane_residual_size(subsize, plane, subx, suby): i64 {
+    var sx = 0;
+    var sy = 0;
+    if (plane > 0) { sx = subx; sy = suby; }
+    return av1_subsampled_size(subsize, sx, sy);
+}
+
+# ================================================================
+# Av1ModeInfo — the per-block intra mode-info the orchestrator fills / reads.
+# Signed fields (angle deltas, cfl alphas) are stored as i64 two's-complement.
+# ================================================================
+enum Av1ModeInfoOff {
+    AV1MI_SKIP      = 0;    # skip flag (0/1)
+    AV1MI_YMODE     = 8;    # YMode (0..12)
+    AV1MI_UVMODE    = 16;   # UVMode (0..13; UV_CFL_PRED=13). DC_PRED if !HasChroma
+    AV1MI_ANGLE_Y   = 24;   # AngleDeltaY (-3..3)
+    AV1MI_ANGLE_UV  = 32;   # AngleDeltaUV (-3..3)
+    AV1MI_CFL_U     = 40;   # CflAlphaU (-16..16)
+    AV1MI_CFL_V     = 48;   # CflAlphaV (-16..16)
+    AV1MI_USE_FI    = 56;   # use_filter_intra (0/1)
+    AV1MI_FI_MODE   = 64;   # filter_intra_mode (0..4)
+    AV1MI_SIZE      = 72;
+}
+fn av1_modeinfo_new(): i64 {
+    var mi = alloc(AV1MI_SIZE);
+    if (mi == 0) { return 0; }
+    store64(mi + AV1MI_SKIP, 0);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_ANGLE_Y, 0);
+    store64(mi + AV1MI_ANGLE_UV, 0);
+    store64(mi + AV1MI_CFL_U, 0);
+    store64(mi + AV1MI_CFL_V, 0);
+    store64(mi + AV1MI_USE_FI, 0);
+    store64(mi + AV1MI_FI_MODE, 0);
+    return mi;
+}
+
+# ================================================================
+# CDF-selection contexts + primitive reads / writes (spec "cdf selection").
+# ncc is a non-coeff CDF context base (mutable av1_ncdf_new, or read-only
+# av1_noncoeff_cdf_blob). Neighbour inputs are supplied by the block loop.
+# ================================================================
+
+# skip ctx (9.3): ctx = Skips[above] + Skips[left] over available neighbours.
+fn av1_skip_ctx(avail_u, above_skip, avail_l, left_skip): i64 {
+    var ctx = 0;
+    if (avail_u) { ctx = ctx + above_skip; }
+    if (avail_l) { ctx = ctx + left_skip; }
+    return ctx;
+}
+fn av1_read_skip(sd, ncc, ctx): i64 {
+    return av1_sym_read_symbol(sd, av1_ncdf_skip(ncc, ctx), 2);
+}
+fn av1_write_skip(enc, ncc, ctx, skip): i64 {
+    return av1_sym_encode_symbol(enc, av1_ncdf_skip(ncc, ctx), 2, skip);
+}
+
+# intra_frame_y_mode (9.3): cdf = TileIntraFrameYModeCdf[abovemode][leftmode]
+# where {above,left}mode = Intra_Mode_Context[ avail ? neighbourYMode : DC_PRED ].
+fn av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode): i64 {
+    var am = AV1_DC_PRED;
+    if (avail_u) { am = above_ymode; }
+    var lm = AV1_DC_PRED;
+    if (avail_l) { lm = left_ymode; }
+    var ac = av1_intra_mode_context(am);
+    var lc = av1_intra_mode_context(lm);
+    return av1_sym_read_symbol(sd, av1_ncdf_y_mode(ncc, ac, lc), 13);
+}
+fn av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode): i64 {
+    var am = AV1_DC_PRED;
+    if (avail_u) { am = above_ymode; }
+    var lm = AV1_DC_PRED;
+    if (avail_l) { lm = left_ymode; }
+    var ac = av1_intra_mode_context(am);
+    var lc = av1_intra_mode_context(lm);
+    return av1_sym_encode_symbol(enc, av1_ncdf_y_mode(ncc, ac, lc), 13, ymode);
+}
+
+# intra_angle_info_y (5.11.20): AngleDeltaY = 0, and only for MiSize >= BLOCK_8X8
+# and a directional YMode read angle_delta_y (7 symbols, cdf indexed YMode-V_PRED)
+# with AngleDeltaY = angle_delta_y - MAX_ANGLE_DELTA.
+fn av1_angle_delta_active(mi_size, mode): i64 {
+    if (mi_size < AV1_BLOCK_8X8) { return 0; }
+    return av1_is_directional_mode(mode);
+}
+fn av1_read_angle_delta_y(sd, ncc, mi_size, ymode): i64 {
+    if (av1_angle_delta_active(mi_size, ymode) == 0) { return 0; }
+    var s = av1_sym_read_symbol(sd, av1_ncdf_angle_delta(ncc, ymode - AV1_V_PRED), 7);
+    return s - AV1_MAX_ANGLE_DELTA;
+}
+fn av1_write_angle_delta_y(enc, ncc, mi_size, ymode, angle_delta_y): i64 {
+    if (av1_angle_delta_active(mi_size, ymode) == 0) { return DR_OK; }
+    return av1_sym_encode_symbol(enc, av1_ncdf_angle_delta(ncc, ymode - AV1_V_PRED), 7,
+    angle_delta_y + AV1_MAX_ANGLE_DELTA);
+}
+
+# uv_mode (9.3) CfL-allowed selection: TileUVModeCflAllowedCdf if
+#   (Lossless && get_plane_residual_size(MiSize,1)==BLOCK_4X4) ||
+#   (!Lossless && Max(Block_Width,Block_Height) <= 32);
+# else TileUVModeCflNotAllowedCdf.
+fn av1_cfl_allowed(mi_size, lossless, subx, suby): i64 {
+    if (lossless) {
+        if (av1_get_plane_residual_size(mi_size, 1, subx, suby) == AV1_BLOCK_4X4) { return 1; }
+        return 0;
+    }
+    if (av1_max(av1_block_width(mi_size), av1_block_height(mi_size)) <= 32) { return 1; }
+    return 0;
+}
+fn av1_read_uv_mode(sd, ncc, ymode, cfl_allowed): i64 {
+    if (cfl_allowed) { return av1_sym_read_symbol(sd, av1_ncdf_uv_mode_cfl(ncc, ymode), 14); }
+    return av1_sym_read_symbol(sd, av1_ncdf_uv_mode_ncfl(ncc, ymode), 13);
+}
+fn av1_write_uv_mode(enc, ncc, ymode, cfl_allowed, uvmode): i64 {
+    if (cfl_allowed) { return av1_sym_encode_symbol(enc, av1_ncdf_uv_mode_cfl(ncc, ymode), 14, uvmode); }
+    return av1_sym_encode_symbol(enc, av1_ncdf_uv_mode_ncfl(ncc, ymode), 13, uvmode);
+}
+
+# read_cfl_alphas (5.11.45): joint sign symbol, then a magnitude per non-zero
+# sign. signU=(signs+1)/3, signV=(signs+1)%3; cfl_alpha_u ctx=(signU-1)*3+signV,
+# cfl_alpha_v ctx=(signV-1)*3+signU. Writes CflAlphaU/V (signed) to out_u/out_v.
+fn av1_read_cfl_alphas(sd, ncc, out_u, out_v): i64 {
+    var signs = av1_sym_read_symbol(sd, av1_ncdf_cfl_sign(ncc), 8);
+    var signU = (signs + 1) / 3;
+    var signV = (signs + 1) % 3;
+    var au = 0;
+    var av = 0;
+    if (signU != AV1_CFL_SIGN_ZERO) {
+        var ctxu = ((signU - 1) * 3) + signV;
+        au = 1 + av1_sym_read_symbol(sd, av1_ncdf_cfl_alpha(ncc, ctxu), 16);
+        if (signU == AV1_CFL_SIGN_NEG) { au = 0 - au; }
+    }
+    if (signV != AV1_CFL_SIGN_ZERO) {
+        var ctxv = ((signV - 1) * 3) + signU;
+        av = 1 + av1_sym_read_symbol(sd, av1_ncdf_cfl_alpha(ncc, ctxv), 16);
+        if (signV == AV1_CFL_SIGN_NEG) { av = 0 - av; }
+    }
+    store64(out_u, au);
+    store64(out_v, av);
+    return signs;
+}
+# Inverse: derive signU/signV from CflAlphaU/V, then cfl_alpha_signs =
+# signU*3 + signV - 1 (inverse of the decode split), and the magnitudes.
+fn av1_write_cfl_alphas(enc, ncc, cfl_u, cfl_v): i64 {
+    var signU = AV1_CFL_SIGN_ZERO;
+    if (cfl_u < 0) { signU = AV1_CFL_SIGN_NEG; }
+    if (cfl_u > 0) { signU = AV1_CFL_SIGN_POS; }
+    var signV = AV1_CFL_SIGN_ZERO;
+    if (cfl_v < 0) { signV = AV1_CFL_SIGN_NEG; }
+    if (cfl_v > 0) { signV = AV1_CFL_SIGN_POS; }
+    var signs = ((signU * 3) + signV) - 1;
+    av1_sym_encode_symbol(enc, av1_ncdf_cfl_sign(ncc), 8, signs);
+    if (signU != AV1_CFL_SIGN_ZERO) {
+        var absu = cfl_u;
+        if (absu < 0) { absu = 0 - absu; }
+        var ctxu = ((signU - 1) * 3) + signV;
+        av1_sym_encode_symbol(enc, av1_ncdf_cfl_alpha(ncc, ctxu), 16, absu - 1);
+    }
+    if (signV != AV1_CFL_SIGN_ZERO) {
+        var absv = cfl_v;
+        if (absv < 0) { absv = 0 - absv; }
+        var ctxv = ((signV - 1) * 3) + signU;
+        av1_sym_encode_symbol(enc, av1_ncdf_cfl_alpha(ncc, ctxv), 16, absv - 1);
+    }
+    return DR_OK;
+}
+
+# intra_angle_info_uv (5.11.21) — mirror of the Y variant with UVMode.
+fn av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode): i64 {
+    if (av1_angle_delta_active(mi_size, uvmode) == 0) { return 0; }
+    var s = av1_sym_read_symbol(sd, av1_ncdf_angle_delta(ncc, uvmode - AV1_V_PRED), 7);
+    return s - AV1_MAX_ANGLE_DELTA;
+}
+fn av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, angle_delta_uv): i64 {
+    if (av1_angle_delta_active(mi_size, uvmode) == 0) { return DR_OK; }
+    return av1_sym_encode_symbol(enc, av1_ncdf_angle_delta(ncc, uvmode - AV1_V_PRED), 7,
+    angle_delta_uv + AV1_MAX_ANGLE_DELTA);
+}
+
+# filter_intra_mode_info (5.11.24): only when enable_filter_intra && YMode==DC_PRED
+# && PaletteSizeY==0 && Max(Block_Width,Block_Height) <= 32. use_filter_intra cdf
+# = TileFilterIntraCdf[MiSize]; filter_intra_mode cdf = TileFilterIntraModeCdf.
+fn av1_filter_intra_allowed(enable_filter_intra, mi_size, ymode, palette_size_y): i64 {
+    if (enable_filter_intra == 0) { return 0; }
+    if (ymode != AV1_DC_PRED) { return 0; }
+    if (palette_size_y != 0) { return 0; }
+    if (av1_max(av1_block_width(mi_size), av1_block_height(mi_size)) > 32) { return 0; }
+    return 1;
+}
+# Reads use_filter_intra (+ filter_intra_mode into out_mode); returns use flag.
+fn av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, palette_size_y, out_mode): i64 {
+    store64(out_mode, 0);
+    if (av1_filter_intra_allowed(enable_filter_intra, mi_size, ymode, palette_size_y) == 0) { return 0; }
+    var use_fi = av1_sym_read_symbol(sd, av1_ncdf_filter_intra(ncc, mi_size), 2);
+    if (use_fi) {
+        var m = av1_sym_read_symbol(sd, av1_ncdf_filter_intra_mode(ncc), 5);
+        store64(out_mode, m);
+    }
+    return use_fi;
+}
+fn av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, palette_size_y, use_fi, fi_mode): i64 {
+    if (av1_filter_intra_allowed(enable_filter_intra, mi_size, ymode, palette_size_y) == 0) { return DR_OK; }
+    av1_sym_encode_symbol(enc, av1_ncdf_filter_intra(ncc, mi_size), 2, use_fi);
+    if (use_fi) {
+        av1_sym_encode_symbol(enc, av1_ncdf_filter_intra_mode(ncc), 5, fi_mode);
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# intra_frame_mode_info() — intra branch orchestrator (decode + inverse encode).
+# Fills / reads Av1ModeInfo. Deferred features (segment/cdef/deltas/intrabc/
+# palette) are elided per the module SCOPE note; PaletteSizeY is fixed 0.
+# Read order mirrors the spec: skip, y_mode, angle_y, then (HasChroma) uv_mode,
+# cfl_alphas (if UV_CFL_PRED), angle_uv, then filter_intra.
+# ================================================================
+fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
+avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
+lossless, subx, suby, enable_filter_intra): i64 {
+    var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
+    var skip = av1_read_skip(sd, ncc, sctx);
+    store64(mi + AV1MI_SKIP, skip);
+
+    var ymode = av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode);
+    store64(mi + AV1MI_YMODE, ymode);
+    store64(mi + AV1MI_ANGLE_Y, av1_read_angle_delta_y(sd, ncc, mi_size, ymode));
+
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_ANGLE_UV, 0);
+    store64(mi + AV1MI_CFL_U, 0);
+    store64(mi + AV1MI_CFL_V, 0);
+    if (has_chroma) {
+        var cfl_ok = av1_cfl_allowed(mi_size, lossless, subx, suby);
+        var uvmode = av1_read_uv_mode(sd, ncc, ymode, cfl_ok);
+        store64(mi + AV1MI_UVMODE, uvmode);
+        if (uvmode == AV1_UV_CFL_PRED) {
+            av1_read_cfl_alphas(sd, ncc, mi + AV1MI_CFL_U, mi + AV1MI_CFL_V);
+        }
+        store64(mi + AV1MI_ANGLE_UV, av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode));
+    }
+
+    var use_fi = av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, 0, mi + AV1MI_FI_MODE);
+    store64(mi + AV1MI_USE_FI, use_fi);
+    return av1_sym_dec_err(sd);
+}
+
+fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
+avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
+lossless, subx, suby, enable_filter_intra): i64 {
+    var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
+    av1_write_skip(enc, ncc, sctx, load64(mi + AV1MI_SKIP));
+
+    var ymode = load64(mi + AV1MI_YMODE);
+    av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode);
+    av1_write_angle_delta_y(enc, ncc, mi_size, ymode, load64(mi + AV1MI_ANGLE_Y));
+
+    if (has_chroma) {
+        var cfl_ok = av1_cfl_allowed(mi_size, lossless, subx, suby);
+        var uvmode = load64(mi + AV1MI_UVMODE);
+        av1_write_uv_mode(enc, ncc, ymode, cfl_ok, uvmode);
+        if (uvmode == AV1_UV_CFL_PRED) {
+            av1_write_cfl_alphas(enc, ncc, load64(mi + AV1MI_CFL_U), load64(mi + AV1MI_CFL_V));
+        }
+        av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, load64(mi + AV1MI_ANGLE_UV));
+    }
+
+    av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, 0,
+    load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
+    return av1_sym_enc_err(enc);
+}

@@ -6,14 +6,15 @@
 
 ## Version
 
-**0.7.19** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
-AV1 arc** opens the **block/partition decode** (the last stretch to a
-decoded keyframe) with its first bite: the default non-coefficient CDF
-tables (`av1_noncoeffcdf.cyr` — 19 tables, 1,622 entries) that every
-mode-info / tx / partition read will consume, on top of the complete
-coefficient decode (0.7.13-0.7.18). The remaining distance to 1.0 is the
-rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) +
-audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.20** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
+AV1 arc** advances the **block/partition decode** (the last stretch to a
+decoded keyframe) with bite 2: the intra **mode-info reads**
+(`av1_modeinfo.cyr` — the intra branch of `intra_frame_mode_info` +
+the shared block-size conversion tables), decode + inverse encode,
+consuming the 0.7.19 non-coeff CDFs, on top of the complete coefficient
+decode (0.7.13-0.7.18) and the default non-coeff CDFs (0.7.19). The
+remaining distance to 1.0 is the rest of the per-codec completion arcs
+(0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -28,7 +29,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (24 `[lib]` modules, dependency order)
+## Source (25 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -49,6 +50,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — all 7 families: txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br + accessors |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode + txb_skip/dc_sign/txSzCtx contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
 | `src/av1_noncoeffcdf.cyr` | `av1_` | default non-coeff CDF tables (intra keyframe) — partition/skip/y-mode/uv-mode/cfl/angle/filter-intra/tx-size/tx-type (1,622) + accessors + av1_ncdf_new |
+| `src/av1_modeinfo.cyr` | `av1_` | intra `intra_frame_mode_info` reads (5.11.16) — skip/y-mode/angle/uv-mode/CfL/filter-intra decode + inverse encode + orchestrator (Av1ModeInfo); block-size conversion tables (Mi/Block/Size_Group/Intra_Mode_Context/Subsampled_Size) |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -62,11 +64,11 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 19 suites / **19,156 assertions**: drishti 51 · bits
+- `make test` — 20 suites / **19,466 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,844 ·
-  av1_noncoeffcdf 1,820 · h264 326 · h265 276 · vpx 287
+  av1_noncoeffcdf 1,820 · av1_modeinfo 310 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -100,7 +102,11 @@ audit (0.11.x) + freeze/docs (0.12.x). See
   and the adaptive coeff-CDF context (3 slices: copy/accessor offsets +
   refactor + adaptation lockstep + libaom → all clean), and the default
   non-coeff CDFs (3 slices: per-table diff of all 19 tables + accessor
-  offsets + libaom entropymode cross-check → all clean)
+  offsets + libaom entropymode cross-check → all clean), and the intra
+  mode-info reads (5 slices: syntax/read-order fidelity + CDF-selection
+  contexts + per-value block-table diff + encode/decode inversion +
+  hostile-input safety, each cross-checked against the spec markdown → all
+  clean, no findings)
 
 ## Dependencies
 
@@ -135,15 +141,19 @@ sequence toward a decoded keyframe, mapped by a multi-agent scoping pass;
 scope + tables per bite are in the review transcript / CHANGELOG):
 
 1. **non-coeff CDF tables** — `av1_noncoeffcdf.cyr` **[done 0.7.19]**
-2. **mode-info reads** — `intra_frame_mode_info` intra branch: `read_skip`,
-   `intra_frame_y_mode` (above/left neighbour-mode ctx), `uv_mode`
-   (CfL-allowed vs not), `read_cfl_alphas`, `angle_delta` (directional),
-   `filter_intra` use/mode. Consumes the 0.7.19 CDFs (`av1_ncdf_*`).
-   Round-trip-testable via the symbol encoder. Needs block-size tables
-   (Block_Width/Height, Mi_Width/Height_Log2, Intra_Mode_Context) + the
-   YModes/UVModes neighbour grids. **← NEXT BITE.**
+2. **mode-info reads** — `av1_modeinfo.cyr`: `intra_frame_mode_info` intra
+   branch — `read_skip`, `intra_frame_y_mode` (above/left `Intra_Mode_Context`
+   ctx), `uv_mode` (CfL-allowed selection), `read_cfl_alphas`, `angle_delta`
+   (directional), `filter_intra` use/mode — decode + inverse encode +
+   the `Av1ModeInfo` orchestrator, consuming the 0.7.19 CDFs. Shipped with
+   the shared block-size conversion tables (Block_Width/Height,
+   Mi_Width/Height_Log2, Num_4x4_*, Size_Group, Intra_Mode_Context,
+   Subsampled_Size). Round-trip tested (both CDF modes + adaptive
+   multi-block). The YModes/Skips neighbour grids are caller inputs, wired by
+   the tile/frame loop (bite 7). **[done 0.7.20]**
 3. **tx-size reads** — `read_tx_size` / `tx_depth` symbol + its ctx; tables
    Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size; fills InterTxSizes.
+   **← NEXT BITE.**
 4. **`compute_tx_type`** spliced INTO `av1_coeffs_decode`/`_encode`
    (between all_zero and get_scan) — retires the `PlaneTxType` caller-input;
    reads `intra_tx_type` (Set1/Set2 CDFs) + `get_tx_set` + `Mode_To_Txfm`.

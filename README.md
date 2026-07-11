@@ -18,16 +18,17 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.19 (AV1 decode arc in progress)
+## Status — 0.7.20 (AV1 decode arc in progress)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (19,156 suite assertions + 1,140 fuzz
+derived, and adversarially tested (19,466 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc is underway — the frame
 header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue (**first pixels** from a coefficient array), the
 **coefficient reading loop** (a transform block decodes end-to-end, with
-adaptive CDFs), and the block-decode CDF tables are in:
+adaptive CDFs), the block-decode CDF tables, and the intra **mode-info
+reads** are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
@@ -46,8 +47,10 @@ adaptive CDFs), and the block-decode CDF tables are in:
   + all seven default coefficient CDF families (txb_skip / eob / dc_sign /
   coeff_base / coeff_br) + the coeffs() reading loop (spec 5.11.39: decode +
   inverse encode + the adaptive per-tile CDF context, round-trip tested) +
-  the default non-coeff CDF tables (partition / mode / tx / CfL …) that the
-  block-decode reads will consume
+  the default non-coeff CDF tables (partition / mode / tx / CfL …) + the
+  intra mode-info reads (spec 5.11.16 `intra_frame_mode_info`: skip / y+uv
+  mode / CfL alphas / angle-delta / filter-intra, decode + inverse encode)
+  with the shared block-size conversion tables
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,

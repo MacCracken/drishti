@@ -4,6 +4,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.20] - 2026-07-11
+
+Bite 2 of the AV1 **block/partition decode** arc: the intra **mode-info
+reads**. A new `src/av1_modeinfo.cyr` implements the intra branch of
+`intra_frame_mode_info()` (spec 5.11.16) — the per-block mode syntax that
+consumes the 0.7.19 non-coeff CDFs — as decode functions AND their
+exact-inverse encoders, round-trip tested through the symbol coder. A
+5-agent adversarial spec review (syntax/read-order fidelity, CDF-selection
+contexts, per-value block-table diff, encode/decode inversion, hostile-input
+safety — each cross-checked against the spec markdown) confirmed it with **no
+findings**. **19,466 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 intra mode-info reads** (`src/av1_modeinfo.cyr`, new flat module):
+  `read_skip`, `intra_frame_y_mode` (above/left `Intra_Mode_Context`
+  neighbour ctx), `intra_angle_info_y`, `uv_mode` (the Lossless /
+  `Max(BW,BH)<=32` CfL-allowed cdf selection), `read_cfl_alphas` (joint sign
+  + per-sign magnitude), `intra_angle_info_uv`, and `filter_intra_mode_info`
+  — each with its exact CDF-selection context (spec 9.3) and a paired encode
+  function. The `av1_intra_frame_mode_info_decode` / `_encode` orchestrator
+  drives them in spec read-order into an `Av1ModeInfo` record. Feature-gated
+  reads (segmentation, cdef, delta-q/lf, intrabc, palette) are deferred to
+  later bites and elided.
+- **AV1 block-size conversion tables** (same module): `Mi_Width/Height_Log2`,
+  `Num_4x4_Blocks_Wide/High`, `Block_Width/Height`, `Size_Group`,
+  `Intra_Mode_Context`, and `Subsampled_Size` + `get_plane_residual_size`
+  (211-entry blob, pinned by a position-weighted checksum) — the shared
+  block-geometry lookups the tx-size / partition / residual-driver bites reuse.
+- **Tests** (`tests/av1_modeinfo.tcyr`, 310 assertions): the block-table
+  checksum + spot values, `get_plane_residual_size` / `cfl_allowed`
+  known-answers, every CDF-selection context, seven mode-info round-trip
+  scenarios (DC+CfL+filter-intra, directional Y/UV angle deltas, all valid
+  CfL sign combinations, no-chroma, the 4x4 no-angle gate, allowed-but-unused
+  filter-intra, CfL-not-allowed uv_mode) each in **both** `disable_cdf_update`
+  modes, plus an adaptive multi-block round-trip sharing one CDF context.
+
+### Notes
+- `drishti_version()` → 720. Next in the block-decode arc (bite 3): the
+  tx-size reads (`read_tx_size` / `tx_depth` + its ctx and the
+  `Max_Tx_Size_Rect` / `Max_Tx_Depth` / `Split_Tx_Size` tables), then
+  `compute_tx_type`, the residual driver, the partition tree, and the
+  tile/frame loop — toward a fully decoded keyframe.
+
 ## [0.7.19] - 2026-07-11
 
 Opens the AV1 **block/partition decode** arc (the final stretch to a

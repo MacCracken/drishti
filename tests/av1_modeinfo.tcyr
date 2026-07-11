@@ -1,0 +1,248 @@
+# tests/av1_modeinfo.tcyr — AV1 intra-frame mode-info reads (spec 5.11.16 intra
+# branch) + the block-size conversion tables + the CDF-selection contexts.
+# The block-size blob is pinned by a position-weighted checksum + spot values;
+# get_plane_residual_size / cfl_allowed by known-answers; the mode-info
+# decode/encode pair by round-trip (build an Av1ModeInfo, encode it through the
+# symbol coder, decode it back, assert every field) in both disable_cdf_update
+# modes, plus an adaptive multi-block round-trip.
+include "src/main.cyr"
+include "src/av1_modeinfo.cyr"
+
+# ---- block-size conversion tables ----
+fn test_blk_checksum() {
+    var b = av1_blk_tables();
+    var s = 0;
+    var k = 0;
+    while (k < 211) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 131665, "block-size table checksum");
+    return 0;
+}
+fn test_blk_values() {
+    # Mi_Width/Height_Log2 + derived Block_Width/Height.
+    assert_eq(av1_mi_width_log2(3), 1, "mi_w_log2 8x8");     # BLOCK_8X8
+    assert_eq(av1_mi_height_log2(3), 1, "mi_h_log2 8x8");
+    assert_eq(av1_block_width(3), 8, "block_w 8x8");
+    assert_eq(av1_block_height(3), 8, "block_h 8x8");
+    assert_eq(av1_block_width(5), 16, "block_w 16x8");       # BLOCK_16X8
+    assert_eq(av1_block_height(5), 8, "block_h 16x8");
+    assert_eq(av1_block_width(12), 64, "block_w 64x64");     # BLOCK_64X64
+    assert_eq(av1_block_height(12), 64, "block_h 64x64");
+    assert_eq(av1_block_width(21), 64, "block_w 64x16");     # BLOCK_64X16
+    assert_eq(av1_block_height(21), 16, "block_h 64x16");
+    assert_eq(av1_num_4x4_w(9), 8, "num4x4w 32x32");         # BLOCK_32X32
+    assert_eq(av1_num_4x4_h(9), 8, "num4x4h 32x32");
+    # Size_Group.
+    assert_eq(av1_size_group(0), 0, "size_group 4x4");
+    assert_eq(av1_size_group(3), 1, "size_group 8x8");
+    assert_eq(av1_size_group(6), 2, "size_group 16x16");
+    assert_eq(av1_size_group(9), 3, "size_group 32x32");
+    # Intra_Mode_Context = {0,1,2,3,4,4,4,4,3,0,1,2,0}.
+    assert_eq(av1_intra_mode_context(0), 0, "imc DC");
+    assert_eq(av1_intra_mode_context(1), 1, "imc V");
+    assert_eq(av1_intra_mode_context(3), 3, "imc D45");
+    assert_eq(av1_intra_mode_context(8), 3, "imc D67");
+    assert_eq(av1_intra_mode_context(9), 0, "imc SMOOTH");
+    assert_eq(av1_intra_mode_context(12), 0, "imc PAETH");
+    return 0;
+}
+# get_plane_residual_size(subsize, plane, subx, suby).
+fn test_plane_residual_size() {
+    # plane 0 is always the block itself (subsampling ignored).
+    assert_eq(av1_get_plane_residual_size(3, 0, 1, 1), 3, "prs 8x8 luma");
+    # plane 1, 420 (subx=suby=1): BLOCK_8X8 -> BLOCK_4X4 (=0).
+    assert_eq(av1_get_plane_residual_size(3, 1, 1, 1), 0, "prs 8x8 c 420");
+    # plane 1, 444 (subx=suby=0): BLOCK_8X8 -> BLOCK_8X8.
+    assert_eq(av1_get_plane_residual_size(3, 1, 0, 0), 3, "prs 8x8 c 444");
+    # plane 1, 422 (subx=1,suby=0): BLOCK_16X16 -> BLOCK_8X16 (=4).
+    assert_eq(av1_get_plane_residual_size(6, 1, 1, 0), 4, "prs 16x16 c 422");
+    # plane 1, 420: BLOCK_16X16 -> BLOCK_8X8 (=3).
+    assert_eq(av1_get_plane_residual_size(6, 1, 1, 1), 3, "prs 16x16 c 420");
+    return 0;
+}
+# cfl_allowed(mi_size, lossless, subx, suby).
+fn test_cfl_allowed() {
+    # Non-lossless: allowed iff Max(BW,BH) <= 32.
+    assert_eq(av1_cfl_allowed(3, 0, 1, 1), 1, "cfl 8x8 allowed");
+    assert_eq(av1_cfl_allowed(9, 0, 1, 1), 1, "cfl 32x32 allowed");
+    assert_eq(av1_cfl_allowed(12, 0, 1, 1), 0, "cfl 64x64 not");   # Max 64 > 32
+    assert_eq(av1_cfl_allowed(11, 0, 1, 1), 0, "cfl 64x32 not");   # BLOCK_64X32 Max 64 > 32
+    assert_eq(av1_cfl_allowed(19, 0, 0, 0), 1, "cfl 32x8 allowed"); # BLOCK_32X8 Max 32 <= 32
+    # Lossless: allowed iff get_plane_residual_size(MiSize,1)==BLOCK_4X4.
+    assert_eq(av1_cfl_allowed(3, 1, 1, 1), 1, "cfl 8x8 lossless 420 allowed");
+    assert_eq(av1_cfl_allowed(3, 1, 0, 0), 0, "cfl 8x8 lossless 444 not");
+    assert_eq(av1_cfl_allowed(0, 1, 0, 0), 1, "cfl 4x4 lossless 444 allowed");
+    return 0;
+}
+# ---- CDF-selection contexts ----
+fn test_ctx() {
+    assert_eq(av1_skip_ctx(0, 1, 0, 1), 0, "skip_ctx no avail");
+    assert_eq(av1_skip_ctx(1, 1, 0, 1), 1, "skip_ctx above only");
+    assert_eq(av1_skip_ctx(1, 1, 1, 1), 2, "skip_ctx both");
+    assert_eq(av1_skip_ctx(1, 0, 1, 0), 0, "skip_ctx both zero");
+    # angle_delta active only for MiSize>=8x8 AND directional mode.
+    assert_eq(av1_angle_delta_active(3, 1), 1, "angle 8x8 V dir");
+    assert_eq(av1_angle_delta_active(0, 1), 0, "angle 4x4 no (<8x8)");
+    assert_eq(av1_angle_delta_active(3, 0), 0, "angle 8x8 DC not dir");
+    assert_eq(av1_angle_delta_active(3, 13), 0, "angle CFL not dir");
+    # filter_intra allowed: enable && DC && palette0 && Max(BW,BH)<=32.
+    assert_eq(av1_filter_intra_allowed(1, 3, 0, 0), 1, "fi 8x8 DC allowed");
+    assert_eq(av1_filter_intra_allowed(0, 3, 0, 0), 0, "fi disabled");
+    assert_eq(av1_filter_intra_allowed(1, 3, 1, 0), 0, "fi non-DC");
+    assert_eq(av1_filter_intra_allowed(1, 3, 0, 2), 0, "fi palette");
+    assert_eq(av1_filter_intra_allowed(1, 12, 0, 0), 0, "fi 64x64 too big");
+    return 0;
+}
+
+# ---- mode-info round-trip harness ----
+fn mk_mi(skip, ymode, uvmode, ay, auv, cu, cv, ufi, fim): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, skip);
+    store64(mi + AV1MI_YMODE, ymode);
+    store64(mi + AV1MI_UVMODE, uvmode);
+    store64(mi + AV1MI_ANGLE_Y, ay);
+    store64(mi + AV1MI_ANGLE_UV, auv);
+    store64(mi + AV1MI_CFL_U, cu);
+    store64(mi + AV1MI_CFL_V, cv);
+    store64(mi + AV1MI_USE_FI, ufi);
+    store64(mi + AV1MI_FI_MODE, fim);
+    return mi;
+}
+fn mi_assert(a, b, tag): i64 {
+    assert_eq(load64(a + AV1MI_SKIP), load64(b + AV1MI_SKIP), tag);
+    assert_eq(load64(a + AV1MI_YMODE), load64(b + AV1MI_YMODE), tag);
+    assert_eq(load64(a + AV1MI_UVMODE), load64(b + AV1MI_UVMODE), tag);
+    assert_eq(load64(a + AV1MI_ANGLE_Y), load64(b + AV1MI_ANGLE_Y), tag);
+    assert_eq(load64(a + AV1MI_ANGLE_UV), load64(b + AV1MI_ANGLE_UV), tag);
+    assert_eq(load64(a + AV1MI_CFL_U), load64(b + AV1MI_CFL_U), tag);
+    assert_eq(load64(a + AV1MI_CFL_V), load64(b + AV1MI_CFL_V), tag);
+    assert_eq(load64(a + AV1MI_USE_FI), load64(b + AV1MI_USE_FI), tag);
+    assert_eq(load64(a + AV1MI_FI_MODE), load64(b + AV1MI_FI_MODE), tag);
+    return 0;
+}
+# Encode mi through the symbol coder, decode it back, assert equality. disable
+# selects read-only (1) vs adaptive (0) CDFs; each side gets its own context.
+fn mi_rt(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, disable, tag): i64 {
+    var nce = av1_noncoeff_cdf_blob();
+    var ncd = av1_noncoeff_cdf_blob();
+    if (disable == 0) { nce = av1_ncdf_new(); ncd = av1_ncdf_new(); }
+    var enc = av1_sym_enc_init(64, disable);
+    av1_intra_frame_mode_info_encode(enc, nce, mi, mi_size, has_chroma,
+    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dmi = av1_modeinfo_new();
+    var sd = av1_sym_dec_init(out, olen, disable);
+    av1_intra_frame_mode_info_decode(sd, ncd, dmi, mi_size, has_chroma,
+    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
+    mi_assert(mi, dmi, tag);
+    return 0;
+}
+# Round-trip a scenario in BOTH cdf modes.
+fn mi_rt_both(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, tag): i64 {
+    mi_rt(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 1, tag);
+    mi_rt(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, tag);
+    return 0;
+}
+
+# S1: 8x8 DC luma, chroma UV_CFL_PRED with alphas, filter-intra used.
+fn test_rt_dc_cfl_fi() {
+    var mi = mk_mi(0, 0, 13, 0, 0, 2, 0 - 3, 1, 3);
+    mi_rt_both(mi, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, "dc/cfl/fi");
+    return 0;
+}
+# S2: 16x16 directional Y (V_PRED, angle -2) + directional UV (H_PRED, angle +3),
+# with available neighbours and skip=1.
+fn test_rt_directional() {
+    var mi = mk_mi(1, 1, 2, 0 - 2, 3, 0, 0, 0, 0);
+    mi_rt_both(mi, 6, 1, 1, 1, 1, 12, 1, 0, 0, 1, 1, 1, "directional");
+    return 0;
+}
+# S3: every valid CfL sign combination (at least one alpha non-zero), 8x8.
+fn test_rt_cfl_signs() {
+    # (cu, cv): U POS only, V NEG only, both NEG/POS extremes, both POS min.
+    var m0 = mk_mi(0, 0, 13, 0, 0, 5, 0, 0, 0);       # signU=POS, signV=ZERO -> signs 5
+    mi_rt_both(m0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, "cfl U pos");
+    var m1 = mk_mi(0, 0, 13, 0, 0, 0, 0 - 8, 0, 0);   # signU=ZERO, signV=NEG -> signs 0
+    mi_rt_both(m1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, "cfl V neg");
+    var m2 = mk_mi(0, 0, 13, 0, 0, 0 - 16, 16, 0, 0); # signU=NEG, signV=POS -> signs 4
+    mi_rt_both(m2, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, "cfl both extreme");
+    var m3 = mk_mi(0, 0, 13, 0, 0, 1, 1, 0, 0);       # both POS, min magnitude -> signs 7
+    mi_rt_both(m3, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, "cfl both pos min");
+    var m4 = mk_mi(0, 0, 13, 0, 0, 0 - 1, 0 - 1, 0, 0); # both NEG -> signs 3
+    mi_rt_both(m4, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, "cfl both neg");
+    return 0;
+}
+# S4: no-chroma DC block with filter-intra used (UV fields stay default).
+fn test_rt_no_chroma() {
+    var mi = mk_mi(0, 0, 0, 0, 0, 0, 0, 1, 2);
+    mi_rt_both(mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, "no chroma dc fi");
+    return 0;
+}
+# S5: 4x4 block — directional modes but MiSize<BLOCK_8X8 so NO angle deltas.
+fn test_rt_4x4() {
+    var mi = mk_mi(0, 1, 1, 0, 0, 0, 0, 0, 0);   # ymode V, uvmode V, angles must stay 0
+    mi_rt_both(mi, 0, 1, 1, 12, 1, 3, 0, 1, 0, 1, 1, 0, "4x4 no angle");
+    return 0;
+}
+# S6: 32x32 DC, cfl allowed + filter-intra allowed but use_filter_intra=0
+# (the allowed-but-not-used branch).
+fn test_rt_fi_not_used() {
+    var mi = mk_mi(0, 0, 13, 0, 0, 0 - 4, 7, 0, 0);
+    mi_rt_both(mi, 9, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, "fi allowed not used");
+    return 0;
+}
+# S7: 64x64 — cfl NOT allowed (uv from the not-allowed cdf), fi not allowed.
+fn test_rt_no_cfl() {
+    var mi = mk_mi(1, 0, 12, 0, 0, 0, 0, 0, 0);   # uvmode PAETH via ncfl cdf
+    mi_rt_both(mi, 12, 1, 0, 0, 1, 6, 0, 1, 0, 1, 1, 1, "64x64 no cfl");
+    return 0;
+}
+# ADAPTIVE multi-block: two mode-infos share one context; block 2 (en/de)codes
+# against CDFs already adapted by block 1 — only in-lockstep adaptation matches.
+fn test_rt_adaptive_multiblock() {
+    var nce = av1_ncdf_new();
+    var ncd = av1_ncdf_new();
+    var mA = mk_mi(0, 0, 13, 0, 0, 3, 0 - 2, 1, 4);       # 8x8 DC/CFL/FI
+    var mB = mk_mi(1, 1, 2, 2, 0 - 1, 0, 0, 0, 0);        # 16x16 directional
+    var enc = av1_sym_enc_init(128, 0);
+    av1_intra_frame_mode_info_encode(enc, nce, mA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1);
+    av1_intra_frame_mode_info_encode(enc, nce, mB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dA = av1_modeinfo_new();
+    var dB = av1_modeinfo_new();
+    var sd = av1_sym_dec_init(out, olen, 0);
+    av1_intra_frame_mode_info_decode(sd, ncd, dA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1);
+    av1_intra_frame_mode_info_decode(sd, ncd, dB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "adaptive dec ok");
+    mi_assert(mA, dA, "adaptive block A");
+    mi_assert(mB, dB, "adaptive block B");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("block-size conversion tables");
+    test_blk_checksum();
+    test_blk_values();
+    test_plane_residual_size();
+    test_cfl_allowed();
+    test_group("mode-info CDF-selection contexts");
+    test_ctx();
+    test_group("intra_frame_mode_info decode/encode round-trip");
+    test_rt_dc_cfl_fi();
+    test_rt_directional();
+    test_rt_cfl_signs();
+    test_rt_no_chroma();
+    test_rt_4x4();
+    test_rt_fi_not_used();
+    test_rt_no_cfl();
+    test_group("mode-info adaptive CDF context");
+    test_rt_adaptive_multiblock();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
