@@ -6,15 +6,14 @@
 
 ## Version
 
-**0.7.17** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
-AV1 arc** reaches a key milestone: the `coeffs()` reading loop (5.11.39)
-in the new `av1_coeffs.cyr` module — so **a transform block now decodes
-end-to-end** (encoded bytes → `Quant[]`, round-trip tested against the
-inverse encode). It ties together the scans (0.7.13), level contexts
-(0.7.14), CDFs (0.7.15-0.7.16), and the symbol coder, plus the remaining
-txb_skip/dc_sign/txSzCtx contexts. The remaining distance to 1.0 is the
-rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) +
-audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.18** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
+AV1 arc** rounds out coefficient decode: the `coeffs()` reading loop
+(5.11.39, 0.7.17) now runs against an **adaptive per-tile CDF context**
+(`av1_ccdf_*` in `av1_coeffs.cyr`, 0.7.18), so decode works with CDF
+adaptation on (`disable_cdf_update = 0`, the common case) as well as
+read-only. A transform block decodes end-to-end in both modes. The
+remaining distance to 1.0 is the rest of the per-codec completion arcs
+(0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -31,7 +30,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 717, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 718, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -46,7 +45,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_scan.cyr` | `av1_` | coefficient scan orders (spec 5.11.41) — 32 Default/Mrow/Mcol scan tables + get_scan + scan_size |
 | `src/av1_coeff.cyr` | `av1_` | coefficient level contexts (spec 8.3.2) — get_tx_class / get_coeff_base_ctx / get_br_ctx + offset tables |
 | `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — all 7 families: txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br + accessors |
-| `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode + txb_skip/dc_sign/txSzCtx contexts (disable_cdf_update mode) |
+| `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode + txb_skip/dc_sign/txSzCtx contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -60,10 +59,10 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 18 suites / **13,920 assertions**: drishti 51 · bits
+- `make test` — 18 suites / **17,336 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
-  av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 428 ·
+  av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,844 ·
   h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
@@ -94,7 +93,9 @@ audit (0.11.x) + freeze/docs (0.12.x). See
   accessor arithmetic + format/libaom token_cdfs cross-check → all clean),
   and the coeffs() reading loop (4 slices: decode conformance + encode
   symmetry + per-symbol CDF/context selection + libaom decodetxb
-  cross-check → 3 clean + 1 real finding, an unbounded golomb loop, fixed)
+  cross-check → 3 clean + 1 real finding, an unbounded golomb loop, fixed),
+  and the adaptive coeff-CDF context (3 slices: copy/accessor offsets +
+  refactor + adaptation lockstep + libaom → all clean)
 
 ## Dependencies
 
@@ -121,12 +122,12 @@ reconstruct glue (7.12.3, 0.7.12) now turn a coefficient array +
 prediction into reconstructed pixels — **first pixels**. The
 **coefficient decode** is underway: the scan-order layer (5.11.41,
 0.7.13) and the level-context helpers (8.3.2, 0.7.14, this cut) are in.
-The `coeffs()` reading loop (5.11.39) is **in** (0.7.17) — a transform
-block decodes end-to-end (round-trip tested). Remaining toward a decoded
-keyframe: the **block/partition decode** — intra-mode + uv-mode + CfL-alpha
-reads and their CDFs, `compute_tx_type` (so `PlaneTxType` stops being a
-caller input), the adaptive per-tile CDF context (so decode works with
-`disable_cdf_update = 0`, the common case), the partition tree, and the
-tile/frame wiring that drives `coeffs()` + predict + reconstruct per
-block. Full per-codec arc plan + the audit/freeze arcs in
-[`roadmap.md`](roadmap.md). Nothing else in flight.
+The `coeffs()` reading loop (5.11.39) is **in** (0.7.17) with the adaptive
+per-tile CDF context (0.7.18) — a transform block decodes end-to-end in
+both CDF modes (round-trip tested). Remaining toward a decoded keyframe:
+the **block/partition decode** — intra-mode + uv-mode + CfL-alpha reads
+and their CDFs, `compute_tx_type` (so `PlaneTxType` stops being a caller
+input), the partition tree, and the tile/frame wiring that drives
+`coeffs()` + predict + reconstruct per block. Full per-codec arc plan +
+the audit/freeze arcs in [`roadmap.md`](roadmap.md). Nothing else in
+flight.

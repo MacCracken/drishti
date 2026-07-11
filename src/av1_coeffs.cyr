@@ -124,37 +124,95 @@ fn av1_dc_sign_ctx(x4, y4, w4, h4, max_x4, max_y4, above_dc, left_dc): i64 {
 }
 
 # ================================================================
+# Adaptive coefficient-CDF context. init_coeff_cdfs (7.x) loads the default
+# CDFs for the frame's quantizer bucket q into a mutable per-tile buffer that
+# the symbol coder adapts as it decodes. This buffer holds ONE q-context of
+# all 7 coeff CDF families (3999 i64), copied from the read-only defaults.
+# The accessors mirror the default ones minus the (already-selected) q dim.
+# Layout (entry offsets): txb_skip 0, eob_pt_16 195, _32 219, _64 247,
+# _128 279, _256 315, _512 355, _1024 377, eob_extra 401, dc_sign 671,
+# coeff_base_eob 689, coeff_base 849, coeff_br 2949 (total 3999).
+# ================================================================
+fn av1_ccdf_copy(dst, src, n): i64 {
+    var i = 0;
+    while (i < n) { store64(dst + (i * 8), load64(src + (i * 8))); i = i + 1; }
+    return 0;
+}
+# Allocate + initialise a mutable coeff-CDF context for quantizer bucket q
+# (0..3). Returns the buffer pointer, or 0 on OOM.
+fn av1_ccdf_new(q): i64 {
+    var cc = alloc(3999 * 8);
+    if (cc == 0) { return 0; }
+    var sb = av1_coeff_cdf_blob();
+    av1_ccdf_copy(cc + (0 * 8), sb + ((0 + (q * 195)) * 8), 195);
+    av1_ccdf_copy(cc + (195 * 8), sb + ((780 + (q * 24)) * 8), 24);
+    av1_ccdf_copy(cc + (219 * 8), sb + ((876 + (q * 28)) * 8), 28);
+    av1_ccdf_copy(cc + (247 * 8), sb + ((988 + (q * 32)) * 8), 32);
+    av1_ccdf_copy(cc + (279 * 8), sb + ((1116 + (q * 36)) * 8), 36);
+    av1_ccdf_copy(cc + (315 * 8), sb + ((1260 + (q * 40)) * 8), 40);
+    av1_ccdf_copy(cc + (355 * 8), sb + ((1420 + (q * 22)) * 8), 22);
+    av1_ccdf_copy(cc + (377 * 8), sb + ((1508 + (q * 24)) * 8), 24);
+    av1_ccdf_copy(cc + (401 * 8), sb + ((1604 + (q * 270)) * 8), 270);
+    av1_ccdf_copy(cc + (671 * 8), sb + ((2684 + (q * 18)) * 8), 18);
+    av1_ccdf_copy(cc + (689 * 8), sb + ((2756 + (q * 160)) * 8), 160);
+    av1_ccdf_copy(cc + (849 * 8), av1_coeff_base_blob() + ((q * 2100) * 8), 2100);
+    av1_ccdf_copy(cc + (2949 * 8), av1_coeff_br_blob() + ((q * 1050) * 8), 1050);
+    return cc;
+}
+fn av1_ccdf_txb_skip(cc, txsz_ctx, c): i64 { return cc + (((txsz_ctx * 13) + c) * 3 * 8); }
+fn av1_ccdf_eob_pt16(cc, ptype, c): i64 { return cc + ((195 + ((ptype * 2) + c) * 6) * 8); }
+fn av1_ccdf_eob_pt32(cc, ptype, c): i64 { return cc + ((219 + ((ptype * 2) + c) * 7) * 8); }
+fn av1_ccdf_eob_pt64(cc, ptype, c): i64 { return cc + ((247 + ((ptype * 2) + c) * 8) * 8); }
+fn av1_ccdf_eob_pt128(cc, ptype, c): i64 { return cc + ((279 + ((ptype * 2) + c) * 9) * 8); }
+fn av1_ccdf_eob_pt256(cc, ptype, c): i64 { return cc + ((315 + ((ptype * 2) + c) * 10) * 8); }
+fn av1_ccdf_eob_pt512(cc, ptype): i64 { return cc + ((355 + (ptype * 11)) * 8); }
+fn av1_ccdf_eob_pt1024(cc, ptype): i64 { return cc + ((377 + (ptype * 12)) * 8); }
+fn av1_ccdf_eob_extra(cc, txsz_ctx, ptype, c): i64 {
+    return cc + ((401 + ((((txsz_ctx * 2) + ptype) * 9) + c) * 3) * 8);
+}
+fn av1_ccdf_dc_sign(cc, ptype, c): i64 { return cc + ((671 + (((ptype * 3) + c) * 3)) * 8); }
+fn av1_ccdf_coeff_base_eob(cc, txsz_ctx, ptype, c): i64 {
+    return cc + ((689 + ((((txsz_ctx * 2) + ptype) * 4) + c) * 4) * 8);
+}
+fn av1_ccdf_coeff_base(cc, txsz_ctx, ptype, c): i64 {
+    return cc + ((849 + ((((txsz_ctx * 2) + ptype) * 42) + c) * 5) * 8);
+}
+fn av1_ccdf_coeff_br(cc, txsz_ctx, ptype, c): i64 {
+    return cc + ((2949 + ((((txsz_ctx * 2) + ptype) * 21) + c) * 5) * 8);
+}
+
+# ================================================================
 # coeffs() reading loop (5.11.39) — decode + the inverse encode.
 # ================================================================
 
 # eob_pt symbol read/write, dispatched by eobMultisize (0..6). Returns eobPt.
-fn av1_coeffs_read_eob_pt(sd, q, ptype, tx_type, eob_multi): i64 {
+fn av1_coeffs_read_eob_pt(sd, cc, ptype, tx_type, eob_multi): i64 {
     var pctx = av1_eob_pt_ctx(tx_type);
-    if (eob_multi == 0) { return av1_sym_read_symbol(sd, av1_eob_pt16_cdf(q, ptype, pctx), 5) + 1; }
-    if (eob_multi == 1) { return av1_sym_read_symbol(sd, av1_eob_pt32_cdf(q, ptype, pctx), 6) + 1; }
-    if (eob_multi == 2) { return av1_sym_read_symbol(sd, av1_eob_pt64_cdf(q, ptype, pctx), 7) + 1; }
-    if (eob_multi == 3) { return av1_sym_read_symbol(sd, av1_eob_pt128_cdf(q, ptype, pctx), 8) + 1; }
-    if (eob_multi == 4) { return av1_sym_read_symbol(sd, av1_eob_pt256_cdf(q, ptype, pctx), 9) + 1; }
-    if (eob_multi == 5) { return av1_sym_read_symbol(sd, av1_eob_pt512_cdf(q, ptype), 10) + 1; }
-    return av1_sym_read_symbol(sd, av1_eob_pt1024_cdf(q, ptype), 11) + 1;
+    if (eob_multi == 0) { return av1_sym_read_symbol(sd, av1_ccdf_eob_pt16(cc, ptype, pctx), 5) + 1; }
+    if (eob_multi == 1) { return av1_sym_read_symbol(sd, av1_ccdf_eob_pt32(cc, ptype, pctx), 6) + 1; }
+    if (eob_multi == 2) { return av1_sym_read_symbol(sd, av1_ccdf_eob_pt64(cc, ptype, pctx), 7) + 1; }
+    if (eob_multi == 3) { return av1_sym_read_symbol(sd, av1_ccdf_eob_pt128(cc, ptype, pctx), 8) + 1; }
+    if (eob_multi == 4) { return av1_sym_read_symbol(sd, av1_ccdf_eob_pt256(cc, ptype, pctx), 9) + 1; }
+    if (eob_multi == 5) { return av1_sym_read_symbol(sd, av1_ccdf_eob_pt512(cc, ptype), 10) + 1; }
+    return av1_sym_read_symbol(sd, av1_ccdf_eob_pt1024(cc, ptype), 11) + 1;
 }
-fn av1_coeffs_write_eob_pt(enc, q, ptype, tx_type, eob_multi, eob_pt): i64 {
+fn av1_coeffs_write_eob_pt(enc, cc, ptype, tx_type, eob_multi, eob_pt): i64 {
     var pctx = av1_eob_pt_ctx(tx_type);
     var s = eob_pt - 1;
-    if (eob_multi == 0) { return av1_sym_encode_symbol(enc, av1_eob_pt16_cdf(q, ptype, pctx), 5, s); }
-    if (eob_multi == 1) { return av1_sym_encode_symbol(enc, av1_eob_pt32_cdf(q, ptype, pctx), 6, s); }
-    if (eob_multi == 2) { return av1_sym_encode_symbol(enc, av1_eob_pt64_cdf(q, ptype, pctx), 7, s); }
-    if (eob_multi == 3) { return av1_sym_encode_symbol(enc, av1_eob_pt128_cdf(q, ptype, pctx), 8, s); }
-    if (eob_multi == 4) { return av1_sym_encode_symbol(enc, av1_eob_pt256_cdf(q, ptype, pctx), 9, s); }
-    if (eob_multi == 5) { return av1_sym_encode_symbol(enc, av1_eob_pt512_cdf(q, ptype), 10, s); }
-    return av1_sym_encode_symbol(enc, av1_eob_pt1024_cdf(q, ptype), 11, s);
+    if (eob_multi == 0) { return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt16(cc, ptype, pctx), 5, s); }
+    if (eob_multi == 1) { return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt32(cc, ptype, pctx), 6, s); }
+    if (eob_multi == 2) { return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt64(cc, ptype, pctx), 7, s); }
+    if (eob_multi == 3) { return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt128(cc, ptype, pctx), 8, s); }
+    if (eob_multi == 4) { return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt256(cc, ptype, pctx), 9, s); }
+    if (eob_multi == 5) { return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt512(cc, ptype), 10, s); }
+    return av1_sym_encode_symbol(enc, av1_ccdf_eob_pt1024(cc, ptype), 11, s);
 }
 
 # coeffs() DECODE (5.11.39). Reads one transform block's coefficients from
 # the symbol decoder sd into quant[] (segEob entries, indexed by raster
 # position); returns eob. Requires disable_cdf_update on sd (CDFs read-only).
 # q = COEFF_CDF_Q_CTXS index; the neighbour arrays are read + updated.
-fn av1_coeffs_decode(sd, q, plane, tx_size, tx_type, x4, y4, max_x4, max_y4,
+fn av1_coeffs_decode(sd, cc, plane, tx_size, tx_type, x4, y4, max_x4, max_y4,
 bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
     var log2w = av1_tx_width_log2(tx_size);
     var log2h = av1_tx_height_log2(tx_size);
@@ -175,15 +233,15 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
 
     var skip_ctx = av1_txb_skip_ctx(plane, x4, y4, w4, h4, w, h, max_x4, max_y4,
     bw, bh, above_lvl, left_lvl, above_dc, left_dc);
-    var all_zero = av1_sym_read_symbol(sd, av1_txb_skip_cdf(q, txsz_ctx, skip_ctx), 2);
+    var all_zero = av1_sym_read_symbol(sd, av1_ccdf_txb_skip(cc, txsz_ctx, skip_ctx), 2);
     if (all_zero == 0) {
         var scan = av1_get_scan(tx_size, tx_type);
         var eob_multi = av1_min(log2w, 5) + av1_min(log2h, 5) - 4;
-        var eob_pt = av1_coeffs_read_eob_pt(sd, q, ptype, tx_type, eob_multi);
+        var eob_pt = av1_coeffs_read_eob_pt(sd, cc, ptype, tx_type, eob_multi);
         eob = eob_pt;
         if (eob_pt >= 2) { eob = (1 << (eob_pt - 2)) + 1; }
         if ((eob_pt - 3) >= 0) {
-            var extra = av1_sym_read_symbol(sd, av1_eob_extra_cdf(q, txsz_ctx, ptype, eob_pt - 3), 2);
+            var extra = av1_sym_read_symbol(sd, av1_ccdf_eob_extra(cc, txsz_ctx, ptype, eob_pt - 3), 2);
             if (extra != 0) { eob = eob + (1 << (eob_pt - 3)); }
             var nb = eob_pt - 2;
             var i = 1;
@@ -200,16 +258,16 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
             if (c == (eob - 1)) {
                 var cbe = av1_get_coeff_base_ctx(tx_size, tx_type, pos, c, 1, quant)
                 - AV1_SIG_COEF_CONTEXTS + AV1_SIG_COEF_CONTEXTS_EOB;
-                level = av1_sym_read_symbol(sd, av1_coeff_base_eob_cdf(q, txsz_ctx, ptype, cbe), 3) + 1;
+                level = av1_sym_read_symbol(sd, av1_ccdf_coeff_base_eob(cc, txsz_ctx, ptype, cbe), 3) + 1;
             } else {
                 var cb = av1_get_coeff_base_ctx(tx_size, tx_type, pos, c, 0, quant);
-                level = av1_sym_read_symbol(sd, av1_coeff_base_cdf(q, txsz_ctx, ptype, cb), 4);
+                level = av1_sym_read_symbol(sd, av1_ccdf_coeff_base(cc, txsz_ctx, ptype, cb), 4);
             }
             if (level > AV1_NUM_BASE_LEVELS) {
                 var idx = 0;
                 while (idx < 4) {
                     var brc = av1_get_br_ctx(tx_size, tx_type, pos, quant);
-                    var cbr = av1_sym_read_symbol(sd, av1_coeff_br_cdf(q, av1_min(txsz_ctx, 3), ptype, brc), 4);
+                    var cbr = av1_sym_read_symbol(sd, av1_ccdf_coeff_br(cc, av1_min(txsz_ctx, 3), ptype, brc), 4);
                     level = level + cbr;
                     if (cbr < 3) { idx = 4; } else { idx = idx + 1; }
                 }
@@ -225,7 +283,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
             if (qv != 0) {
                 if (c == 0) {
                     var dsc = av1_dc_sign_ctx(x4, y4, w4, h4, max_x4, max_y4, above_dc, left_dc);
-                    sign = av1_sym_read_symbol(sd, av1_dc_sign_cdf(q, ptype, dsc), 2);
+                    sign = av1_sym_read_symbol(sd, av1_ccdf_dc_sign(cc, ptype, dsc), 2);
                 } else {
                     sign = av1_sym_read_bool(sd);
                 }
@@ -281,7 +339,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
 # coeffs() ENCODE — the exact inverse of av1_coeffs_decode. quant[] holds the
 # signed coefficients (as decode produces); eob is the number of scanned
 # coefficients (0 => all_zero). Requires disable_cdf_update on enc.
-fn av1_coeffs_encode(enc, q, plane, tx_size, tx_type, x4, y4, max_x4, max_y4,
+fn av1_coeffs_encode(enc, cc, plane, tx_size, tx_type, x4, y4, max_x4, max_y4,
 bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
     var log2w = av1_tx_width_log2(tx_size);
     var log2h = av1_tx_height_log2(tx_size);
@@ -301,20 +359,20 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
     bw, bh, above_lvl, left_lvl, above_dc, left_dc);
     var all_zero = 0;
     if (eob == 0) { all_zero = 1; }
-    av1_sym_encode_symbol(enc, av1_txb_skip_cdf(q, txsz_ctx, skip_ctx), 2, all_zero);
+    av1_sym_encode_symbol(enc, av1_ccdf_txb_skip(cc, txsz_ctx, skip_ctx), 2, all_zero);
     if (eob != 0) {
         var scan = av1_get_scan(tx_size, tx_type);
         var eob_multi = av1_min(log2w, 5) + av1_min(log2h, 5) - 4;
         # eobPt from eob, then the extra bits.
         var eob_pt = eob;
         if (eob > 2) { eob_pt = dr_floor_log2(eob - 1) + 2; }
-        av1_coeffs_write_eob_pt(enc, q, ptype, tx_type, eob_multi, eob_pt);
+        av1_coeffs_write_eob_pt(enc, cc, ptype, tx_type, eob_multi, eob_pt);
         if ((eob_pt - 3) >= 0) {
             var base = eob_pt;
             if (eob_pt >= 2) { base = (1 << (eob_pt - 2)) + 1; }
             var extra_val = eob - base;
             var nb = eob_pt - 2;
-            av1_sym_encode_symbol(enc, av1_eob_extra_cdf(q, txsz_ctx, ptype, eob_pt - 3), 2,
+            av1_sym_encode_symbol(enc, av1_ccdf_eob_extra(cc, txsz_ctx, ptype, eob_pt - 3), 2,
             (extra_val >> (nb - 1)) & 1);
             var i = 1;
             while (i < nb) {
@@ -340,10 +398,10 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
             if (c == (eob - 1)) {
                 var cbe = av1_get_coeff_base_ctx(tx_size, tx_type, pos, c, 1, absl)
                 - AV1_SIG_COEF_CONTEXTS + AV1_SIG_COEF_CONTEXTS_EOB;
-                av1_sym_encode_symbol(enc, av1_coeff_base_eob_cdf(q, txsz_ctx, ptype, cbe), 3, basev - 1);
+                av1_sym_encode_symbol(enc, av1_ccdf_coeff_base_eob(cc, txsz_ctx, ptype, cbe), 3, basev - 1);
             } else {
                 var cb = av1_get_coeff_base_ctx(tx_size, tx_type, pos, c, 0, absl);
-                av1_sym_encode_symbol(enc, av1_coeff_base_cdf(q, txsz_ctx, ptype, cb), 4, basev);
+                av1_sym_encode_symbol(enc, av1_ccdf_coeff_base(cc, txsz_ctx, ptype, cb), 4, basev);
             }
             if (basev > AV1_NUM_BASE_LEVELS) {
                 var r = lvl - 3;
@@ -352,7 +410,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
                     var br = r;
                     if (br > 3) { br = 3; }
                     var brc = av1_get_br_ctx(tx_size, tx_type, pos, absl);
-                    av1_sym_encode_symbol(enc, av1_coeff_br_cdf(q, av1_min(txsz_ctx, 3), ptype, brc), 4, br);
+                    av1_sym_encode_symbol(enc, av1_ccdf_coeff_br(cc, av1_min(txsz_ctx, 3), ptype, brc), 4, br);
                     r = r - br;
                     if (br < 3) { idx = 4; } else { idx = idx + 1; }
                 }
@@ -371,7 +429,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
             if (av != 0) {
                 if (c == 0) {
                     var dsc = av1_dc_sign_ctx(x4, y4, w4, h4, max_x4, max_y4, above_dc, left_dc);
-                    av1_sym_encode_symbol(enc, av1_dc_sign_cdf(q, ptype, dsc), 2, sign);
+                    av1_sym_encode_symbol(enc, av1_ccdf_dc_sign(cc, ptype, dsc), 2, sign);
                 } else {
                     av1_sym_encode_bool(enc, sign);
                 }

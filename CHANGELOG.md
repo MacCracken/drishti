@@ -4,6 +4,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-07-11
+
+Adds the adaptive coefficient-CDF context, so the `coeffs()` decode now
+works with CDF adaptation **on** (`disable_cdf_update = 0`, the common
+case for real streams) — not just the read-only mode. A 3-agent
+adversarial review (copy/accessor offsets, refactor completeness +
+adaptation lockstep, libaom cross-check) confirmed it with no defects.
+**17,336 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **Adaptive coeff-CDF context** (`src/av1_coeffs.cyr`): `av1_ccdf_new(q)`
+  allocates a mutable per-tile buffer and copies one quantizer bucket's
+  worth of all 7 default coefficient CDF families into it (mirroring
+  `init_coeff_cdfs`), with `av1_ccdf_*` accessors. `av1_coeffs_decode` /
+  `av1_coeffs_encode` now take this context (instead of a bare `q`) and
+  hand its mutable CDF pointers to the symbol coder, which adapts them in
+  place when adaptation is on. The read-only path (`disable_cdf_update = 1`)
+  still works — it simply skips the in-place update. New assertions: a
+  direct byte-for-byte check that a fresh context equals the defaults for
+  all 4 buckets, an adaptive single-block round-trip, and an **adaptive
+  multi-block round-trip** (two blocks sharing one context — block 2
+  decodes correctly only because encode/decode adapt in lockstep).
+
+### Notes
+- `drishti_version()` → 718. Coefficient decode now handles both CDF
+  modes. Next toward a decoded keyframe: the block/partition decode —
+  mode-info reads (intra/uv/CfL modes + their CDFs), `compute_tx_type`,
+  the partition tree, and the tile/frame wiring.
+
 ## [0.7.17] - 2026-07-11
 
 **A transform block decodes end-to-end.** The AV1 `coeffs()` reading loop

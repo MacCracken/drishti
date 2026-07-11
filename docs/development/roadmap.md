@@ -125,9 +125,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   `src/av1_coeffcdf.cyr`, all 7 default coefficient CDF families (txb_skip
   / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br);
   0.7.17: `src/av1_coeffs.cyr`, the coeffs() reading loop (5.11.39) — a
-  transform block decodes end-to-end, round-trip tested)** → the
-  block/partition wiring — mode info + compute_tx_type + the adaptive CDF
-  context (decoded keyframe).
+  transform block decodes end-to-end, round-trip tested; 0.7.18: the
+  adaptive per-tile CDF context (`av1_ccdf_*`) so decode works with CDF
+  adaptation on)** → the block/partition wiring — mode info +
+  compute_tx_type + the partition tree (decoded keyframe).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

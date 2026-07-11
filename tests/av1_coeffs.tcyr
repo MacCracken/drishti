@@ -87,8 +87,9 @@ fn test_dc_sign_ctx() {
 
 # Encode a known signed quant[] for one transform block, then decode it back
 # and assert the coefficients + eob match. Neighbour arrays start zeroed on
-# both sides (isolated block); disable_cdf_update = 1 (CDFs read-only).
-fn coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob): i64 {
+# both sides (isolated block); a fresh mutable CDF context per side. disable
+# selects read-only (1) vs adaptive (0) CDFs.
+fn coeffs_roundtrip_d(tx_size, tx_type, plane, quant, seg_eob, eob, disable): i64 {
     var al = alloc(256 * 8);
     var ll = alloc(256 * 8);
     var ad = alloc(256 * 8);
@@ -96,8 +97,9 @@ fn coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob): i64 {
     az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
     var w = 1 << av1_tx_width_log2(tx_size);
     var h = 1 << av1_tx_height_log2(tx_size);
-    var enc = av1_sym_enc_init(512, 1);
-    av1_coeffs_encode(enc, 0, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, al, ll, ad, ld, quant, eob);
+    var cce = av1_ccdf_new(0);
+    var enc = av1_sym_enc_init(512, disable);
+    av1_coeffs_encode(enc, cce, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, al, ll, ad, ld, quant, eob);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "encode ok");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -107,8 +109,9 @@ fn coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob): i64 {
     var dld = alloc(256 * 8);
     az(dal, 256); az(dll, 256); az(dad, 256); az(dld, 256);
     var dq = alloc(seg_eob * 8);
-    var sd = av1_sym_dec_init(out, olen, 1);
-    var deob = av1_coeffs_decode(sd, 0, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, dal, dll, dad, dld, dq);
+    var ccd = av1_ccdf_new(0);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var deob = av1_coeffs_decode(sd, ccd, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, dal, dll, dad, dld, dq);
     assert_eq(deob, eob, "eob round-trips");
     var i = 0;
     while (i < seg_eob) {
@@ -116,6 +119,9 @@ fn coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob): i64 {
         i = i + 1;
     }
     return 0;
+}
+fn coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob): i64 {
+    return coeffs_roundtrip_d(tx_size, tx_type, plane, quant, seg_eob, eob, 1);
 }
 
 # 4x4 DCT_DCT, exercising: DC base+br, a small negative, a golomb value, an
@@ -215,16 +221,154 @@ fn test_coeffs_truncation() {
     var k = 0;
     while (k < 3) {
         az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
+        var cc = av1_ccdf_new(0);
         var sd = av1_sym_dec_init(buf, 4, 1);
-        av1_coeffs_decode(sd, 0, 0, load64(sizes + (k * 8)), AV1_DCT_DCT, 0, 0, 100, 100, 4, 4, al, ll, ad, ld, dq);
+        av1_coeffs_decode(sd, cc, 0, load64(sizes + (k * 8)), AV1_DCT_DCT, 0, 0, 100, 100, 4, 4, al, ll, ad, ld, dq);
         assert_eq(1, 1, "truncated decode terminated (no hang)");
         k = k + 1;
     }
     return 0;
 }
 
+# ADAPTIVE round-trip (disable_cdf_update = 0): the mutable CDF context adapts
+# as symbols are (en/de)coded. A single fresh context per side stays in sync.
+fn test_coeffs_adaptive() {
+    # scan[0..3] = [0,1,4,8]; the eob coeff (scan[3]=8) must be nonzero.
+    var quant = alloc(16 * 8);
+    az(quant, 16);
+    store64(quant + (0 * 8), 6);
+    store64(quant + (1 * 8), 0 - 4);
+    store64(quant + (4 * 8), 25);
+    store64(quant + (8 * 8), 0 - 2);
+    coeffs_roundtrip_d(0, AV1_DCT_DCT, 0, quant, 16, 4, 0);
+    return 0;
+}
+
+# ADAPTIVE across MULTIPLE blocks sharing one context: block 2 is (en/de)coded
+# with the CDFs already adapted by block 1 — proving decode stays in sync with
+# encode only if the adaptation is identical on both sides.
+fn test_coeffs_adaptive_multiblock() {
+    var w = 4;
+    var h = 4;
+    var cce = av1_ccdf_new(0);
+    var ccd = av1_ccdf_new(0);
+    # block A: scan[0..2] = [0,1,4], eob=3 (scan[2]=4 nonzero).
+    var qa = alloc(16 * 8);
+    az(qa, 16);
+    store64(qa + (0 * 8), 9); store64(qa + (1 * 8), 0 - 3); store64(qa + (4 * 8), 40);
+    # block B: scan[0..4] = [0,1,4,8,5], eob=5 (scan[4]=5 nonzero).
+    var qb = alloc(16 * 8);
+    az(qb, 16);
+    store64(qb + (0 * 8), 0 - 5); store64(qb + (1 * 8), 2);
+    store64(qb + (4 * 8), 0 - 1); store64(qb + (8 * 8), 3); store64(qb + (5 * 8), 0 - 2);
+    var al = alloc(64 * 8);
+    var ll = alloc(64 * 8);
+    var ad = alloc(64 * 8);
+    var ld = alloc(64 * 8);
+    az(al, 64); az(ll, 64); az(ad, 64); az(ld, 64);
+    var enc = av1_sym_enc_init(512, 0);
+    av1_coeffs_encode(enc, cce, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, al, ll, ad, ld, qa, 3);
+    av1_coeffs_encode(enc, cce, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, al, ll, ad, ld, qb, 5);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dal = alloc(64 * 8);
+    var dll = alloc(64 * 8);
+    var dad = alloc(64 * 8);
+    var dld = alloc(64 * 8);
+    az(dal, 64); az(dll, 64); az(dad, 64); az(dld, 64);
+    var da = alloc(16 * 8);
+    var db = alloc(16 * 8);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var ea = av1_coeffs_decode(sd, ccd, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, dal, dll, dad, dld, da);
+    var eb = av1_coeffs_decode(sd, ccd, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, dal, dll, dad, dld, db);
+    assert_eq(ea, 3, "block A eob");
+    assert_eq(eb, 5, "block B eob");
+    var i = 0;
+    while (i < 16) {
+        assert_eq(load64(da + (i * 8)), load64(qa + (i * 8)), "block A coeff (adaptive)");
+        assert_eq(load64(db + (i * 8)), load64(qb + (i * 8)), "block B coeff (adaptive)");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The freshly-initialised mutable CDF context must byte-for-byte equal the
+# read-only defaults for its quantizer bucket (across all 7 families + all 4
+# buckets). A wrong copy offset or accessor formula shows up here.
+fn cmp_cdf(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load64(a + (i * 8)) != load64(b + (i * 8))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+fn test_ccdf_copy() {
+    var q = 0;
+    while (q < 4) {
+        var cc = av1_ccdf_new(q);
+        var ts = 0;
+        while (ts < 5) {
+            var c = 0;
+            while (c < 13) {
+                assert_eq(cmp_cdf(av1_ccdf_txb_skip(cc, ts, c), av1_txb_skip_cdf(q, ts, c), 3), 1, "ccdf txb_skip");
+                c = c + 1;
+            }
+            ts = ts + 1;
+        }
+        var p = 0;
+        while (p < 2) {
+            var cx = 0;
+            while (cx < 2) {
+                assert_eq(cmp_cdf(av1_ccdf_eob_pt16(cc, p, cx), av1_eob_pt16_cdf(q, p, cx), 6), 1, "ccdf eob16");
+                assert_eq(cmp_cdf(av1_ccdf_eob_pt256(cc, p, cx), av1_eob_pt256_cdf(q, p, cx), 10), 1, "ccdf eob256");
+                cx = cx + 1;
+            }
+            assert_eq(cmp_cdf(av1_ccdf_eob_pt1024(cc, p), av1_eob_pt1024_cdf(q, p), 12), 1, "ccdf eob1024");
+            var d = 0;
+            while (d < 3) {
+                assert_eq(cmp_cdf(av1_ccdf_dc_sign(cc, p, d), av1_dc_sign_cdf(q, p, d), 3), 1, "ccdf dc_sign");
+                d = d + 1;
+            }
+            var t2 = 0;
+            while (t2 < 5) {
+                var e = 0;
+                while (e < 42) {
+                    var cbm = av1_ccdf_coeff_base(cc, t2, p, e);
+                    assert_eq(cmp_cdf(cbm, av1_coeff_base_cdf(q, t2, p, e), 5), 1, "ccdf coeff_base");
+                    e = e + 1;
+                }
+                var br = 0;
+                while (br < 21) {
+                    var brm = av1_ccdf_coeff_br(cc, t2, p, br);
+                    assert_eq(cmp_cdf(brm, av1_coeff_br_cdf(q, t2, p, br), 5), 1, "ccdf coeff_br");
+                    br = br + 1;
+                }
+                var be = 0;
+                while (be < 4) {
+                    var bem = av1_ccdf_coeff_base_eob(cc, t2, p, be);
+                    assert_eq(cmp_cdf(bem, av1_coeff_base_eob_cdf(q, t2, p, be), 4), 1, "ccdf base_eob");
+                    be = be + 1;
+                }
+                var ee = 0;
+                while (ee < 9) {
+                    var eem = av1_ccdf_eob_extra(cc, t2, p, ee);
+                    assert_eq(cmp_cdf(eem, av1_eob_extra_cdf(q, t2, p, ee), 3), 1, "ccdf eob_extra");
+                    ee = ee + 1;
+                }
+                t2 = t2 + 1;
+            }
+            p = p + 1;
+        }
+        q = q + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("adaptive cdf context copy");
+    test_ccdf_copy();
     test_group("coeff contexts (txSzCtx / txb_skip / dc_sign)");
     test_tx_size_ctx();
     test_txb_skip_ctx();
@@ -237,6 +381,9 @@ fn main() {
     test_coeffs_1d();
     test_coeffs_16x16();
     test_coeffs_truncation();
+    test_group("coeffs() adaptive CDF context");
+    test_coeffs_adaptive();
+    test_coeffs_adaptive_multiblock();
     return assert_summary();
 }
 

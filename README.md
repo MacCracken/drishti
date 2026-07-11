@@ -18,16 +18,16 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.17 (AV1 decode arc in progress)
+## Status — 0.7.18 (AV1 decode arc in progress)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (13,920 suite assertions + 1,140 fuzz
+derived, and adversarially tested (17,336 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc is underway — the frame
 header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue (**first pixels** from a coefficient array), and the
-**coefficient reading loop** (a transform block now decodes end-to-end)
-are in:
+**coefficient reading loop** (a transform block decodes end-to-end, with
+adaptive CDFs) are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
@@ -45,7 +45,7 @@ are in:
   the coefficient level contexts (spec 8.3.2: get_coeff_base_ctx / get_br_ctx)
   + all seven default coefficient CDF families (txb_skip / eob / dc_sign /
   coeff_base / coeff_br) + the coeffs() reading loop (spec 5.11.39: decode +
-  inverse encode, round-trip tested)
+  inverse encode + the adaptive per-tile CDF context, round-trip tested)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,
