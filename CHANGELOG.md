@@ -4,6 +4,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.21] - 2026-07-11
+
+Bite 3 of the AV1 **block/partition decode** arc: the intra **transform-size
+read**. A new `src/av1_txsize.cyr` implements `read_tx_size` (spec 5.11.15) —
+the `tx_depth` symbol that splits a keyframe block's `Max_Tx_Size_Rect` down
+toward `TX_4X4` — as a decode function AND its exact-inverse encoder,
+round-trip tested through the symbol coder. A 4-agent adversarial spec review
+(read_tx_size fidelity, the tx_depth ctx + cdf-family dispatch, per-value
+table diff, hostile-input safety) confirmed it with **no findings**. **19,635
+suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 intra transform-size read** (`src/av1_txsize.cyr`, new flat module):
+  `av1_read_tx_size` returns a keyframe block's luma `TxSize` — `Lossless`
+  forces `TX_4X4`; otherwise it starts at `Max_Tx_Size_Rect[MiSize]` and, when
+  `MiSize > BLOCK_4X4 && allowSelect && TxMode == TX_MODE_SELECT`, reads
+  `tx_depth` and applies `Split_Tx_Size` that many times. The `tx_depth`
+  CDF-selection context (`av1_tx_depth_ctx`, `(aboveW>=maxTxW)+(leftH>=maxTxH)`
+  from the neighbour tx widths/heights) and the `maxTxDepth → Tx8/16/32/64`
+  cdf-family dispatch (spec 9.3) consume the 0.7.19 tx-size CDFs. Paired
+  `av1_write_tx_size` derives `tx_depth` back from the target `TxSize` (exact
+  inverse). The inter `read_var_tx_size` tree and the `InterTxSizes` grid write
+  are deferred to later bites — `read_tx_size` returns the `TxSize`; the caller
+  fills the grid.
+- **AV1 tx-size tables** (same module): `Max_Tx_Size_Rect[22]`,
+  `Max_Tx_Depth[22]`, `Split_Tx_Size[19]` (63-entry blob, checksum-pinned) +
+  `av1_tx_width`/`av1_tx_height` (from the `av1_itx` log2 tables).
+- **Tests** (`tests/av1_txsize.tcyr`, 169 assertions): the table checksum +
+  spot values, `tx_depth` ctx known-answers, `read_tx_size`/`write_tx_size`
+  round-trips over every reachable `TxSize` across all four `maxTxDepth`
+  categories (Tx8/16/32/64) and rectangular blocks in **both**
+  `disable_cdf_update` modes, the no-symbol forced cases (lossless / 4x4 /
+  non-select / no-allowSelect), and an adaptive multi-block round-trip.
+
+### Notes
+- `drishti_version()` → 721. Next in the block-decode arc (bite 4):
+  `compute_tx_type` spliced into the coeffs decode/encode (reads `intra_tx_type`
+  via the Set1/Set2 CDFs, `get_tx_set`, `Mode_To_Txfm`), then the residual
+  driver, the partition tree, and the tile/frame loop.
+
 ## [0.7.20] - 2026-07-11
 
 Bite 2 of the AV1 **block/partition decode** arc: the intra **mode-info

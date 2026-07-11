@@ -132,8 +132,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   `src/av1_noncoeffcdf.cyr` the non-coeff CDF tables; 0.7.20
   `src/av1_modeinfo.cyr` the intra mode-info reads (skip / y+uv mode / CfL /
   angle / filter-intra decode + inverse encode) with the shared block-size
-  conversion tables; then tx-size → compute_tx_type → residual driver →
-  decode_partition tree → tile/frame loop = decoded keyframe)**.
+  conversion tables; 0.7.21 `src/av1_txsize.cyr` the intra transform-size
+  read (`read_tx_size` / `tx_depth` decode + inverse encode + the
+  Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size tables); then
+  compute_tx_type → residual driver → decode_partition tree → tile/frame
+  loop = decoded keyframe)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

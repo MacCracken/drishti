@@ -6,15 +6,15 @@
 
 ## Version
 
-**0.7.20** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
+**0.7.21** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
 AV1 arc** advances the **block/partition decode** (the last stretch to a
-decoded keyframe) with bite 2: the intra **mode-info reads**
-(`av1_modeinfo.cyr` — the intra branch of `intra_frame_mode_info` +
-the shared block-size conversion tables), decode + inverse encode,
-consuming the 0.7.19 non-coeff CDFs, on top of the complete coefficient
-decode (0.7.13-0.7.18) and the default non-coeff CDFs (0.7.19). The
-remaining distance to 1.0 is the rest of the per-codec completion arcs
-(0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+decoded keyframe) with bite 3: the intra **transform-size read**
+(`av1_txsize.cyr` — `read_tx_size` / `tx_depth` + the Max_Tx_Size_Rect /
+Max_Tx_Depth / Split_Tx_Size tables), decode + inverse encode, on top of
+the mode-info reads (0.7.20), the default non-coeff CDFs (0.7.19), and
+the complete coefficient decode (0.7.13-0.7.18). The remaining distance
+to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x
+VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -29,7 +29,7 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (25 `[lib]` modules, dependency order)
+## Source (26 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -51,6 +51,7 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode + txb_skip/dc_sign/txSzCtx contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
 | `src/av1_noncoeffcdf.cyr` | `av1_` | default non-coeff CDF tables (intra keyframe) — partition/skip/y-mode/uv-mode/cfl/angle/filter-intra/tx-size/tx-type (1,622) + accessors + av1_ncdf_new |
 | `src/av1_modeinfo.cyr` | `av1_` | intra `intra_frame_mode_info` reads (5.11.16) — skip/y-mode/angle/uv-mode/CfL/filter-intra decode + inverse encode + orchestrator (Av1ModeInfo); block-size conversion tables (Mi/Block/Size_Group/Intra_Mode_Context/Subsampled_Size) |
+| `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size tables + av1_tx_width/height |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -64,11 +65,12 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 20 suites / **19,466 assertions**: drishti 51 · bits
+- `make test` — 21 suites / **19,635 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,844 ·
-  av1_noncoeffcdf 1,820 · av1_modeinfo 310 · h264 326 · h265 276 · vpx 287
+  av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · h264 326 ·
+  h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -106,7 +108,9 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
   mode-info reads (5 slices: syntax/read-order fidelity + CDF-selection
   contexts + per-value block-table diff + encode/decode inversion +
   hostile-input safety, each cross-checked against the spec markdown → all
-  clean, no findings)
+  clean, no findings), and the intra tx-size read (4 slices: read_tx_size
+  fidelity + tx_depth ctx/cdf-family dispatch + per-value table diff +
+  hostile-input safety → all clean, no findings)
 
 ## Dependencies
 
@@ -151,13 +155,16 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    Subsampled_Size). Round-trip tested (both CDF modes + adaptive
    multi-block). The YModes/Skips neighbour grids are caller inputs, wired by
    the tile/frame loop (bite 7). **[done 0.7.20]**
-3. **tx-size reads** — `read_tx_size` / `tx_depth` symbol + its ctx; tables
-   Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size; fills InterTxSizes.
-   **← NEXT BITE.**
+3. **tx-size reads** — `av1_txsize.cyr`: `read_tx_size` / `tx_depth` symbol +
+   its ctx (`(aboveW>=maxTxW)+(leftH>=maxTxH)`, neighbour-tx inputs) + the
+   `maxTxDepth → Tx8/16/32/64` cdf dispatch; tables Max_Tx_Size_Rect /
+   Max_Tx_Depth / Split_Tx_Size (+ av1_tx_width/height). Decode + inverse
+   encode, round-trip tested (both CDF modes + adaptive). The InterTxSizes
+   grid write is a caller concern (bite 5/7). **[done 0.7.21]**
 4. **`compute_tx_type`** spliced INTO `av1_coeffs_decode`/`_encode`
    (between all_zero and get_scan) — retires the `PlaneTxType` caller-input;
    reads `intra_tx_type` (Set1/Set2 CDFs) + `get_tx_set` + `Mode_To_Txfm`.
-   Trickiest seam — must keep the coeffs round-trip green.
+   Trickiest seam — must keep the coeffs round-trip green. **← NEXT BITE.**
 5. **residual driver** — `residual()`/`transform_block()` (5.11.34/35):
    per tx block, predict_intra → coeffs() → reconstruct(); manages
    BlockDecoded availability + the level-context strips + CfL MaxLumaW/H.

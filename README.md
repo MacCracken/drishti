@@ -18,17 +18,17 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.20 (AV1 decode arc in progress)
+## Status — 0.7.21 (AV1 decode arc in progress)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (19,466 suite assertions + 1,140 fuzz
+derived, and adversarially tested (19,635 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc is underway — the frame
 header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue (**first pixels** from a coefficient array), the
 **coefficient reading loop** (a transform block decodes end-to-end, with
-adaptive CDFs), the block-decode CDF tables, and the intra **mode-info
-reads** are in:
+adaptive CDFs), the block-decode CDF tables, the intra **mode-info
+reads**, and the intra **transform-size read** are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
@@ -50,7 +50,9 @@ reads** are in:
   the default non-coeff CDF tables (partition / mode / tx / CfL …) + the
   intra mode-info reads (spec 5.11.16 `intra_frame_mode_info`: skip / y+uv
   mode / CfL alphas / angle-delta / filter-intra, decode + inverse encode)
-  with the shared block-size conversion tables
+  with the shared block-size conversion tables + the intra transform-size
+  read (spec 5.11.15 `read_tx_size`: the tx_depth split of Max_Tx_Size_Rect,
+  decode + inverse encode)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,

@@ -1,0 +1,175 @@
+# tests/av1_txsize.tcyr — AV1 intra transform-size read (spec 5.11.15
+# read_tx_size) + the tx_depth CDF-selection context + the Max_Tx_Size_Rect /
+# Max_Tx_Depth / Split_Tx_Size tables. Tables pinned by a position-weighted
+# checksum + spot values; the ctx by known-answers; read_tx_size/write_tx_size
+# by round-trip (encode a TxSize, decode it back, assert equal) in both
+# disable_cdf_update modes, plus the no-symbol forced cases (lossless / 4x4 /
+# non-select) and an adaptive multi-block round-trip.
+include "src/main.cyr"
+include "src/av1_txsize.cyr"
+
+fn test_txsz_checksum() {
+    var b = av1_txsz_tables();
+    var s = 0;
+    var k = 0;
+    while (k < 63) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 8470, "tx-size table checksum");
+    return 0;
+}
+fn test_txsz_values() {
+    # Max_Tx_Size_Rect.
+    assert_eq(av1_max_tx_size_rect(0), 0, "maxrect 4x4 -> TX_4X4");
+    assert_eq(av1_max_tx_size_rect(3), 1, "maxrect 8x8 -> TX_8X8");
+    assert_eq(av1_max_tx_size_rect(6), 2, "maxrect 16x16 -> TX_16X16");
+    assert_eq(av1_max_tx_size_rect(12), 4, "maxrect 64x64 -> TX_64X64");
+    assert_eq(av1_max_tx_size_rect(13), 4, "maxrect 64x128 -> TX_64X64");
+    assert_eq(av1_max_tx_size_rect(21), 18, "maxrect 64x16 -> TX_64X16");
+    # Max_Tx_Depth.
+    assert_eq(av1_max_tx_depth(0), 0, "maxdepth 4x4");
+    assert_eq(av1_max_tx_depth(3), 1, "maxdepth 8x8");
+    assert_eq(av1_max_tx_depth(6), 2, "maxdepth 16x16");
+    assert_eq(av1_max_tx_depth(9), 3, "maxdepth 32x32");
+    assert_eq(av1_max_tx_depth(12), 4, "maxdepth 64x64");
+    # Split_Tx_Size.
+    assert_eq(av1_split_tx_size(0), 0, "split TX_4X4");
+    assert_eq(av1_split_tx_size(2), 1, "split TX_16X16 -> TX_8X8");
+    assert_eq(av1_split_tx_size(4), 3, "split TX_64X64 -> TX_32X32");
+    assert_eq(av1_split_tx_size(18), 10, "split TX_64X16 -> TX_32X16");
+    # Tx_Width / Tx_Height (via av1_itx logs).
+    assert_eq(av1_tx_width(2), 16, "tx_width TX_16X16");
+    assert_eq(av1_tx_height(2), 16, "tx_height TX_16X16");
+    assert_eq(av1_tx_width(5), 4, "tx_width TX_4X8");
+    assert_eq(av1_tx_height(5), 8, "tx_height TX_4X8");
+    assert_eq(av1_tx_width(4), 64, "tx_width TX_64X64");
+    return 0;
+}
+# tx_depth ctx = (aboveW >= maxTxWidth) + (leftH >= maxTxHeight).
+fn test_tx_depth_ctx() {
+    # max_rect = TX_16X16 (2): maxW = maxH = 16.
+    assert_eq(av1_tx_depth_ctx(0, 0, 0, 0, 2), 0, "ctx no neighbours");
+    assert_eq(av1_tx_depth_ctx(1, 2, 0, 0, 2), 1, "ctx above 16x16 >= 16");
+    assert_eq(av1_tx_depth_ctx(1, 1, 0, 0, 2), 0, "ctx above 8x8 < 16");
+    assert_eq(av1_tx_depth_ctx(0, 0, 1, 2, 2), 1, "ctx left 16x16 >= 16");
+    assert_eq(av1_tx_depth_ctx(1, 2, 1, 2, 2), 2, "ctx both >= 16");
+    assert_eq(av1_tx_depth_ctx(1, 3, 1, 3, 2), 2, "ctx both 32x32 >= 16");
+    # unavailable neighbours contribute 0 even with a large tx passed in.
+    assert_eq(av1_tx_depth_ctx(0, 4, 0, 4, 2), 0, "ctx unavail ignores tx");
+    return 0;
+}
+
+# Encode tx_size, decode it back, assert equal. disable selects read-only (1)
+# vs adaptive (0) CDFs; each side gets its own context.
+fn tx_rt(mi_size, lossless, tx_mode, allow_select, ctx, tx_size, disable, tag): i64 {
+    var nce = av1_noncoeff_cdf_blob();
+    var ncd = av1_noncoeff_cdf_blob();
+    if (disable == 0) { nce = av1_ncdf_new(); ncd = av1_ncdf_new(); }
+    var enc = av1_sym_enc_init(64, disable);
+    av1_write_tx_size(enc, nce, mi_size, lossless, tx_mode, allow_select, ctx, tx_size);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var got = av1_read_tx_size(sd, ncd, mi_size, lossless, tx_mode, allow_select, ctx);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
+    assert_eq(got, tx_size, tag);
+    return 0;
+}
+fn tx_rt_both(mi_size, lossless, tx_mode, allow_select, ctx, tx_size, tag): i64 {
+    tx_rt(mi_size, lossless, tx_mode, allow_select, ctx, tx_size, 1, tag);
+    tx_rt(mi_size, lossless, tx_mode, allow_select, ctx, tx_size, 0, tag);
+    return 0;
+}
+
+# Read cases (tx_mode = TX_MODE_SELECT = 2, allowSelect = 1, lossless = 0):
+# every reachable TxSize for a spread of block sizes / maxTxDepth categories.
+fn test_rt_8x8() {   # maxdepth 1 -> Tx8 cdf; reachable {TX_8X8, TX_4X4}
+    tx_rt_both(3, 0, 2, 1, 0, 1, "8x8 depth0 -> TX_8X8");
+    tx_rt_both(3, 0, 2, 1, 1, 0, "8x8 depth1 -> TX_4X4");
+    return 0;
+}
+fn test_rt_16x16() { # maxdepth 2 -> Tx16 cdf; reachable {TX_16X16, TX_8X8, TX_4X4}
+    tx_rt_both(6, 0, 2, 1, 0, 2, "16x16 depth0");
+    tx_rt_both(6, 0, 2, 1, 1, 1, "16x16 depth1");
+    tx_rt_both(6, 0, 2, 1, 2, 0, "16x16 depth2");
+    return 0;
+}
+fn test_rt_32x32() { # maxdepth 3 -> Tx32 cdf; reachable {TX_32X32, TX_16X16, TX_8X8}
+    tx_rt_both(9, 0, 2, 1, 0, 3, "32x32 depth0");
+    tx_rt_both(9, 0, 2, 1, 1, 2, "32x32 depth1");
+    tx_rt_both(9, 0, 2, 1, 2, 1, "32x32 depth2");
+    return 0;
+}
+fn test_rt_64x64() { # maxdepth 4 -> Tx64 cdf; reachable {TX_64X64, TX_32X32, TX_16X16}
+    tx_rt_both(12, 0, 2, 1, 0, 4, "64x64 depth0");
+    tx_rt_both(12, 0, 2, 1, 1, 3, "64x64 depth1");
+    tx_rt_both(12, 0, 2, 1, 2, 2, "64x64 depth2");
+    return 0;
+}
+fn test_rt_rect() {  # rectangular blocks
+    # BLOCK_4X8 (1): maxdepth 1 -> Tx8; reachable {TX_4X8=5, TX_4X4=0}
+    tx_rt_both(1, 0, 2, 1, 0, 5, "4x8 depth0 -> TX_4X8");
+    tx_rt_both(1, 0, 2, 1, 1, 0, "4x8 depth1 -> TX_4X4");
+    # BLOCK_16X32 (7): maxdepth 3 -> Tx32; reachable {TX_16X32=9, TX_16X16=2, TX_8X8=1}
+    tx_rt_both(7, 0, 2, 1, 0, 9, "16x32 depth0 -> TX_16X32");
+    tx_rt_both(7, 0, 2, 1, 1, 2, "16x32 depth1 -> TX_16X16");
+    tx_rt_both(7, 0, 2, 1, 2, 1, "16x32 depth2 -> TX_8X8");
+    # BLOCK_8X32 (18): maxdepth 3 -> Tx32; reachable {TX_8X32=15, TX_8X16=7, TX_8X8=1}
+    tx_rt_both(18, 0, 2, 1, 0, 15, "8x32 depth0 -> TX_8X32");
+    tx_rt_both(18, 0, 2, 1, 1, 7, "8x32 depth1 -> TX_8X16");
+    tx_rt_both(18, 0, 2, 1, 2, 1, "8x32 depth2 -> TX_8X8");
+    return 0;
+}
+# No-symbol forced cases: decode must return the forced TxSize with nothing read.
+fn test_rt_forced() {
+    # Lossless -> TX_4X4 regardless of block size.
+    tx_rt_both(6, 1, 2, 1, 0, 0, "lossless -> TX_4X4");
+    # BLOCK_4X4 -> Max_Tx_Size_Rect[0] = TX_4X4, condition MiSize>BLOCK_4X4 false.
+    tx_rt_both(0, 0, 2, 1, 0, 0, "4x4 -> TX_4X4 no read");
+    # TxMode != SELECT (TX_MODE_LARGEST=1) -> max_rect, no read.
+    tx_rt_both(6, 0, 1, 1, 0, 2, "largest -> TX_16X16 no read");
+    # allowSelect = 0 -> max_rect, no read.
+    tx_rt_both(6, 0, 2, 0, 0, 2, "no-select -> TX_16X16 no read");
+    return 0;
+}
+# Adaptive multi-block: two tx_depth reads share one context; block 2 decodes
+# against CDFs adapted by block 1 — only in-lockstep adaptation matches.
+fn test_rt_adaptive_multiblock() {
+    var nce = av1_ncdf_new();
+    var ncd = av1_ncdf_new();
+    var enc = av1_sym_enc_init(64, 0);
+    # block A: 32x32, depth1 -> TX_16X16 (2), ctx 0
+    av1_write_tx_size(enc, nce, 9, 0, 2, 1, 0, 2);
+    # block B: 16x16, depth2 -> TX_4X4 (0), ctx 1
+    av1_write_tx_size(enc, nce, 6, 0, 2, 1, 1, 0);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var a = av1_read_tx_size(sd, ncd, 9, 0, 2, 1, 0);
+    var b = av1_read_tx_size(sd, ncd, 6, 0, 2, 1, 1);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "adaptive dec ok");
+    assert_eq(a, 2, "adaptive block A -> TX_16X16");
+    assert_eq(b, 0, "adaptive block B -> TX_4X4");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("tx-size tables");
+    test_txsz_checksum();
+    test_txsz_values();
+    test_group("tx_depth CDF-selection context");
+    test_tx_depth_ctx();
+    test_group("read_tx_size decode/encode round-trip");
+    test_rt_8x8();
+    test_rt_16x16();
+    test_rt_32x32();
+    test_rt_64x64();
+    test_rt_rect();
+    test_rt_forced();
+    test_group("tx-size adaptive CDF context");
+    test_rt_adaptive_multiblock();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
