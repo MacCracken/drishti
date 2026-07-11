@@ -45,7 +45,9 @@ adaptive CDFs), and the block-decode CDF tables are in:
   the coefficient level contexts (spec 8.3.2: get_coeff_base_ctx / get_br_ctx)
   + all seven default coefficient CDF families (txb_skip / eob / dc_sign /
   coeff_base / coeff_br) + the coeffs() reading loop (spec 5.11.39: decode +
-  inverse encode + the adaptive per-tile CDF context, round-trip tested)
+  inverse encode + the adaptive per-tile CDF context, round-trip tested) +
+  the default non-coeff CDF tables (partition / mode / tx / CfL …) that the
+  block-decode reads will consume
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,
@@ -54,7 +56,10 @@ adaptive CDFs), and the block-decode CDF tables are in:
   encoder, bounds-hardened), VP8 frame framing + byte-exact writer,
   VP9 uncompressed header
 
-Pixels come next: the road to 1.0 is **one minor arc per codec** —
+A transform block already reconstructs to pixels end-to-end; the
+remaining piece for a **decoded keyframe** is the block/partition decode
+that orchestrates the primitives (mode-info + tx-type + partition-tree +
+tile/frame loop). The road to 1.0 is **one minor arc per codec** —
 **0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
 **0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
 **freeze/documentation** arc (0.12.x) before the 1.0.0 close-out.

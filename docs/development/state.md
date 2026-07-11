@@ -20,9 +20,11 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 
 - **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
   version for the arithmetic-shift operator `>>>`. The pin is the
-  *minimum*; a newer installed `cycc` (e.g. 6.4.47) compiles clean and
-  only emits a harmless drift note (`CYRIUS_NO_WARN_PIN_DRIFT=1` silences
-  it) — bump the pin only when a new toolchain feature is actually used.
+  *minimum*; a newer installed `cycc` (currently **6.4.49**) compiles
+  clean and only emits a harmless drift note. **Set
+  `CYRIUS_NO_WARN_PIN_DRIFT=1`** in the env for clean build/test/lint
+  output. Bump the pin only when a new toolchain feature is actually used
+  (none needed so far past 6.4.46).
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
@@ -57,7 +59,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 
 `src/main.cyr` is the include-wiring root (no code).
 
-## Gates (all green, 2026-07-10)
+## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
 - `make test` — 19 suites / **19,156 assertions**: drishti 51 · bits
@@ -112,26 +114,72 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 ## In-flight / next
 
-The **0.7.x AV1 arc** is underway, now inside the **intra still-picture
-decode MILESTONE**. Done: the frame-header OBU (0.7.1), the
-entropy/symbol decoder + encoder (0.7.2), the shared YUV frame buffer
-(0.7.3), the inverse transform block (0.7.4), the arithmetic-shift fix
-(0.7.5), non-directional intra prediction (0.7.6), the `>>>` adoption
-(0.7.7), the full directional intra prediction (0.7.8), recursive
-filter-intra prediction (0.7.9), and chroma-from-luma (0.7.10). The
-**AV1 intra-prediction layer (7.11.2 + 7.11.5) is complete**, as is the
-dequant + reconstruct path: dequantization (7.12.2, 0.7.11) and the
-reconstruct glue (7.12.3, 0.7.12) now turn a coefficient array +
-prediction into reconstructed pixels — **first pixels**. The
-**coefficient decode** is underway: the scan-order layer (5.11.41,
-0.7.13) and the level-context helpers (8.3.2, 0.7.14, this cut) are in.
-Coefficient decode is complete (0.7.13-0.7.18). The **block/partition
-decode** arc is now open — a 7-bite sequence toward a decoded keyframe:
-(1) the non-coeff CDF tables **[done 0.7.19]** → (2) mode-info reads
-(intra y/uv/CfL/angle/filter-intra) → (3) tx-size (tx_depth) reads →
-(4) `compute_tx_type` spliced into `coeffs()` (retires the `PlaneTxType`
-caller-input) → (5) the residual driver (predict → coeffs → reconstruct
-per tx block) → (6) the `decode_partition` tree + `decode_block` →
-(7) the tile/frame loop into `DrFrame` = first decoded keyframe. Full
-per-codec arc plan + the audit/freeze arcs in [`roadmap.md`](roadmap.md).
-Nothing else in flight.
+The **0.7.x AV1 arc** is inside the **intra still-picture decode
+MILESTONE**. Per-release history is in [`CHANGELOG.md`](../../CHANGELOG.md);
+the current picture:
+
+**Done — every AV1 decode primitive is in:** OBU/sequence/frame-header
+parse; the multi-symbol adaptive-CDF arithmetic coder (dec + enc); the
+**complete intra-prediction layer** (7.11.2 + 7.11.5 — DC/PAETH/SMOOTH,
+full directional + edge filter/upsample, filter-intra, chroma-from-luma);
+the inverse transform (7.13); dequantization (7.12.2) and the reconstruct
+glue (7.12.3) — **first pixels** from a coefficient array; and the
+**complete coefficient decode** — scan orders (5.11.41), level contexts
+(8.3.2), all 7 default coeff CDF families, and the `coeffs()` reading loop
+(5.11.39, decode + inverse encode) with an adaptive per-tile CDF context,
+so a transform block decodes **end-to-end in both `disable_cdf_update`
+modes** (round-trip tested).
+
+**Now open — the block/partition decode** (a 7-bite, leaf-to-root
+sequence toward a decoded keyframe, mapped by a multi-agent scoping pass;
+scope + tables per bite are in the review transcript / CHANGELOG):
+
+1. **non-coeff CDF tables** — `av1_noncoeffcdf.cyr` **[done 0.7.19]**
+2. **mode-info reads** — `intra_frame_mode_info` intra branch: `read_skip`,
+   `intra_frame_y_mode` (above/left neighbour-mode ctx), `uv_mode`
+   (CfL-allowed vs not), `read_cfl_alphas`, `angle_delta` (directional),
+   `filter_intra` use/mode. Consumes the 0.7.19 CDFs (`av1_ncdf_*`).
+   Round-trip-testable via the symbol encoder. Needs block-size tables
+   (Block_Width/Height, Mi_Width/Height_Log2, Intra_Mode_Context) + the
+   YModes/UVModes neighbour grids. **← NEXT BITE.**
+3. **tx-size reads** — `read_tx_size` / `tx_depth` symbol + its ctx; tables
+   Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size; fills InterTxSizes.
+4. **`compute_tx_type`** spliced INTO `av1_coeffs_decode`/`_encode`
+   (between all_zero and get_scan) — retires the `PlaneTxType` caller-input;
+   reads `intra_tx_type` (Set1/Set2 CDFs) + `get_tx_set` + `Mode_To_Txfm`.
+   Trickiest seam — must keep the coeffs round-trip green.
+5. **residual driver** — `residual()`/`transform_block()` (5.11.34/35):
+   per tx block, predict_intra → coeffs() → reconstruct(); manages
+   BlockDecoded availability + the level-context strips + CfL MaxLumaW/H.
+6. **`decode_partition` tree + `decode_block`** (5.11.4/5.11.5) — the
+   partition symbol/ctx + split_or_horz/vert edge CDFs + Partition_Subsize;
+   writes the MiSizes grid.
+7. **tile/frame loop** (`decode_tile`/tile_group) — clear_above/left,
+   the SB loop, init the CDF contexts (av1_ncdf_new + av1_ccdf_new), drive
+   into `DrFrame` = **first decoded keyframe**.
+
+Deferred (feature-gated, after the baseline keyframe): 128×128 SBs,
+palette, intrabc, segmentation, active delta-q/lf, multi-tile, and the
+loop-filter/CDEF/LR/superres + frame-end CDF save/average wrapup.
+
+Full per-codec arc plan + the audit/freeze arcs in
+[`roadmap.md`](roadmap.md). Nothing else in flight.
+
+## Working rhythm (handoff)
+
+Each bite = **one coherent subsystem per patch release**: spec-derive
+(cite sections inline, cross-check ≥2 impls) → implement in a
+family-prefixed flat module (wire into `src/main.cyr` **and**
+`cyrius.cyml [lib].modules` in dependency order) → hand-tested
+known-answers (round-trip via the symbol encoder for entropy-coded
+paths) → adversarial multi-agent spec-review → update docs (CHANGELOG,
+this file, roadmap, sources, README) → bump `VERSION` +
+`drishti_version()` + `tests/drishti.tcyr` → regenerate `dist/` → run the
+full gate. **The user handles all git (commit + push) and cuts each
+release** — leave the tree all-green. Large tables (Q/scan/CDF): extract
+from the spec markdown, generate the Cyrius fill code, verify with a
+weighted checksum + a structural sweep + the adversarial per-value diff
+(never hand-transcribe thousands of values). Reference material for the
+block-decode arc lives in the scratchpad spec files
+(`10.additional.tables.md` etc., re-fetch from the AV1-spec repo if the
+scratchpad was cleaned).

@@ -118,7 +118,7 @@ Baseline (0.7.0): OBU layer + sequence header.
   Dc/Ac Qlookup + get_qindex/get_dc_quant/get_ac_quant, 7.12.2)** → the
   reconstruct glue **(done 0.7.12: `src/av1_recon.cyr` — dequant →
   inverse transform → FLIPADST-flipped residual add, 7.12.3; first pixels
-  from a coefficient array)** → coefficient decode **(in progress —
+  from a coefficient array)** → coefficient decode **(done 0.7.13-0.7.18 —
   0.7.13: `src/av1_scan.cyr`, the scan orders + get_scan (5.11.41);
   0.7.14: `src/av1_coeff.cyr`, the level contexts get_tx_class /
   get_coeff_base_ctx / get_br_ctx (8.3.2); 0.7.15-0.7.16:
@@ -127,10 +127,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   0.7.17: `src/av1_coeffs.cyr`, the coeffs() reading loop (5.11.39) — a
   transform block decodes end-to-end, round-trip tested; 0.7.18: the
   adaptive per-tile CDF context (`av1_ccdf_*`) so decode works with CDF
-  adaptation on)** → the block/partition decode (7-bite arc: 0.7.19
+  adaptation on — both `disable_cdf_update` modes complete)** → the
+  block/partition decode **(in progress — 7-bite arc: 0.7.19
   `src/av1_noncoeffcdf.cyr` the non-coeff CDF tables; then mode-info reads
   → tx-size → compute_tx_type → residual driver → decode_partition tree →
-  tile/frame loop = decoded keyframe).
+  tile/frame loop = decoded keyframe)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
