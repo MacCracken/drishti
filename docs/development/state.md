@@ -6,14 +6,14 @@
 
 ## Version
 
-**0.7.25** — cut 2026-07-11, not yet tagged (user's git). **MILESTONE — the
-first fully decoded AV1 keyframe.** Bite 7 (`av1_tile.cyr` — `decode_tile`
-+ the CDF/symbol wiring) closes the **block/partition decode** arc
-(0.7.19-0.7.25) and the intra still-picture decode milestone: the superblock
-loop drives `decode_partition` over a tile into a `DrFrame`, so every 0.7.x
-AV1 primitive — entropy coder, adaptive CDFs, partition tree, mode-info,
-tx-size, residual (predict → coeffs → reconstruct) — composes into a keyframe
-decoded **end-to-end to pixels**. The remaining distance to 1.0 is the AV1
+**0.7.26** — cut 2026-07-11, not yet tagged (user's git). A post-milestone
+refinement: **`get_filter_type`** (7.11.2.8) closes the last correctness gap
+in the intra keyframe prediction — the intra edge-filter type is now derived
+from the neighbour intra modes (the YModes/UVModes grids) and fed to the
+edge-filter strength, instead of the hard-coded 0 deferred through the
+block-decode arc. On top of the **first fully decoded keyframe** (0.7.25,
+which closed the block/partition decode arc 0.7.19-0.7.25 and the intra
+still-picture decode milestone). The remaining distance to 1.0 is the AV1
 inter + in-loop-filter layer, conformance/10-bit, and the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -55,7 +55,7 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
-| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H); get_tx_size; Av1Tile (+ MI grids) + Av1Block decode contexts |
+| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids) + Av1Block decode contexts |
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
@@ -71,12 +71,12 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 25 suites / **20,039 assertions**: drishti 51 · bits
+- `make test` — 25 suites / **20,048 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · av1_txtype
-  142 · av1_residual 19 · av1_partition 216 · av1_tile 20 · h264 326 ·
+  142 · av1_residual 28 · av1_partition 216 · av1_tile 20 · h264 326 ·
   h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
@@ -129,7 +129,8 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
   write that was OOB for an edge block on a non-64-aligned frame, fixed +
   regression-tested), and the tile/frame loop (4 slices: decode_tile SB loop
   + CDF/symbol/qbucket wiring + clear-context + encode-symmetry/safety → all
-  clean, no findings)
+  clean, no findings), and get_filter_type (2 slices: derivation incl. the
+  chroma subsampling neighbour-position math + wiring/safety → all clean)
 
 ## Dependencies
 
@@ -214,9 +215,9 @@ scope + tables per bite are in the review transcript / CHANGELOG):
 compensation, deblocking, CDEF, loop restoration, film-grain synthesis;
 then conformance / 10-bit + the encode-lane completion. The deferred,
 feature-gated pieces (128×128 SBs, palette, intrabc, segmentation, active
-delta-q/lf, multi-tile, superres, get_filter_type, frame-end CDF
-save/average, the non-skip residual-encode lane) fold in with the inter /
-conformance work.
+delta-q/lf, multi-tile, superres, frame-end CDF save/average, the non-skip
+residual-encode lane) fold in with the inter / conformance work.
+(`get_filter_type` was completed in 0.7.26.)
 
 Full per-codec arc plan + the audit/freeze arcs in
 [`roadmap.md`](roadmap.md). Nothing else in flight.

@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-07-11
+
+Closes the last correctness gap in the intra keyframe **prediction**: the intra
+edge-filter type. `get_filter_type` (spec 7.11.2.8) is now derived from the
+neighbour intra modes (the `YModes` / `UVModes` MI grids) and fed to the intra
+edge-filter strength / upsample selection — previously it was hard-coded to 0, a
+refinement deferred through the block-decode arc. A 2-agent adversarial spec
+review (fidelity — incl. the chroma subsampling neighbour-position math — and
+wiring/safety) confirmed it with **no findings**. **20,048 suite assertions +
+1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 intra edge-filter type** (`av1_get_filter_type` / `av1_is_smooth_neighbour`
+  in `src/av1_residual.cyr`, spec 7.11.2.8): returns 1 iff the block above or to
+  the left uses a SMOOTH prediction mode (SMOOTH / SMOOTH_V / SMOOTH_H), reading
+  the neighbour `YModes` (luma) / `UVModes` (chroma) grids with the correct
+  chroma subsampling neighbour-position adjustments. `transform_block` now derives
+  it per plane and passes it to `av1_intra_predict` (the `AV1BLK_FILTER_TYPE`
+  block field is retired to reserved).
+- **Tests** (`tests/av1_residual.tcyr`, +9 → 28 assertions): `get_filter_type`
+  known-answers (luma above/left/neither/no-avail), a 420-chroma test asserting it
+  reads the *subsampling-adjusted* neighbour position (not the raw one), and a
+  proof that `filter_type` changes a directional (D67 + angle-delta) prediction —
+  cross-checked against the edge-filter strength (`(8,8,0,20)=0` vs `(8,8,1,20)=1`).
+
+### Notes
+- `drishti_version()` → 726. The intra keyframe prediction is now
+  conformance-faithful (no more hard-coded edge-filter type). Next toward AV1
+  100%: the inter + in-loop-filter layer, conformance / 10-bit, and the
+  encode-lane completion.
+
 ## [0.7.25] - 2026-07-11
 
 **MILESTONE — the first fully decoded AV1 keyframe.** Bite 7 closes the AV1
