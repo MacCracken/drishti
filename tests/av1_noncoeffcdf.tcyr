@@ -1,0 +1,152 @@
+# tests/av1_noncoeffcdf.tcyr — AV1 default non-coefficient CDF tables (the
+# intra-keyframe set: partition, skip, intra y/uv modes, CfL, angle-delta,
+# filter-intra, tx-size, intra tx-type). Verified by a position-weighted
+# checksum over the whole 1622-entry blob, a structural sweep validating every
+# cdf via its accessor, an identity-copy check on av1_ncdf_new, spot values,
+# and per-family accessor offsets.
+include "src/main.cyr"
+include "src/av1_noncoeffcdf.cyr"
+
+# nsym+1 slots: cdf[0..nsym-1] non-decreasing with cdf[nsym-1]==32768, count 0.
+fn cdf_ok(cdf, nsym): i64 {
+    if (load64(cdf + (nsym * 8)) != 0) { return 0; }
+    if (load64(cdf + ((nsym - 1) * 8)) != 32768) { return 0; }
+    var i = 1;
+    while (i < nsym) {
+        if (load64(cdf + (i * 8)) < load64(cdf + ((i - 1) * 8))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn test_ncdf_checksum() {
+    var b = av1_noncoeff_cdf_blob();
+    var s = 0;
+    var k = 0;
+    while (k < 1622) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 22696036661, "non-coeff cdf blob checksum");
+    return 0;
+}
+
+# av1_ncdf_new is a byte-for-byte identity copy of the defaults (no q select).
+fn test_ncdf_copy() {
+    var b = av1_noncoeff_cdf_blob();
+    var cc = av1_ncdf_new();
+    var k = 0;
+    while (k < 1622) {
+        assert_eq(load64(cc + (k * 8)), load64(b + (k * 8)), "ncdf copy == default");
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Every cdf reached through an accessor must be well-formed.
+fn test_ncdf_structure() {
+    var b = av1_noncoeff_cdf_blob();
+    var c = 0;
+    while (c < 4) {
+        assert_eq(cdf_ok(av1_ncdf_partition_w8(b, c), 4), 1, "partition_w8");
+        assert_eq(cdf_ok(av1_ncdf_partition_w16(b, c), 10), 1, "partition_w16");
+        assert_eq(cdf_ok(av1_ncdf_partition_w32(b, c), 10), 1, "partition_w32");
+        assert_eq(cdf_ok(av1_ncdf_partition_w64(b, c), 10), 1, "partition_w64");
+        c = c + 1;
+    }
+    var s = 0;
+    while (s < 3) {
+        assert_eq(cdf_ok(av1_ncdf_skip(b, s), 2), 1, "skip");
+        assert_eq(cdf_ok(av1_ncdf_tx8(b, s), 2), 1, "tx8");
+        assert_eq(cdf_ok(av1_ncdf_tx16(b, s), 3), 1, "tx16");
+        assert_eq(cdf_ok(av1_ncdf_tx32(b, s), 3), 1, "tx32");
+        assert_eq(cdf_ok(av1_ncdf_tx64(b, s), 3), 1, "tx64");
+        s = s + 1;
+    }
+    var a = 0;
+    while (a < 5) {
+        var l = 0;
+        while (l < 5) {
+            assert_eq(cdf_ok(av1_ncdf_y_mode(b, a, l), 13), 1, "y_mode");
+            l = l + 1;
+        }
+        a = a + 1;
+    }
+    var u = 0;
+    while (u < 13) {
+        assert_eq(cdf_ok(av1_ncdf_uv_mode_ncfl(b, u), 13), 1, "uv_ncfl");
+        assert_eq(cdf_ok(av1_ncdf_uv_mode_cfl(b, u), 14), 1, "uv_cfl");
+        u = u + 1;
+    }
+    var d = 0;
+    while (d < 8) {
+        assert_eq(cdf_ok(av1_ncdf_angle_delta(b, d), 7), 1, "angle_delta");
+        d = d + 1;
+    }
+    assert_eq(cdf_ok(av1_ncdf_cfl_sign(b), 8), 1, "cfl_sign");
+    assert_eq(cdf_ok(av1_ncdf_filter_intra_mode(b), 5), 1, "filter_intra_mode");
+    var ca = 0;
+    while (ca < 6) {
+        assert_eq(cdf_ok(av1_ncdf_cfl_alpha(b, ca), 16), 1, "cfl_alpha");
+        ca = ca + 1;
+    }
+    var bs = 0;
+    while (bs < 22) {
+        assert_eq(cdf_ok(av1_ncdf_filter_intra(b, bs), 2), 1, "filter_intra");
+        bs = bs + 1;
+    }
+    var sq = 0;
+    while (sq < 2) {
+        var dir = 0;
+        while (dir < 13) {
+            assert_eq(cdf_ok(av1_ncdf_intra_tx_set1(b, sq, dir), 7), 1, "itx_set1");
+            dir = dir + 1;
+        }
+        sq = sq + 1;
+    }
+    sq = 0;
+    while (sq < 3) {
+        var dir2 = 0;
+        while (dir2 < 13) {
+            assert_eq(cdf_ok(av1_ncdf_intra_tx_set2(b, sq, dir2), 5), 1, "itx_set2");
+            dir2 = dir2 + 1;
+        }
+        sq = sq + 1;
+    }
+    return 0;
+}
+
+# Specific known cdf values + accessor offsets.
+fn test_ncdf_known() {
+    var b = av1_noncoeff_cdf_blob();
+    var fm = av1_ncdf_filter_intra_mode(b);
+    assert_eq(load64(fm + 0), 8949, "filter_intra_mode[0]");
+    assert_eq(load64(fm + 24), 29558, "filter_intra_mode[3]");
+    var pw = av1_ncdf_partition_w8(b, 0);
+    assert_eq(load64(pw + 0), 19132, "partition_w8[0][0]");
+    var sk = av1_ncdf_skip(b, 0);
+    assert_eq(load64(sk + 0), 31671, "skip[0][0]");
+    var cs = av1_ncdf_cfl_sign(b);
+    assert_eq(load64(cs + 0), 1418, "cfl_sign[0]");
+    assert_eq(load64(cs + 16), 13340, "cfl_sign[2]");
+    var ym = av1_ncdf_y_mode(b, 0, 0);
+    assert_eq(load64(ym + 0), 15588, "y_mode[0][0][0]");
+    # accessor offsets (entry offsets into the blob).
+    assert_eq(av1_ncdf_partition_w8(b, 0), b + (0 * 8), "off partition_w8");
+    assert_eq(av1_ncdf_skip(b, 0), b + (152 * 8), "off skip");
+    assert_eq(av1_ncdf_y_mode(b, 0, 0), b + (161 * 8), "off y_mode");
+    assert_eq(av1_ncdf_cfl_alpha(b, 0), b + (961 * 8), "off cfl_alpha");
+    assert_eq(av1_ncdf_intra_tx_set2(b, 2, 12), b + ((1388 + (2 * 13 + 12) * 6) * 8), "off itx_set2 last");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("non-coeff cdf blob");
+    test_ncdf_checksum();
+    test_ncdf_copy();
+    test_ncdf_structure();
+    test_group("non-coeff cdf known values + offsets");
+    test_ncdf_known();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

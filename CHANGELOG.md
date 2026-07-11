@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-07-11
+
+Opens the AV1 **block/partition decode** arc (the final stretch to a
+decoded keyframe) with its first, foundational bite: the default
+non-coefficient CDF tables. A 7-bite decomposition of the block decode
+was mapped by a multi-agent scoping pass; this is bite 1 — the data every
+downstream read consumes. A 3-agent adversarial review (per-table diff,
+accessor offsets, libaom cross-check) confirmed all values with no
+defects. **19,156 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 default non-coefficient CDF tables** (`src/av1_noncoeffcdf.cyr`,
+  new flat module): the 19 initial adaptive-CDF tables the intra-keyframe
+  block decode reads — partition (W8/16/32/64), skip, intra-frame Y mode,
+  UV mode (CfL-allowed + not-allowed), angle-delta, CfL sign/alpha,
+  filter-intra (use + mode), tx-size (8/16/32/64), and intra tx-type
+  (set1/set2) — **1,622 entries** in one lazily-built blob with per-family
+  accessors. `av1_ncdf_new` copies the whole blob into a mutable per-tile
+  context (no quantizer bucket, unlike the coeff CDFs). 1,820 assertions:
+  a weighted blob checksum, a structural sweep validating every CDF via
+  its accessor, an identity-copy check, known values, and offset
+  arithmetic. (128x128-superblock / segment / delta-q / palette / intrabc
+  CDFs are feature-gated for later bites.)
+
+### Notes
+- `drishti_version()` → 719. Next in the block-decode arc: the mode-info
+  reads (intra y/uv/CfL/angle/filter-intra) that consume these CDFs, then
+  tx-size/tx-type, the residual driver, the partition tree, and the
+  tile/frame loop — toward a fully decoded keyframe.
+
 ## [0.7.18] - 2026-07-11
 
 Adds the adaptive coefficient-CDF context, so the `coeffs()` decode now

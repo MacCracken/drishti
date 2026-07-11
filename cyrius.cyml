@@ -36,6 +36,7 @@ modules = [
     "src/av1_coeff.cyr",
     "src/av1_coeffcdf.cyr",
     "src/av1_coeffs.cyr",
+    "src/av1_noncoeffcdf.cyr",
     "src/h264_nal.cyr",
     "src/h264_ps.cyr",
     "src/h265_nal.cyr",
