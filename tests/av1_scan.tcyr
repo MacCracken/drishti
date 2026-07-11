@@ -1,0 +1,163 @@
+# tests/av1_scan.tcyr — AV1 coefficient scan orders (spec 5.11.41). The 32
+# scan tables are verified three ways: a position-weighted checksum over the
+# whole 4912-entry blob (order-sensitive — catches any transposed or wrong
+# value), a permutation check on each selected scan (every scan is a
+# bijection over 0..len-1, starting at DC=0), specific known scan values, and
+# the get_scan(txSz, txType) selection matrix + av1_scan_size.
+include "src/main.cyr"
+include "src/av1_scan.cyr"
+
+# Whole-blob position-weighted checksum: sum over k of (k+1)*blob[k].
+fn test_scan_checksum() {
+    var blob = av1_scan_blob();
+    var s = 0;
+    var k = 0;
+    while (k < 4912) {
+        s = s + ((k + 1) * load64(blob + (k * 8)));
+        k = k + 1;
+    }
+    assert_eq(s, 2242646613, "scan blob weighted checksum");
+    return 0;
+}
+
+# Every scan array is a permutation of 0..n-1 (no dup, no gap, in range).
+fn scan_is_perm(scan, n): i64 {
+    var seen = alloc(n * 8);
+    var k = 0;
+    while (k < n) { store64(seen + (k * 8), 0); k = k + 1; }
+    k = 0;
+    while (k < n) {
+        var v = load64(scan + (k * 8));
+        if ((v < 0) || (v >= n)) { return 0; }
+        if (load64(seen + (v * 8)) != 0) { return 0; }
+        store64(seen + (v * 8), 1);
+        k = k + 1;
+    }
+    return 1;
+}
+
+# The default (and IDTX) scan for every TxSize (0..18) is a valid
+# permutation of length av1_scan_size, and starts at DC position 0.
+fn test_scan_permutations() {
+    var ts = 0;
+    while (ts < 19) {
+        var n = av1_scan_size(ts);
+        var sc = av1_get_scan(ts, AV1_DCT_DCT);
+        assert_eq(scan_is_perm(sc, n), 1, "default scan is a permutation");
+        assert_eq(load64(sc + 0), 0, "scan starts at DC 0");
+        assert_eq(scan_is_perm(av1_get_scan(ts, AV1_IDTX), n), 1, "idtx scan is a permutation");
+        ts = ts + 1;
+    }
+    return 0;
+}
+
+# The mrow / mcol (1D-transform) scans are only used for the sizes the
+# reduced tx set allows a V_*/H_* type on — exactly the sizes get_mrow_scan
+# / get_mcol_scan return a length-matched table for (<= 16x16 plus 4x16 /
+# 16x4). Verify those are permutations of the right length. (For larger
+# sizes get_scan never pairs a V_*/H_* type with the mismatched fallback.)
+fn test_1d_scan_permutations() {
+    var sizes = alloc(9 * 8);
+    store64(sizes + 0, 0);   store64(sizes + 8, 1);   store64(sizes + 16, 2);
+    store64(sizes + 24, 5);  store64(sizes + 32, 6);  store64(sizes + 40, 7);
+    store64(sizes + 48, 8);  store64(sizes + 56, 13); store64(sizes + 64, 14);
+    var k = 0;
+    while (k < 9) {
+        var ts = load64(sizes + (k * 8));
+        var n = av1_scan_size(ts);
+        assert_eq(scan_is_perm(av1_get_scan(ts, AV1_V_DCT), n), 1, "mrow scan is a permutation");
+        assert_eq(scan_is_perm(av1_get_scan(ts, AV1_H_DCT), n), 1, "mcol scan is a permutation");
+        assert_eq(load64(av1_get_scan(ts, AV1_V_DCT) + 0), 0, "mrow scan starts at 0");
+        assert_eq(load64(av1_get_scan(ts, AV1_H_DCT) + 0), 0, "mcol scan starts at 0");
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Specific known scan values (spec additional-tables annex).
+fn test_scan_known_values() {
+    # Default_Scan_4x4 = up-right diagonal.
+    var d44 = av1_get_scan(0, AV1_DCT_DCT);
+    assert_eq(load64(d44 + 0), 0, "Default_4x4[0]");
+    assert_eq(load64(d44 + 8), 1, "Default_4x4[1]");
+    assert_eq(load64(d44 + 16), 4, "Default_4x4[2]");
+    assert_eq(load64(d44 + 24), 8, "Default_4x4[3]");
+    assert_eq(load64(d44 + 32), 5, "Default_4x4[4]");
+    assert_eq(load64(d44 + (15 * 8)), 15, "Default_4x4[15]");
+    # Mrow_Scan_4x4 = row-major identity.
+    var mr = av1_get_scan(0, AV1_V_DCT);
+    assert_eq(load64(mr + (5 * 8)), 5, "Mrow_4x4[5]=5");
+    assert_eq(load64(mr + (10 * 8)), 10, "Mrow_4x4[10]=10");
+    # Mcol_Scan_4x4 = column-major.
+    var mc = av1_get_scan(0, AV1_H_DCT);
+    assert_eq(load64(mc + 8), 4, "Mcol_4x4[1]=4");
+    assert_eq(load64(mc + 16), 8, "Mcol_4x4[2]=8");
+    assert_eq(load64(mc + 24), 12, "Mcol_4x4[3]=12");
+    # Default_Scan_8x8 diagonal.
+    var d88 = av1_get_scan(1, AV1_DCT_DCT);
+    assert_eq(load64(d88 + 8), 1, "Default_8x8[1]=1");
+    assert_eq(load64(d88 + 16), 8, "Default_8x8[2]=8");
+    assert_eq(load64(d88 + 24), 16, "Default_8x8[3]=16");
+    assert_eq(load64(d88 + 32), 9, "Default_8x8[4]=9");
+    # Default_Scan_32x32 endpoints.
+    var d32 = av1_get_scan(3, AV1_DCT_DCT);
+    assert_eq(load64(d32 + 8), 1, "Default_32x32[1]=1");
+    assert_eq(load64(d32 + 16), 32, "Default_32x32[2]=32");
+    assert_eq(load64(d32 + (1023 * 8)), 1023, "Default_32x32[1023]=1023");
+    return 0;
+}
+
+# av1_scan_size(txSz) = Min(32,w) * Min(32,h).
+fn test_scan_size() {
+    assert_eq(av1_scan_size(0), 16, "size 4x4");
+    assert_eq(av1_scan_size(1), 64, "size 8x8");
+    assert_eq(av1_scan_size(2), 256, "size 16x16");
+    assert_eq(av1_scan_size(3), 1024, "size 32x32");
+    assert_eq(av1_scan_size(4), 1024, "size 64x64 -> 32x32");
+    assert_eq(av1_scan_size(9), 512, "size 16x32");
+    assert_eq(av1_scan_size(15), 256, "size 8x32");
+    assert_eq(av1_scan_size(17), 512, "size 16x64 -> 16x32");
+    assert_eq(av1_scan_size(18), 512, "size 64x16 -> 32x16");
+    assert_eq(av1_scan_size(11), 1024, "size 32x64 -> 32x32");
+    return 0;
+}
+
+# get_scan selection matrix — the returned pointer equals blob + offset*8.
+fn test_get_scan_select() {
+    var blob = av1_scan_blob();
+    # Special sizes: independent of tx type.
+    assert_eq(av1_get_scan(17, AV1_DCT_DCT), blob + (656 * 8), "TX_16X64 -> Default_16x32");
+    assert_eq(av1_get_scan(17, AV1_V_DCT), blob + (656 * 8), "TX_16X64 ignores tx type");
+    assert_eq(av1_get_scan(18, AV1_H_DCT), blob + (1168 * 8), "TX_64X16 -> Default_32x16");
+    assert_eq(av1_get_scan(4, AV1_DCT_DCT), blob + (1680 * 8), "TX_64X64 -> Default_32x32");
+    assert_eq(av1_get_scan(11, AV1_V_ADST), blob + (1680 * 8), "TX_32X64 -> Default_32x32");
+    assert_eq(av1_get_scan(12, AV1_H_DCT), blob + (1680 * 8), "TX_64X32 -> Default_32x32");
+    # TX_4X4: IDTX + DCT_DCT -> default (0); V_* -> mrow (4128); H_* -> mcol (3344).
+    assert_eq(av1_get_scan(0, AV1_DCT_DCT), blob + (0 * 8), "4x4 DCT_DCT -> default");
+    assert_eq(av1_get_scan(0, AV1_IDTX), blob + (0 * 8), "4x4 IDTX -> default");
+    assert_eq(av1_get_scan(0, AV1_V_DCT), blob + (4128 * 8), "4x4 V_DCT -> mrow");
+    assert_eq(av1_get_scan(0, AV1_V_FLIPADST), blob + (4128 * 8), "4x4 V_FLIPADST -> mrow");
+    assert_eq(av1_get_scan(0, AV1_H_DCT), blob + (3344 * 8), "4x4 H_DCT -> mcol");
+    assert_eq(av1_get_scan(0, AV1_H_ADST), blob + (3344 * 8), "4x4 H_ADST -> mcol");
+    # TX_8X16 (7): mrow_off[7]=4272, mcol_off[7]=3488, default_off[7]=144.
+    assert_eq(av1_get_scan(7, AV1_DCT_DCT), blob + (144 * 8), "8x16 default");
+    assert_eq(av1_get_scan(7, AV1_V_ADST), blob + (4272 * 8), "8x16 V_ADST -> mrow");
+    assert_eq(av1_get_scan(7, AV1_H_FLIPADST), blob + (3488 * 8), "8x16 H_FLIPADST -> mcol");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("scan blob integrity");
+    test_scan_checksum();
+    test_scan_permutations();
+    test_1d_scan_permutations();
+    test_scan_known_values();
+    test_group("get_scan + scan_size");
+    test_scan_size();
+    test_get_scan_select();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

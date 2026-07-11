@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-07-10
+
+Opens the AV1 **coefficient decode** with the scan-order layer (spec
+5.11.41) in a new `src/av1_scan.cyr` module — the read order the
+`coeffs()` decode will walk. The 32 scan tables were extracted from the
+spec, each validated as a permutation, and a 4-agent adversarial review
+(per-value default/mrow/mcol table diffs, `get_scan` selection logic,
+libaom cross-check) confirmed every value and selection with no defects.
+**9,995 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 coefficient scan orders** (`src/av1_scan.cyr`, new flat module):
+  the 32 scan tables (14 `Default_Scan_*` + 9 `Mrow_Scan_*` + 9
+  `Mcol_Scan_*`, 4,912 entries) in one lazily-built blob, `av1_get_scan`
+  (5.11.41 — selects a scan from transform size + `PlaneTxType`, incl. the
+  `TX_16X64`/`TX_64X16`→16x32/32x16 and 64x64-class→32x32 clamps and the
+  `V_*`/`H_*` mrow/mcol paths via per-TxSize offset tables), and
+  `av1_scan_size` (the scan length `Min(32,w)·Min(32,h)`). 137 assertions:
+  a position-weighted checksum over the whole 4,912-entry blob
+  (order-sensitive), a permutation check on every selected scan (each is a
+  bijection over `0..len-1` starting at DC=0), specific known scan values,
+  and the full `get_scan` selection matrix.
+
+### Notes
+- `drishti_version()` → 713. Next in the coefficient decode: the txb
+  context helpers + the default coefficient CDF tables, then the
+  `coeffs()` reading loop that walks these scans to fill `Quant[]`.
+
 ## [0.7.12] - 2026-07-10
 
 **First pixels.** The reconstruct process (spec 7.12.3) in a new

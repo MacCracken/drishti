@@ -6,15 +6,14 @@
 
 ## Version
 
-**0.7.12** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
-AV1 arc** reaches **first pixels**: the reconstruct process (7.12.3) in
-the new `av1_recon.cyr` module ties dequant → inverse transform →
-residual add, so coefficients + a prediction now reconstruct to samples.
-This sits on the now-complete intra-prediction layer (0.7.6-0.7.10), the
-inverse transform (0.7.4), and the dequantizer (0.7.11). The remaining
-distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
-→ 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
-[`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
+**0.7.13** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
+AV1 arc** opens the coefficient decode: the scan-order layer (5.11.41) in
+the new `av1_scan.cyr` module — the 32 Default/Mrow/Mcol scan tables +
+`get_scan` — on top of first-pixels reconstruction (0.7.12) and the
+complete intra + dequant path. The remaining distance to 1.0 is the rest
+of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit
+(0.11.x) + freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md)
++ [`roadmap.md`](roadmap.md).
 
 ## Toolchain
 
@@ -26,11 +25,11 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (19 `[lib]` modules, dependency order)
+## Source (20 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 712, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 713, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -42,6 +41,7 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
 | `src/av1_intra.cyr` | `av1_` | intra prediction (spec 7.11.2 + 7.11.5) — predict_intra + DC/PAETH/SMOOTH×3 + full directional (edge filter/upsample) + recursive filter-intra (7.11.2.3) + chroma-from-luma (7.11.5) |
 | `src/av1_quant.cyr` | `av1_` | dequantization (spec 7.12.2) — Dc/Ac Qlookup tables (8/10/12-bit) + dc_q/ac_q/get_qindex/get_dc_quant/get_ac_quant |
 | `src/av1_recon.cyr` | `av1_` | reconstruct process (spec 7.12.3) — dequant + dqDenom + FLIPADST flip + residual-add glue (av1_reconstruct) |
+| `src/av1_scan.cyr` | `av1_` | coefficient scan orders (spec 5.11.41) — 32 Default/Mrow/Mcol scan tables + get_scan + scan_size |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -55,10 +55,10 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 14 suites / **9,858 assertions**: drishti 51 · bits 1,211
+- `make test` — 15 suites / **9,995 assertions**: drishti 51 · bits 1,211
   · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
-  av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 · h264
-  326 · h265 276 · vpx 287
+  av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
+  av1_scan 137 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -78,7 +78,9 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
   clean; one refuted robustness note prompted a proactive depth-clamp
   backstop), and the reconstruct glue (5 slices: dequant step + dqDenom/
   flip/add + integration/safety + libaom multi-source + independent
-  known-answer recompute → all clean, no defects)
+  known-answer recompute → all clean, no defects), and the coefficient
+  scan orders (4 slices: per-value default/mrow/mcol table diffs +
+  get_scan selection + libaom cross-check → all clean)
 
 ## Dependencies
 
@@ -101,11 +103,12 @@ entropy/symbol decoder + encoder (0.7.2), the shared YUV frame buffer
 filter-intra prediction (0.7.9), and chroma-from-luma (0.7.10). The
 **AV1 intra-prediction layer (7.11.2 + 7.11.5) is complete**, as is the
 dequant + reconstruct path: dequantization (7.12.2, 0.7.11) and the
-reconstruct glue (7.12.3, 0.7.12, this cut) now turn a coefficient array
-+ prediction into reconstructed pixels — **first pixels**. Remaining
-milestone sub-bites: the `coeffs()` coefficient decode (scan tables +
-default CDF tables + context derivation + the reading loop, consuming the
-symbol decoder) that fills `Quant[]` from the bitstream → the
-partition/block wiring that drives predict + reconstruct per block. Full
-per-codec arc plan + the audit/freeze arcs in [`roadmap.md`](roadmap.md).
-Nothing else in flight.
+reconstruct glue (7.12.3, 0.7.12) now turn a coefficient array +
+prediction into reconstructed pixels — **first pixels**. The
+**coefficient decode** is now underway: the scan-order layer (5.11.41,
+0.7.13, this cut) is in. Remaining `coeffs()` sub-bites: the txb context
+helpers + the default coefficient CDF tables → the `coeffs()` reading
+loop (walks the scans, consumes the symbol decoder) that fills `Quant[]`
+→ the partition/block wiring that drives predict + reconstruct per block.
+Full per-codec arc plan + the audit/freeze arcs in
+[`roadmap.md`](roadmap.md). Nothing else in flight.

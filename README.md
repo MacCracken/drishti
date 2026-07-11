@@ -18,15 +18,15 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.12 (AV1 decode arc in progress)
+## Status — 0.7.13 (AV1 decode arc in progress)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (9,858 suite assertions + 1,140 fuzz
+derived, and adversarially tested (9,995 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc is underway — the frame
 header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
-and the reconstruct glue (**first pixels** from a coefficient array) are
-in:
+the reconstruct glue (**first pixels** from a coefficient array), and the
+coefficient scan orders are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
@@ -39,7 +39,8 @@ in:
   the intra edge filter/upsample + recursive filter-intra + chroma-from-
   luma, into the shared frame buffer) + the dequantizer (spec 7.12.2:
   Dc/Ac Qlookup + get_dc_quant/get_ac_quant) + the reconstruct process
-  (spec 7.12.3: dequant → inverse transform → residual add → pixels)
+  (spec 7.12.3: dequant → inverse transform → residual add → pixels) + the
+  coefficient scan orders (spec 5.11.41: get_scan + the 32 scan tables)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,

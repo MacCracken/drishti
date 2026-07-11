@@ -118,7 +118,9 @@ Baseline (0.7.0): OBU layer + sequence header.
   Dc/Ac Qlookup + get_qindex/get_dc_quant/get_ac_quant, 7.12.2)** → the
   reconstruct glue **(done 0.7.12: `src/av1_recon.cyr` — dequant →
   inverse transform → FLIPADST-flipped residual add, 7.12.3; first pixels
-  from a coefficient array)** → coefficient decode (+ default CDFs) → the
+  from a coefficient array)** → coefficient decode **(in progress —
+  0.7.13: `src/av1_scan.cyr`, the scan orders + get_scan, 5.11.41; then
+  the txb context + default CDFs + the coeffs() reading loop)** → the
   block/partition wiring (decoded keyframe).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.

@@ -32,6 +32,7 @@ modules = [
     "src/av1_intra.cyr",
     "src/av1_quant.cyr",
     "src/av1_recon.cyr",
+    "src/av1_scan.cyr",
     "src/h264_nal.cyr",
     "src/h264_ps.cyr",
     "src/h265_nal.cyr",
