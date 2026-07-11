@@ -19,9 +19,10 @@
 #   7.11.2.7 filter corner, 7.11.2.9 edge filter strength, 7.11.2.10
 #            edge upsample selection, 7.11.2.11 edge upsample, 7.11.2.12
 #            edge filter; Dr_Intra_Derivative + Intra_Edge_Kernel tables.
-# The recursive filter-intra (7.11.2.3) and chroma-from-luma (7.11.5)
-# remain later 0.7.x sub-bites (see docs/development/roadmap.md); the
-# get_filter_type computation (7.11.2.8) is a caller-provided input.
+#   7.11.2.3 recursive filter-intra prediction (Intra_Filter_Taps)
+# Chroma-from-luma (7.11.5) remains a later 0.7.x sub-bite (see
+# docs/development/roadmap.md); the get_filter_type computation
+# (7.11.2.8) is a caller-provided input.
 #
 # AboveRow / LeftCol are i64 scratch arrays; callers pass the ORIGIN
 # pointer with -2 headroom (index -2 .. 2*(w+h)-2) so the edge upsample,
@@ -533,6 +534,140 @@ filter_type, pred): i64 {
 }
 
 # ================================================================
+# Recursive filter-intra prediction — 7.11.2.3 + Intra_Filter_Taps.
+# ================================================================
+
+# Round2Signed(x, n) — spec section 4: Round2 for x>=0, -Round2(-x) for x<0.
+fn av1_round2_signed(x, n): i64 {
+    if (x >= 0) { return av1_round2(x, n); }
+    return 0 - av1_round2(0 - x, n);
+}
+
+# Intra_Filter_Taps[mode][pos][tap] — 5 modes x 8 positions x 7 taps,
+# lazily built (cyrius global array literals do not initialize reliably).
+var Av1_FTaps = 0;
+fn av1_ftaps_fill7(p, t0, t1, t2, t3, t4, t5, t6) {
+    store64(p + 0, t0);  store64(p + 8, t1);  store64(p + 16, t2); store64(p + 24, t3);
+    store64(p + 32, t4); store64(p + 40, t5); store64(p + 48, t6);
+    return 0;
+}
+fn av1_filter_taps(): i64 {
+    if (Av1_FTaps != 0) { return Av1_FTaps; }
+    var t = alloc((5 * 8 * 7) * 8);
+    if (t == 0) { return 0; }
+    var s = 7 * 8;   # bytes per position row
+    # mode 0
+    av1_ftaps_fill7(t + (0 * s), 0 - 6, 10, 0, 0, 0, 12, 0);
+    av1_ftaps_fill7(t + (1 * s), 0 - 5, 2, 10, 0, 0, 9, 0);
+    av1_ftaps_fill7(t + (2 * s), 0 - 3, 1, 1, 10, 0, 7, 0);
+    av1_ftaps_fill7(t + (3 * s), 0 - 3, 1, 1, 2, 10, 5, 0);
+    av1_ftaps_fill7(t + (4 * s), 0 - 4, 6, 0, 0, 0, 2, 12);
+    av1_ftaps_fill7(t + (5 * s), 0 - 3, 2, 6, 0, 0, 2, 9);
+    av1_ftaps_fill7(t + (6 * s), 0 - 3, 2, 2, 6, 0, 2, 7);
+    av1_ftaps_fill7(t + (7 * s), 0 - 3, 1, 2, 2, 6, 3, 5);
+    # mode 1
+    av1_ftaps_fill7(t + (8 * s), 0 - 10, 16, 0, 0, 0, 10, 0);
+    av1_ftaps_fill7(t + (9 * s), 0 - 6, 0, 16, 0, 0, 6, 0);
+    av1_ftaps_fill7(t + (10 * s), 0 - 4, 0, 0, 16, 0, 4, 0);
+    av1_ftaps_fill7(t + (11 * s), 0 - 2, 0, 0, 0, 16, 2, 0);
+    av1_ftaps_fill7(t + (12 * s), 0 - 10, 16, 0, 0, 0, 0, 10);
+    av1_ftaps_fill7(t + (13 * s), 0 - 6, 0, 16, 0, 0, 0, 6);
+    av1_ftaps_fill7(t + (14 * s), 0 - 4, 0, 0, 16, 0, 0, 4);
+    av1_ftaps_fill7(t + (15 * s), 0 - 2, 0, 0, 0, 16, 0, 2);
+    # mode 2
+    av1_ftaps_fill7(t + (16 * s), 0 - 8, 8, 0, 0, 0, 16, 0);
+    av1_ftaps_fill7(t + (17 * s), 0 - 8, 0, 8, 0, 0, 16, 0);
+    av1_ftaps_fill7(t + (18 * s), 0 - 8, 0, 0, 8, 0, 16, 0);
+    av1_ftaps_fill7(t + (19 * s), 0 - 8, 0, 0, 0, 8, 16, 0);
+    av1_ftaps_fill7(t + (20 * s), 0 - 4, 4, 0, 0, 0, 0, 16);
+    av1_ftaps_fill7(t + (21 * s), 0 - 4, 0, 4, 0, 0, 0, 16);
+    av1_ftaps_fill7(t + (22 * s), 0 - 4, 0, 0, 4, 0, 0, 16);
+    av1_ftaps_fill7(t + (23 * s), 0 - 4, 0, 0, 0, 4, 0, 16);
+    # mode 3
+    av1_ftaps_fill7(t + (24 * s), 0 - 2, 8, 0, 0, 0, 10, 0);
+    av1_ftaps_fill7(t + (25 * s), 0 - 1, 3, 8, 0, 0, 6, 0);
+    av1_ftaps_fill7(t + (26 * s), 0 - 1, 2, 3, 8, 0, 4, 0);
+    av1_ftaps_fill7(t + (27 * s), 0, 1, 2, 3, 8, 2, 0);
+    av1_ftaps_fill7(t + (28 * s), 0 - 1, 4, 0, 0, 0, 3, 10);
+    av1_ftaps_fill7(t + (29 * s), 0 - 1, 3, 4, 0, 0, 4, 6);
+    av1_ftaps_fill7(t + (30 * s), 0 - 1, 2, 3, 4, 0, 4, 4);
+    av1_ftaps_fill7(t + (31 * s), 0 - 1, 2, 2, 3, 4, 3, 3);
+    # mode 4
+    av1_ftaps_fill7(t + (32 * s), 0 - 12, 14, 0, 0, 0, 14, 0);
+    av1_ftaps_fill7(t + (33 * s), 0 - 10, 0, 14, 0, 0, 12, 0);
+    av1_ftaps_fill7(t + (34 * s), 0 - 9, 0, 0, 14, 0, 11, 0);
+    av1_ftaps_fill7(t + (35 * s), 0 - 8, 0, 0, 0, 14, 10, 0);
+    av1_ftaps_fill7(t + (36 * s), 0 - 10, 12, 0, 0, 0, 0, 14);
+    av1_ftaps_fill7(t + (37 * s), 0 - 9, 1, 12, 0, 0, 0, 12);
+    av1_ftaps_fill7(t + (38 * s), 0 - 8, 0, 0, 12, 0, 1, 11);
+    av1_ftaps_fill7(t + (39 * s), 0 - 7, 0, 0, 1, 12, 1, 9);
+    Av1_FTaps = t;
+    return t;
+}
+fn av1_filter_tap(mode, pos, tap): i64 {
+    return load64(av1_filter_taps() + ((((mode * 8) + pos) * 7 + tap) * 8));
+}
+
+# Recursive filter-intra prediction (7.11.2.3): filter 4x2 sub-blocks in
+# raster order, each from 7 neighbours (AboveRow/LeftCol edges + already-
+# predicted samples). filter_intra_mode is 0..4. Writes into pred (w*h,
+# stride w).
+fn av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred): i64 {
+    var w4 = w >> 2;
+    var h2 = h >> 1;
+    var p = alloc(7 * 8);
+    if (p == 0) { return DR_ERR_OOM; }
+    var i2 = 0;
+    while (i2 < h2) {
+        var j4 = 0;
+        while (j4 < w4) {
+            var i = 0;
+            while (i <= 6) {
+                var pv = 0;
+                if (i < 5) {
+                    if (i2 == 0) {
+                        pv = load64(above + (((j4 << 2) + i - 1) * 8));
+                    } else {
+                        if ((j4 == 0) && (i == 0)) {
+                            pv = load64(left + (((i2 << 1) - 1) * 8));
+                        } else {
+                            pv = load64(pred + (((((i2 << 1) - 1) * w) + (j4 << 2) + i - 1) * 8));
+                        }
+                    }
+                } else {
+                    if (j4 == 0) {
+                        pv = load64(left + (((i2 << 1) + i - 5) * 8));
+                    } else {
+                        pv = load64(pred + (((((i2 << 1) + i - 5) * w) + (j4 << 2) - 1) * 8));
+                    }
+                }
+                store64(p + (i * 8), pv);
+                i = i + 1;
+            }
+            var i1 = 0;
+            while (i1 <= 1) {
+                var j1 = 0;
+                while (j1 <= 3) {
+                    var pr = 0;
+                    var k = 0;
+                    while (k <= 6) {
+                        pr = pr + (av1_filter_tap(filter_intra_mode, (i1 << 2) + j1, k) * load64(p + (k * 8)));
+                        k = k + 1;
+                    }
+                    store64(pred + (((((i2 << 1) + i1) * w) + (j4 << 2) + j1) * 8),
+                    dr_clip1(av1_round2_signed(pr, 4), bit_depth));   # INTRA_FILTER_SCALE_BITS
+                    j1 = j1 + 1;
+                }
+                i1 = i1 + 1;
+            }
+            j4 = j4 + 1;
+        }
+        i2 = i2 + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
 # predict_intra — 7.11.2.1: build the reference samples from the frame,
 # dispatch to the mode kernel, write the prediction back.
 # ================================================================
@@ -542,12 +677,15 @@ filter_type, pred): i64 {
 # AboveRight,BelowLeft} flag reconstructed-neighbour availability; mi_cols
 # / mi_rows are the frame's MI dimensions (for the edge clamps).
 # enable_edge_filter is the sequence header's enable_intra_edge_filter;
-# filter_type (0/1) is derived from the neighbour modes (caller input).
-# Returns DR_OK, or DR_ERR_UNSUPPORTED for the not-yet-implemented paths
-# (recursive filter-intra), DR_ERR_OOM, DR_ERR_BOUNDS.
+# filter_type (0/1) is derived from the neighbour modes (caller input);
+# use_filter_intra + filter_intra_mode (0..4) select recursive filter-intra
+# on the luma plane.
+# Returns DR_OK, DR_ERR_UNSUPPORTED (chroma-from-luma; roadmap.md 0.7.x),
+# DR_ERR_OOM, DR_ERR_BOUNDS.
 fn av1_intra_predict(frame, plane, x, y, have_left, have_above,
 have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
-enable_edge_filter, filter_type, log2w, log2h, mi_cols, mi_rows): i64 {
+filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
+mi_cols, mi_rows): i64 {
     if ((log2w < 2) || (log2w > 6) || (log2h < 2) || (log2h > 6)) {
         return DR_ERR_BOUNDS;
     }
@@ -630,7 +768,7 @@ enable_edge_filter, filter_type, log2w, log2h, mi_cols, mi_rows): i64 {
     if (pred == 0) { return DR_ERR_OOM; }
     var rc = DR_ERR_UNSUPPORTED;
     if ((plane == 0) && use_filter_intra) {
-        rc = DR_ERR_UNSUPPORTED;                     # recursive filter-intra: deferred (roadmap.md 0.7.x)
+        rc = av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred);
     } else {
         if (av1_is_directional_mode(mode)) {
             rc = av1_intra_directional(above, left, plane, x, y, have_left,

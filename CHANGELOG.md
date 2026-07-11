@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-07-10
+
+Adds AV1 recursive filter-intra prediction — the fifth milestone
+sub-bite. Derived verbatim from spec 7.11.2.3 + the `Intra_Filter_Taps`
+table, and cross-checked by a 4-agent adversarial spec review (clean).
+**4,050 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 recursive filter-intra prediction** (`src/av1_intra.cyr`):
+  `av1_intra_filter_intra` (7.11.2.3) filters the luma block in 4x2
+  sub-blocks in raster order, each from 7 neighbours (the AboveRow /
+  LeftCol edges plus already-predicted samples), driven by the
+  `Intra_Filter_Taps[5][8][7]` table (lazy-init, all 280 taps transcribed
+  verbatim; every position's row sums to 16, so a flat reference
+  reproduces itself). Adds `av1_round2_signed` (Round2 for x≥0,
+  −Round2(−x) for x<0 — spec section 4) over the arithmetic `av1_round2`.
+  The `predict_intra` driver gains a `filter_intra_mode` (0..4) input and
+  now routes `plane == 0 && use_filter_intra` here (previously
+  `DR_ERR_UNSUPPORTED`); the filter-intra path uses the plain reference
+  samples (no directional edge filter/upsample). 172 assertions (up from
+  96): the hand-computed known answer, the flat-reference invariant for
+  all five filter modes, the tap-table spot-checks + the sum-to-16
+  invariant, and the `Round2Signed` sign/rounding cases.
+
+### Notes
+- `drishti_version()` → 709. Chroma-from-luma (7.11.5) is the remaining
+  intra sub-bite before coefficient decode.
+
 ## [0.7.8] - 2026-07-10
 
 Completes AV1 directional intra prediction — the fourth milestone
