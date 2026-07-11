@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-07-10
+
+**First pixels.** The reconstruct process (spec 7.12.3) in a new
+`src/av1_recon.cyr` module ties the existing pieces together —
+dequantize → 2D inverse transform → add the residual onto the
+prediction — so a block of quantized coefficients plus a prediction now
+produces reconstructed samples. Cross-checked against libaom and reviewed
+by a 5-agent adversarial workflow (dequant step, dqDenom/flip/add,
+integration + memory safety, libaom multi-source, independent
+known-answer recompute — all clean, no defects). **9,858 suite
+assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 reconstruct process** (`src/av1_recon.cyr`, new flat module):
+  `av1_reconstruct` runs the 7.12.3 pipeline — per-coefficient
+  dequantization (`av1_dequant_coeff`: `dq = Quant·q`, the 24-bit
+  magnitude mask, the `dqDenom` divide for the large transforms, the
+  `±2^(7+BitDepth)` clamp), the 2D inverse transform (reusing
+  `av1_inverse_transform_2d`), and the `FLIPADST` up/down + left/right
+  flipped residual add with `Clip1`. Helpers `av1_dq_denom` (7.12.3 size
+  categories) and `av1_recon_flip_ud`/`av1_recon_flip_lr`. The quantizer
+  matrix path (`using_qmatrix`) is deferred (`q2 == q`); `q_dc`/`q_ac`
+  and the `Quant[]` array are caller inputs until coefficient decode.
+  4,209 assertions: the dequant arithmetic (mask, clip, `dqDenom`, signs),
+  the `dqDenom`/flip selection matrices, and the **full pipeline** —
+  reusing the inverse transform's hand-verified DC/IDTX/WHT vectors, plus
+  the transform-as-oracle for the flip placement and a 64×64
+  `dqDenom=4`/stride path (all 4,096 samples matched).
+
+### Notes
+- `drishti_version()` → 712. With prediction (7.11) + dequant (7.12.2) +
+  reconstruct (7.12.3) all in, the remaining path to a decoded keyframe
+  is the `coeffs()` entropy decode (scan + CDF + context) that fills
+  `Quant[]`, then the partition/block wiring that drives these per block.
+
 ## [0.7.11] - 2026-07-10
 
 Opens the AV1 **reconstruction** milestone with the dequantization layer

@@ -1,0 +1,241 @@
+# tests/av1_recon.tcyr — AV1 reconstruct process (spec 7.12.3). The dequant
+# arithmetic, dqDenom, and flip selection are pinned by exact hand-computed
+# known-answers; the full dequant -> inverse-transform -> add pipeline is
+# checked against the (already hand-verified + reviewed) inverse transform,
+# reusing its DC/IDTX/WHT vectors and using it as an oracle for the flip
+# placement and the 64x64 dqDenom/stride path.
+include "src/main.cyr"
+include "src/av1_recon.cyr"
+
+# Fill [x0,x0+w) x [y0,y0+h) of plane pl with v.
+fn rc_fill(f, pl, x0, y0, w, h, v): i64 {
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) { dr_frame_set(f, pl, x0 + j, y0 + i, v); j = j + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+fn rc_zero(p, n): i64 {
+    var k = 0;
+    while (k < n) { store64(p + (k * 8), 0); k = k + 1; }
+    return 0;
+}
+
+# ---- dequant arithmetic (7.12.3 1c-1f) ----
+fn test_dequant_coeff() {
+    assert_eq(av1_dequant_coeff(1, 4096, 1, 8), 4096, "dq 1*4096");
+    assert_eq(av1_dequant_coeff(0 - 3, 100, 1, 8), 0 - 300, "dq negative");
+    assert_eq(av1_dequant_coeff(10, 100, 2, 8), 500, "dq dqDenom 2");
+    assert_eq(av1_dequant_coeff(0 - 10, 100, 4, 8), 0 - 250, "dq neg dqDenom 4");
+    assert_eq(av1_dequant_coeff(0, 4096, 1, 8), 0, "dq zero coeff");
+    # 24-bit magnitude mask: 0x1000001 & 0xFFFFFF = 1.
+    assert_eq(av1_dequant_coeff(16777217, 1, 1, 8), 1, "dq 24-bit mask wrap");
+    # Clip3 to +-2^(7+BitDepth). 8-bit: [-32768, 32767].
+    assert_eq(av1_dequant_coeff(1000, 1000, 1, 8), 32767, "dq clip high 8b");
+    assert_eq(av1_dequant_coeff(0 - 1000, 1000, 1, 8), 0 - 32768, "dq clip low 8b");
+    # 10-bit range [-131072, 131071].
+    assert_eq(av1_dequant_coeff(200000, 1, 1, 10), 131071, "dq clip high 10b");
+    assert_eq(av1_dequant_coeff(0 - 200000, 1, 1, 10), 0 - 131072, "dq clip low 10b");
+    return 0;
+}
+
+# ---- dqDenom (7.12.3) ----
+fn test_dq_denom() {
+    assert_eq(av1_dq_denom(2, 2), 1, "dqDenom 4x4");
+    assert_eq(av1_dq_denom(3, 3), 1, "dqDenom 8x8");
+    assert_eq(av1_dq_denom(4, 4), 1, "dqDenom 16x16");
+    assert_eq(av1_dq_denom(2, 3), 1, "dqDenom 4x8");
+    assert_eq(av1_dq_denom(2, 4), 1, "dqDenom 4x16");
+    assert_eq(av1_dq_denom(5, 5), 2, "dqDenom 32x32");
+    assert_eq(av1_dq_denom(4, 5), 2, "dqDenom 16x32");
+    assert_eq(av1_dq_denom(5, 4), 2, "dqDenom 32x16");
+    assert_eq(av1_dq_denom(4, 6), 2, "dqDenom 16x64");
+    assert_eq(av1_dq_denom(6, 4), 2, "dqDenom 64x16");
+    assert_eq(av1_dq_denom(6, 6), 4, "dqDenom 64x64");
+    assert_eq(av1_dq_denom(5, 6), 4, "dqDenom 32x64");
+    assert_eq(av1_dq_denom(6, 5), 4, "dqDenom 64x32");
+    return 0;
+}
+
+# ---- flip selection (7.12.3) ----
+fn test_flip_select() {
+    assert_eq(av1_recon_flip_ud(AV1_FLIPADST_DCT), 1, "flipUD FLIPADST_DCT");
+    assert_eq(av1_recon_flip_ud(AV1_FLIPADST_ADST), 1, "flipUD FLIPADST_ADST");
+    assert_eq(av1_recon_flip_ud(AV1_V_FLIPADST), 1, "flipUD V_FLIPADST");
+    assert_eq(av1_recon_flip_ud(AV1_FLIPADST_FLIPADST), 1, "flipUD FLIPADST_FLIPADST");
+    assert_eq(av1_recon_flip_ud(AV1_DCT_DCT), 0, "flipUD DCT_DCT");
+    assert_eq(av1_recon_flip_ud(AV1_DCT_FLIPADST), 0, "flipUD DCT_FLIPADST");
+    assert_eq(av1_recon_flip_lr(AV1_DCT_FLIPADST), 1, "flipLR DCT_FLIPADST");
+    assert_eq(av1_recon_flip_lr(AV1_ADST_FLIPADST), 1, "flipLR ADST_FLIPADST");
+    assert_eq(av1_recon_flip_lr(AV1_H_FLIPADST), 1, "flipLR H_FLIPADST");
+    assert_eq(av1_recon_flip_lr(AV1_FLIPADST_FLIPADST), 1, "flipLR FLIPADST_FLIPADST");
+    assert_eq(av1_recon_flip_lr(AV1_DCT_DCT), 0, "flipLR DCT_DCT");
+    assert_eq(av1_recon_flip_lr(AV1_FLIPADST_DCT), 0, "flipLR FLIPADST_DCT");
+    return 0;
+}
+
+# ---- full pipeline: 4x4 DCT_DCT DC. quant[0]=1, q_dc=4096, dqDenom=1 ->
+# Dequant[0][0]=4096 -> (itx vector) flat residual 128 -> pred+128. ----
+fn test_recon_dct_dc() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    rc_fill(f, 0, 0, 0, 4, 4, 50);
+    var quant = alloc(16 * 8);
+    rc_zero(quant, 16);
+    store64(quant + 0, 1);
+    assert_eq(av1_reconstruct(f, 0, 0, 0, AV1_TX_4X4, AV1_DCT_DCT, 0, quant, 4096, 4096), DR_OK, "recon dct dc ok");
+    var i = 0;
+    while (i < 4) {
+        var j = 0;
+        while (j < 4) { assert_eq(dr_frame_get(f, 0, j, i), 178, "dct dc -> 50+128=178"); j = j + 1; }
+        i = i + 1;
+    }
+    # A pixel outside the tx block is untouched.
+    assert_eq(dr_frame_get(f, 0, 5, 5), 0, "outside block untouched");
+    return 0;
+}
+
+# 4x4 IDTX: Dequant[0][0]=4096 -> residual[0][0]=512 (rest 0). pred 50 ->
+# [0][0]=clip1(562)=255, rest 50.
+fn test_recon_idtx() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    rc_fill(f, 0, 0, 0, 4, 4, 50);
+    var quant = alloc(16 * 8);
+    rc_zero(quant, 16);
+    store64(quant + 0, 1);
+    assert_eq(av1_reconstruct(f, 0, 0, 0, AV1_TX_4X4, AV1_IDTX, 0, quant, 4096, 4096), DR_OK, "recon idtx ok");
+    assert_eq(dr_frame_get(f, 0, 0, 0), 255, "idtx [0][0] clip 50+512 -> 255");
+    assert_eq(dr_frame_get(f, 0, 1, 0), 50, "idtx [0][1] unchanged 50");
+    assert_eq(dr_frame_get(f, 0, 1, 1), 50, "idtx [1][1] unchanged 50");
+    return 0;
+}
+
+# 4x4 lossless WHT: quant[0]=8, q_dc=4 -> Dequant[0][0]=32 -> residual flat 2.
+fn test_recon_lossless() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    rc_fill(f, 0, 0, 0, 4, 4, 50);
+    var quant = alloc(16 * 8);
+    rc_zero(quant, 16);
+    store64(quant + 0, 8);
+    assert_eq(av1_reconstruct(f, 0, 0, 0, AV1_TX_4X4, AV1_DCT_DCT, 1, quant, 4, 4), DR_OK, "recon lossless ok");
+    var i = 0;
+    while (i < 4) {
+        var j = 0;
+        while (j < 4) { assert_eq(dr_frame_get(f, 0, j, i), 52, "lossless -> 50+2=52"); j = j + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Zero coefficients -> zero residual -> prediction unchanged.
+fn test_recon_zero() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    rc_fill(f, 0, 0, 0, 4, 4, 77);
+    var quant = alloc(16 * 8);
+    rc_zero(quant, 16);
+    assert_eq(av1_reconstruct(f, 0, 0, 0, AV1_TX_4X4, AV1_DCT_DCT, 0, quant, 100, 100), DR_OK, "recon zero ok");
+    var i = 0;
+    while (i < 4) {
+        var j = 0;
+        while (j < 4) { assert_eq(dr_frame_get(f, 0, j, i), 77, "zero coeff keeps prediction"); j = j + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# FLIPADST_DCT: the column (vertical) transform is FLIPADST, so flipUD=1.
+# Use q_dc=q_ac=1 so Dequant == Quant; compute the un-flipped residual with
+# the inverse transform as an ORACLE, then confirm reconstruct places
+# residual[i][j] at row (3 - i) (flipped up/down), column j (not flipped).
+fn test_recon_flip_ud() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    rc_fill(f, 0, 0, 0, 4, 4, 128);
+    var quant = alloc(16 * 8);
+    var k = 0;
+    while (k < 16) { store64(quant + (k * 8), k - 8); k = k + 1; }   # -8..7, row-asymmetric
+    var dqo = alloc(16 * 8);
+    var reso = alloc(16 * 8);
+    k = 0;
+    while (k < 16) { store64(dqo + (k * 8), load64(quant + (k * 8))); k = k + 1; }
+    assert_eq(av1_inverse_transform_2d(dqo, reso, AV1_TX_4X4, AV1_FLIPADST_DCT, 0, 8), DR_OK, "oracle itx ok");
+    assert_eq(av1_reconstruct(f, 0, 0, 0, AV1_TX_4X4, AV1_FLIPADST_DCT, 0, quant, 1, 1), DR_OK, "recon flip ok");
+    var i = 0;
+    while (i < 4) {
+        var j = 0;
+        while (j < 4) {
+            var expect = dr_clip1(128 + load64(reso + (((i * 4) + j) * 8)), 8);
+            assert_eq(dr_frame_get(f, 0, j, 3 - i), expect, "flipUD places row i at 3-i");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 64x64: exercises dqDenom=4 and the tw(32) vs w(64) stride mapping.
+# quant[0]=1, q_dc=16384 -> Dequant[0][0] = (16384 & 0xFFFFFF)/4 = 4096.
+# Oracle: inverse transform of a 64x64 DC=4096, DCT_DCT (no flip). Compare
+# every reconstructed sample to clip1(prediction + residual).
+fn test_recon_64_denom_stride() {
+    var e = 0;
+    var f = dr_frame_new(64, 64, 1, 1, 1, 8, 0, &e);
+    rc_fill(f, 0, 0, 0, 64, 64, 30);
+    var quant = alloc(1024 * 8);   # tw*th = 32*32
+    rc_zero(quant, 1024);
+    store64(quant + 0, 1);
+    var dqo = alloc(4096 * 8);     # w*h = 64*64
+    var reso = alloc(4096 * 8);
+    rc_zero(dqo, 4096);
+    store64(dqo + 0, 4096);
+    assert_eq(av1_inverse_transform_2d(dqo, reso, AV1_TX_64X64, AV1_DCT_DCT, 0, 8), DR_OK, "oracle 64x64 ok");
+    assert_eq(av1_reconstruct(f, 0, 0, 0, AV1_TX_64X64, AV1_DCT_DCT, 0, quant, 16384, 16384), DR_OK, "recon 64x64 ok");
+    var i = 0;
+    while (i < 64) {
+        var j = 0;
+        while (j < 64) {
+            var expect = dr_clip1(30 + load64(reso + (((i * 64) + j) * 8)), 8);
+            assert_eq(dr_frame_get(f, 0, j, i), expect, "64x64 recon matches oracle");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_recon_bad_tx() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    var quant = alloc(16 * 8);
+    rc_zero(quant, 16);
+    var big = av1_reconstruct(f, 0, 0, 0, 19, AV1_DCT_DCT, 0, quant, 100, 100);
+    assert_eq(big, AV1_ERR_BAD_TX, "tx_size 19 rejected");
+    var neg = av1_reconstruct(f, 0, 0, 0, 0 - 1, AV1_DCT_DCT, 0, quant, 100, 100);
+    assert_eq(neg, AV1_ERR_BAD_TX, "tx_size -1 rejected");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("dequant + dqDenom + flip select");
+    test_dequant_coeff();
+    test_dq_denom();
+    test_flip_select();
+    test_group("reconstruct pipeline");
+    test_recon_dct_dc();
+    test_recon_idtx();
+    test_recon_lossless();
+    test_recon_zero();
+    test_recon_flip_ud();
+    test_recon_64_denom_stride();
+    test_recon_bad_tx();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

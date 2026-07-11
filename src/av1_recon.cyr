@@ -1,0 +1,127 @@
+# src/av1_recon.cyr — AV1 reconstruct process (spec 7.12.3).
+#
+# The reconstruct glue turns a block of quantized coefficients into
+# reconstructed pixels: dequantize (7.12.3 step 1) -> 2D inverse transform
+# (7.13.3, in src/av1_itx.cyr) -> add the residual onto the prediction
+# already in CurrFrame, with the FLIPADST up/down + left/right flips
+# (7.12.3 step 3). This is the bite that emits first pixels; the coeffs()
+# entropy decode that fills Quant[] from the bitstream lands later.
+#
+# FLAT module (no includes) — wiring in src/main.cyr, after av1_itx.cyr and
+# av1_quant.cyr. Reuses av1_inverse_transform_2d + av1_itx_abs (av1_itx),
+# av1_clip3 (av1_frame), and dr_frame_* / dr_clip1 (frame). Family av1_.
+#
+# NOT YET (caller inputs / deferred, see docs/development/roadmap.md):
+#   - the quantizer matrix path (using_qmatrix / Quantizer_Matrix, 7.12.3
+#     step 1b): q2 == q here; qmatrix scaling is a later sub-bite.
+#   - q_dc / q_ac are resolved by the caller (av1_get_dc_quant /
+#     av1_get_ac_quant); the Quant[] array is a caller input until coeffs().
+
+# dqDenom (7.12.3): 4 for the 64x{64,32} + 32x64 transforms, 2 for the
+# 32-class (32x32 / 16x32 / 32x16 / 16x64 / 64x16), else 1 — keyed off the
+# transform log2 dimensions.
+fn av1_dq_denom(log2w, log2h): i64 {
+    if (((log2w == 6) && (log2h == 6)) || ((log2w == 5) && (log2h == 6)) || ((log2w == 6) && (log2h == 5))) {
+        return 4;
+    }
+    if (((log2w == 5) && (log2h == 5)) || ((log2w == 4) && (log2h == 5)) || ((log2w == 5) && (log2h == 4))
+    || ((log2w == 4) && (log2h == 6)) || ((log2w == 6) && (log2h == 4))) {
+        return 2;
+    }
+    return 1;
+}
+
+# flipUD (7.12.3): PlaneTxType in {FLIPADST_DCT, FLIPADST_ADST, V_FLIPADST,
+# FLIPADST_FLIPADST}.
+fn av1_recon_flip_ud(tx_type): i64 {
+    if ((tx_type == AV1_FLIPADST_DCT) || (tx_type == AV1_FLIPADST_ADST)
+    || (tx_type == AV1_V_FLIPADST) || (tx_type == AV1_FLIPADST_FLIPADST)) {
+        return 1;
+    }
+    return 0;
+}
+
+# flipLR (7.12.3): PlaneTxType in {DCT_FLIPADST, ADST_FLIPADST, H_FLIPADST,
+# FLIPADST_FLIPADST}.
+fn av1_recon_flip_lr(tx_type): i64 {
+    if ((tx_type == AV1_DCT_FLIPADST) || (tx_type == AV1_ADST_FLIPADST)
+    || (tx_type == AV1_H_FLIPADST) || (tx_type == AV1_FLIPADST_FLIPADST)) {
+        return 1;
+    }
+    return 0;
+}
+
+# Dequantize one coefficient (7.12.3 steps 1c-1f, no qmatrix): dq = coeff*q;
+# dq2 = sign(dq) * ((|dq| & 0xFFFFFF) / dqDenom); clamp to the +-2^(7+BitDepth)
+# range. The division is on the non-negative magnitude, so it matches the
+# spec's truncate-toward-zero regardless of cyrius's signed-/ convention.
+fn av1_dequant_coeff(coeff, q, dq_denom, bit_depth): i64 {
+    var dq = coeff * q;
+    var sign = 1;
+    if (dq < 0) { sign = 0 - 1; }
+    var mag = (av1_itx_abs(dq) & 16777215) / dq_denom;   # 0xFFFFFF
+    var lo = 0 - (1 << (7 + bit_depth));
+    var hi = (1 << (7 + bit_depth)) - 1;
+    return av1_clip3(lo, hi, sign * mag);
+}
+
+# Reconstruct process (7.12.3). plane / x / y locate the transform block's
+# top-left in CurrFrame[plane]; tx_size (0..18) + tx_type (PlaneTxType,
+# 0..15) describe the transform; lossless selects the WHT path; quant is the
+# tw*th (row-major, stride tw) quantized-coefficient array; q_dc / q_ac are
+# get_dc_quant(plane) / get_ac_quant(plane). Adds the residual onto the
+# prediction already in CurrFrame. Returns DR_OK, AV1_ERR_BAD_TX, DR_ERR_OOM.
+fn av1_reconstruct(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_dc, q_ac): i64 {
+    if ((tx_size < 0) || (tx_size > 18)) { return AV1_ERR_BAD_TX; }
+    var log2w = av1_tx_width_log2(tx_size);
+    var log2h = av1_tx_height_log2(tx_size);
+    var w = 1 << log2w;
+    var h = 1 << log2h;
+    var tw = av1_min(32, w);
+    var th = av1_min(32, h);
+    var bit_depth = dr_frame_bit_depth(frame);
+    var dq_denom = av1_dq_denom(log2w, log2h);
+
+    var dequant = alloc(w * h * 8);
+    var residual = alloc(w * h * 8);
+    if ((dequant == 0) || (residual == 0)) { return DR_ERR_OOM; }
+    memset(dequant, 0, w * h * 8);
+
+    # Step 1: dequantize the tw x th coefficients into dequant[i*w + j].
+    var i = 0;
+    while (i < th) {
+        var j = 0;
+        while (j < tw) {
+            var q = q_ac;
+            if ((i == 0) && (j == 0)) { q = q_dc; }
+            var coeff = load64(quant + (((i * tw) + j) * 8));
+            store64(dequant + (((i * w) + j) * 8), av1_dequant_coeff(coeff, q, dq_denom, bit_depth));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    # Step 2: 2D inverse transform (un-flipped residual) — 7.13.3.
+    var rc = av1_inverse_transform_2d(dequant, residual, tx_size, tx_type, lossless, bit_depth);
+    if (rc != DR_OK) { return rc; }
+
+    # Step 3: flip + add residual onto the prediction, clamp to the range.
+    var flip_ud = av1_recon_flip_ud(tx_type);
+    var flip_lr = av1_recon_flip_lr(tx_type);
+    i = 0;
+    while (i < h) {
+        var j2 = 0;
+        while (j2 < w) {
+            var xx = j2;
+            if (flip_lr) { xx = w - j2 - 1; }
+            var yy = i;
+            if (flip_ud) { yy = h - i - 1; }
+            var cur = dr_frame_get(frame, plane, x + xx, y + yy);
+            var res = load64(residual + (((i * w) + j2) * 8));
+            dr_frame_set(frame, plane, x + xx, y + yy, dr_clip1(cur + res, bit_depth));
+            j2 = j2 + 1;
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
