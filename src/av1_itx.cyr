@@ -20,8 +20,9 @@
 #   7.13.2.10 inverse Walsh-Hadamard
 #   7.13.2.11-15 inverse identity transforms
 #   7.13.3 2D inverse transform process
-# Round2(x, n) is the spec's rounding right shift (section 4); cyrius `>>`
-# is arithmetic so it matches for negative intermediates.
+# Round2(x, n) is the spec's rounding right shift (section 4); cyrius `>>>`
+# is arithmetic (sign-preserving) so it matches for negative intermediates
+# (`>>` is LOGICAL and would corrupt them).
 #
 # Coefficient / residual arrays are flat i64, row-major: element (i,j) at
 # index i*w + j. The FLIPADST flip and the residual-into-prediction add
