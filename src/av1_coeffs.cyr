@@ -1,44 +1,29 @@
 # src/av1_coeffs.cyr — AV1 coefficient reading loop (spec 5.11.39 coeffs())
 # + the remaining CDF-selection contexts (8.3.2): txb_skip (all_zero) and
-# dc_sign, plus txSzCtx and the Tx_Size_Sqr / Tx_Size_Sqr_Up tables.
+# dc_sign. (txSzCtx / Tx_Size_Sqr live in av1_txsize.)
 #
 # coeffs() decodes one transform block's quantized coefficients from the
 # symbol coder into Quant[] (returns eob), and av1_coeffs_encode writes them
 # back — the two are exact inverses, round-trip tested. They tie together the
 # scan (av1_scan), the level contexts (av1_coeff), the default CDFs
-# (av1_coeffcdf), and the symbol coder (av1_symbol).
+# (av1_coeffcdf), the transform-type read (av1_txtype), and the symbol coder.
 #
-# SCOPE (this bite): PlaneTxType is a caller input (compute_tx_type is read
-# with the block mode info — see roadmap.md 0.7.x). The CDFs are used READ-ONLY, so
-# decode/encode must run with disable_cdf_update = 1 (the default CDF blobs
-# must not be mutated); the adaptive path (a per-tile mutable CDF copy) is a
-# follow-up (roadmap.md). The neighbour context arrays (Above/LeftLevelContext
-# + *DcContext) are caller-managed; coeffs() reads and updates them.
+# TX-TYPE SEAM (0.7.22): the PlaneTxType is no longer a caller input — coeffs()
+# reads transform_type (intra_tx_type) after all_zero for a luma block and
+# derives PlaneTxType via compute_tx_type (av1_txtype), given the block's
+# tx-type context (Av1TxTypeCtx: y/uv mode, filter-intra, is_inter, lossless,
+# base_q_idx, reduced_tx_set). Decode returns the computed PlaneTxType via an
+# out pointer; encode takes the target luma tx_type and writes the matching
+# intra_tx_type. The intra_tx_type CDFs live in the non-coeff CDF context
+# (ncc), so coeffs() takes BOTH cc (coeff CDFs) and ncc (non-coeff CDFs). The
+# neighbour context arrays (Above/LeftLevelContext + *DcContext) are
+# caller-managed; coeffs() reads and updates them.
 #
-# FLAT module — wiring in src/main.cyr after av1_coeff.cyr + av1_coeffcdf.cyr.
-# Family av1_. Reuses av1_tx_width_log2/av1_tx_height_log2 (av1_itx),
-# av1_min/av1_max (av1_frame), the level contexts + constants (av1_coeff),
-# the CDF accessors (av1_coeffcdf), and the symbol coder (av1_symbol).
-
-# Tx_Size_Sqr / Tx_Size_Sqr_Up [19] — the min/max square tx size (as a TxSize
-# index). txSzCtx = (Tx_Size_Sqr + Tx_Size_Sqr_Up + 1) >> 1.
-var Av1_TxSqr = 0;
-fn av1_txsqr_tables(): i64 {
-    if (Av1_TxSqr != 0) { return Av1_TxSqr; }
-    var t = alloc(38 * 8);
-    if (t == 0) { return 0; }
-    # Tx_Size_Sqr[19] at slot 0
-    av1_itx_fill19(t + 0, 0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2);
-    # Tx_Size_Sqr_Up[19] at slot 19
-    av1_itx_fill19(t + (19 * 8), 0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4);
-    Av1_TxSqr = t;
-    return t;
-}
-fn av1_tx_size_sqr(tx_size): i64 { return load64(av1_txsqr_tables() + (tx_size * 8)); }
-fn av1_tx_size_sqr_up(tx_size): i64 { return load64(av1_txsqr_tables() + ((19 + tx_size) * 8)); }
-fn av1_tx_size_ctx(tx_size): i64 {
-    return (av1_tx_size_sqr(tx_size) + av1_tx_size_sqr_up(tx_size) + 1) >> 1;
-}
+# FLAT module — wiring in src/main.cyr after av1_txtype.cyr. Family av1_.
+# Reuses av1_tx_width_log2/av1_tx_height_log2 (av1_itx), av1_tx_size_ctx
+# (av1_txsize), av1_min/av1_max (av1_frame), the level contexts + constants
+# (av1_coeff), the CDF accessors (av1_coeffcdf), the transform_type /
+# compute_tx_type reads (av1_txtype), and the symbol coder (av1_symbol).
 
 # get_txb_skip_ctx (all_zero, 8.3.2). Neighbour context arrays are passed in
 # (above_lvl / left_lvl carry AboveLevelContext / LeftLevelContext, above_dc /
@@ -210,10 +195,12 @@ fn av1_coeffs_write_eob_pt(enc, cc, ptype, tx_type, eob_multi, eob_pt): i64 {
 
 # coeffs() DECODE (5.11.39). Reads one transform block's coefficients from
 # the symbol decoder sd into quant[] (segEob entries, indexed by raster
-# position); returns eob. Requires disable_cdf_update on sd (CDFs read-only).
-# q = COEFF_CDF_Q_CTXS index; the neighbour arrays are read + updated.
-fn av1_coeffs_decode(sd, cc, plane, tx_size, tx_type, x4, y4, max_x4, max_y4,
-bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
+# position); returns eob. cc = the per-tile coeff-CDF context (av1_ccdf_new);
+# ncc = the per-tile non-coeff-CDF context (av1_ncdf_new, for intra_tx_type).
+# ttx = Av1TxTypeCtx (block mode + frame params). The computed PlaneTxType is
+# stored to *out_tx_type (DCT_DCT when all_zero). Neighbour arrays read+updated.
+fn av1_coeffs_decode(sd, cc, ncc, plane, tx_size, ttx, x4, y4, max_x4, max_y4,
+bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, out_tx_type): i64 {
     var log2w = av1_tx_width_log2(tx_size);
     var log2h = av1_tx_height_log2(tx_size);
     var w = 1 << log2w;
@@ -230,11 +217,17 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
     var eob = 0;
     var cul_level = 0;
     var dc_category = 0;
+    var tx_type = AV1_DCT_DCT;
 
     var skip_ctx = av1_txb_skip_ctx(plane, x4, y4, w4, h4, w, h, max_x4, max_y4,
     bw, bh, above_lvl, left_lvl, above_dc, left_dc);
     var all_zero = av1_sym_read_symbol(sd, av1_ccdf_txb_skip(cc, txsz_ctx, skip_ctx), 2);
     if (all_zero == 0) {
+        # transform_type: a luma block reads intra_tx_type here (between all_zero
+        # and eob_pt); compute_tx_type derives the block's PlaneTxType (5.11.40).
+        var luma_tx_type = AV1_DCT_DCT;
+        if (plane == 0) { luma_tx_type = av1_transform_type_decode(sd, ncc, tx_size, ttx); }
+        tx_type = av1_compute_tx_type(plane, tx_size, ttx, luma_tx_type);
         var scan = av1_get_scan(tx_size, tx_type);
         var eob_multi = av1_min(log2w, 5) + av1_min(log2h, 5) - 4;
         var eob_pt = av1_coeffs_read_eob_pt(sd, cc, ptype, tx_type, eob_multi);
@@ -333,13 +326,16 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant): i64 {
         store64(left_dc + ((y4 + u) * 8), dc_category);
         u = u + 1;
     }
+    store64(out_tx_type, tx_type);
     return eob;
 }
 
 # coeffs() ENCODE — the exact inverse of av1_coeffs_decode. quant[] holds the
 # signed coefficients (as decode produces); eob is the number of scanned
-# coefficients (0 => all_zero). Requires disable_cdf_update on enc.
-fn av1_coeffs_encode(enc, cc, plane, tx_size, tx_type, x4, y4, max_x4, max_y4,
+# coefficients (0 => all_zero). tx_type is the target luma TxType (chroma is
+# derived from ttx and must match compute_tx_type). Writes intra_tx_type for a
+# luma block so the decoder recovers the same PlaneTxType.
+fn av1_coeffs_encode(enc, cc, ncc, plane, tx_size, ttx, tx_type, x4, y4, max_x4, max_y4,
 bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
     var log2w = av1_tx_width_log2(tx_size);
     var log2h = av1_tx_height_log2(tx_size);
@@ -361,6 +357,8 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
     if (eob == 0) { all_zero = 1; }
     av1_sym_encode_symbol(enc, av1_ccdf_txb_skip(cc, txsz_ctx, skip_ctx), 2, all_zero);
     if (eob != 0) {
+        # transform_type: mirror the decode — write intra_tx_type for a luma block.
+        if (plane == 0) { av1_transform_type_encode(enc, ncc, tx_size, ttx, tx_type); }
         var scan = av1_get_scan(tx_size, tx_type);
         var eob_multi = av1_min(log2w, 5) + av1_min(log2h, 5) - 4;
         # eobPt from eob, then the extra bits.

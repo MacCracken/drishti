@@ -6,15 +6,16 @@
 
 ## Version
 
-**0.7.21** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
+**0.7.22** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
 AV1 arc** advances the **block/partition decode** (the last stretch to a
-decoded keyframe) with bite 3: the intra **transform-size read**
-(`av1_txsize.cyr` — `read_tx_size` / `tx_depth` + the Max_Tx_Size_Rect /
-Max_Tx_Depth / Split_Tx_Size tables), decode + inverse encode, on top of
-the mode-info reads (0.7.20), the default non-coeff CDFs (0.7.19), and
-the complete coefficient decode (0.7.13-0.7.18). The remaining distance
-to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x
-VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+decoded keyframe) with bite 4 — the trickiest seam: the **transform-type
+derivation** (`av1_txtype.cyr` — `compute_tx_type` / `transform_type` /
+`get_tx_set`) spliced INTO the coeffs loop, so a transform block decodes
+with its own computed tx type (the `intra_tx_type` symbol, read between
+all_zero and the eob position). On top of the tx-size read (0.7.21),
+mode-info reads (0.7.20), and the coefficient decode (0.7.13-0.7.18). The
+remaining distance to 1.0 is the rest of the per-codec completion arcs
+(0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -29,7 +30,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (26 `[lib]` modules, dependency order)
+## Source (27 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -48,10 +49,11 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_scan.cyr` | `av1_` | coefficient scan orders (spec 5.11.41) — 32 Default/Mrow/Mcol scan tables + get_scan + scan_size |
 | `src/av1_coeff.cyr` | `av1_` | coefficient level contexts (spec 8.3.2) — get_tx_class / get_coeff_base_ctx / get_br_ctx + offset tables |
 | `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — all 7 families: txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br + accessors |
-| `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode + txb_skip/dc_sign/txSzCtx contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
 | `src/av1_noncoeffcdf.cyr` | `av1_` | default non-coeff CDF tables (intra keyframe) — partition/skip/y-mode/uv-mode/cfl/angle/filter-intra/tx-size/tx-type (1,622) + accessors + av1_ncdf_new |
 | `src/av1_modeinfo.cyr` | `av1_` | intra `intra_frame_mode_info` reads (5.11.16) — skip/y-mode/angle/uv-mode/CfL/filter-intra decode + inverse encode + orchestrator (Av1ModeInfo); block-size conversion tables (Mi/Block/Size_Group/Intra_Mode_Context/Subsampled_Size) |
-| `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size tables + av1_tx_width/height |
+| `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
+| `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
+| `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -65,12 +67,12 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 21 suites / **19,635 assertions**: drishti 51 · bits
+- `make test` — 22 suites / **19,784 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
-  av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,844 ·
-  av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · h264 326 ·
-  h265 276 · vpx 287
+  av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
+  av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · av1_txtype
+  142 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -110,7 +112,10 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
   hostile-input safety, each cross-checked against the spec markdown → all
   clean, no findings), and the intra tx-size read (4 slices: read_tx_size
   fidelity + tx_depth ctx/cdf-family dispatch + per-value table diff +
-  hostile-input safety → all clean, no findings)
+  hostile-input safety → all clean, no findings), and the transform-type
+  seam (5 slices: transform_type fidelity + compute_tx_type/get_tx_set +
+  per-value table diff + the coeffs splice/Tx_Size_Sqr move + hostile-input
+  safety → all clean, no findings)
 
 ## Dependencies
 
@@ -161,13 +166,18 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    Max_Tx_Depth / Split_Tx_Size (+ av1_tx_width/height). Decode + inverse
    encode, round-trip tested (both CDF modes + adaptive). The InterTxSizes
    grid write is a caller concern (bite 5/7). **[done 0.7.21]**
-4. **`compute_tx_type`** spliced INTO `av1_coeffs_decode`/`_encode`
-   (between all_zero and get_scan) — retires the `PlaneTxType` caller-input;
-   reads `intra_tx_type` (Set1/Set2 CDFs) + `get_tx_set` + `Mode_To_Txfm`.
-   Trickiest seam — must keep the coeffs round-trip green. **← NEXT BITE.**
+4. **`compute_tx_type`** — `av1_txtype.cyr` spliced INTO
+   `av1_coeffs_decode`/`_encode` (between all_zero and get_scan): retired the
+   `PlaneTxType` caller-input; reads `intra_tx_type` (Set1/Set2 CDFs, ctx
+   `[Tx_Size_Sqr][intraDir]`) + `get_tx_set` + `compute_tx_type`
+   (`Mode_To_Txfm` for chroma). `Tx_Size_Sqr` moved to `av1_txsize`; coeffs
+   take `cc`+`ncc`+`Av1TxTypeCtx` and return the computed tx type. Coeffs
+   round-trip stayed green (DCT_DCT via `base_q=0` = byte-identical stream).
+   **[done 0.7.22]**
 5. **residual driver** — `residual()`/`transform_block()` (5.11.34/35):
    per tx block, predict_intra → coeffs() → reconstruct(); manages
    BlockDecoded availability + the level-context strips + CfL MaxLumaW/H.
+   **← NEXT BITE.**
 6. **`decode_partition` tree + `decode_block`** (5.11.4/5.11.5) — the
    partition symbol/ctx + split_or_horz/vert edge CDFs + Partition_Subsize;
    writes the MiSizes grid.

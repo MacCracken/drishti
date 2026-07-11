@@ -82,6 +82,28 @@ fn av1_max_tx_size_rect(bsize): i64 { return load64(av1_txsz_tables() + (bsize *
 fn av1_max_tx_depth(bsize): i64 { return load64(av1_txsz_tables() + ((22 + bsize) * 8)); }
 fn av1_split_tx_size(txsize): i64 { return load64(av1_txsz_tables() + ((44 + txsize) * 8)); }
 
+# Tx_Size_Sqr / Tx_Size_Sqr_Up [19] — the min/max square tx size (as a TxSize
+# index); txSzCtx = (Tx_Size_Sqr + Tx_Size_Sqr_Up + 1) >> 1. Used by the coeffs
+# loop (txSzCtx) and by get_tx_set / the intra_tx_type ctx (av1_txtype). Lives
+# here with the other tx-size tables. Built via av1_itx_fill19 (av1_itx).
+var Av1_TxSqr = 0;
+fn av1_txsqr_tables(): i64 {
+    if (Av1_TxSqr != 0) { return Av1_TxSqr; }
+    var t = alloc(38 * 8);          # 2 * 19 i64
+    if (t == 0) { return 0; }
+    # Tx_Size_Sqr[19] at slot 0.
+    av1_itx_fill19(t + 0, 0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2);
+    # Tx_Size_Sqr_Up[19] at slot 19.
+    av1_itx_fill19(t + (19 * 8), 0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4);
+    Av1_TxSqr = t;
+    return t;
+}
+fn av1_tx_size_sqr(tx_size): i64 { return load64(av1_txsqr_tables() + (tx_size * 8)); }
+fn av1_tx_size_sqr_up(tx_size): i64 { return load64(av1_txsqr_tables() + ((19 + tx_size) * 8)); }
+fn av1_tx_size_ctx(tx_size): i64 {
+    return (av1_tx_size_sqr(tx_size) + av1_tx_size_sqr_up(tx_size) + 1) >> 1;
+}
+
 # ================================================================
 # tx_depth CDF-selection context (spec 9.3). For an intra keyframe:
 #   aboveW = AvailU ? Tx_Width[ InterTxSizes[above] ] : 0

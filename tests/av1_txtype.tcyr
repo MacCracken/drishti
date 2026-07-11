@@ -1,0 +1,203 @@
+# tests/av1_txtype.tcyr — AV1 transform-type derivation (spec 5.11.48
+# transform_type / get_tx_set + 5.11.40 compute_tx_type) and the intra_tx_type
+# CDF-selection context. Tables pinned by a checksum + spot values; get_tx_set /
+# compute_tx_type / intra_tx_dir by known-answers; transform_type decode/encode
+# by round-trip over every set1/set2 tx type (raw-YMode and filter-intra dirs)
+# in both disable_cdf_update modes, plus an adaptive multi-block round-trip.
+include "src/main.cyr"
+include "src/av1_txtype.cyr"
+
+fn test_txt_checksum() {
+    var b = av1_txtype_tables();
+    var s = 0;
+    var k = 0;
+    while (k < 79) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 2513, "tx-type table checksum");
+    return 0;
+}
+fn test_txt_values() {
+    # Mode_To_Txfm spot values.
+    assert_eq(av1_mode_to_txfm(0), AV1_DCT_DCT, "M2T DC");
+    assert_eq(av1_mode_to_txfm(1), AV1_ADST_DCT, "M2T V");
+    assert_eq(av1_mode_to_txfm(2), AV1_DCT_ADST, "M2T H");
+    assert_eq(av1_mode_to_txfm(12), AV1_ADST_ADST, "M2T PAETH");
+    assert_eq(av1_mode_to_txfm(13), AV1_DCT_DCT, "M2T CFL");
+    # Inv tables.
+    assert_eq(av1_intra_tx_inv_set1(0), AV1_IDTX, "inv1[0]=IDTX");
+    assert_eq(av1_intra_tx_inv_set1(2), AV1_V_DCT, "inv1[2]=V_DCT");
+    assert_eq(av1_intra_tx_inv_set1(6), AV1_DCT_ADST, "inv1[6]=DCT_ADST");
+    assert_eq(av1_intra_tx_inv_set2(0), AV1_IDTX, "inv2[0]=IDTX");
+    assert_eq(av1_intra_tx_inv_set2(4), AV1_DCT_ADST, "inv2[4]=DCT_ADST");
+    # Membership.
+    assert_eq(av1_is_tx_type_in_set_intra(0, AV1_DCT_DCT), 1, "DCTONLY has DCT_DCT");
+    assert_eq(av1_is_tx_type_in_set_intra(0, AV1_IDTX), 0, "DCTONLY lacks IDTX");
+    assert_eq(av1_is_tx_type_in_set_intra(1, AV1_V_DCT), 1, "INTRA_1 has V_DCT");
+    assert_eq(av1_is_tx_type_in_set_intra(2, AV1_V_DCT), 0, "INTRA_2 lacks V_DCT");
+    assert_eq(av1_is_tx_type_in_set_intra(2, AV1_ADST_ADST), 1, "INTRA_2 has ADST_ADST");
+    # Filter_Intra_Mode_To_Intra_Dir.
+    assert_eq(av1_filter_intra_to_dir(0), AV1_DC_PRED, "FI dir 0");
+    assert_eq(av1_filter_intra_to_dir(3), AV1_D157_PRED, "FI dir 3 = D157");
+    assert_eq(av1_filter_intra_to_dir(4), AV1_DC_PRED, "FI dir 4 = DC");
+    # Reverse lookups.
+    assert_eq(av1_intra_tx_fwd_set1(AV1_V_DCT), 2, "fwd1 V_DCT -> 2");
+    assert_eq(av1_intra_tx_fwd_set1(AV1_DCT_DCT), 1, "fwd1 DCT_DCT -> 1");
+    assert_eq(av1_intra_tx_fwd_set2(AV1_ADST_ADST), 2, "fwd2 ADST_ADST -> 2");
+    return 0;
+}
+# get_tx_set(txSz, is_inter, reduced) — intra + inter branches.
+fn test_get_tx_set() {
+    # intra, non-reduced: 4x4/8x8 -> INTRA_1; 16x16 -> INTRA_2; 32x32 -> DCTONLY.
+    assert_eq(av1_get_tx_set(0, 0, 0), AV1_TX_SET_INTRA_1, "4x4 -> INTRA_1");
+    assert_eq(av1_get_tx_set(1, 0, 0), AV1_TX_SET_INTRA_1, "8x8 -> INTRA_1");
+    assert_eq(av1_get_tx_set(2, 0, 0), AV1_TX_SET_INTRA_2, "16x16 -> INTRA_2");
+    assert_eq(av1_get_tx_set(3, 0, 0), AV1_TX_SET_DCTONLY, "32x32 -> DCTONLY");
+    assert_eq(av1_get_tx_set(4, 0, 0), AV1_TX_SET_DCTONLY, "64x64 -> DCTONLY");
+    # rectangular: 4x8 (5) sqr=0,sqr_up=1 -> INTRA_1; 8x16 (7) sqr=1,sqr_up=2 ->
+    # INTRA_1; 16x32 (9) sqr=2,sqr_up=3 (TX_32X32) -> DCTONLY (only TX_16X16
+    # itself, sqr==sqr_up==2, hits the INTRA_2 rule).
+    assert_eq(av1_get_tx_set(5, 0, 0), AV1_TX_SET_INTRA_1, "4x8 -> INTRA_1");
+    assert_eq(av1_get_tx_set(7, 0, 0), AV1_TX_SET_INTRA_1, "8x16 -> INTRA_1");
+    assert_eq(av1_get_tx_set(9, 0, 0), AV1_TX_SET_DCTONLY, "16x32 -> DCTONLY");
+    # reduced_tx_set forces INTRA_2 for a small tx.
+    assert_eq(av1_get_tx_set(0, 0, 1), AV1_TX_SET_INTRA_2, "4x4 reduced -> INTRA_2");
+    # inter branch: 4x4 -> INTER_1; 16x16 -> INTER_2; 32x32/reduced -> INTER_3.
+    assert_eq(av1_get_tx_set(0, 1, 0), AV1_TX_SET_INTER_1, "4x4 inter -> INTER_1");
+    assert_eq(av1_get_tx_set(2, 1, 0), AV1_TX_SET_INTER_2, "16x16 inter -> INTER_2");
+    assert_eq(av1_get_tx_set(3, 1, 0), AV1_TX_SET_INTER_3, "32x32 inter -> INTER_3");
+    assert_eq(av1_get_tx_set(0, 1, 1), AV1_TX_SET_INTER_3, "4x4 inter reduced -> INTER_3");
+    return 0;
+}
+fn test_intra_tx_dir() {
+    assert_eq(av1_intra_tx_dir(0, 0, 5), 5, "no FI -> YMode");
+    assert_eq(av1_intra_tx_dir(1, 1, 5), AV1_V_PRED, "FI mode 1 -> V dir");
+    assert_eq(av1_intra_tx_dir(1, 3, 9), AV1_D157_PRED, "FI mode 3 -> D157 dir");
+    return 0;
+}
+# mk_ttx2 — a full Av1TxTypeCtx for tests.
+fn mk_ttx2(y_mode, uv_mode, use_fi, fi_mode, is_inter, lossless, base_q, reduced): i64 {
+    var c = av1_txtypectx_new();
+    store64(c + AV1TTC_YMODE, y_mode);
+    store64(c + AV1TTC_UVMODE, uv_mode);
+    store64(c + AV1TTC_USE_FI, use_fi);
+    store64(c + AV1TTC_FI_MODE, fi_mode);
+    store64(c + AV1TTC_IS_INTER, is_inter);
+    store64(c + AV1TTC_LOSSLESS, lossless);
+    store64(c + AV1TTC_BASE_Q, base_q);
+    store64(c + AV1TTC_REDUCED_TX, reduced);
+    return c;
+}
+# compute_tx_type — luma / chroma / lossless / large-tx / not-in-set gating.
+fn test_compute_tx_type() {
+    var ttx = mk_ttx2(0, 1, 0, 0, 0, 0, 32, 0);   # uv = V_PRED
+    # luma returns the passed luma_tx_type (4x4, non-lossless).
+    assert_eq(av1_compute_tx_type(0, 0, ttx, AV1_V_DCT), AV1_V_DCT, "luma passthrough");
+    # chroma (4x4, INTRA_1): Mode_To_Txfm[V_PRED]=ADST_DCT, in set -> ADST_DCT.
+    assert_eq(av1_compute_tx_type(1, 0, ttx, AV1_DCT_DCT), AV1_ADST_DCT, "chroma ADST_DCT");
+    # chroma at 32x32 (set DCTONLY): ADST_DCT not in set -> DCT_DCT.
+    assert_eq(av1_compute_tx_type(1, 3, ttx, AV1_DCT_DCT), AV1_DCT_DCT, "chroma gated -> DCT_DCT");
+    # lossless forces DCT_DCT (even luma).
+    var ttxL = mk_ttx2(0, 1, 0, 0, 0, 1, 32, 0);
+    assert_eq(av1_compute_tx_type(0, 0, ttxL, AV1_V_DCT), AV1_DCT_DCT, "lossless -> DCT_DCT");
+    # large tx (64x64, txSzSqrUp > TX_32X32) forces DCT_DCT.
+    assert_eq(av1_compute_tx_type(0, 4, ttx, AV1_V_DCT), AV1_DCT_DCT, "64x64 -> DCT_DCT");
+    return 0;
+}
+
+# transform_type decode/encode round-trip (luma). Encode tx_type, decode it back.
+fn tt_rt(tx_size, ttx, tx_type, disable, tag): i64 {
+    var nce = av1_noncoeff_cdf_blob();
+    var ncd = av1_noncoeff_cdf_blob();
+    if (disable == 0) { nce = av1_ncdf_new(); ncd = av1_ncdf_new(); }
+    var enc = av1_sym_enc_init(32, disable);
+    av1_transform_type_encode(enc, nce, tx_size, ttx, tx_type);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "tt enc ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var got = av1_transform_type_decode(sd, ncd, tx_size, ttx);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "tt dec ok");
+    assert_eq(got, tx_type, tag);
+    return 0;
+}
+fn tt_rt_both(tx_size, ttx, tx_type, tag): i64 {
+    tt_rt(tx_size, ttx, tx_type, 1, tag);
+    tt_rt(tx_size, ttx, tx_type, 0, tag);
+    return 0;
+}
+# Every TX_SET_INTRA_1 tx type round-trips (4x4, base_q>0, raw YMode dir).
+fn test_tt_set1() {
+    var ttx = mk_ttx2(0, 0, 0, 0, 0, 0, 32, 0);   # YMode=DC -> intraDir 0
+    tt_rt_both(0, ttx, AV1_IDTX, "set1 IDTX");
+    tt_rt_both(0, ttx, AV1_DCT_DCT, "set1 DCT_DCT");
+    tt_rt_both(0, ttx, AV1_V_DCT, "set1 V_DCT");
+    tt_rt_both(0, ttx, AV1_H_DCT, "set1 H_DCT");
+    tt_rt_both(0, ttx, AV1_ADST_ADST, "set1 ADST_ADST");
+    tt_rt_both(0, ttx, AV1_ADST_DCT, "set1 ADST_DCT");
+    tt_rt_both(0, ttx, AV1_DCT_ADST, "set1 DCT_ADST");
+    return 0;
+}
+# Every TX_SET_INTRA_2 tx type round-trips (16x16, base_q>0).
+fn test_tt_set2() {
+    var ttx = mk_ttx2(1, 0, 0, 0, 0, 0, 32, 0);   # YMode=V_PRED -> intraDir 1
+    tt_rt_both(2, ttx, AV1_IDTX, "set2 IDTX");
+    tt_rt_both(2, ttx, AV1_DCT_DCT, "set2 DCT_DCT");
+    tt_rt_both(2, ttx, AV1_ADST_ADST, "set2 ADST_ADST");
+    tt_rt_both(2, ttx, AV1_ADST_DCT, "set2 ADST_DCT");
+    tt_rt_both(2, ttx, AV1_DCT_ADST, "set2 DCT_ADST");
+    return 0;
+}
+# intraDir from filter-intra selects a different CDF ctx; round-trip still holds.
+fn test_tt_filter_intra_dir() {
+    var ttx = mk_ttx2(0, 0, 1, 3, 0, 0, 32, 0);   # use_fi, fi_mode 3 -> D157 dir
+    tt_rt_both(0, ttx, AV1_V_DCT, "set1 FI-dir V_DCT");
+    tt_rt_both(0, ttx, AV1_ADST_DCT, "set1 FI-dir ADST_DCT");
+    return 0;
+}
+# No-read cases: base_q_idx 0, or a DCT-only set -> DCT_DCT with no symbol.
+fn test_tt_no_read() {
+    var ttx0 = mk_ttx2(0, 0, 0, 0, 0, 0, 0, 0);   # base_q 0
+    tt_rt_both(0, ttx0, AV1_DCT_DCT, "base_q0 -> DCT_DCT");
+    var ttx = mk_ttx2(0, 0, 0, 0, 0, 0, 32, 0);
+    tt_rt_both(3, ttx, AV1_DCT_DCT, "32x32 DCTONLY -> DCT_DCT");   # get_tx_set 32x32 -> DCTONLY
+    return 0;
+}
+# Adaptive multi-block: two transform_type reads share one ncc context.
+fn test_tt_adaptive_multiblock() {
+    var ttx = mk_ttx2(0, 0, 0, 0, 0, 0, 32, 0);
+    var nce = av1_ncdf_new();
+    var ncd = av1_ncdf_new();
+    var enc = av1_sym_enc_init(32, 0);
+    av1_transform_type_encode(enc, nce, 0, ttx, AV1_V_DCT);
+    av1_transform_type_encode(enc, nce, 0, ttx, AV1_H_DCT);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var a = av1_transform_type_decode(sd, ncd, 0, ttx);
+    var b = av1_transform_type_decode(sd, ncd, 0, ttx);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "tt adaptive dec ok");
+    assert_eq(a, AV1_V_DCT, "adaptive tt A = V_DCT");
+    assert_eq(b, AV1_H_DCT, "adaptive tt B = H_DCT");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("tx-type tables");
+    test_txt_checksum();
+    test_txt_values();
+    test_group("get_tx_set / intra_tx_dir");
+    test_get_tx_set();
+    test_intra_tx_dir();
+    test_group("compute_tx_type");
+    test_compute_tx_type();
+    test_group("transform_type decode/encode round-trip");
+    test_tt_set1();
+    test_tt_set2();
+    test_tt_filter_intra_dir();
+    test_tt_no_read();
+    test_tt_adaptive_multiblock();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

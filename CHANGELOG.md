@@ -4,6 +4,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.22] - 2026-07-11
+
+Bite 4 of the AV1 **block/partition decode** arc — the trickiest seam: the
+**transform-type derivation** (`compute_tx_type`) spliced INTO the coeffs loop.
+A new `src/av1_txtype.cyr` reads the `intra_tx_type` symbol (between `all_zero`
+and the eob position, for a luma block) and derives each transform block's
+`PlaneTxType`, retiring it as a caller input to `av1_coeffs_decode`/`_encode`.
+A 5-agent adversarial spec review (transform_type fidelity, compute_tx_type /
+get_tx_set, per-value tables, the coeffs splice + Tx_Size_Sqr move, hostile-input
+safety) confirmed the change with **no findings**. **19,784 suite assertions +
+1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 transform-type derivation** (`src/av1_txtype.cyr`, new flat module):
+  `av1_get_tx_set` (spec 5.11.48, intra + inter branches), `transform_type`
+  decode + inverse encode (reads/writes `intra_tx_type` via the Set1/Set2 CDFs,
+  ctx = `[Tx_Size_Sqr][intraDir]` where `intraDir` is the filter-intra dir or
+  `YMode`), and `compute_tx_type` (spec 5.11.40: Lossless/large-tx → DCT_DCT,
+  luma passthrough, chroma `Mode_To_Txfm[UVMode]` gated by set membership). New
+  tables `Mode_To_Txfm` / `Tx_Type_Intra_Inv_Set1/2` / `Tx_Type_In_Set_Intra` /
+  `Filter_Intra_Mode_To_Intra_Dir` (79-entry blob, checksum-pinned) + the
+  `Av1TxTypeCtx` per-block record.
+- **Tests** (`tests/av1_txtype.tcyr`, 142 assertions): tables, `get_tx_set`
+  known-answers (intra/inter/reduced), `compute_tx_type` (luma/chroma/lossless/
+  large-tx/not-in-set gating), and `transform_type` decode/encode round-trips
+  over every Set1 (7) and Set2 (5) tx type — with both raw-`YMode` and
+  filter-intra `intraDir` — in both `disable_cdf_update` modes, plus an adaptive
+  multi-block round-trip.
+
+### Changed
+- **coeffs seam** (`src/av1_coeffs.cyr`): `av1_coeffs_decode`/`_encode` no longer
+  take `PlaneTxType` — decode reads `transform_type` (a luma block) + derives
+  the tx type via `compute_tx_type` and returns it via an out pointer; encode
+  takes the target luma tx type and writes the matching `intra_tx_type`. Both now
+  take the non-coeff CDF context (`ncc`, for `intra_tx_type`) alongside `cc` and
+  an `Av1TxTypeCtx`. Downstream coefficient reading is unchanged; the existing
+  round-trips hold (DCT_DCT blocks with `base_q_idx = 0` produce a byte-identical
+  stream). The V_DCT case is now a genuine `intra_tx_type` round-trip.
+- **Tx_Size_Sqr tables** moved from `av1_coeffs.cyr` to `av1_txsize.cyr`
+  (`av1_tx_size_sqr` / `_up` / `_ctx`) — they are tx-size properties and
+  `get_tx_set` needs them. The include order now places `av1_txtype` before
+  `av1_coeffs`.
+
+### Notes
+- `drishti_version()` → 722. A transform block now decodes with its **own**
+  computed transform type. Next in the block-decode arc (bite 5): the residual
+  driver (`residual()` / `transform_block()`, 5.11.34/35) — per tx block:
+  predict_intra → coeffs() → reconstruct() — then the partition tree and the
+  tile/frame loop toward a decoded keyframe.
+
 ## [0.7.21] - 2026-07-11
 
 Bite 3 of the AV1 **block/partition decode** arc: the intra **transform-size

@@ -1,0 +1,212 @@
+# src/av1_txtype.cyr — AV1 transform-type derivation (spec 5.11.48 transform_type
+# + 5.11.40 compute_tx_type + get_tx_set) and the intra_tx_type CDF-selection
+# context. Bite 4 of the block/partition decode arc: this is the seam spliced
+# INTO the coeffs loop (av1_coeffs) — for a luma block, transform_type reads the
+# intra_tx_type symbol after all_zero and compute_tx_type derives the block's
+# PlaneTxType (which the scan + coeff contexts then use, and the residual driver
+# feeds to the inverse transform). Consumes the 0.7.19 intra-tx CDFs
+# (av1_ncdf_intra_tx_set1/set2).
+#
+# SCOPE (this bite, intra keyframe baseline): the INTRA transform-type path.
+# get_tx_set is implemented for both is_inter branches (faithful), but the
+# in-set table + compute_tx_type chroma path here are intra-only
+# (Tx_Type_In_Set_Intra + Mode_To_Txfm[UVMode]); the inter co-located-luma
+# chroma derivation + Tx_Type_In_Set_Inter are deferred to the inter arc (roadmap.md).
+# Segmentation qindex is also deferred (roadmap.md) — for a keyframe the qindex
+# the transform_type gate reads is base_q_idx.
+#
+# FLAT module — wiring in src/main.cyr after av1_txsize.cyr, BEFORE av1_coeffs
+# (which calls transform_type / compute_tx_type). Family av1_. Depends on:
+# av1_symbol (sym read/write), av1_noncoeffcdf (av1_ncdf_intra_tx_set*),
+# av1_txsize (av1_tx_size_sqr / _up), av1_itx (AV1_DCT_DCT .. AV1_H_DCT tx-type
+# enum), drishti (DR_OK).
+
+enum Av1TxTypeConst {
+    AV1_TX_SET_DCTONLY = 0;
+    AV1_TX_SET_INTRA_1 = 1;
+    AV1_TX_SET_INTRA_2 = 2;
+    AV1_TX_SET_INTER_1 = 1;
+    AV1_TX_SET_INTER_2 = 2;
+    AV1_TX_SET_INTER_3 = 3;
+    AV1_TXSZ_16X16     = 2;    # Tx_Size_Sqr index for a 16x16 square tx
+    AV1_TXSZ_32X32     = 3;    # Tx_Size_Sqr index for a 32x32 square tx
+}
+
+# ================================================================
+# Tables — one lazily-built blob (79 i64):
+#   [0..13]  Mode_To_Txfm[14]           (UVMode -> TxType, UV_INTRA_MODES_CFL)
+#   [14..20] Tx_Type_Intra_Inv_Set1[7]  (intra_tx_type -> TxType, TX_SET_INTRA_1)
+#   [21..25] Tx_Type_Intra_Inv_Set2[5]  (intra_tx_type -> TxType, TX_SET_INTRA_2)
+#   [26..73] Tx_Type_In_Set_Intra[3][16]
+#   [74..78] Filter_Intra_Mode_To_Intra_Dir[5]
+# TxType enum values are the AV1_* constants from av1_itx.
+# ================================================================
+var Av1_TxType = 0;
+fn av1_txt_fill16(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15) {
+    store64(t + ((off + 0) * 8), v0);    store64(t + ((off + 1) * 8), v1);
+    store64(t + ((off + 2) * 8), v2);    store64(t + ((off + 3) * 8), v3);
+    store64(t + ((off + 4) * 8), v4);    store64(t + ((off + 5) * 8), v5);
+    store64(t + ((off + 6) * 8), v6);    store64(t + ((off + 7) * 8), v7);
+    store64(t + ((off + 8) * 8), v8);    store64(t + ((off + 9) * 8), v9);
+    store64(t + ((off + 10) * 8), v10);  store64(t + ((off + 11) * 8), v11);
+    store64(t + ((off + 12) * 8), v12);  store64(t + ((off + 13) * 8), v13);
+    store64(t + ((off + 14) * 8), v14);  store64(t + ((off + 15) * 8), v15);
+    return 0;
+}
+fn av1_txtype_tables(): i64 {
+    if (Av1_TxType != 0) { return Av1_TxType; }
+    var t = alloc(79 * 8);          # 79 i64
+    if (t == 0) { return 0; }
+    # Mode_To_Txfm[14]: DC,V,H,D45,D135,D113,D157,D203,D67,SMOOTH,SMOOTH_V,SMOOTH_H,PAETH,CFL
+    store64(t + (0 * 8), AV1_DCT_DCT);    store64(t + (1 * 8), AV1_ADST_DCT);
+    store64(t + (2 * 8), AV1_DCT_ADST);   store64(t + (3 * 8), AV1_DCT_DCT);
+    store64(t + (4 * 8), AV1_ADST_ADST);  store64(t + (5 * 8), AV1_ADST_DCT);
+    store64(t + (6 * 8), AV1_DCT_ADST);   store64(t + (7 * 8), AV1_DCT_ADST);
+    store64(t + (8 * 8), AV1_ADST_DCT);   store64(t + (9 * 8), AV1_ADST_ADST);
+    store64(t + (10 * 8), AV1_ADST_DCT);  store64(t + (11 * 8), AV1_DCT_ADST);
+    store64(t + (12 * 8), AV1_ADST_ADST); store64(t + (13 * 8), AV1_DCT_DCT);
+    # Tx_Type_Intra_Inv_Set1[7] = { IDTX, DCT_DCT, V_DCT, H_DCT, ADST_ADST, ADST_DCT, DCT_ADST }
+    store64(t + (14 * 8), AV1_IDTX);      store64(t + (15 * 8), AV1_DCT_DCT);
+    store64(t + (16 * 8), AV1_V_DCT);     store64(t + (17 * 8), AV1_H_DCT);
+    store64(t + (18 * 8), AV1_ADST_ADST); store64(t + (19 * 8), AV1_ADST_DCT);
+    store64(t + (20 * 8), AV1_DCT_ADST);
+    # Tx_Type_Intra_Inv_Set2[5] = { IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST }
+    store64(t + (21 * 8), AV1_IDTX);      store64(t + (22 * 8), AV1_DCT_DCT);
+    store64(t + (23 * 8), AV1_ADST_ADST); store64(t + (24 * 8), AV1_ADST_DCT);
+    store64(t + (25 * 8), AV1_DCT_ADST);
+    # Tx_Type_In_Set_Intra[3][16] — membership flags per (set, TxType).
+    av1_txt_fill16(t, 26, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);  # DCTONLY
+    av1_txt_fill16(t, 42, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0);  # INTRA_1
+    av1_txt_fill16(t, 58, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0);  # INTRA_2
+    # Filter_Intra_Mode_To_Intra_Dir[5] = { DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED }
+    store64(t + (74 * 8), AV1_DC_PRED);   store64(t + (75 * 8), AV1_V_PRED);
+    store64(t + (76 * 8), AV1_H_PRED);    store64(t + (77 * 8), AV1_D157_PRED);
+    store64(t + (78 * 8), AV1_DC_PRED);
+    Av1_TxType = t;
+    return t;
+}
+fn av1_mode_to_txfm(uv_mode): i64 { return load64(av1_txtype_tables() + (uv_mode * 8)); }
+fn av1_intra_tx_inv_set1(idx): i64 { return load64(av1_txtype_tables() + ((14 + idx) * 8)); }
+fn av1_intra_tx_inv_set2(idx): i64 { return load64(av1_txtype_tables() + ((21 + idx) * 8)); }
+fn av1_is_tx_type_in_set_intra(tx_set, tx_type): i64 {
+    return load64(av1_txtype_tables() + ((26 + (tx_set * 16) + tx_type) * 8));
+}
+fn av1_filter_intra_to_dir(fi_mode): i64 { return load64(av1_txtype_tables() + ((74 + fi_mode) * 8)); }
+
+# Reverse lookups (encode): TxType -> intra_tx_type index in the inv set. A
+# valid encoder-chosen TxType is always present; DCT_DCT (index 1) is the safe
+# fallback if a caller passes a type not in the set.
+fn av1_intra_tx_fwd_set1(tx_type): i64 {
+    var i = 0;
+    while (i < 7) { if (av1_intra_tx_inv_set1(i) == tx_type) { return i; } i = i + 1; }
+    return 1;
+}
+fn av1_intra_tx_fwd_set2(tx_type): i64 {
+    var i = 0;
+    while (i < 5) { if (av1_intra_tx_inv_set2(i) == tx_type) { return i; } i = i + 1; }
+    return 1;
+}
+
+# ================================================================
+# Av1TxTypeCtx — the per-block inputs transform_type / compute_tx_type read.
+# Built by the block loop from the mode info (Av1ModeInfo) + frame header.
+# ================================================================
+enum Av1TxTypeCtxOff {
+    AV1TTC_YMODE      = 0;    # YMode (0..12)
+    AV1TTC_UVMODE     = 8;    # UVMode (0..13)
+    AV1TTC_USE_FI     = 16;   # use_filter_intra (0/1)
+    AV1TTC_FI_MODE    = 24;   # filter_intra_mode (0..4)
+    AV1TTC_IS_INTER   = 32;   # is_inter (0 for intra keyframe)
+    AV1TTC_LOSSLESS   = 40;   # Lossless (segment)
+    AV1TTC_BASE_Q     = 48;   # the qindex the gate reads (base_q_idx for keyframe)
+    AV1TTC_REDUCED_TX = 56;   # reduced_tx_set (frame header)
+    AV1TTC_SIZE       = 64;
+}
+fn av1_txtypectx_new(): i64 {
+    var c = alloc(AV1TTC_SIZE);
+    if (c == 0) { return 0; }
+    store64(c + AV1TTC_YMODE, 0);
+    store64(c + AV1TTC_UVMODE, 0);
+    store64(c + AV1TTC_USE_FI, 0);
+    store64(c + AV1TTC_FI_MODE, 0);
+    store64(c + AV1TTC_IS_INTER, 0);
+    store64(c + AV1TTC_LOSSLESS, 0);
+    store64(c + AV1TTC_BASE_Q, 0);
+    store64(c + AV1TTC_REDUCED_TX, 0);
+    return c;
+}
+
+# get_tx_set(txSz) (5.11.48). is_inter / reduced_tx_set from the block/frame.
+fn av1_get_tx_set(tx_size, is_inter, reduced_tx_set): i64 {
+    var sqr = av1_tx_size_sqr(tx_size);
+    var sqr_up = av1_tx_size_sqr_up(tx_size);
+    if (sqr_up > AV1_TXSZ_32X32) { return AV1_TX_SET_DCTONLY; }
+    if (is_inter) {
+        if (reduced_tx_set || (sqr_up == AV1_TXSZ_32X32)) { return AV1_TX_SET_INTER_3; }
+        if (sqr == AV1_TXSZ_16X16) { return AV1_TX_SET_INTER_2; }
+        return AV1_TX_SET_INTER_1;
+    }
+    if (sqr_up == AV1_TXSZ_32X32) { return AV1_TX_SET_DCTONLY; }
+    if (reduced_tx_set) { return AV1_TX_SET_INTRA_2; }
+    if (sqr == AV1_TXSZ_16X16) { return AV1_TX_SET_INTRA_2; }
+    return AV1_TX_SET_INTRA_1;
+}
+
+# intraDir (intra_tx_type ctx, spec 9.3): filter-intra maps its mode to a dir,
+# else the raw YMode.
+fn av1_intra_tx_dir(use_fi, fi_mode, y_mode): i64 {
+    if (use_fi) { return av1_filter_intra_to_dir(fi_mode); }
+    return y_mode;
+}
+
+# ================================================================
+# transform_type (5.11.48) — LUMA only (plane 0). Reads intra_tx_type when the
+# tx set is non-DCT-only and the qindex > 0; returns the luma TxType. The write
+# is the exact inverse (given the target luma TxType).
+# ================================================================
+fn av1_transform_type_decode(sd, ncc, tx_size, ttx): i64 {
+    var set = av1_get_tx_set(tx_size, load64(ttx + AV1TTC_IS_INTER), load64(ttx + AV1TTC_REDUCED_TX));
+    if ((set > 0) && (load64(ttx + AV1TTC_BASE_Q) > 0)) {
+        var intra_dir = av1_intra_tx_dir(load64(ttx + AV1TTC_USE_FI),
+        load64(ttx + AV1TTC_FI_MODE), load64(ttx + AV1TTC_YMODE));
+        var sqr = av1_tx_size_sqr(tx_size);
+        if (set == AV1_TX_SET_INTRA_1) {
+            var s1 = av1_sym_read_symbol(sd, av1_ncdf_intra_tx_set1(ncc, sqr, intra_dir), 7);
+            return av1_intra_tx_inv_set1(s1);
+        }
+        var s2 = av1_sym_read_symbol(sd, av1_ncdf_intra_tx_set2(ncc, sqr, intra_dir), 5);
+        return av1_intra_tx_inv_set2(s2);
+    }
+    return AV1_DCT_DCT;
+}
+fn av1_transform_type_encode(enc, ncc, tx_size, ttx, tx_type): i64 {
+    var set = av1_get_tx_set(tx_size, load64(ttx + AV1TTC_IS_INTER), load64(ttx + AV1TTC_REDUCED_TX));
+    if ((set > 0) && (load64(ttx + AV1TTC_BASE_Q) > 0)) {
+        var intra_dir = av1_intra_tx_dir(load64(ttx + AV1TTC_USE_FI),
+        load64(ttx + AV1TTC_FI_MODE), load64(ttx + AV1TTC_YMODE));
+        var sqr = av1_tx_size_sqr(tx_size);
+        if (set == AV1_TX_SET_INTRA_1) {
+            return av1_sym_encode_symbol(enc, av1_ncdf_intra_tx_set1(ncc, sqr, intra_dir), 7,
+            av1_intra_tx_fwd_set1(tx_type));
+        }
+        return av1_sym_encode_symbol(enc, av1_ncdf_intra_tx_set2(ncc, sqr, intra_dir), 5,
+        av1_intra_tx_fwd_set2(tx_type));
+    }
+    return DR_OK;
+}
+
+# compute_tx_type (5.11.40) — the block's PlaneTxType. Lossless / txSzSqrUp>32x32
+# force DCT_DCT. Luma (plane 0) returns the value transform_type stored
+# (luma_tx_type). Chroma (intra) uses Mode_To_Txfm[UVMode], gated to DCT_DCT if
+# not in the set. (Inter chroma co-location deferred to the inter arc, roadmap.md;
+# is_inter=0 in this scope.)
+fn av1_compute_tx_type(plane, tx_size, ttx, luma_tx_type): i64 {
+    if (load64(ttx + AV1TTC_LOSSLESS) || (av1_tx_size_sqr_up(tx_size) > AV1_TXSZ_32X32)) {
+        return AV1_DCT_DCT;
+    }
+    if (plane == 0) { return luma_tx_type; }
+    var set = av1_get_tx_set(tx_size, load64(ttx + AV1TTC_IS_INTER), load64(ttx + AV1TTC_REDUCED_TX));
+    var tx_type = av1_mode_to_txfm(load64(ttx + AV1TTC_UVMODE));
+    if (av1_is_tx_type_in_set_intra(set, tx_type) == 0) { return AV1_DCT_DCT; }
+    return tx_type;
+}

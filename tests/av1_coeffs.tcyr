@@ -8,6 +8,16 @@ include "src/av1_coeffs.cyr"
 
 fn az(p, n): i64 { var k = 0; while (k < n) { store64(p + (k * 8), 0); k = k + 1; } return 0; }
 
+# A tx-type context for the coeffs seam. Defaults (DC modes, intra, non-lossless,
+# base_q_idx 0) force DCT_DCT with NO intra_tx_type read — the coeff bitstream is
+# then identical to the pre-0.7.22 stream. base_q_idx > 0 is set only for a
+# non-DCT_DCT luma tx_type so transform_type actually reads/writes intra_tx_type.
+fn mk_ttx(tx_type): i64 {
+    var ttx = av1_txtypectx_new();
+    if (tx_type != AV1_DCT_DCT) { store64(ttx + AV1TTC_BASE_Q, 32); }
+    return ttx;
+}
+
 fn test_tx_size_ctx() {
     assert_eq(av1_tx_size_ctx(0), 0, "txSzCtx 4x4");
     assert_eq(av1_tx_size_ctx(1), 1, "txSzCtx 8x8");
@@ -97,9 +107,12 @@ fn coeffs_roundtrip_d(tx_size, tx_type, plane, quant, seg_eob, eob, disable): i6
     az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
     var w = 1 << av1_tx_width_log2(tx_size);
     var h = 1 << av1_tx_height_log2(tx_size);
+    var ttx = mk_ttx(tx_type);
     var cce = av1_ccdf_new(0);
+    var nce = av1_noncoeff_cdf_blob();
+    if (disable == 0) { nce = av1_ncdf_new(); }
     var enc = av1_sym_enc_init(512, disable);
-    av1_coeffs_encode(enc, cce, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, al, ll, ad, ld, quant, eob);
+    av1_coeffs_encode(enc, cce, nce, plane, tx_size, ttx, tx_type, 0, 0, 100, 100, w, h, al, ll, ad, ld, quant, eob);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "encode ok");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -110,9 +123,13 @@ fn coeffs_roundtrip_d(tx_size, tx_type, plane, quant, seg_eob, eob, disable): i6
     az(dal, 256); az(dll, 256); az(dad, 256); az(dld, 256);
     var dq = alloc(seg_eob * 8);
     var ccd = av1_ccdf_new(0);
+    var ncd = av1_noncoeff_cdf_blob();
+    if (disable == 0) { ncd = av1_ncdf_new(); }
+    var ott = alloc(8);
     var sd = av1_sym_dec_init(out, olen, disable);
-    var deob = av1_coeffs_decode(sd, ccd, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, dal, dll, dad, dld, dq);
+    var deob = av1_coeffs_decode(sd, ccd, ncd, plane, tx_size, ttx, 0, 0, 100, 100, w, h, dal, dll, dad, dld, dq, ott);
     assert_eq(deob, eob, "eob round-trips");
+    assert_eq(load64(ott), tx_type, "PlaneTxType round-trips");
     var i = 0;
     while (i < seg_eob) {
         assert_eq(load64(dq + (i * 8)), load64(quant + (i * 8)), "coeff round-trips");
@@ -218,12 +235,18 @@ fn test_coeffs_truncation() {
     # reads far past the buffer into padding, exercising the exhausted reader.
     var sizes = alloc(3 * 8);
     store64(sizes + 0, 0); store64(sizes + 8, 1); store64(sizes + 16, 2);
+    var ncc = av1_noncoeff_cdf_blob();
+    var ott = alloc(8);
+    # base_q_idx > 0 so a luma block ALSO exercises the intra_tx_type read under
+    # truncation (the transform_type path must terminate too, not just coeffs).
+    var ttx = av1_txtypectx_new();
+    store64(ttx + AV1TTC_BASE_Q, 32);
     var k = 0;
     while (k < 3) {
         az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
         var cc = av1_ccdf_new(0);
         var sd = av1_sym_dec_init(buf, 4, 1);
-        av1_coeffs_decode(sd, cc, 0, load64(sizes + (k * 8)), AV1_DCT_DCT, 0, 0, 100, 100, 4, 4, al, ll, ad, ld, dq);
+        av1_coeffs_decode(sd, cc, ncc, 0, load64(sizes + (k * 8)), ttx, 0, 0, 100, 100, 4, 4, al, ll, ad, ld, dq, ott);
         assert_eq(1, 1, "truncated decode terminated (no hang)");
         k = k + 1;
     }
@@ -266,9 +289,14 @@ fn test_coeffs_adaptive_multiblock() {
     var ad = alloc(64 * 8);
     var ld = alloc(64 * 8);
     az(al, 64); az(ll, 64); az(ad, 64); az(ld, 64);
+    var ttx = mk_ttx(AV1_DCT_DCT);
+    var nce = av1_ncdf_new();
+    var ncd = av1_ncdf_new();
+    var ota = alloc(8);
+    var otb = alloc(8);
     var enc = av1_sym_enc_init(512, 0);
-    av1_coeffs_encode(enc, cce, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, al, ll, ad, ld, qa, 3);
-    av1_coeffs_encode(enc, cce, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, al, ll, ad, ld, qb, 5);
+    av1_coeffs_encode(enc, cce, nce, 0, 0, ttx, AV1_DCT_DCT, 0, 0, 100, 100, w, h, al, ll, ad, ld, qa, 3);
+    av1_coeffs_encode(enc, cce, nce, 0, 0, ttx, AV1_DCT_DCT, 0, 0, 100, 100, w, h, al, ll, ad, ld, qb, 5);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dal = alloc(64 * 8);
@@ -279,8 +307,8 @@ fn test_coeffs_adaptive_multiblock() {
     var da = alloc(16 * 8);
     var db = alloc(16 * 8);
     var sd = av1_sym_dec_init(out, olen, 0);
-    var ea = av1_coeffs_decode(sd, ccd, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, dal, dll, dad, dld, da);
-    var eb = av1_coeffs_decode(sd, ccd, 0, 0, AV1_DCT_DCT, 0, 0, 100, 100, w, h, dal, dll, dad, dld, db);
+    var ea = av1_coeffs_decode(sd, ccd, ncd, 0, 0, ttx, 0, 0, 100, 100, w, h, dal, dll, dad, dld, da, ota);
+    var eb = av1_coeffs_decode(sd, ccd, ncd, 0, 0, ttx, 0, 0, 100, 100, w, h, dal, dll, dad, dld, db, otb);
     assert_eq(ea, 3, "block A eob");
     assert_eq(eb, 5, "block B eob");
     var i = 0;

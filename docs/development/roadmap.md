@@ -134,9 +134,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   angle / filter-intra decode + inverse encode) with the shared block-size
   conversion tables; 0.7.21 `src/av1_txsize.cyr` the intra transform-size
   read (`read_tx_size` / `tx_depth` decode + inverse encode + the
-  Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size tables); then
-  compute_tx_type → residual driver → decode_partition tree → tile/frame
-  loop = decoded keyframe)**.
+  Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size tables); 0.7.22
+  `src/av1_txtype.cyr` the transform-type derivation (`compute_tx_type` /
+  `transform_type` / `get_tx_set`) spliced into the coeffs loop, retiring the
+  PlaneTxType caller-input; then residual driver → decode_partition tree →
+  tile/frame loop = decoded keyframe)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
