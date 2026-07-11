@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-07-10
+
+Continues the AV1 coefficient decode with the level-context layer (spec
+8.3.2 CDF selection) in a new `src/av1_coeff.cyr` module — the contexts
+that pick each coefficient symbol's CDF. A 4-agent adversarial review
+(coeff_base logic, coeff_br/tx_class logic, table diffs + a libaom
+`txb_common` cross-check, and an independent recompute of every
+hand-traced known-answer) confirmed the logic and tables with no defects.
+**10,042 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 coefficient level contexts** (`src/av1_coeff.cyr`, new flat
+  module): `av1_get_tx_class` (TX_CLASS_2D/HORIZ/VERT), `av1_eob_pt_ctx`,
+  `av1_get_coeff_base_ctx` (the `coeff_base` / `coeff_base_eob` context —
+  the neighbour-magnitude template over `Quant[]`, the `Coeff_Base_Ctx_Offset`
+  position offset, and the EOB variant), and `av1_get_br_ctx` (the
+  `coeff_br` context), plus their offset tables (`Coeff_Base_Ctx_Offset`
+  [19][5][5], `Coeff_Base_Pos_Ctx_Offset`, `Sig_Ref_Diff_Offset`,
+  `Mag_Ref_Offset_With_Tx_Class`, `Adjusted_Tx_Size`). `tx_type` is a
+  caller input; the `txb_skip`/`dc_sign` contexts (which need the per-tile
+  neighbour arrays) are deferred to the reading-loop bite. 47 assertions:
+  the context functions pinned by hand-traced known-answers on constructed
+  `Quant[]` arrays (2D / VERT / HORIZ paths, the EOB variants), and the
+  offset tables by a weighted checksum + spot values.
+
+### Notes
+- `drishti_version()` → 714. Next: the default coefficient CDF tables +
+  the `coeffs()` reading loop (with the `txb_skip`/`dc_sign` contexts)
+  that walks the scans, consumes the symbol decoder, and fills `Quant[]`.
+
 ## [0.7.13] - 2026-07-10
 
 Opens the AV1 **coefficient decode** with the scan-order layer (spec

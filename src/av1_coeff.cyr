@@ -1,0 +1,295 @@
+# src/av1_coeff.cyr — AV1 coefficient level contexts (spec 8.3.2 CDF
+# selection). The coeffs() decode selects each coefficient symbol's CDF by a
+# context derived from the already-decoded neighbour levels in Quant[] and
+# the transform geometry. This module implements the Quant-neighbour-based
+# contexts — get_tx_class, get_coeff_base_ctx (coeff_base / coeff_base_eob),
+# get_br_ctx (coeff_br), and the eob_pt context — plus their offset tables
+# (Coeff_Base_Ctx_Offset, Coeff_Base_Pos_Ctx_Offset, Sig_Ref_Diff_Offset,
+# Mag_Ref_Offset_With_Tx_Class, Adjusted_Tx_Size).
+#
+# The txb_skip (all_zero) and dc_sign contexts depend on the per-tile
+# AboveLevelContext / LeftLevelContext / *DcContext neighbour arrays (block-
+# decode state); they land with the coeffs() reading loop (roadmap.md).
+#
+# FLAT module (no includes) — wiring in src/main.cyr, after av1_itx.cyr
+# (reuses av1_tx_width_log2 / av1_tx_height_log2 / av1_min / av1_itx_abs and
+# the AV1_V_*/AV1_H_* tx-type enum). Family av1_. tx_type is a caller input
+# (compute_tx_type is read during block decode); Quant[] is indexed with the
+# ADJUSTED tx width (1 << Tx_Width_Log2[Adjusted_Tx_Size[txSz]]) as stride.
+# Coeff_Base_Ctx_Offset extracted from the spec; the rest transcribed.
+
+enum Av1CoeffConst {
+    AV1_NUM_BASE_LEVELS         = 2;
+    AV1_COEFF_BASE_RANGE        = 12;
+    AV1_BR_CDF_SIZE             = 4;
+    AV1_SIG_COEF_CONTEXTS_EOB   = 4;
+    AV1_SIG_COEF_CONTEXTS_2D    = 26;
+    AV1_SIG_COEF_CONTEXTS       = 42;
+    AV1_SIG_REF_DIFF_OFFSET_NUM = 5;
+    AV1_TX_CLASS_2D             = 0;
+    AV1_TX_CLASS_HORIZ          = 1;
+    AV1_TX_CLASS_VERT           = 2;
+}
+
+# Coeff_Base_Ctx_Offset[TX_SIZES_ALL][5][5] flattened as (txSz*5 + r)*5 + c.
+var Av1_CBCO = 0;
+# Small tables: Adjusted_Tx_Size[19] at 0, Sig_Ref_Diff_Offset[3][5][2] at 19,
+# Mag_Ref_Offset_With_Tx_Class[3][3][2] at 49, Coeff_Base_Pos_Ctx_Offset[3] at 67.
+var Av1_CTabs = 0;
+
+fn av1_cbfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
+    store64(t + ((off + 0) * 8), v0);   store64(t + ((off + 1) * 8), v1);
+    store64(t + ((off + 2) * 8), v2);   store64(t + ((off + 3) * 8), v3);
+    store64(t + ((off + 4) * 8), v4);   store64(t + ((off + 5) * 8), v5);
+    store64(t + ((off + 6) * 8), v6);   store64(t + ((off + 7) * 8), v7);
+    return 0;
+}
+
+fn av1_cbco(): i64 {
+    if (Av1_CBCO != 0) { return Av1_CBCO; }
+    var t = alloc(480 * 8);
+    if (t == 0) { return 0; }
+    av1_cbfill8(t, 0, 0, 1, 6, 6, 0, 1, 6, 6);
+    av1_cbfill8(t, 8, 21, 0, 6, 6, 21, 21, 0, 6);
+    av1_cbfill8(t, 16, 21, 21, 21, 0, 0, 0, 0, 0);
+    av1_cbfill8(t, 24, 0, 0, 1, 6, 6, 21, 1, 6);
+    av1_cbfill8(t, 32, 6, 21, 21, 6, 6, 21, 21, 21);
+    av1_cbfill8(t, 40, 6, 21, 21, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 48, 21, 21, 0, 1, 6, 6, 21, 1);
+    av1_cbfill8(t, 56, 6, 6, 21, 21, 6, 6, 21, 21);
+    av1_cbfill8(t, 64, 21, 6, 21, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 72, 21, 21, 21, 0, 1, 6, 6, 21);
+    av1_cbfill8(t, 80, 1, 6, 6, 21, 21, 6, 6, 21);
+    av1_cbfill8(t, 88, 21, 21, 6, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 96, 21, 21, 21, 21, 0, 1, 6, 6);
+    av1_cbfill8(t, 104, 21, 1, 6, 6, 21, 21, 6, 6);
+    av1_cbfill8(t, 112, 21, 21, 21, 6, 21, 21, 21, 21);
+    av1_cbfill8(t, 120, 21, 21, 21, 21, 21, 0, 11, 11);
+    av1_cbfill8(t, 128, 11, 0, 11, 11, 11, 11, 0, 6);
+    av1_cbfill8(t, 136, 6, 21, 21, 0, 6, 21, 21, 21);
+    av1_cbfill8(t, 144, 0, 21, 21, 21, 21, 0, 0, 16);
+    av1_cbfill8(t, 152, 6, 6, 21, 16, 16, 6, 21, 21);
+    av1_cbfill8(t, 160, 16, 16, 21, 21, 21, 16, 16, 21);
+    av1_cbfill8(t, 168, 21, 21, 0, 0, 0, 0, 0, 0);
+    av1_cbfill8(t, 176, 11, 11, 11, 11, 11, 11, 11, 11);
+    av1_cbfill8(t, 184, 11, 6, 6, 21, 21, 21, 6, 21);
+    av1_cbfill8(t, 192, 21, 21, 21, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 200, 0, 16, 6, 6, 21, 16, 16, 6);
+    av1_cbfill8(t, 208, 21, 21, 16, 16, 21, 21, 21, 16);
+    av1_cbfill8(t, 216, 16, 21, 21, 21, 16, 16, 21, 21);
+    av1_cbfill8(t, 224, 21, 0, 11, 11, 11, 11, 11, 11);
+    av1_cbfill8(t, 232, 11, 11, 11, 6, 6, 21, 21, 21);
+    av1_cbfill8(t, 240, 6, 21, 21, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 248, 21, 21, 0, 16, 6, 6, 21, 16);
+    av1_cbfill8(t, 256, 16, 6, 21, 21, 16, 16, 21, 21);
+    av1_cbfill8(t, 264, 21, 16, 16, 21, 21, 21, 16, 16);
+    av1_cbfill8(t, 272, 21, 21, 21, 0, 11, 11, 11, 11);
+    av1_cbfill8(t, 280, 11, 11, 11, 11, 11, 6, 6, 21);
+    av1_cbfill8(t, 288, 21, 21, 6, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 296, 21, 21, 21, 21, 0, 16, 6, 6);
+    av1_cbfill8(t, 304, 21, 16, 16, 6, 21, 21, 16, 16);
+    av1_cbfill8(t, 312, 21, 21, 21, 16, 16, 21, 21, 21);
+    av1_cbfill8(t, 320, 16, 16, 21, 21, 21, 0, 11, 11);
+    av1_cbfill8(t, 328, 11, 0, 11, 11, 11, 11, 0, 6);
+    av1_cbfill8(t, 336, 6, 21, 21, 0, 6, 21, 21, 21);
+    av1_cbfill8(t, 344, 0, 21, 21, 21, 21, 0, 0, 16);
+    av1_cbfill8(t, 352, 6, 6, 21, 16, 16, 6, 21, 21);
+    av1_cbfill8(t, 360, 16, 16, 21, 21, 21, 16, 16, 21);
+    av1_cbfill8(t, 368, 21, 21, 0, 0, 0, 0, 0, 0);
+    av1_cbfill8(t, 376, 11, 11, 11, 11, 11, 11, 11, 11);
+    av1_cbfill8(t, 384, 11, 6, 6, 21, 21, 21, 6, 21);
+    av1_cbfill8(t, 392, 21, 21, 21, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 400, 0, 16, 6, 6, 21, 16, 16, 6);
+    av1_cbfill8(t, 408, 21, 21, 16, 16, 21, 21, 21, 16);
+    av1_cbfill8(t, 416, 16, 21, 21, 21, 16, 16, 21, 21);
+    av1_cbfill8(t, 424, 21, 0, 11, 11, 11, 11, 11, 11);
+    av1_cbfill8(t, 432, 11, 11, 11, 6, 6, 21, 21, 21);
+    av1_cbfill8(t, 440, 6, 21, 21, 21, 21, 21, 21, 21);
+    av1_cbfill8(t, 448, 21, 21, 0, 16, 6, 6, 21, 16);
+    av1_cbfill8(t, 456, 16, 6, 21, 21, 16, 16, 21, 21);
+    av1_cbfill8(t, 464, 21, 16, 16, 21, 21, 21, 16, 16);
+    av1_cbfill8(t, 472, 21, 21, 21, 0, 0, 0, 0, 0);
+    Av1_CBCO = t;
+    return t;
+}
+fn av1_coeff_base_ctx_offset(tx_size, r, c): i64 {
+    return load64(av1_cbco() + ((((tx_size * 5) + r) * 5 + c) * 8));
+}
+
+fn av1_ctabs(): i64 {
+    if (Av1_CTabs != 0) { return Av1_CTabs; }
+    var t = alloc(70 * 8);
+    if (t == 0) { return 0; }
+    # Adjusted_Tx_Size[19]
+    store64(t + ((0+0) * 8), 0);
+    store64(t + ((0+1) * 8), 1);
+    store64(t + ((0+2) * 8), 2);
+    store64(t + ((0+3) * 8), 3);
+    store64(t + ((0+4) * 8), 3);
+    store64(t + ((0+5) * 8), 5);
+    store64(t + ((0+6) * 8), 6);
+    store64(t + ((0+7) * 8), 7);
+    store64(t + ((0+8) * 8), 8);
+    store64(t + ((0+9) * 8), 9);
+    store64(t + ((0+10) * 8), 10);
+    store64(t + ((0+11) * 8), 3);
+    store64(t + ((0+12) * 8), 3);
+    store64(t + ((0+13) * 8), 13);
+    store64(t + ((0+14) * 8), 14);
+    store64(t + ((0+15) * 8), 15);
+    store64(t + ((0+16) * 8), 16);
+    store64(t + ((0+17) * 8), 9);
+    store64(t + ((0+18) * 8), 10);
+    # Sig_Ref_Diff_Offset[3][5][2]
+    store64(t + ((19+0) * 8), 0);
+    store64(t + ((19+1) * 8), 1);
+    store64(t + ((19+2) * 8), 1);
+    store64(t + ((19+3) * 8), 0);
+    store64(t + ((19+4) * 8), 1);
+    store64(t + ((19+5) * 8), 1);
+    store64(t + ((19+6) * 8), 0);
+    store64(t + ((19+7) * 8), 2);
+    store64(t + ((19+8) * 8), 2);
+    store64(t + ((19+9) * 8), 0);
+    store64(t + ((19+10) * 8), 0);
+    store64(t + ((19+11) * 8), 1);
+    store64(t + ((19+12) * 8), 1);
+    store64(t + ((19+13) * 8), 0);
+    store64(t + ((19+14) * 8), 0);
+    store64(t + ((19+15) * 8), 2);
+    store64(t + ((19+16) * 8), 0);
+    store64(t + ((19+17) * 8), 3);
+    store64(t + ((19+18) * 8), 0);
+    store64(t + ((19+19) * 8), 4);
+    store64(t + ((19+20) * 8), 0);
+    store64(t + ((19+21) * 8), 1);
+    store64(t + ((19+22) * 8), 1);
+    store64(t + ((19+23) * 8), 0);
+    store64(t + ((19+24) * 8), 2);
+    store64(t + ((19+25) * 8), 0);
+    store64(t + ((19+26) * 8), 3);
+    store64(t + ((19+27) * 8), 0);
+    store64(t + ((19+28) * 8), 4);
+    store64(t + ((19+29) * 8), 0);
+    # Mag_Ref_Offset_With_Tx_Class[3][3][2]
+    store64(t + ((49+0) * 8), 0);
+    store64(t + ((49+1) * 8), 1);
+    store64(t + ((49+2) * 8), 1);
+    store64(t + ((49+3) * 8), 0);
+    store64(t + ((49+4) * 8), 1);
+    store64(t + ((49+5) * 8), 1);
+    store64(t + ((49+6) * 8), 0);
+    store64(t + ((49+7) * 8), 1);
+    store64(t + ((49+8) * 8), 1);
+    store64(t + ((49+9) * 8), 0);
+    store64(t + ((49+10) * 8), 0);
+    store64(t + ((49+11) * 8), 2);
+    store64(t + ((49+12) * 8), 0);
+    store64(t + ((49+13) * 8), 1);
+    store64(t + ((49+14) * 8), 1);
+    store64(t + ((49+15) * 8), 0);
+    store64(t + ((49+16) * 8), 2);
+    store64(t + ((49+17) * 8), 0);
+    # Coeff_Base_Pos_Ctx_Offset[3]
+    store64(t + ((67+0) * 8), 26);
+    store64(t + ((67+1) * 8), 31);
+    store64(t + ((67+2) * 8), 36);
+    Av1_CTabs = t;
+    return t;
+}
+fn av1_adjusted_tx_size(tx_size): i64 { return load64(av1_ctabs() + (tx_size * 8)); }
+fn av1_sig_ref_diff(tx_class, idx, dim): i64 {
+    return load64(av1_ctabs() + ((19 + (((tx_class * 5) + idx) * 2) + dim) * 8));
+}
+fn av1_mag_ref_off(tx_class, idx, dim): i64 {
+    return load64(av1_ctabs() + ((49 + (((tx_class * 3) + idx) * 2) + dim) * 8));
+}
+fn av1_coeff_base_pos_ctx(i): i64 { return load64(av1_ctabs() + ((67 + i) * 8)); }
+
+# get_tx_class(txType) — TX_CLASS_2D / HORIZ / VERT (8.3.2).
+fn av1_get_tx_class(tx_type): i64 {
+    if ((tx_type == AV1_V_DCT) || (tx_type == AV1_V_ADST) || (tx_type == AV1_V_FLIPADST)) {
+        return AV1_TX_CLASS_VERT;
+    }
+    if ((tx_type == AV1_H_DCT) || (tx_type == AV1_H_ADST) || (tx_type == AV1_H_FLIPADST)) {
+        return AV1_TX_CLASS_HORIZ;
+    }
+    return AV1_TX_CLASS_2D;
+}
+
+# eob_pt_N context (8.3.2): 0 for a 2D transform, else 1.
+fn av1_eob_pt_ctx(tx_type): i64 {
+    if (av1_get_tx_class(tx_type) == AV1_TX_CLASS_2D) { return 0; }
+    return 1;
+}
+
+# get_coeff_base_ctx (8.3.2) — context for coeff_base (is_eob 0) and
+# coeff_base_eob (is_eob 1). pos is the raster position (scan[c]); c is the
+# scan index; quant holds the already-decoded base levels (stride 1<<bwl).
+fn av1_get_coeff_base_ctx(tx_size, tx_type, pos, c, is_eob, quant): i64 {
+    var adj = av1_adjusted_tx_size(tx_size);
+    var bwl = av1_tx_width_log2(adj);
+    var width = 1 << bwl;
+    var height = 1 << av1_tx_height_log2(adj);
+    if (is_eob) {
+        if (c == 0) { return AV1_SIG_COEF_CONTEXTS - 4; }
+        if (c <= ((height << bwl) / 8)) { return AV1_SIG_COEF_CONTEXTS - 3; }
+        if (c <= ((height << bwl) / 4)) { return AV1_SIG_COEF_CONTEXTS - 2; }
+        return AV1_SIG_COEF_CONTEXTS - 1;
+    }
+    var tx_class = av1_get_tx_class(tx_type);
+    var row = pos >> bwl;
+    var col = pos - (row << bwl);
+    var mag = 0;
+    var idx = 0;
+    while (idx < AV1_SIG_REF_DIFF_OFFSET_NUM) {
+        var ref_row = row + av1_sig_ref_diff(tx_class, idx, 0);
+        var ref_col = col + av1_sig_ref_diff(tx_class, idx, 1);
+        if ((ref_row >= 0) && (ref_col >= 0) && (ref_row < height) && (ref_col < width)) {
+            mag = mag + av1_min(av1_itx_abs(load64(quant + (((ref_row << bwl) + ref_col) * 8))), 3);
+        }
+        idx = idx + 1;
+    }
+    var ctx = av1_min((mag + 1) >> 1, 4);
+    if (tx_class == AV1_TX_CLASS_2D) {
+        if ((row == 0) && (col == 0)) { return 0; }
+        return ctx + av1_coeff_base_ctx_offset(tx_size, av1_min(row, 4), av1_min(col, 4));
+    }
+    var pidx = col;
+    if (tx_class == AV1_TX_CLASS_VERT) { pidx = row; }
+    return ctx + av1_coeff_base_pos_ctx(av1_min(pidx, 2));
+}
+
+# get_br_ctx (8.3.2) — context for coeff_br. quant holds the base levels.
+fn av1_get_br_ctx(tx_size, tx_type, pos, quant): i64 {
+    var adj = av1_adjusted_tx_size(tx_size);
+    var bwl = av1_tx_width_log2(adj);
+    var txw = 1 << bwl;
+    var txh = 1 << av1_tx_height_log2(adj);
+    var row = pos >> bwl;
+    var col = pos - (row << bwl);
+    var tx_class = av1_get_tx_class(tx_type);
+    var mag = 0;
+    var idx = 0;
+    while (idx < 3) {
+        var ref_row = row + av1_mag_ref_off(tx_class, idx, 0);
+        var ref_col = col + av1_mag_ref_off(tx_class, idx, 1);
+        if ((ref_row >= 0) && (ref_col >= 0) && (ref_row < txh) && (ref_col < txw)) {
+            mag = mag + av1_min(load64(quant + (((ref_row * txw) + ref_col) * 8)),
+            AV1_COEFF_BASE_RANGE + AV1_NUM_BASE_LEVELS + 1);
+        }
+        idx = idx + 1;
+    }
+    mag = av1_min((mag + 1) >> 1, 6);
+    if (pos == 0) { return mag; }
+    if (tx_class == AV1_TX_CLASS_2D) {
+        if ((row < 2) && (col < 2)) { return mag + 7; }
+        return mag + 14;
+    }
+    if (tx_class == AV1_TX_CLASS_HORIZ) {
+        if (col == 0) { return mag + 7; }
+        return mag + 14;
+    }
+    if (row == 0) { return mag + 7; }
+    return mag + 14;
+}

@@ -6,14 +6,14 @@
 
 ## Version
 
-**0.7.13** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
-AV1 arc** opens the coefficient decode: the scan-order layer (5.11.41) in
-the new `av1_scan.cyr` module — the 32 Default/Mrow/Mcol scan tables +
-`get_scan` — on top of first-pixels reconstruction (0.7.12) and the
-complete intra + dequant path. The remaining distance to 1.0 is the rest
-of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit
-(0.11.x) + freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md)
-+ [`roadmap.md`](roadmap.md).
+**0.7.14** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
+AV1 arc** continues the coefficient decode: the level-context layer
+(8.3.2) in the new `av1_coeff.cyr` module — `get_tx_class` /
+`get_coeff_base_ctx` / `get_br_ctx` + their offset tables — on top of the
+scan orders (0.7.13) and first-pixels reconstruction. The remaining
+distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
+→ 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+[`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
 
@@ -25,11 +25,11 @@ of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (20 `[lib]` modules, dependency order)
+## Source (21 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 713, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 714, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -42,6 +42,7 @@ of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit
 | `src/av1_quant.cyr` | `av1_` | dequantization (spec 7.12.2) — Dc/Ac Qlookup tables (8/10/12-bit) + dc_q/ac_q/get_qindex/get_dc_quant/get_ac_quant |
 | `src/av1_recon.cyr` | `av1_` | reconstruct process (spec 7.12.3) — dequant + dqDenom + FLIPADST flip + residual-add glue (av1_reconstruct) |
 | `src/av1_scan.cyr` | `av1_` | coefficient scan orders (spec 5.11.41) — 32 Default/Mrow/Mcol scan tables + get_scan + scan_size |
+| `src/av1_coeff.cyr` | `av1_` | coefficient level contexts (spec 8.3.2) — get_tx_class / get_coeff_base_ctx / get_br_ctx + offset tables |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -55,10 +56,10 @@ of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 15 suites / **9,995 assertions**: drishti 51 · bits 1,211
-  · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
+- `make test` — 16 suites / **10,042 assertions**: drishti 51 · bits
+  1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
-  av1_scan 137 · h264 326 · h265 276 · vpx 287
+  av1_scan 137 · av1_coeff 47 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -80,7 +81,10 @@ of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit
   flip/add + integration/safety + libaom multi-source + independent
   known-answer recompute → all clean, no defects), and the coefficient
   scan orders (4 slices: per-value default/mrow/mcol table diffs +
-  get_scan selection + libaom cross-check → all clean)
+  get_scan selection + libaom cross-check → all clean), and the
+  coefficient level contexts (4 slices: coeff_base/coeff_br logic +
+  Coeff_Base_Ctx_Offset diff + libaom txb_common cross-check +
+  known-answer recompute → all clean)
 
 ## Dependencies
 
@@ -105,10 +109,11 @@ filter-intra prediction (0.7.9), and chroma-from-luma (0.7.10). The
 dequant + reconstruct path: dequantization (7.12.2, 0.7.11) and the
 reconstruct glue (7.12.3, 0.7.12) now turn a coefficient array +
 prediction into reconstructed pixels — **first pixels**. The
-**coefficient decode** is now underway: the scan-order layer (5.11.41,
-0.7.13, this cut) is in. Remaining `coeffs()` sub-bites: the txb context
-helpers + the default coefficient CDF tables → the `coeffs()` reading
-loop (walks the scans, consumes the symbol decoder) that fills `Quant[]`
-→ the partition/block wiring that drives predict + reconstruct per block.
-Full per-codec arc plan + the audit/freeze arcs in
+**coefficient decode** is underway: the scan-order layer (5.11.41,
+0.7.13) and the level-context helpers (8.3.2, 0.7.14, this cut) are in.
+Remaining `coeffs()` sub-bites: the default coefficient CDF tables → the
+`coeffs()` reading loop (with the `txb_skip`/`dc_sign` neighbour-array
+contexts) that walks the scans, consumes the symbol decoder, and fills
+`Quant[]` → the partition/block wiring that drives predict + reconstruct
+per block. Full per-codec arc plan + the audit/freeze arcs in
 [`roadmap.md`](roadmap.md). Nothing else in flight.
