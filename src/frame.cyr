@@ -1,0 +1,160 @@
+# @public — drishti core: the shared YUV planar-frame buffer every codec
+# decoder writes pixels into (and the encode lanes read from). One
+# `DrFrame` holds 1 (monochrome) or 3 (Y/U/V) planes of 16-bit samples,
+# so 8-, 10-, and 12-bit content share one representation; chroma planes
+# carry the frame's subsampling. Each plane is allocated with an optional
+# padding BORDER so neighbours at negative coordinates (the intra "above"
+# / "left" edge, and later inter motion-comp read-past) are addressable
+# without per-sample edge branching.
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_*) only. This is the "shared planar-frame
+# record" the roadmap parks under the AV1 intra-decode milestone (it
+# lands with the first decoder to emit pixels); VP8/H.264/H.265 reuse it.
+#
+# Sample storage: u16 little-endian (store16/load16). A plane's samples
+# live in a buffer of (stride * (h + 2*border)) u16 words, stride =
+# w + 2*border; the stored plane pointer is the ORIGIN — sample (0,0) —
+# so coordinates in [-border, w+border) x [-border, h+border) index
+# directly (negative offsets land in the padding).
+#
+# DrFrame record — heap, DR_FRAME_SIZE bytes; per-plane {ptr,w,h,stride}
+# arrays indexed 0..2 (Y,U,V).
+
+# Dimension-bomb guard: reject luma dimensions beyond this (a lying
+# header must not drive an unbounded allocation). 16384 is well above any
+# AV1/H.26x level's MaxPicSize while keeping width*height*2 in range.
+enum DrFrameLimits {
+    DR_FRAME_MAX_DIM = 16384;
+}
+
+enum DrFrameOff {
+    DR_FRAME_NUM_PLANES   = 0;
+    DR_FRAME_BIT_DEPTH    = 8;
+    DR_FRAME_WIDTH        = 16;   # luma width
+    DR_FRAME_HEIGHT       = 24;   # luma height
+    DR_FRAME_SUBX         = 32;   # subsampling_x (chroma)
+    DR_FRAME_SUBY         = 40;   # subsampling_y
+    DR_FRAME_BORDER       = 48;   # padding samples on every side
+    DR_FRAME_PLANE_PTR    = 56;   # [3] origin pointers    -> 80
+    DR_FRAME_PLANE_W      = 80;   # [3] plane sample widths -> 104
+    DR_FRAME_PLANE_H      = 104;  # [3] plane sample heights-> 128
+    DR_FRAME_PLANE_STRIDE = 128;  # [3] strides (samples)  -> 152
+    DR_FRAME_SIZE         = 152;
+}
+
+# Clip1(x) — clamp a reconstructed sample to the valid range for a bit
+# depth: Clip3(0, (1<<BitDepth)-1, x). The workhorse of reconstruction.
+fn dr_clip1(x, bit_depth): i64 {
+    var hi = (1 << bit_depth) - 1;
+    if (x < 0) { return 0; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+# Allocate a planar frame. width/height are luma dimensions (> 0);
+# num_planes is 1 (mono) or 3; subx/suby are 0/1 chroma subsampling
+# (ignored when mono); bit_depth is 8/10/12; border >= 0 pads every plane
+# edge. Returns the DrFrame handle, or 0 with *out_err set:
+#   DR_ERR_BOUNDS   — bad argument (dims <= 0, bad num_planes/bit_depth/
+#                     subsampling/border)
+#   DR_ERR_OVERSIZE — width or height exceeds DR_FRAME_MAX_DIM
+#   DR_ERR_OOM      — allocation failure
+fn dr_frame_new(width, height, num_planes, subx, suby, bit_depth, border, out_err): i64 {
+    store64(out_err, DR_OK);
+    if ((width <= 0) || (height <= 0) || (border < 0)) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    if ((num_planes != 1) && (num_planes != 3)) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    if ((subx != 0) && (subx != 1)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if ((suby != 0) && (suby != 1)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if ((bit_depth != 8) && (bit_depth != 10) && (bit_depth != 12)) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    if ((width > DR_FRAME_MAX_DIM) || (height > DR_FRAME_MAX_DIM)) {
+        store64(out_err, DR_ERR_OVERSIZE);
+        return 0;
+    }
+    var f = alloc(DR_FRAME_SIZE);
+    if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    store64(f + DR_FRAME_NUM_PLANES, num_planes);
+    store64(f + DR_FRAME_BIT_DEPTH, bit_depth);
+    store64(f + DR_FRAME_WIDTH, width);
+    store64(f + DR_FRAME_HEIGHT, height);
+    store64(f + DR_FRAME_SUBX, subx);
+    store64(f + DR_FRAME_SUBY, suby);
+    store64(f + DR_FRAME_BORDER, border);
+    var p = 0;
+    while (p < num_planes) {
+        var pw = width;
+        var ph = height;
+        if (p > 0) {
+            pw = (width + subx) >> subx;    # ceil(width / 2^subx)
+            ph = (height + suby) >> suby;
+        }
+        var stride = pw + (2 * border);
+        var rows = ph + (2 * border);
+        var buf = alloc(stride * rows * 2);   # u16 samples
+        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        memset(buf, 0, stride * rows * 2);
+        # origin = sample (0,0): skip `border` rows and `border` columns.
+        var origin = buf + (((border * stride) + border) * 2);
+        store64(f + DR_FRAME_PLANE_PTR + (p * 8), origin);
+        store64(f + DR_FRAME_PLANE_W + (p * 8), pw);
+        store64(f + DR_FRAME_PLANE_H + (p * 8), ph);
+        store64(f + DR_FRAME_PLANE_STRIDE + (p * 8), stride);
+        p = p + 1;
+    }
+    return f;
+}
+
+# ---- accessors ----
+fn dr_frame_num_planes(f): i64 { return load64(f + DR_FRAME_NUM_PLANES); }
+fn dr_frame_bit_depth(f): i64 { return load64(f + DR_FRAME_BIT_DEPTH); }
+fn dr_frame_width(f): i64 { return load64(f + DR_FRAME_WIDTH); }
+fn dr_frame_height(f): i64 { return load64(f + DR_FRAME_HEIGHT); }
+fn dr_frame_subx(f): i64 { return load64(f + DR_FRAME_SUBX); }
+fn dr_frame_suby(f): i64 { return load64(f + DR_FRAME_SUBY); }
+fn dr_frame_border(f): i64 { return load64(f + DR_FRAME_BORDER); }
+fn dr_frame_plane_ptr(f, p): i64 { return load64(f + DR_FRAME_PLANE_PTR + (p * 8)); }
+fn dr_frame_plane_width(f, p): i64 { return load64(f + DR_FRAME_PLANE_W + (p * 8)); }
+fn dr_frame_plane_height(f, p): i64 { return load64(f + DR_FRAME_PLANE_H + (p * 8)); }
+fn dr_frame_plane_stride(f, p): i64 { return load64(f + DR_FRAME_PLANE_STRIDE + (p * 8)); }
+
+# Sample get/set. x/y are plane-local coordinates; the valid range is
+# [-border, plane_w+border) x [-border, plane_h+border). No per-call
+# bounds check (hot path; the decoder guarantees the range via plane
+# dims + border) — callers stay inside the allocated plane.
+fn dr_frame_get(f, p, x, y): i64 {
+    var stride = load64(f + DR_FRAME_PLANE_STRIDE + (p * 8));
+    return load16(load64(f + DR_FRAME_PLANE_PTR + (p * 8)) + (((y * stride) + x) * 2));
+}
+fn dr_frame_set(f, p, x, y, val): i64 {
+    var stride = load64(f + DR_FRAME_PLANE_STRIDE + (p * 8));
+    store16(load64(f + DR_FRAME_PLANE_PTR + (p * 8)) + (((y * stride) + x) * 2), val);
+    return 0;
+}
+
+# Fill a plane's active area (0..w, 0..h; not the border) with val.
+fn dr_frame_fill(f, p, val): i64 {
+    var w = load64(f + DR_FRAME_PLANE_W + (p * 8));
+    var h = load64(f + DR_FRAME_PLANE_H + (p * 8));
+    var stride = load64(f + DR_FRAME_PLANE_STRIDE + (p * 8));
+    var base = load64(f + DR_FRAME_PLANE_PTR + (p * 8));
+    var y = 0;
+    while (y < h) {
+        var row = base + ((y * stride) * 2);
+        var x = 0;
+        while (x < w) {
+            store16(row + (x * 2), val);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}

@@ -6,14 +6,14 @@
 
 ## Version
 
-**0.7.2** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
-AV1 arc** continues: the multi-symbol adaptive-CDF arithmetic (symbol)
-decoder — the entropy substrate every tile decode reads through —
-plus its paired encoder, on top of the 0.7.1 frame header and the 0.7.0
-baseline. The remaining distance to 1.0 is the rest of the per-codec
-completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) +
-freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
-[`roadmap.md`](roadmap.md).
+**0.7.3** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
+AV1 arc** continues into the intra still-picture decode milestone,
+starting with the shared YUV planar-frame buffer (`DrFrame`) — the pixel
+sink every decoder writes into — on top of the 0.7.2 symbol coder, 0.7.1
+frame header, and 0.7.0 baseline. The remaining distance to 1.0 is the
+rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) +
+audit (0.11.x) + freeze/docs (0.12.x). See
+[`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
 
@@ -21,13 +21,14 @@ freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (14 `[lib]` modules, dependency order)
+## Source (15 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 702, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 703, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
+| `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
 | `src/av1_obu.cyr` | `av1_` | OBU parse/walk/write |
 | `src/av1_seq.cyr` | `av1_` | sequence_header_obu → full-fidelity Av1Seq |
 | `src/av1_frame.cyr` | `av1_` | uncompressed frame header (5.9.2, all frame types) + ref-frame state machine (Av1FrameHeader / Av1RefState) |
@@ -45,9 +46,9 @@ freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 9 suites / **3,629 assertions**: drishti 51 · bits 1,201
-  · ivf 889 · av1 185 · av1_frame 134 · av1_symbol 280 · h264 326 ·
-  h265 276 · vpx 287
+- `make test` — 10 suites / **3,702 assertions**: drishti 51 · bits 1,201
+  · ivf 889 · frame 73 · av1 185 · av1_frame 134 · av1_symbol 280 ·
+  h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make lint` / `make fmt-check` — clean for the AV1 modules (a
@@ -72,11 +73,11 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 ## In-flight / next
 
-The **0.7.x AV1 arc** is underway. Done: the frame-header OBU (0.7.1)
-and the entropy/symbol decoder + encoder (0.7.2, this cut). Next: the
-**intra still-picture decode MILESTONE** — partition tree, intra
-prediction modes, inverse transforms, reconstruction (profile-0
-keyframes: first pixels out), which consumes the symbol decoder over
-tile-group data. A shared YUV planar-frame type lands with it. Full
+The **0.7.x AV1 arc** is underway, now inside the **intra still-picture
+decode MILESTONE**. Done: the frame-header OBU (0.7.1), the
+entropy/symbol decoder + encoder (0.7.2), and the shared YUV frame buffer
+(0.7.3, this cut). Remaining milestone sub-bites: inverse transforms →
+intra prediction modes → coefficient decode (with the default CDF tables)
+→ the partition/block reconstruction glue that emits first pixels. Full
 per-codec arc plan + the audit/freeze arcs in [`roadmap.md`](roadmap.md).
 Nothing else in flight.

@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-10
+
+The shared substrate for pixel output: a planar YUV frame-buffer type,
+the first piece of the 0.7.x AV1 intra still-picture decode milestone (it
+lands with the first decoder to emit pixels and is reused by every
+family). **3,702 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **YUV planar-frame buffer** (`src/frame.cyr`, core prefix `dr_`): a
+  `DrFrame` holding 1 (monochrome) or 3 (Y/U/V) planes of 16-bit samples
+  — 8/10/12-bit share one representation — with per-plane subsampling
+  (4:2:0 / 4:2:2 / 4:4:4, chroma dims via ceil) and an optional padding
+  border so intra "above"/"left" neighbours (and later inter read-past)
+  are addressable at negative coordinates. `dr_frame_new` (with a
+  16384-per-dimension bomb guard), sample get/set, `dr_frame_fill`, and
+  the reconstruction workhorse `dr_clip1` (Clip3 to the bit-depth range).
+  73 assertions.
+
+### Notes
+- `drishti_version()` → 703; toolchain pin unchanged (`6.4.43`).
+
 ## [0.7.2] - 2026-07-10
 
 The **0.7.x AV1 arc** continues with the entropy substrate: the

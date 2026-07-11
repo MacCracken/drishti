@@ -1,0 +1,208 @@
+# tests/frame.tcyr — the shared YUV planar-frame buffer (DrFrame).
+# Covers plane geometry (luma + subsampled chroma, odd dims), sample
+# get/set across planes and bit depths, border (negative-coordinate)
+# access, fill, dr_clip1, and adversarial argument rejection.
+include "src/main.cyr"
+include "src/frame.cyr"
+
+# ================================================================
+# Geometry
+# ================================================================
+fn test_frame_geometry_420() {
+    var e = 0;
+    var f = dr_frame_new(16, 16, 3, 1, 1, 8, 0, &e);   # 4:2:0
+    assert(f != 0, "4:2:0 frame allocates");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(dr_frame_num_planes(f), 3, "3 planes");
+    assert_eq(dr_frame_bit_depth(f), 8, "8-bit");
+    assert_eq(dr_frame_width(f), 16, "luma width 16");
+    assert_eq(dr_frame_height(f), 16, "luma height 16");
+    assert_eq(dr_frame_plane_width(f, 0), 16, "Y plane width 16");
+    assert_eq(dr_frame_plane_height(f, 0), 16, "Y plane height 16");
+    assert_eq(dr_frame_plane_width(f, 1), 8, "U plane width 8 (4:2:0)");
+    assert_eq(dr_frame_plane_height(f, 1), 8, "U plane height 8");
+    assert_eq(dr_frame_plane_width(f, 2), 8, "V plane width 8");
+    assert_eq(dr_frame_plane_stride(f, 0), 16, "Y stride = w (no border)");
+    return 0;
+}
+
+fn test_frame_geometry_odd() {
+    # 4:2:0 with odd luma dims: chroma = ceil(dim/2).
+    var e = 0;
+    var f = dr_frame_new(17, 15, 3, 1, 1, 10, 0, &e);
+    assert(f != 0, "odd-dim frame allocates");
+    assert_eq(dr_frame_plane_width(f, 1), 9, "U width ceil(17/2)=9");
+    assert_eq(dr_frame_plane_height(f, 1), 8, "U height ceil(15/2)=8");
+    # 4:2:2 (subx=1, suby=0): chroma full height, half width.
+    var f2 = dr_frame_new(18, 12, 3, 1, 0, 8, 0, &e);
+    assert_eq(dr_frame_plane_width(f2, 1), 9, "4:2:2 U width 9");
+    assert_eq(dr_frame_plane_height(f2, 1), 12, "4:2:2 U height 12 (full)");
+    # 4:4:4 (subx=0, suby=0): chroma == luma.
+    var f3 = dr_frame_new(20, 20, 3, 0, 0, 8, 0, &e);
+    assert_eq(dr_frame_plane_width(f3, 1), 20, "4:4:4 U width 20");
+    assert_eq(dr_frame_plane_height(f3, 1), 20, "4:4:4 U height 20");
+    return 0;
+}
+
+fn test_frame_mono() {
+    var e = 0;
+    var f = dr_frame_new(32, 24, 1, 1, 1, 8, 0, &e);
+    assert(f != 0, "mono frame allocates");
+    assert_eq(dr_frame_num_planes(f), 1, "1 plane");
+    assert_eq(dr_frame_plane_width(f, 0), 32, "Y width 32");
+    return 0;
+}
+
+# ================================================================
+# Sample get/set
+# ================================================================
+fn test_frame_get_set() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 3, 1, 1, 8, 0, &e);
+    # Distinct pattern per plane.
+    dr_frame_set(f, 0, 0, 0, 10);
+    dr_frame_set(f, 0, 7, 7, 200);
+    dr_frame_set(f, 0, 3, 5, 99);
+    dr_frame_set(f, 1, 0, 0, 44);
+    dr_frame_set(f, 2, 3, 3, 55);
+    assert_eq(dr_frame_get(f, 0, 0, 0), 10, "Y (0,0)");
+    assert_eq(dr_frame_get(f, 0, 7, 7), 200, "Y (7,7)");
+    assert_eq(dr_frame_get(f, 0, 3, 5), 99, "Y (3,5)");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 44, "U (0,0)");
+    assert_eq(dr_frame_get(f, 2, 3, 3), 55, "V (3,3)");
+    # Untouched samples default to 0 (memset).
+    assert_eq(dr_frame_get(f, 0, 1, 1), 0, "unset sample is 0");
+    # Planes are independent (Y(0,0) != U(0,0) storage).
+    assert_eq(dr_frame_get(f, 1, 3, 3), 0, "U (3,3) independent of V");
+    return 0;
+}
+
+fn test_frame_high_bitdepth() {
+    var e = 0;
+    var f = dr_frame_new(4, 4, 1, 1, 1, 12, 0, &e);
+    dr_frame_set(f, 0, 0, 0, 4095);    # max 12-bit
+    dr_frame_set(f, 0, 1, 0, 1023);
+    dr_frame_set(f, 0, 2, 0, 2048);
+    assert_eq(dr_frame_get(f, 0, 0, 0), 4095, "12-bit max stored");
+    assert_eq(dr_frame_get(f, 0, 1, 0), 1023, "10-bit value in 12-bit frame");
+    assert_eq(dr_frame_get(f, 0, 2, 0), 2048, "mid value");
+    return 0;
+}
+
+fn test_frame_row_addressing() {
+    # Writing along a row must not bleed into the next (stride correct).
+    var e = 0;
+    var f = dr_frame_new(5, 3, 1, 1, 1, 8, 0, &e);
+    var x = 0;
+    while (x < 5) { dr_frame_set(f, 0, x, 0, 100 + x); x = x + 1; }
+    dr_frame_set(f, 0, 0, 1, 250);   # start of row 1
+    assert_eq(dr_frame_get(f, 0, 0, 0), 100, "row0 col0");
+    assert_eq(dr_frame_get(f, 0, 4, 0), 104, "row0 col4");
+    assert_eq(dr_frame_get(f, 0, 0, 1), 250, "row1 col0 distinct");
+    return 0;
+}
+
+# ================================================================
+# Border — negative-coordinate access into the padding.
+# ================================================================
+fn test_frame_border() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 3, &e);   # border 3
+    assert(f != 0, "bordered frame allocates");
+    assert_eq(dr_frame_border(f), 3, "border 3");
+    assert_eq(dr_frame_plane_stride(f, 0), 14, "stride = w + 2*border");
+    # The "above row" (y = -1) and "left column" (x = -1) are addressable.
+    dr_frame_set(f, 0, 0 - 1, 0 - 1, 77);    # (-1,-1) top-left of border
+    dr_frame_set(f, 0, 4, 0 - 1, 88);        # above (4,0)
+    dr_frame_set(f, 0, 0 - 1, 4, 99);        # left of (0,4)
+    dr_frame_set(f, 0, 0, 0, 5);             # origin, adjacent
+    assert_eq(dr_frame_get(f, 0, 0 - 1, 0 - 1), 77, "(-1,-1) in border");
+    assert_eq(dr_frame_get(f, 0, 4, 0 - 1), 88, "above (4,0)");
+    assert_eq(dr_frame_get(f, 0, 0 - 1, 4), 99, "left of (0,4)");
+    assert_eq(dr_frame_get(f, 0, 0, 0), 5, "origin unaffected by border writes");
+    # Far border corner.
+    dr_frame_set(f, 0, 8 + 2, 8 + 2, 123);   # bottom-right padding
+    assert_eq(dr_frame_get(f, 0, 8 + 2, 8 + 2), 123, "bottom-right border");
+    return 0;
+}
+
+# ================================================================
+# Fill + clip
+# ================================================================
+fn test_frame_fill() {
+    var e = 0;
+    var f = dr_frame_new(6, 4, 3, 1, 1, 8, 1, &e);
+    dr_frame_fill(f, 0, 128);
+    assert_eq(dr_frame_get(f, 0, 0, 0), 128, "fill corner");
+    assert_eq(dr_frame_get(f, 0, 5, 3), 128, "fill far corner");
+    assert_eq(dr_frame_get(f, 0, 3, 2), 128, "fill middle");
+    # Border NOT filled (fill covers the active area only).
+    assert_eq(dr_frame_get(f, 0, 0 - 1, 0), 0, "border left untouched by fill");
+    # Other planes untouched.
+    assert_eq(dr_frame_get(f, 1, 0, 0), 0, "U plane untouched");
+    return 0;
+}
+
+fn test_clip1() {
+    assert_eq(dr_clip1(0 - 5, 8), 0, "clip negative to 0");
+    assert_eq(dr_clip1(300, 8), 255, "clip >255 to 255 (8-bit)");
+    assert_eq(dr_clip1(128, 8), 128, "in-range unchanged");
+    assert_eq(dr_clip1(1023, 10), 1023, "10-bit max ok");
+    assert_eq(dr_clip1(1024, 10), 1023, "clip to 10-bit max");
+    assert_eq(dr_clip1(5000, 12), 4095, "clip to 12-bit max");
+    assert_eq(dr_clip1(0, 12), 0, "zero ok");
+    return 0;
+}
+
+# ================================================================
+# Adversarial argument rejection
+# ================================================================
+fn test_frame_reject() {
+    var e = 0;
+    assert_eq(dr_frame_new(0, 16, 3, 1, 1, 8, 0, &e), 0, "zero width rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "zero width -> bounds");
+    assert_eq(dr_frame_new(16, 0 - 1, 3, 1, 1, 8, 0, &e), 0, "negative height rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative height -> bounds");
+    assert_eq(dr_frame_new(16, 16, 2, 1, 1, 8, 0, &e), 0, "num_planes 2 rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "bad num_planes -> bounds");
+    assert_eq(dr_frame_new(16, 16, 3, 1, 1, 9, 0, &e), 0, "bit_depth 9 rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "bad bit_depth -> bounds");
+    assert_eq(dr_frame_new(16, 16, 3, 2, 1, 8, 0, &e), 0, "subx 2 rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "bad subx -> bounds");
+    assert_eq(dr_frame_new(16, 16, 3, 1, 1, 8, 0 - 1, &e), 0, "negative border rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative border -> bounds");
+    # Dimension bomb.
+    assert_eq(dr_frame_new(16385, 16, 3, 1, 1, 8, 0, &e), 0, "oversize width rejected");
+    assert_eq(e, DR_ERR_OVERSIZE, "oversize width -> oversize");
+    assert_eq(dr_frame_new(16, 100000, 3, 1, 1, 8, 0, &e), 0, "oversize height rejected");
+    assert_eq(e, DR_ERR_OVERSIZE, "oversize height -> oversize");
+    # Max legal dimension is accepted (allocation may still be large but
+    # a 1x1 at the cap keeps it cheap — test the boundary with small).
+    var f = dr_frame_new(16384, 1, 1, 1, 1, 8, 0, &e);
+    assert(f != 0, "exactly-max width accepted");
+    assert_eq(e, DR_OK, "max dim -> ok");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("frame geometry");
+    test_frame_geometry_420();
+    test_frame_geometry_odd();
+    test_frame_mono();
+    test_group("frame get/set");
+    test_frame_get_set();
+    test_frame_high_bitdepth();
+    test_frame_row_addressing();
+    test_group("frame border");
+    test_frame_border();
+    test_group("frame fill / clip");
+    test_frame_fill();
+    test_clip1();
+    test_group("frame adversarial");
+    test_frame_reject();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

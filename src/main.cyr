@@ -35,6 +35,7 @@
 include "src/drishti.cyr"
 include "src/bits.cyr"
 include "src/ivf.cyr"
+include "src/frame.cyr"
 
 # ================================================================
 # Codec families (flat modules, leaf-to-root within each family):

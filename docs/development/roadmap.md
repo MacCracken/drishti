@@ -66,9 +66,10 @@ common floor:
 
 Not its own arc; these land inside whichever codec arc first needs them:
 
-- **YUV frame-buffer / plane types** — a shared planar-frame record
-  appears when the first decoder emits pixels (AV1 0.7.x or VP8 0.10.x,
-  whichever milestone lands first).
+- **YUV frame-buffer / plane types** — **done (0.7.3)**: `src/frame.cyr`,
+  the shared `DrFrame` planar-frame record (1/3 planes, 16-bit samples
+  for 8/10/12-bit, subsampling, padding border, `dr_clip1`). Landed with
+  the AV1 intra-decode milestone; VP8/H.26x reuse it.
 - **Entropy-coder consolidation watch** — CABAC (H.264/H.265),
   multi-symbol adaptive-CDF (AV1), and the boolean coder (VP8/VP9) stay
   per-family until real overlap proves out. Do NOT unify speculatively.
