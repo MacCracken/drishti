@@ -124,6 +124,72 @@ fn test_cdf_offsets() {
     return 0;
 }
 
+# Default_Coeff_Base_Cdf[4][5][2][42][5] — 8400 entries. Checksum + a
+# structural sweep over every (q, txSzCtx, ptype, ctx) cdf + known value.
+fn test_coeff_base_cdf() {
+    var b = av1_coeff_base_blob();
+    var s = 0;
+    var k = 0;
+    while (k < 8400) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 645830782703, "coeff_base cdf weighted checksum");
+    var q = 0;
+    while (q < 4) {
+        var t = 0;
+        while (t < 5) {
+            var p = 0;
+            while (p < 2) {
+                var c = 0;
+                while (c < 42) {
+                    assert_eq(cdf_valid(av1_coeff_base_cdf(q, t, p, c), 4), 1, "coeff_base cdf valid");
+                    c = c + 1;
+                }
+                p = p + 1;
+            }
+            t = t + 1;
+        }
+        q = q + 1;
+    }
+    var cb = av1_coeff_base_cdf(0, 0, 0, 0);
+    assert_eq(load64(cb + 0), 4034, "coeff_base[0][0][0][0][0]");
+    assert_eq(load64(cb + 8), 8930, "coeff_base[0][0][0][0][1]");
+    assert_eq(load64(cb + 16), 12727, "coeff_base[0][0][0][0][2]");
+    assert_eq(av1_coeff_base_cdf(0, 0, 0, 0), b + 0, "coeff_base base offset");
+    assert_eq(av1_coeff_base_cdf(3, 4, 1, 41), b + (8395 * 8), "coeff_base last offset");
+    return 0;
+}
+
+# Default_Coeff_Br_Cdf[4][5][2][21][5] — 4200 entries.
+fn test_coeff_br_cdf() {
+    var b = av1_coeff_br_blob();
+    var s = 0;
+    var k = 0;
+    while (k < 4200) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 147356334653, "coeff_br cdf weighted checksum");
+    var q = 0;
+    while (q < 4) {
+        var t = 0;
+        while (t < 5) {
+            var p = 0;
+            while (p < 2) {
+                var c = 0;
+                while (c < 21) {
+                    assert_eq(cdf_valid(av1_coeff_br_cdf(q, t, p, c), 4), 1, "coeff_br cdf valid");
+                    c = c + 1;
+                }
+                p = p + 1;
+            }
+            t = t + 1;
+        }
+        q = q + 1;
+    }
+    var cr = av1_coeff_br_cdf(0, 0, 0, 0);
+    assert_eq(load64(cr + 0), 14298, "coeff_br[0][0][0][0][0]");
+    assert_eq(load64(cr + 8), 20718, "coeff_br[0][0][0][0][1]");
+    assert_eq(av1_coeff_br_cdf(0, 0, 0, 0), b + 0, "coeff_br base offset");
+    assert_eq(av1_coeff_br_cdf(3, 4, 1, 20), b + (4195 * 8), "coeff_br last offset");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("coeff cdf blob");
@@ -132,6 +198,9 @@ fn main() {
     test_group("coeff cdf known values + offsets");
     test_cdf_known();
     test_cdf_offsets();
+    test_group("coeff_base + coeff_br cdf");
+    test_coeff_base_cdf();
+    test_coeff_br_cdf();
     return assert_summary();
 }
 

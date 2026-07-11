@@ -6,10 +6,10 @@
 
 ## Version
 
-**0.7.15** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
-AV1 arc** continues the coefficient decode: the first batch of default
-coefficient CDF tables (txb_skip / eob_pt / eob_extra / dc_sign /
-coeff_base_eob) in the new `av1_coeffcdf.cyr` module, on top of the level
+**0.7.16** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
+AV1 arc** completes the default coefficient CDF tables: `coeff_base` +
+`coeff_br` (the two largest families) join the smaller ones in
+`av1_coeffcdf.cyr` — all seven families now in — on top of the level
 contexts (0.7.14) and scan orders (0.7.13). The remaining distance to 1.0
 is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9)
 + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -29,7 +29,7 @@ is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9)
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 715, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 716, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -43,7 +43,7 @@ is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9)
 | `src/av1_recon.cyr` | `av1_` | reconstruct process (spec 7.12.3) — dequant + dqDenom + FLIPADST flip + residual-add glue (av1_reconstruct) |
 | `src/av1_scan.cyr` | `av1_` | coefficient scan orders (spec 5.11.41) — 32 Default/Mrow/Mcol scan tables + get_scan + scan_size |
 | `src/av1_coeff.cyr` | `av1_` | coefficient level contexts (spec 8.3.2) — get_tx_class / get_coeff_base_ctx / get_br_ctx + offset tables |
-| `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob + accessors (coeff_base/coeff_br pending) |
+| `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — all 7 families: txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br + accessors |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -57,10 +57,10 @@ is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9)
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 17 suites / **10,961 assertions**: drishti 51 · bits
+- `make test` — 17 suites / **13,492 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
-  av1_scan 137 · av1_coeff 47 · av1_coeffcdf 919 · h264 326 · h265 276 ·
+  av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · h264 326 · h265 276 ·
   vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
@@ -87,8 +87,8 @@ is the rest of the per-codec completion arcs (0.7.x AV1 → 0.10.x VP8/VP9)
   coefficient level contexts (4 slices: coeff_base/coeff_br logic +
   Coeff_Base_Ctx_Offset diff + libaom txb_common cross-check +
   known-answer recompute → all clean), and the default coefficient CDFs
-  (smaller families) (3 slices: per-family table diff + accessor arithmetic
-  + format/libaom token_cdfs cross-check → all clean)
+  (7 slices across two cuts: per-family table diffs of all 15,996 values +
+  accessor arithmetic + format/libaom token_cdfs cross-check → all clean)
 
 ## Dependencies
 
@@ -115,11 +115,11 @@ reconstruct glue (7.12.3, 0.7.12) now turn a coefficient array +
 prediction into reconstructed pixels — **first pixels**. The
 **coefficient decode** is underway: the scan-order layer (5.11.41,
 0.7.13) and the level-context helpers (8.3.2, 0.7.14, this cut) are in.
-The default coefficient CDF tables are landing family-by-family: the
-smaller ones (txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob)
-are in (0.7.15). Remaining `coeffs()` sub-bites: `Default_Coeff_Base_Cdf`
-+ `Default_Coeff_Br_Cdf` (the two largest CDF families) → the `coeffs()`
-reading loop (with the `txb_skip`/`dc_sign` neighbour-array contexts) that
+The default coefficient CDF tables are **complete** (all 7 families, the
+smaller ones in 0.7.15 and `coeff_base` + `coeff_br` in 0.7.16). With the
+scans, level contexts, and CDFs all in, the remaining `coeffs()`
+sub-bites are: the `coeffs()` reading loop itself (with the
+`txb_skip`/`dc_sign` neighbour-array contexts + the tx-type decode) that
 walks the scans, consumes the symbol decoder, and fills `Quant[]` → the
 partition/block wiring that drives predict + reconstruct per block. Full
 per-codec arc plan + the audit/freeze arcs in [`roadmap.md`](roadmap.md).

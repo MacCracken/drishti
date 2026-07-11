@@ -4,6 +4,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-07-10
+
+Completes the AV1 default coefficient CDF tables with the two largest
+families — `Default_Coeff_Base_Cdf` (8,400 entries) and
+`Default_Coeff_Br_Cdf` (4,200) — extending `src/av1_coeffcdf.cyr`. A
+3-agent adversarial review diffed all 12,600 values against the spec and
+cross-checked libaom `token_cdfs.h` with no defects. **13,492 suite
+assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 default `coeff_base` + `coeff_br` CDF tables**
+  (`src/av1_coeffcdf.cyr`): `Default_Coeff_Base_Cdf[4][5][2][42][5]` and
+  `Default_Coeff_Br_Cdf[4][5][2][21][5]`, each in its own lazily-built
+  blob with a CDF accessor (`av1_coeff_base_cdf` /
+  `av1_coeff_br_cdf`); the `coeff_br` accessor takes the
+  `Min(txSzCtx, TX_32X32)`-clamped size context per the spec. With these,
+  **all seven default coefficient CDF families are in** — the complete
+  initial adaptive-CDF state the `coeffs()` decode needs. 3,450 assertions
+  (up from 919): per-family weighted checksums, a structural sweep
+  validating every CDF via its accessor, known values, and offset
+  arithmetic.
+
+### Notes
+- `drishti_version()` → 716. With the scans (0.7.13), level contexts
+  (0.7.14), and now the full CDF set, the next bite is the `coeffs()`
+  reading loop itself (plus the `txb_skip`/`dc_sign` neighbour-array
+  contexts and the tx-type decode) — where a transform block decodes
+  end-to-end from the bitstream into `Quant[]`.
+
 ## [0.7.15] - 2026-07-10
 
 Continues the AV1 coefficient decode with the first batch of default

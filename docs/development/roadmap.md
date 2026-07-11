@@ -121,11 +121,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   from a coefficient array)** → coefficient decode **(in progress —
   0.7.13: `src/av1_scan.cyr`, the scan orders + get_scan (5.11.41);
   0.7.14: `src/av1_coeff.cyr`, the level contexts get_tx_class /
-  get_coeff_base_ctx / get_br_ctx (8.3.2); 0.7.15: `src/av1_coeffcdf.cyr`,
-  the smaller default CDF families (txb_skip / eob_pt / eob_extra /
-  dc_sign / coeff_base_eob); then coeff_base + coeff_br CDFs + the
-  coeffs() reading loop)** → the block/partition wiring (decoded
-  keyframe).
+  get_coeff_base_ctx / get_br_ctx (8.3.2); 0.7.15-0.7.16:
+  `src/av1_coeffcdf.cyr`, all 7 default coefficient CDF families (txb_skip
+  / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br);
+  then the coeffs() reading loop + tx-type decode)** → the block/partition
+  wiring (decoded keyframe).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
