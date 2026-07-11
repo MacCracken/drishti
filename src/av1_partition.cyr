@@ -12,10 +12,9 @@
 # CDF (spec 9.3). MI grids live in the Av1Tile context (av1_residual).
 #
 # SCOPE (intra keyframe baseline): is_inter=0; a 64x64 superblock (no 128x128 →
-# partition W128 / bsl 5 deferred, roadmap.md). Palette, segmentation, and the
-# get_filter_type edge refinement (7.11.2.8) are deferred (roadmap.md) —
-# filter_type is 0 here (exact for DC/SMOOTH/PAETH; a small edge-filter refinement
-# for directional-with-smooth-neighbour blocks lands later). Lossless is derived
+# partition W128 / bsl 5 deferred, roadmap.md). Palette and segmentation are
+# deferred (roadmap.md). (The intra edge-filter type get_filter_type, 7.11.2.8,
+# is derived in transform_block as of 0.7.26.) Lossless is derived
 # as base_q_idx==0 (no per-plane delta-q in scope). The encode lane covers the
 # block-orchestration entropy (mode_info + tx_size); the per-tx coeffs-encode in
 # residual order is grown with the tile-loop bite (roadmap.md) — the round-trip
@@ -302,7 +301,7 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     store64(blk + AV1BLK_AVAIL_U, avail_u);
     store64(blk + AV1BLK_AVAIL_LC, avail_lc);
     store64(blk + AV1BLK_AVAIL_UC, avail_uc);
-    store64(blk + AV1BLK_FILTER_TYPE, 0);        # get_filter_type deferred (roadmap.md)
+    store64(blk + AV1BLK_FILTER_TYPE, 0);        # reserved; get_filter_type derived in transform_block
     av1_residual(tile, blk);
 
     av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),

@@ -260,6 +260,90 @@ fn test_cfl_flat_luma() {
     return 0;
 }
 
+# get_filter_type (7.11.2.8): 1 iff the above/left neighbour uses a SMOOTH mode.
+fn test_get_filter_type() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(t);
+    var blk = av1_block_new();
+    store64(blk + AV1BLK_MI_ROW, 2);
+    store64(blk + AV1BLK_MI_COL, 2);
+    store64(blk + AV1BLK_AVAIL_U, 1);
+    store64(blk + AV1BLK_AVAIL_L, 1);
+    # grids default DC (0) -> no smooth neighbour -> 0.
+    assert_eq(av1_get_filter_type(t, blk, 0), 0, "gft neither smooth");
+    # above (YModes[1][2]) smooth -> 1.
+    av1_grid_set(t, AV1TILE_YMODES, 1, 2, AV1_SMOOTH_PRED);
+    assert_eq(av1_get_filter_type(t, blk, 0), 1, "gft above smooth");
+    # reset above; left (YModes[2][1]) smooth -> 1.
+    av1_grid_set(t, AV1TILE_YMODES, 1, 2, AV1_DC_PRED);
+    av1_grid_set(t, AV1TILE_YMODES, 2, 1, AV1_SMOOTH_H_PRED);
+    assert_eq(av1_get_filter_type(t, blk, 0), 1, "gft left smooth");
+    # no availability -> 0 even with a smooth grid.
+    store64(blk + AV1BLK_AVAIL_U, 0);
+    store64(blk + AV1BLK_AVAIL_L, 0);
+    assert_eq(av1_get_filter_type(t, blk, 0), 0, "gft no avail");
+    return 0;
+}
+# Chroma (420) reads the SUBSAMPLING-ADJUSTED neighbour position. For a block at
+# MI (2,2): above adjusts to (r=1, c=3) [subx && !(MiCol&1) -> c++]; the raw (1,2)
+# must NOT be what is read.
+fn test_get_filter_type_chroma() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 3, 1, 1, 8, 8, oe);
+    var t = av1_tile_new(frame, 16, 16, 40, 1, 0, 3);
+    av1_tile_grids_new(t);
+    var blk = av1_block_new();
+    store64(blk + AV1BLK_MI_ROW, 2);
+    store64(blk + AV1BLK_MI_COL, 2);
+    store64(blk + AV1BLK_AVAIL_UC, 1);
+    store64(blk + AV1BLK_AVAIL_LC, 0);
+    av1_grid_set(t, AV1TILE_UVMODES, 1, 2, AV1_SMOOTH_PRED);   # raw (unadjusted) pos
+    av1_grid_set(t, AV1TILE_UVMODES, 1, 3, AV1_DC_PRED);       # adjusted pos
+    assert_eq(av1_get_filter_type(t, blk, 1), 0, "gft chroma reads adjusted (not raw) pos");
+    av1_grid_set(t, AV1TILE_UVMODES, 1, 3, AV1_SMOOTH_V_PRED); # adjusted pos smooth
+    assert_eq(av1_get_filter_type(t, blk, 1), 1, "gft chroma above (adjusted) smooth");
+    return 0;
+}
+# filter_type is consequential: the intra edge-filter strength (7.11.2.9) differs
+# for filter_type 0 vs 1, so a directional prediction differs. Verified directly
+# (strength) and end-to-end (an 8x8 D67 +angle prediction over a ramped edge).
+fn test_filter_type_affects_prediction() {
+    assert_eq(av1_edge_filter_strength(8, 8, 0, 20), 0, "strength ft0 d20 = 0");
+    assert_eq(av1_edge_filter_strength(8, 8, 1, 20), 1, "strength ft1 d20 = 1");
+    var o0 = alloc(8); var o1 = alloc(8);
+    var f0 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, o0);
+    var f1 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, o1);
+    var i = 0;
+    while (i < 32) {
+        var j = 0;
+        while (j < 8) {
+            var v = ((i * 3) + (j * 5)) & 255;
+            dr_frame_set(f0, 0, i, j, v);
+            dr_frame_set(f1, 0, i, j, v);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    # D67 (pAngle 67) + angle_delta 1 -> pAngle 70 -> above delta -20 (d=20): the
+    # 8x8 edge filter runs at strength 0 (ft0) vs 1 (ft1).
+    av1_intra_predict(f0, 0, 8, 8, 1, 1, 0, 0, AV1_D67_PRED, 1, 0, 0, 1, 0, 3, 3, 8, 8);
+    av1_intra_predict(f1, 0, 8, 8, 1, 1, 0, 0, AV1_D67_PRED, 1, 0, 0, 1, 1, 3, 3, 8, 8);
+    var diff = 0;
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) {
+            if (dr_frame_get(f0, 0, 8 + x, 8 + y) != dr_frame_get(f1, 0, 8 + x, 8 + y)) { diff = 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 1, "filter_type changes the directional prediction");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("get_tx_size");
@@ -272,6 +356,10 @@ fn main() {
     test_reconstruct_consistency();
     test_group("residual driver — chroma-from-luma");
     test_cfl_flat_luma();
+    test_group("get_filter_type (intra edge-filter type)");
+    test_get_filter_type();
+    test_get_filter_type_chroma();
+    test_filter_type_affects_prediction();
     return assert_summary();
 }
 

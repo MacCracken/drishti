@@ -11264,7 +11264,7 @@ enum Av1BlockOff {
     AV1BLK_AVAIL_U     = 64;
     AV1BLK_AVAIL_LC    = 72;   # AvailLChroma
     AV1BLK_AVAIL_UC    = 80;   # AvailUChroma
-    AV1BLK_FILTER_TYPE = 88;   # get_filter_type (7.11.2.8), forwarded to predict
+    AV1BLK_FILTER_TYPE = 88;   # reserved; get_filter_type derived in transform_block
     AV1BLK_SIZE        = 96;
 }
 fn av1_block_new(): i64 {
@@ -11273,6 +11273,57 @@ fn av1_block_new(): i64 {
     var i = 0;
     while (i < (AV1BLK_SIZE / 8)) { store64(b + (i * 8), 0); i = i + 1; }
     return b;
+}
+
+# ================================================================
+# get_filter_type (7.11.2.8) — the intra edge-filter type: 1 iff the block above
+# or to the left uses a SMOOTH prediction mode. Feeds the edge-filter strength /
+# upsample selection (7.11.2.9/10) inside av1_intra_predict. Reads the neighbour
+# YModes / UVModes grids (written by earlier, raster-order decode_blocks).
+# ================================================================
+# is_smooth(row, col, plane): does the neighbour block use a smooth intra mode?
+# (Intra keyframe: RefFrames is always INTRA_FRAME, so chroma uses UVModes.)
+fn av1_is_smooth_neighbour(tile, r, c, plane): i64 {
+    var mode = av1_grid_get(tile, AV1TILE_YMODES, r, c);
+    if (plane > 0) { mode = av1_grid_get(tile, AV1TILE_UVMODES, r, c); }
+    if ((mode == AV1_SMOOTH_PRED) || (mode == AV1_SMOOTH_V_PRED) || (mode == AV1_SMOOTH_H_PRED)) {
+        return 1;
+    }
+    return 0;
+}
+fn av1_get_filter_type(tile, blk, plane): i64 {
+    var mi_row = load64(blk + AV1BLK_MI_ROW);
+    var mi_col = load64(blk + AV1BLK_MI_COL);
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var avail_u = load64(blk + AV1BLK_AVAIL_U);
+    var avail_l = load64(blk + AV1BLK_AVAIL_L);
+    if (plane > 0) {
+        avail_u = load64(blk + AV1BLK_AVAIL_UC);
+        avail_l = load64(blk + AV1BLK_AVAIL_LC);
+    }
+    var above_smooth = 0;
+    if (avail_u) {
+        var ar = mi_row - 1;
+        var ac = mi_col;
+        if (plane > 0) {
+            if (subx && ((mi_col & 1) == 0)) { ac = ac + 1; }
+            if (suby && (mi_row & 1)) { ar = ar - 1; }
+        }
+        above_smooth = av1_is_smooth_neighbour(tile, ar, ac, plane);
+    }
+    var left_smooth = 0;
+    if (avail_l) {
+        var lr = mi_row;
+        var lc = mi_col - 1;
+        if (plane > 0) {
+            if (subx && (mi_col & 1)) { lc = lc - 1; }
+            if (suby && ((mi_row & 1) == 0)) { lr = lr + 1; }
+        }
+        left_smooth = av1_is_smooth_neighbour(tile, lr, lc, plane);
+    }
+    if (above_smooth || left_smooth) { return 1; }
+    return 0;
 }
 
 # ================================================================
@@ -11336,7 +11387,7 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
 
     var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
     have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
-    load64(tile + AV1TILE_ENABLE_EF), load64(blk + AV1BLK_FILTER_TYPE),
+    load64(tile + AV1TILE_ENABLE_EF), av1_get_filter_type(tile, blk, plane),
     log2w, log2h, mi_cols, mi_rows);
     if (rc != DR_OK) { return rc; }
     if (is_cfl) {
@@ -11451,10 +11502,9 @@ fn av1_residual(tile, blk): i64 {
 # CDF (spec 9.3). MI grids live in the Av1Tile context (av1_residual).
 #
 # SCOPE (intra keyframe baseline): is_inter=0; a 64x64 superblock (no 128x128 →
-# partition W128 / bsl 5 deferred, roadmap.md). Palette, segmentation, and the
-# get_filter_type edge refinement (7.11.2.8) are deferred (roadmap.md) —
-# filter_type is 0 here (exact for DC/SMOOTH/PAETH; a small edge-filter refinement
-# for directional-with-smooth-neighbour blocks lands later). Lossless is derived
+# partition W128 / bsl 5 deferred, roadmap.md). Palette and segmentation are
+# deferred (roadmap.md). (The intra edge-filter type get_filter_type, 7.11.2.8,
+# is derived in transform_block as of 0.7.26.) Lossless is derived
 # as base_q_idx==0 (no per-plane delta-q in scope). The encode lane covers the
 # block-orchestration entropy (mode_info + tx_size); the per-tx coeffs-encode in
 # residual order is grown with the tile-loop bite (roadmap.md) — the round-trip
@@ -11741,7 +11791,7 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     store64(blk + AV1BLK_AVAIL_U, avail_u);
     store64(blk + AV1BLK_AVAIL_LC, avail_lc);
     store64(blk + AV1BLK_AVAIL_UC, avail_uc);
-    store64(blk + AV1BLK_FILTER_TYPE, 0);        # get_filter_type deferred (roadmap.md)
+    store64(blk + AV1BLK_FILTER_TYPE, 0);        # reserved; get_filter_type derived in transform_block
     av1_residual(tile, blk);
 
     av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),
