@@ -18,20 +18,21 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.3 (AV1 decode arc in progress)
+## Status — 0.7.4 (AV1 decode arc in progress)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (3,702 suite assertions + 1,140 fuzz
-assertions, all green). The 0.7.x AV1 arc is underway — the full
-uncompressed frame header, the entropy substrate, and the shared YUV
-frame buffer are in:
+derived, and adversarially tested (3,862 suite assertions + 1,140 fuzz
+assertions, all green). The 0.7.x AV1 arc is underway — the frame
+header, the entropy substrate, the shared YUV frame buffer, and the
+inverse transforms are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
   (5.9.2, all frame types, cursor-true) with the reference-frame state
   machine (set_frame_refs, frame_size_with_refs, ref update) + the
   multi-symbol adaptive-CDF arithmetic (symbol) coder (spec 8.2,
-  decoder + encoder)
+  decoder + encoder) + the inverse transform block (spec 7.13: DCT /
+  ADST / identity / WHT + the 2D driver)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,

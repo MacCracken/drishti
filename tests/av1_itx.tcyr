@@ -1,0 +1,266 @@
+# tests/av1_itx.tcyr — the AV1 inverse transform block (spec 7.13).
+# Primitives (Round2 / cos128 / brev) and the exactly-verifiable 1D
+# transforms (identity, Walsh-Hadamard, ADST4, 4-pt DCT DC) are pinned by
+# hand-computed known-answers; the larger DCTs are checked structurally
+# (DC-only input must produce a flat output) and by a full 2D known-answer
+# (a 4x4 DCT_DCT DC coefficient reconstructs to a flat residual). The full
+# butterfly transcription is additionally cross-checked by an adversarial
+# spec review.
+include "src/main.cyr"
+include "src/av1_itx.cyr"
+
+# alloc a T array of `n` i64 slots, fill from `vals` (len n), return ptr.
+fn mk_t(vals, n): i64 {
+    var T = alloc(n * 8);
+    var i = 0;
+    while (i < n) { store64(T + (i * 8), load64(vals + (i * 8))); i = i + 1; }
+    return T;
+}
+fn set4(a, b, c, d): i64 {
+    var v = alloc(32);
+    store64(v + 0, a); store64(v + 8, b); store64(v + 16, c); store64(v + 24, d);
+    return v;
+}
+
+# ================================================================
+# Primitives
+# ================================================================
+fn test_round2() {
+    assert_eq(av1_round2(10, 2), 3, "Round2(10,2) = (10+2)>>2 = 3");
+    assert_eq(av1_round2(0 - 10, 2), 0 - 2, "Round2(-10,2) = -8>>2 = -2");
+    assert_eq(av1_round2(7, 0), 7, "Round2(x,0) = x");
+    assert_eq(av1_round2(4096, 12), 1, "Round2(4096,12) = 1");
+    assert_eq(av1_round2(0 - 7, 1), 0 - 3, "Round2(-7,1) = -3");
+    return 0;
+}
+
+fn test_cos128() {
+    assert_eq(av1_cos128(0), 4096, "cos128(0)");
+    assert_eq(av1_cos128(32), 2896, "cos128(32)");
+    assert_eq(av1_cos128(64), 0, "cos128(64)");
+    assert_eq(av1_cos128(96), 0 - 2896, "cos128(96) folds to -Cos[32]");
+    assert_eq(av1_cos128(128), 0 - 4096, "cos128(128) = -Cos[0]");
+    assert_eq(av1_cos128(256), 4096, "cos128 wraps mod 256");
+    assert_eq(av1_sin128(0), 0, "sin128(0) = cos128(-64) = 0");
+    assert_eq(av1_sin128(64), 4096, "sin128(64) = cos128(0) = 4096");
+    return 0;
+}
+
+fn test_brev() {
+    assert_eq(av1_brev(2, 1), 2, "brev(2,1) 01->10");
+    assert_eq(av1_brev(2, 2), 1, "brev(2,2) 10->01");
+    assert_eq(av1_brev(4, 1), 8, "brev(4,1) 0001->1000");
+    assert_eq(av1_brev(3, 3), 6, "brev(3,3) 011->110");
+    assert_eq(av1_brev(4, 0), 0, "brev(4,0) = 0");
+    assert_eq(av1_brev(4, 15), 15, "brev(4,15) 1111->1111");
+    return 0;
+}
+
+# ================================================================
+# 1D transforms — exact known-answers
+# ================================================================
+fn test_identity_1d() {
+    # 4-pt: Round2(T*5793,12); for 4096 -> 5793.
+    var T = mk_t(set4(4096, 0, 0, 0), 4);
+    av1_itx_identity(T, 2);
+    assert_eq(load64(T + 0), 5793, "id4 [4096] -> 5793");
+    assert_eq(load64(T + 8), 0, "id4 zero stays zero");
+    # 8-pt: *2.
+    var T8 = alloc(8 * 8);
+    var i = 0; while (i < 8) { store64(T8 + (i * 8), 0); i = i + 1; }
+    store64(T8 + 0, 100); store64(T8 + 8, 0 - 50);
+    av1_itx_identity(T8, 3);
+    assert_eq(load64(T8 + 0), 200, "id8 *2");
+    assert_eq(load64(T8 + 8), 0 - 100, "id8 *2 negative");
+    # 16-pt: Round2(T*11586,12); for 4096 -> 11586.
+    var T16 = alloc(16 * 8);
+    i = 0; while (i < 16) { store64(T16 + (i * 8), 0); i = i + 1; }
+    store64(T16 + 0, 4096);
+    av1_itx_identity(T16, 4);
+    assert_eq(load64(T16 + 0), 11586, "id16 [4096] -> 11586");
+    # 32-pt: *4.
+    var T32 = alloc(32 * 8);
+    i = 0; while (i < 32) { store64(T32 + (i * 8), 0); i = i + 1; }
+    store64(T32 + 0, 7);
+    av1_itx_identity(T32, 5);
+    assert_eq(load64(T32 + 0), 28, "id32 *4");
+    return 0;
+}
+
+fn test_wht_1d() {
+    # WHT([8,0,0,0], 0) = [4,4,4,4]; WHT([4,4,4,4], 0) = [8,0,0,0] (self-inverse pair).
+    var T = mk_t(set4(8, 0, 0, 0), 4);
+    av1_itx_wht(T, 0);
+    assert_eq(load64(T + 0), 4, "wht a");
+    assert_eq(load64(T + 8), 4, "wht b");
+    assert_eq(load64(T + 16), 4, "wht c");
+    assert_eq(load64(T + 24), 4, "wht d");
+    var T2 = mk_t(set4(4, 4, 4, 4), 4);
+    av1_itx_wht(T2, 0);
+    assert_eq(load64(T2 + 0), 8, "wht inverse-pair [0]");
+    assert_eq(load64(T2 + 8), 0, "wht inverse-pair [1]");
+    assert_eq(load64(T2 + 16), 0, "wht inverse-pair [2]");
+    assert_eq(load64(T2 + 24), 0, "wht inverse-pair [3]");
+    return 0;
+}
+
+fn test_adst4_1d() {
+    # ADST4([4096,0,0,0]) = [1321,2482,3344,3803] (the SINPI constants).
+    var T = mk_t(set4(4096, 0, 0, 0), 4);
+    av1_itx_adst4(T);
+    assert_eq(load64(T + 0), 1321, "adst4 [0] = SINPI_1_9");
+    assert_eq(load64(T + 8), 2482, "adst4 [1] = SINPI_2_9");
+    assert_eq(load64(T + 16), 3344, "adst4 [2] = SINPI_3_9");
+    assert_eq(load64(T + 24), 3803, "adst4 [3] = SINPI_4_9");
+    return 0;
+}
+
+# Negative inputs exercise the arithmetic-shift path inside the transforms
+# (cyrius `>>` is logical, so signed intermediates go through av1_shr).
+fn test_negative_inputs() {
+    # WHT([-8,0,0,0], 0) = [-4,-4,-4,-4] (mirror of the positive case).
+    var T = mk_t(set4(0 - 8, 0, 0, 0), 4);
+    av1_itx_wht(T, 0);
+    assert_eq(load64(T + 0), 0 - 4, "wht neg [0]");
+    assert_eq(load64(T + 24), 0 - 4, "wht neg [3]");
+    # Inverse DCT of a negative DC is flat -2896 (sign symmetry).
+    var T2 = mk_t(set4(0 - 4096, 0, 0, 0), 4);
+    av1_itx_dct(T2, 2, 32);
+    assert_eq(load64(T2 + 0), 0 - 2896, "dct4 negative DC flat [0]");
+    assert_eq(load64(T2 + 24), 0 - 2896, "dct4 negative DC flat [3]");
+    # ADST4 of a negative DC negates the SINPI outputs.
+    var T3 = mk_t(set4(0 - 4096, 0, 0, 0), 4);
+    av1_itx_adst4(T3);
+    assert_eq(load64(T3 + 0), 0 - 1321, "adst4 neg [0]");
+    assert_eq(load64(T3 + 24), 0 - 3803, "adst4 neg [3]");
+    return 0;
+}
+
+fn test_dct_4pt_dc() {
+    # Inverse DCT of a DC-only [4096,0,0,0] is flat = Round2(2896*4096,12) = 2896.
+    var T = mk_t(set4(4096, 0, 0, 0), 4);
+    av1_itx_dct(T, 2, 32);
+    assert_eq(load64(T + 0), 2896, "dct4 DC flat [0]");
+    assert_eq(load64(T + 8), 2896, "dct4 DC flat [1]");
+    assert_eq(load64(T + 16), 2896, "dct4 DC flat [2]");
+    assert_eq(load64(T + 24), 2896, "dct4 DC flat [3]");
+    return 0;
+}
+
+# DC-only input to an inverse DCT must yield a FLAT output for every size
+# (the DC basis is constant). A wrong butterfly index would break flatness.
+fn dct_dc_is_flat(n): i64 {
+    var len = 1 << n;
+    var T = alloc(len * 8);
+    var i = 0;
+    while (i < len) { store64(T + (i * 8), 0); i = i + 1; }
+    store64(T + 0, 4096);
+    av1_itx_dct(T, n, 32);
+    var v0 = load64(T + 0);
+    var flat = 1;
+    i = 1;
+    while (i < len) {
+        if (load64(T + (i * 8)) != v0) { flat = 0; }
+        i = i + 1;
+    }
+    assert_eq(flat, 1, "DCT DC output is flat");
+    assert(v0 != 0, "DCT DC output is non-zero");
+    return 0;
+}
+fn test_dct_flat_all() {
+    dct_dc_is_flat(3);    # 8
+    dct_dc_is_flat(4);    # 16
+    dct_dc_is_flat(5);    # 32
+    dct_dc_is_flat(6);    # 64
+    return 0;
+}
+
+# ================================================================
+# 2D driver — known-answers
+# ================================================================
+fn test_2d_zero() {
+    # All-zero coefficients -> all-zero residual (every size / type).
+    var dq = alloc(64 * 8);
+    var res = alloc(64 * 8);
+    var i = 0; while (i < 64) { store64(dq + (i * 8), 0); i = i + 1; }
+    assert_eq(av1_inverse_transform_2d(dq, res, AV1_TX_8X8, AV1_DCT_DCT, 0, 8), DR_OK, "2D zero ok");
+    i = 0;
+    while (i < 64) { assert_eq(load64(res + (i * 8)), 0, "zero residual"); i = i + 1; }
+    return 0;
+}
+
+fn test_2d_dct_dc() {
+    # 4x4 DCT_DCT with Dequant[0][0]=4096 reconstructs to a flat 128:
+    #   row: Round2(2896*4096,12)=2896 ; col: Round2(2896*2896,12)=2048 ;
+    #   colShift 4: Round2(2048,4)=128.
+    var dq = alloc(16 * 8);
+    var res = alloc(16 * 8);
+    var i = 0; while (i < 16) { store64(dq + (i * 8), 0); i = i + 1; }
+    store64(dq + 0, 4096);
+    assert_eq(av1_inverse_transform_2d(dq, res, AV1_TX_4X4, AV1_DCT_DCT, 0, 8), DR_OK, "2D dct dc ok");
+    i = 0;
+    while (i < 16) { assert_eq(load64(res + (i * 8)), 128, "4x4 DCT DC -> flat 128"); i = i + 1; }
+    return 0;
+}
+
+fn test_2d_idtx() {
+    # 4x4 IDTX is separable element-wise: for Dequant[0][0]=4096,
+    #   row id: Round2(4096*5793,12)=5793 ; col id: Round2(5793*5793,12)=8193 ;
+    #   colShift 4: Round2(8193,4)=512. Every other element stays 0.
+    var dq = alloc(16 * 8);
+    var res = alloc(16 * 8);
+    var i = 0; while (i < 16) { store64(dq + (i * 8), 0); i = i + 1; }
+    store64(dq + 0, 4096);
+    assert_eq(av1_inverse_transform_2d(dq, res, AV1_TX_4X4, AV1_IDTX, 0, 8), DR_OK, "2D idtx ok");
+    assert_eq(load64(res + 0), 512, "IDTX [0][0] = 512");
+    assert_eq(load64(res + 8), 0, "IDTX [0][1] = 0 (separable)");
+    assert_eq(load64(res + (5 * 8)), 0, "IDTX [1][1] = 0");
+    return 0;
+}
+
+fn test_2d_lossless_wht() {
+    # Lossless path uses the WHT on rows (shift 2) and cols (shift 0).
+    var dq = alloc(16 * 8);
+    var res = alloc(16 * 8);
+    var i = 0; while (i < 16) { store64(dq + (i * 8), 0); i = i + 1; }
+    store64(dq + 0, 32);
+    assert_eq(av1_inverse_transform_2d(dq, res, AV1_TX_4X4, AV1_DCT_DCT, 1, 8), DR_OK, "2D lossless ok");
+    # Row WHT([32>>2=8,0,0,0]) = [4,4,4,4]; after rows residual row0 = 4 each.
+    # Col WHT([4,0,0,0], shift 0) per column = [2,2,2,2]. So all residual = 2.
+    i = 0;
+    while (i < 16) { assert_eq(load64(res + (i * 8)), 2, "lossless WHT residual flat 2"); i = i + 1; }
+    return 0;
+}
+
+fn test_2d_reject() {
+    var dq = alloc(16 * 8);
+    var res = alloc(16 * 8);
+    assert_eq(av1_inverse_transform_2d(dq, res, 19, AV1_DCT_DCT, 0, 8), AV1_ERR_BAD_TX, "bad tx_size rejected");
+    assert_eq(av1_inverse_transform_2d(dq, res, 0 - 1, AV1_DCT_DCT, 0, 8), AV1_ERR_BAD_TX, "negative tx_size rejected");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("itx primitives");
+    test_round2();
+    test_cos128();
+    test_brev();
+    test_group("itx 1D transforms");
+    test_identity_1d();
+    test_wht_1d();
+    test_adst4_1d();
+    test_negative_inputs();
+    test_dct_4pt_dc();
+    test_dct_flat_all();
+    test_group("itx 2D driver");
+    test_2d_zero();
+    test_2d_dct_dc();
+    test_2d_idtx();
+    test_2d_lossless_wht();
+    test_2d_reject();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

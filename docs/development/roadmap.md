@@ -96,7 +96,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   paired symbol encoder (encode-lane seed) so every path round-trips.
 - **intra still-picture decode — MILESTONE** — partition tree, intra
   prediction modes, inverse transforms, reconstruction (profile-0
-  keyframes: first pixels out).
+  keyframes: first pixels out). Sub-bites: YUV frame buffer **(done
+  0.7.3)** → inverse transforms **(done 0.7.4)**: DCT 4-64 / ADST 4-16 /
+  identity / WHT + the 2D driver (`src/av1_itx.cyr`) → intra prediction →
+  coefficient decode (+ default CDFs) → reconstruction glue (first pixels).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

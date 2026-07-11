@@ -4,6 +4,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-10
+
+The second sub-bite of the AV1 intra still-picture decode milestone: the
+inverse transform block (spec 7.13). Transcribed verbatim from the spec
+pseudocode, pinned by hand-computed known-answers, and cross-checked by a
+5-agent adversarial spec review (clean). **3,862 suite assertions +
+1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 inverse transform** (`src/av1_itx.cyr`, prefix `av1_`): the full
+  inverse transform block — inverse DCT (sizes 4-64, the 31-step
+  butterfly), inverse ADST (4/8/16), the identity transforms (4/8/16/32),
+  the lossless Walsh-Hadamard, and the `av1_inverse_transform_2d` driver
+  that routes each of the 16 PlaneTxTypes to the right row/column
+  transform with the spec's 64-point zeroing, rectangular 2896 scaling,
+  clamps, and rounding shifts. Includes the butterfly primitives
+  (`cos128`/`sin128`/`brev`/B/H), `Round2`, and the `Cos128_Lookup` /
+  `Tx_*_Log2` / `Transform_Row_Shift` tables. 160 assertions.
+
+### Notes
+- `drishti_version()` → 704; toolchain pin unchanged (`6.4.43`).
+- Cyrius runtime `>>` is a LOGICAL shift (it does not sign-extend), so
+  signed transform intermediates round through an explicit arithmetic
+  shift (`av1_shr`); `Round2` and the WHT use it.
+
 ## [0.7.3] - 2026-07-10
 
 The shared substrate for pixel output: a planar YUV frame-buffer type,

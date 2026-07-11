@@ -1,0 +1,672 @@
+# @public — drishti AV1: the inverse transform block (spec 7.13). Turns a
+# 2D array of dequantized coefficients into a spatial residual via 1D
+# inverse transforms applied to rows then columns. Implements the inverse
+# DCT (sizes 4..64), inverse ADST (4/8/16), the identity transforms
+# (4/8/16/32), and the lossless Walsh-Hadamard, plus the 2D driver that
+# routes each PlaneTxType to the right row/column transform with the
+# spec's clamps and rounding shifts.
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_*) and reuses av1_clip3 / av1_min / av1_max from
+# src/av1_frame.cyr (same family). No bitstream I/O: pure integer maths on
+# caller-provided i64 coefficient/residual arrays.
+#
+# Derived verbatim from the AV1 spec section 7.13 (cited inline):
+#   7.13.2.1 butterfly functions B / H, cos128 / sin128 / brev
+#   7.13.2.2 inverse DCT array permutation
+#   7.13.2.3 inverse DCT process (the 31-step butterfly, n = 2..6)
+#   7.13.2.4/5 inverse ADST input/output permutations
+#   7.13.2.6/7/8/9 inverse ADST4 / ADST8 / ADST16 / dispatch
+#   7.13.2.10 inverse Walsh-Hadamard
+#   7.13.2.11-15 inverse identity transforms
+#   7.13.3 2D inverse transform process
+# Round2(x, n) is the spec's rounding right shift (section 4); cyrius `>>`
+# is arithmetic so it matches for negative intermediates.
+#
+# Coefficient / residual arrays are flat i64, row-major: element (i,j) at
+# index i*w + j. The FLIPADST flip and the residual-into-prediction add
+# are reconstruction concerns (a later 0.7.x milestone sub-bite, see
+# docs/development/roadmap.md); this module emits the un-flipped residual
+# the spec's 7.13.3 produces.
+
+enum Av1TxConst {
+    # PlaneTxType values (spec 6.10.35 / Table).
+    AV1_DCT_DCT           = 0;
+    AV1_ADST_DCT          = 1;
+    AV1_DCT_ADST          = 2;
+    AV1_ADST_ADST         = 3;
+    AV1_FLIPADST_DCT      = 4;
+    AV1_DCT_FLIPADST      = 5;
+    AV1_FLIPADST_FLIPADST = 6;
+    AV1_ADST_FLIPADST     = 7;
+    AV1_FLIPADST_ADST     = 8;
+    AV1_IDTX              = 9;
+    AV1_V_DCT             = 10;
+    AV1_H_DCT             = 11;
+    AV1_V_ADST            = 12;
+    AV1_H_ADST            = 13;
+    AV1_V_FLIPADST        = 14;
+    AV1_H_FLIPADST        = 15;
+    # TxSize values (spec 6.10.29 / Table), TX_SIZES_ALL = 19.
+    AV1_TX_4X4            = 0;
+    AV1_TX_8X8            = 1;
+    AV1_TX_16X16          = 2;
+    AV1_TX_32X32          = 3;
+    AV1_TX_64X64          = 4;
+    # 1D transform kinds returned by the row/col routing helpers.
+    AV1_TX1D_DCT          = 0;
+    AV1_TX1D_ADST         = 1;
+    AV1_TX1D_IDTX         = 2;
+    # ADST4 constants (SINPI_k_9).
+    AV1_SINPI_1_9         = 1321;
+    AV1_SINPI_2_9         = 2482;
+    AV1_SINPI_3_9         = 3344;
+    AV1_SINPI_4_9         = 3803;
+    # itx error (AV1 band).
+    AV1_ERR_BAD_TX        = 13;
+}
+
+# ================================================================
+# Lazily-built constant tables (a single alloc'd block cached in a global
+# scalar pointer — cyrius global array literals do not initialize
+# reliably, so tables are populated in code once). Layout, in i64 slots:
+#   [0..64]   Cos128_Lookup (65)
+#   [65..83]  Tx_Width_Log2  (19)
+#   [84..102] Tx_Height_Log2 (19)
+#   [103..121] Transform_Row_Shift (19)
+# ================================================================
+var Av1_ITx_Tables = 0;
+
+fn av1_itx_tables(): i64 {
+    if (Av1_ITx_Tables != 0) { return Av1_ITx_Tables; }
+    var t = alloc((65 + 19 + 19 + 19) * 8);
+    if (t == 0) { return 0; }
+    # Cos128_Lookup — 4096 * cos(a*pi/128) rounded (7.13.2.1).
+    store64(t + 0, 4096);   store64(t + 8, 4095);   store64(t + 16, 4091);  store64(t + 24, 4085);
+    store64(t + 32, 4076);  store64(t + 40, 4065);  store64(t + 48, 4052);  store64(t + 56, 4036);
+    store64(t + 64, 4017);  store64(t + 72, 3996);  store64(t + 80, 3973);  store64(t + 88, 3948);
+    store64(t + 96, 3920);  store64(t + 104, 3889); store64(t + 112, 3857); store64(t + 120, 3822);
+    store64(t + 128, 3784); store64(t + 136, 3745); store64(t + 144, 3703); store64(t + 152, 3659);
+    store64(t + 160, 3612); store64(t + 168, 3564); store64(t + 176, 3513); store64(t + 184, 3461);
+    store64(t + 192, 3406); store64(t + 200, 3349); store64(t + 208, 3290); store64(t + 216, 3229);
+    store64(t + 224, 3166); store64(t + 232, 3102); store64(t + 240, 3035); store64(t + 248, 2967);
+    store64(t + 256, 2896); store64(t + 264, 2824); store64(t + 272, 2751); store64(t + 280, 2675);
+    store64(t + 288, 2598); store64(t + 296, 2520); store64(t + 304, 2440); store64(t + 312, 2359);
+    store64(t + 320, 2276); store64(t + 328, 2191); store64(t + 336, 2106); store64(t + 344, 2019);
+    store64(t + 352, 1931); store64(t + 360, 1842); store64(t + 368, 1751); store64(t + 376, 1660);
+    store64(t + 384, 1567); store64(t + 392, 1474); store64(t + 400, 1380); store64(t + 408, 1285);
+    store64(t + 416, 1189); store64(t + 424, 1092); store64(t + 432, 995);  store64(t + 440, 897);
+    store64(t + 448, 799);  store64(t + 456, 700);  store64(t + 464, 601);  store64(t + 472, 501);
+    store64(t + 480, 401);  store64(t + 488, 301);  store64(t + 496, 201);  store64(t + 504, 101);
+    store64(t + 512, 0);
+    # Tx_Width_Log2[19] at slot 65.
+    av1_itx_fill19(t + (65 * 8), 2, 3, 4, 5, 6, 2, 3, 3, 4, 4, 5, 5, 6, 2, 4, 3, 5, 4, 6);
+    # Tx_Height_Log2[19] at slot 84.
+    av1_itx_fill19(t + (84 * 8), 2, 3, 4, 5, 6, 3, 2, 4, 3, 5, 4, 6, 5, 4, 2, 5, 3, 6, 4);
+    # Transform_Row_Shift[19] at slot 103.
+    av1_itx_fill19(t + (103 * 8), 0, 1, 2, 2, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2);
+    Av1_ITx_Tables = t;
+    return t;
+}
+
+# Store 19 values contiguously (a small helper so the table fills read as
+# the spec's flat arrays).
+fn av1_itx_fill19(p, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18) {
+    store64(p + 0, a0);    store64(p + 8, a1);    store64(p + 16, a2);   store64(p + 24, a3);
+    store64(p + 32, a4);   store64(p + 40, a5);   store64(p + 48, a6);   store64(p + 56, a7);
+    store64(p + 64, a8);   store64(p + 72, a9);   store64(p + 80, a10);  store64(p + 88, a11);
+    store64(p + 96, a12);  store64(p + 104, a13); store64(p + 112, a14); store64(p + 120, a15);
+    store64(p + 128, a16); store64(p + 136, a17); store64(p + 144, a18);
+    return 0;
+}
+
+fn av1_tx_width_log2(tx): i64 { return load64(av1_itx_tables() + ((65 + tx) * 8)); }
+fn av1_tx_height_log2(tx): i64 { return load64(av1_itx_tables() + ((84 + tx) * 8)); }
+fn av1_tx_row_shift(tx): i64 { return load64(av1_itx_tables() + ((103 + tx) * 8)); }
+
+# ================================================================
+# Primitives — Round2, brev, cos128 / sin128, butterflies B / H.
+# ================================================================
+
+# Arithmetic (sign-preserving) right shift = floor(x / 2^n). Cyrius `>>`
+# is a LOGICAL shift at runtime (it does not sign-extend), so signed
+# transform intermediates must shift through here.
+fn av1_shr(x, n): i64 {
+    if (x >= 0) { return x >> n; }
+    return 0 - (((0 - x) + (1 << n) - 1) >> n);   # -ceil((-x)/2^n) = floor(x/2^n)
+}
+
+# Round2(x, n) — spec section 4: floor((x + 2^(n-1)) / 2^n).
+fn av1_round2(x, n): i64 {
+    if (n == 0) { return x; }
+    return av1_shr(x + (1 << (n - 1)), n);
+}
+
+fn av1_itx_abs(x): i64 {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+
+# brev(numBits, x) — bit reversal of the low numBits of x (7.13.2.1).
+fn av1_brev(num_bits, x): i64 {
+    var t = 0;
+    var i = 0;
+    while (i < num_bits) {
+        var bit = (x >> i) & 1;
+        t = t + (bit << (num_bits - 1 - i));
+        i = i + 1;
+    }
+    return t;
+}
+
+# cos128(angle) — Cos128_Lookup with the four-quadrant folding (7.13.2.1).
+fn av1_cos128(angle): i64 {
+    var base = av1_itx_tables();
+    var a2 = angle & 255;
+    if (a2 <= 64) { return load64(base + (a2 * 8)); }
+    if (a2 <= 128) { return 0 - load64(base + ((128 - a2) * 8)); }
+    if (a2 <= 192) { return 0 - load64(base + ((a2 - 128) * 8)); }
+    return load64(base + ((256 - a2) * 8));
+}
+
+fn av1_sin128(angle): i64 { return av1_cos128(angle - 64); }
+
+# B(a, b, angle, flip) — butterfly rotation (and optional flip). The
+# spec's `r` argument is only a conformance bound (no clamp here). T is
+# the i64 transform array.
+fn av1_itx_b(T, a, b, angle, flip): i64 {
+    var ta = load64(T + (a * 8));
+    var tb = load64(T + (b * 8));
+    var x = (ta * av1_cos128(angle)) - (tb * av1_sin128(angle));
+    var y = (ta * av1_sin128(angle)) + (tb * av1_cos128(angle));
+    var ra = av1_round2(x, 12);
+    var rb = av1_round2(y, 12);
+    if (flip) {
+        store64(T + (a * 8), rb);
+        store64(T + (b * 8), ra);
+    } else {
+        store64(T + (a * 8), ra);
+        store64(T + (b * 8), rb);
+    }
+    return 0;
+}
+
+# H(a, b, flip, r) — Hadamard rotation, clamped to r bits. flip swaps the
+# indices (H(a,b,1,r) == H(b,a,0,r)).
+fn av1_itx_h(T, a, b, flip, r): i64 {
+    var pa = a;
+    var pb = b;
+    if (flip) { pa = b; pb = a; }
+    var x = load64(T + (pa * 8));
+    var y = load64(T + (pb * 8));
+    var lo = 0 - (1 << (r - 1));
+    var hi = (1 << (r - 1)) - 1;
+    store64(T + (pa * 8), av1_clip3(lo, hi, x + y));
+    store64(T + (pb * 8), av1_clip3(lo, hi, x - y));
+    return 0;
+}
+
+# ================================================================
+# Inverse DCT — permutation (7.13.2.2) + the 31-step process (7.13.2.3).
+# ================================================================
+fn av1_itx_dct_permute(T, n): i64 {
+    var len = 1 << n;
+    var copy = alloc(len * 8);
+    if (copy == 0) { return DR_ERR_OOM; }
+    memcpy(copy, T, len * 8);
+    var i = 0;
+    while (i < len) {
+        store64(T + (i * 8), load64(copy + (av1_brev(n, i) * 8)));
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+fn av1_itx_dct(T, n, r): i64 {
+    var rc = av1_itx_dct_permute(T, n);
+    if (rc != DR_OK) { return rc; }
+    var i = 0;
+    var j = 0;
+    if (n == 6) { i = 0; while (i <= 15) { av1_itx_b(T, 32 + i, 63 - i, 63 - (4 * av1_brev(4, i)), 0); i = i + 1; } }
+    if (n >= 5) { i = 0; while (i <= 7) { av1_itx_b(T, 16 + i, 31 - i, 6 + (av1_brev(3, 7 - i) << 3), 0); i = i + 1; } }
+    if (n == 6) { i = 0; while (i <= 15) { av1_itx_h(T, 32 + (i * 2), 33 + (i * 2), i & 1, r); i = i + 1; } }
+    if (n >= 4) { i = 0; while (i <= 3) { av1_itx_b(T, 8 + i, 15 - i, 12 + (av1_brev(2, 3 - i) << 4), 0); i = i + 1; } }
+    if (n >= 5) { i = 0; while (i <= 7) { av1_itx_h(T, 16 + (2 * i), 17 + (2 * i), i & 1, r); i = i + 1; } }
+    if (n == 6) {
+        i = 0;
+        while (i <= 3) {
+            j = 0;
+            while (j <= 1) {
+                av1_itx_b(T, 62 - (i * 4) - j, 33 + (i * 4) + j, 60 - (16 * av1_brev(2, i)) + (64 * j), 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n >= 3) { i = 0; while (i <= 1) { av1_itx_b(T, 4 + i, 7 - i, 56 - (32 * i), 0); i = i + 1; } }
+    if (n >= 4) { i = 0; while (i <= 3) { av1_itx_h(T, 8 + (2 * i), 9 + (2 * i), i & 1, r); i = i + 1; } }
+    if (n >= 5) {
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 1) {
+                av1_itx_b(T, 30 - (4 * i) - j, 17 + (4 * i) + j, 24 + (j << 6) + ((1 - i) << 5), 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n == 6) {
+        i = 0;
+        while (i <= 7) {
+            j = 0;
+            while (j <= 1) {
+                av1_itx_h(T, 32 + (i * 4) + j, 35 + (i * 4) - j, i & 1, r);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    i = 0; while (i <= 1) { av1_itx_b(T, 2 * i, (2 * i) + 1, 32 + (16 * i), 1 - i); i = i + 1; }
+    if (n >= 3) { i = 0; while (i <= 1) { av1_itx_h(T, 4 + (2 * i), 5 + (2 * i), i, r); i = i + 1; } }
+    if (n >= 4) { i = 0; while (i <= 1) { av1_itx_b(T, 14 - i, 9 + i, 48 + (64 * i), 1); i = i + 1; } }
+    if (n >= 5) {
+        i = 0;
+        while (i <= 3) {
+            j = 0;
+            while (j <= 1) {
+                av1_itx_h(T, 16 + (4 * i) + j, 19 + (4 * i) - j, i & 1, r);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n == 6) {
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 3) {
+                av1_itx_b(T, 61 - (i * 8) - j, 34 + (i * 8) + j, 56 - (i * 32) + ((j >> 1) * 64), 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    i = 0; while (i <= 1) { av1_itx_h(T, i, 3 - i, 0, r); i = i + 1; }
+    if (n >= 3) { av1_itx_b(T, 6, 5, 32, 1); }
+    if (n >= 4) {
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 1) {
+                av1_itx_h(T, 8 + (4 * i) + j, 11 + (4 * i) - j, i, r);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n >= 5) { i = 0; while (i <= 3) { av1_itx_b(T, 29 - i, 18 + i, 48 + ((i >> 1) * 64), 1); i = i + 1; } }
+    if (n == 6) {
+        i = 0;
+        while (i <= 3) {
+            j = 0;
+            while (j <= 3) {
+                av1_itx_h(T, 32 + (8 * i) + j, 39 + (8 * i) - j, i & 1, r);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n >= 3) { i = 0; while (i <= 3) { av1_itx_h(T, i, 7 - i, 0, r); i = i + 1; } }
+    if (n >= 4) { i = 0; while (i <= 1) { av1_itx_b(T, 13 - i, 10 + i, 32, 1); i = i + 1; } }
+    if (n >= 5) {
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 3) {
+                av1_itx_h(T, 16 + (i * 8) + j, 23 + (i * 8) - j, i, r);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n == 6) {
+        i = 0;
+        while (i <= 7) {
+            var ang = 48;
+            if (i >= 4) { ang = 112; }
+            av1_itx_b(T, 59 - i, 36 + i, ang, 1);
+            i = i + 1;
+        }
+    }
+    if (n >= 4) { i = 0; while (i <= 7) { av1_itx_h(T, i, 15 - i, 0, r); i = i + 1; } }
+    if (n >= 5) { i = 0; while (i <= 3) { av1_itx_b(T, 27 - i, 20 + i, 32, 1); i = i + 1; } }
+    if (n == 6) {
+        i = 0;
+        while (i <= 7) {
+            av1_itx_h(T, 32 + i, 47 - i, 0, r);
+            av1_itx_h(T, 48 + i, 63 - i, 1, r);
+            i = i + 1;
+        }
+    }
+    if (n >= 5) { i = 0; while (i <= 15) { av1_itx_h(T, i, 31 - i, 0, r); i = i + 1; } }
+    if (n == 6) { i = 0; while (i <= 7) { av1_itx_b(T, 55 - i, 40 + i, 32, 1); i = i + 1; } }
+    if (n == 6) { i = 0; while (i <= 31) { av1_itx_h(T, i, 63 - i, 0, r); i = i + 1; } }
+    return DR_OK;
+}
+
+# ================================================================
+# Inverse ADST — permutations (7.13.2.4/5) + ADST4/8/16 (7.13.2.6-8).
+# ================================================================
+fn av1_itx_adst_ipermute(T, n): i64 {
+    var n0 = 1 << n;
+    var copy = alloc(n0 * 8);
+    if (copy == 0) { return DR_ERR_OOM; }
+    memcpy(copy, T, n0 * 8);
+    var i = 0;
+    while (i < n0) {
+        var idx = n0 - i - 1;
+        if (i & 1) { idx = i - 1; }
+        store64(T + (i * 8), load64(copy + (idx * 8)));
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+fn av1_itx_adst_opermute(T, n): i64 {
+    var n0 = 1 << n;
+    var copy = alloc(n0 * 8);
+    if (copy == 0) { return DR_ERR_OOM; }
+    memcpy(copy, T, n0 * 8);
+    var i = 0;
+    while (i < n0) {
+        var a = (i >> 3) & 1;
+        var b = ((i >> 2) & 1) ^ ((i >> 3) & 1);
+        var c = ((i >> 1) & 1) ^ ((i >> 2) & 1);
+        var d = (i & 1) ^ ((i >> 1) & 1);
+        var idx = ((d << 3) | (c << 2) | (b << 1) | a) >> (4 - n);
+        var v = load64(copy + (idx * 8));
+        if (i & 1) { v = 0 - v; }
+        store64(T + (i * 8), v);
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+fn av1_itx_adst4(T): i64 {
+    var t0 = load64(T + 0);
+    var t1 = load64(T + 8);
+    var t2 = load64(T + 16);
+    var t3 = load64(T + 24);
+    var s0 = AV1_SINPI_1_9 * t0;
+    var s1 = AV1_SINPI_2_9 * t0;
+    var s2 = AV1_SINPI_3_9 * t1;
+    var s3 = AV1_SINPI_4_9 * t2;
+    var s4 = AV1_SINPI_1_9 * t2;
+    var s5 = AV1_SINPI_2_9 * t3;
+    var s6 = AV1_SINPI_4_9 * t3;
+    var a7 = t0 - t2;
+    var b7 = a7 + t3;
+    s0 = s0 + s3;
+    s1 = s1 - s4;
+    s3 = s2;
+    s2 = AV1_SINPI_3_9 * b7;
+    s0 = s0 + s5;
+    s1 = s1 - s6;
+    var x0 = s0 + s3;
+    var x1 = s1 + s3;
+    var x2 = s2;
+    var x3 = s0 + s1;
+    x3 = x3 - s3;
+    store64(T + 0, av1_round2(x0, 12));
+    store64(T + 8, av1_round2(x1, 12));
+    store64(T + 16, av1_round2(x2, 12));
+    store64(T + 24, av1_round2(x3, 12));
+    return DR_OK;
+}
+
+fn av1_itx_adst8(T, r): i64 {
+    var rc = av1_itx_adst_ipermute(T, 3);
+    if (rc != DR_OK) { return rc; }
+    var i = 0;
+    var j = 0;
+    i = 0; while (i <= 3) { av1_itx_b(T, 2 * i, (2 * i) + 1, 60 - (16 * i), 1); i = i + 1; }
+    i = 0; while (i <= 3) { av1_itx_h(T, i, 4 + i, 0, r); i = i + 1; }
+    i = 0; while (i <= 1) { av1_itx_b(T, 4 + (3 * i), 5 + i, 48 - (32 * i), 1); i = i + 1; }
+    i = 0;
+    while (i <= 1) {
+        j = 0;
+        while (j <= 1) {
+            av1_itx_h(T, (4 * j) + i, 2 + (4 * j) + i, 0, r);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0; while (i <= 1) { av1_itx_b(T, 2 + (4 * i), 3 + (4 * i), 32, 1); i = i + 1; }
+    return av1_itx_adst_opermute(T, 3);
+}
+
+fn av1_itx_adst16(T, r): i64 {
+    var rc = av1_itx_adst_ipermute(T, 4);
+    if (rc != DR_OK) { return rc; }
+    var i = 0;
+    var j = 0;
+    i = 0; while (i <= 7) { av1_itx_b(T, 2 * i, (2 * i) + 1, 62 - (8 * i), 1); i = i + 1; }
+    i = 0; while (i <= 7) { av1_itx_h(T, i, 8 + i, 0, r); i = i + 1; }
+    i = 0;
+    while (i <= 1) {
+        av1_itx_b(T, 8 + (2 * i), 9 + (2 * i), 56 - (32 * i), 1);
+        av1_itx_b(T, 13 + (2 * i), 12 + (2 * i), 8 + (32 * i), 1);
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= 3) {
+        j = 0;
+        while (j <= 1) {
+            av1_itx_h(T, (8 * j) + i, 4 + (8 * j) + i, 0, r);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= 1) {
+        j = 0;
+        while (j <= 1) {
+            av1_itx_b(T, 4 + (8 * j) + (3 * i), 5 + (8 * j) + i, 48 - (32 * i), 1);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= 1) {
+        j = 0;
+        while (j <= 3) {
+            av1_itx_h(T, (4 * j) + i, 2 + (4 * j) + i, 0, r);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0; while (i <= 3) { av1_itx_b(T, 2 + (4 * i), 3 + (4 * i), 32, 1); i = i + 1; }
+    return av1_itx_adst_opermute(T, 4);
+}
+
+fn av1_itx_adst(T, n, r): i64 {
+    if (n == 2) { return av1_itx_adst4(T); }
+    if (n == 3) { return av1_itx_adst8(T, r); }
+    if (n == 4) { return av1_itx_adst16(T, r); }
+    return AV1_ERR_BAD_TX;
+}
+
+# ================================================================
+# Inverse Walsh-Hadamard (7.13.2.10) + identity transforms (7.13.2.11-15).
+# ================================================================
+fn av1_itx_wht(T, shift): i64 {
+    var a = av1_shr(load64(T + 0), shift);
+    var c = av1_shr(load64(T + 8), shift);
+    var d = av1_shr(load64(T + 16), shift);
+    var b = av1_shr(load64(T + 24), shift);
+    a = a + c;
+    d = d - b;
+    var e = av1_shr(a - d, 1);
+    b = e - b;
+    c = e - c;
+    a = a - b;
+    d = d + c;
+    store64(T + 0, a);
+    store64(T + 8, b);
+    store64(T + 16, c);
+    store64(T + 24, d);
+    return DR_OK;
+}
+
+fn av1_itx_identity(T, n): i64 {
+    var len = 1 << n;
+    # Per-size scaling: 4-pt *5793 (Round2 12), 8-pt *2, 16-pt *11586
+    # (Round2 12), 32-pt *4. mult/round chosen by n; only 2 <= n <= 5.
+    if ((n < 2) || (n > 5)) { return AV1_ERR_BAD_TX; }
+    var i = 0;
+    while (i < len) {
+        var v = load64(T + (i * 8));
+        if (n == 2) { v = av1_round2(v * 5793, 12); }
+        if (n == 3) { v = v * 2; }
+        if (n == 4) { v = av1_round2(v * 11586, 12); }
+        if (n == 5) { v = v * 4; }
+        store64(T + (i * 8), v);
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# PlaneTxType -> row / column 1D transform kind (7.13.3 selection).
+# ================================================================
+fn av1_tx_row_kind(txtype): i64 {
+    if ((txtype == AV1_DCT_DCT) || (txtype == AV1_ADST_DCT) || (txtype == AV1_FLIPADST_DCT) || (txtype == AV1_H_DCT)) {
+        return AV1_TX1D_DCT;
+    }
+    if ((txtype == AV1_DCT_ADST) || (txtype == AV1_ADST_ADST) || (txtype == AV1_DCT_FLIPADST)
+    || (txtype == AV1_FLIPADST_FLIPADST) || (txtype == AV1_ADST_FLIPADST) || (txtype == AV1_FLIPADST_ADST)
+    || (txtype == AV1_H_ADST) || (txtype == AV1_H_FLIPADST)) {
+        return AV1_TX1D_ADST;
+    }
+    return AV1_TX1D_IDTX;
+}
+
+fn av1_tx_col_kind(txtype): i64 {
+    if ((txtype == AV1_DCT_DCT) || (txtype == AV1_DCT_ADST) || (txtype == AV1_DCT_FLIPADST) || (txtype == AV1_V_DCT)) {
+        return AV1_TX1D_DCT;
+    }
+    if ((txtype == AV1_ADST_DCT) || (txtype == AV1_ADST_ADST) || (txtype == AV1_FLIPADST_DCT)
+    || (txtype == AV1_FLIPADST_FLIPADST) || (txtype == AV1_ADST_FLIPADST) || (txtype == AV1_FLIPADST_ADST)
+    || (txtype == AV1_V_ADST) || (txtype == AV1_V_FLIPADST)) {
+        return AV1_TX1D_ADST;
+    }
+    return AV1_TX1D_IDTX;
+}
+
+# Apply the 1D transform of the given kind and size (base-2 log n) to T.
+fn av1_itx_1d(T, kind, n, r): i64 {
+    if (kind == AV1_TX1D_DCT) { return av1_itx_dct(T, n, r); }
+    if (kind == AV1_TX1D_ADST) { return av1_itx_adst(T, n, r); }
+    return av1_itx_identity(T, n);
+}
+
+# ================================================================
+# 2D inverse transform process (7.13.3).
+# ================================================================
+
+# Transform `dequant` (h*w row-major i64 coefficients) into `residual`
+# (h*w row-major i64, caller-allocated) for the given tx_size / tx_type.
+# lossless selects the WHT path; bit_depth sizes the clamp ranges.
+# Returns DR_OK, or AV1_ERR_BAD_TX for an out-of-range size, DR_ERR_OOM.
+fn av1_inverse_transform_2d(dequant, residual, tx_size, tx_type, lossless, bit_depth): i64 {
+    if ((tx_size < 0) || (tx_size > 18)) { return AV1_ERR_BAD_TX; }
+    var log2w = av1_tx_width_log2(tx_size);
+    var log2h = av1_tx_height_log2(tx_size);
+    var w = 1 << log2w;
+    var h = 1 << log2h;
+    var row_shift = 0;
+    var col_shift = 0;
+    if (lossless == 0) {
+        row_shift = av1_tx_row_shift(tx_size);
+        col_shift = 4;
+    }
+    var row_clamp = bit_depth + 8;
+    var col_clamp = av1_max(bit_depth + 6, 16);
+    var rect = 0;
+    if (av1_itx_abs(log2w - log2h) == 1) { rect = 1; }
+    var row_kind = av1_tx_row_kind(tx_type);
+    var col_kind = av1_tx_col_kind(tx_type);
+    var T = alloc(64 * 8);
+    if (T == 0) { return DR_ERR_OOM; }
+
+    # --- Row transforms ---
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            var v = 0;
+            if ((i < 32) && (j < 32)) { v = load64(dequant + (((i * w) + j) * 8)); }
+            store64(T + (j * 8), v);
+            j = j + 1;
+        }
+        if (rect) {
+            j = 0;
+            while (j < w) {
+                store64(T + (j * 8), av1_round2(load64(T + (j * 8)) * 2896, 12));
+                j = j + 1;
+            }
+        }
+        var rc = DR_OK;
+        if (lossless) {
+            rc = av1_itx_wht(T, 2);
+        } else {
+            rc = av1_itx_1d(T, row_kind, log2w, row_clamp);
+        }
+        if (rc != DR_OK) { return rc; }
+        j = 0;
+        while (j < w) {
+            store64(residual + (((i * w) + j) * 8), av1_round2(load64(T + (j * 8)), row_shift));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    # --- Intermediate clamp ---
+    var clo = 0 - (1 << (col_clamp - 1));
+    var chi = (1 << (col_clamp - 1)) - 1;
+    i = 0;
+    while (i < h) {
+        var j2 = 0;
+        while (j2 < w) {
+            var idx = ((i * w) + j2) * 8;
+            store64(residual + idx, av1_clip3(clo, chi, load64(residual + idx)));
+            j2 = j2 + 1;
+        }
+        i = i + 1;
+    }
+
+    # --- Column transforms ---
+    var j = 0;
+    while (j < w) {
+        i = 0;
+        while (i < h) {
+            store64(T + (i * 8), load64(residual + (((i * w) + j) * 8)));
+            i = i + 1;
+        }
+        var rc2 = DR_OK;
+        if (lossless) {
+            rc2 = av1_itx_wht(T, 0);
+        } else {
+            rc2 = av1_itx_1d(T, col_kind, log2h, col_clamp);
+        }
+        if (rc2 != DR_OK) { return rc2; }
+        i = 0;
+        while (i < h) {
+            store64(residual + (((i * w) + j) * 8), av1_round2(load64(T + (i * 8)), col_shift));
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    return DR_OK;
+}
