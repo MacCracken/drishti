@@ -152,7 +152,7 @@ fn test_intra_driver_dc() {
     var c = 0; while (c < 8) { dr_frame_set(f, 0, c, 3, 40); c = c + 1; }   # row 3
     var r = 0; while (r < 8) { dr_frame_set(f, 0, 3, r, 40); r = r + 1; }   # col 3
     # mi_cols = mi_rows = 2 for an 8x8 frame (2*ceil(8/8)).
-    var rc = av1_intra_predict(f, 0, 4, 4, 1, 1, 0, 0, AV1_DC_PRED, 0, 0, 2, 2, 2, 2);
+    var rc = av1_intra_predict(f, 0, 4, 4, 1, 1, 0, 0, AV1_DC_PRED, 0, 0, 0, 0, 2, 2, 2, 2);
     assert_eq(rc, DR_OK, "DC driver ok");
     # DC of all-40 neighbours = 40, written across the block.
     assert_eq(dr_frame_get(f, 0, 4, 4), 40, "block (4,4) = 40");
@@ -167,7 +167,7 @@ fn test_intra_driver_default() {
     var e = 0;
     var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
     # Top-left 4x4 block: no neighbours -> DC default 1<<(bd-1) = 128.
-    var rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 2, 2, 2, 2);
+    var rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 0, 0, 2, 2, 2, 2);
     assert_eq(rc, DR_OK, "default DC ok");
     assert_eq(dr_frame_get(f, 0, 0, 0), 128, "no-neighbour DC = 128");
     assert_eq(dr_frame_get(f, 0, 3, 3), 128, "flat default fill");
@@ -180,7 +180,7 @@ fn test_intra_driver_vertical() {
     # Above row 3 = distinct values; V_PRED copies AboveRow down each row.
     dr_frame_set(f, 0, 4, 3, 71); dr_frame_set(f, 0, 5, 3, 72);
     dr_frame_set(f, 0, 6, 3, 73); dr_frame_set(f, 0, 7, 3, 74);
-    var rc = av1_intra_predict(f, 0, 4, 4, 0, 1, 0, 0, AV1_V_PRED, 0, 0, 2, 2, 2, 2);
+    var rc = av1_intra_predict(f, 0, 4, 4, 0, 1, 0, 0, AV1_V_PRED, 0, 0, 0, 0, 2, 2, 2, 2);
     assert_eq(rc, DR_OK, "V driver ok");
     assert_eq(dr_frame_get(f, 0, 4, 4), 71, "V (4,4) = Above col4");
     assert_eq(dr_frame_get(f, 0, 7, 4), 74, "V (7,4) = Above col7");
@@ -188,21 +188,69 @@ fn test_intra_driver_vertical() {
     return 0;
 }
 
+# Angled directional: a FLAT reference (all neighbours = V) must predict a
+# flat block for any angle (interpolating between equal samples). Exercise
+# each quadrant (D45 < 90, D135 in (90,180), D203 > 180) with the edge
+# filter on, and the z2 fallback path.
+fn dir_flat(mode, delta): i64 {
+    var e = 0;
+    var f = dr_frame_new(16, 16, 1, 1, 1, 8, 0, &e);
+    # Fill a 4x4 block at (8,8)'s neighbourhood (rows/cols 7..15) with 100.
+    var r = 7; while (r < 16) { var c = 7; while (c < 16) { dr_frame_set(f, 0, c, r, 100); c = c + 1; } r = r + 1; }
+    var rc = av1_intra_predict(f, 0, 8, 8, 1, 1, 1, 1, mode, delta, 0, 1, 1, 4, 4, 4, 4);
+    assert_eq(rc, DR_OK, "directional flat ok");
+    # Every predicted sample equals the flat reference value.
+    assert_eq(dr_frame_get(f, 0, 8, 8), 100, "directional flat [0][0]");
+    assert_eq(dr_frame_get(f, 0, 11, 11), 100, "directional flat [3][3]");
+    assert_eq(dr_frame_get(f, 0, 11, 8), 100, "directional flat [0][3]");
+    assert_eq(dr_frame_get(f, 0, 8, 11), 100, "directional flat [3][0]");
+    return 0;
+}
+fn test_intra_directional_flat() {
+    dir_flat(AV1_D45_PRED, 0);     # pAngle 45  (< 90)
+    dir_flat(AV1_D135_PRED, 0);    # pAngle 135 (90..180, z2 + fallback)
+    dir_flat(AV1_D203_PRED, 0);    # pAngle 203 (> 180)
+    dir_flat(AV1_V_PRED, 1);       # pAngle 93  (angled vertical)
+    dir_flat(AV1_H_PRED, 0 - 2);   # pAngle 174 (angled horizontal)
+    dir_flat(AV1_D67_PRED, 0);     # pAngle 67  (< 90)
+    dir_flat(AV1_D157_PRED, 0);    # pAngle 157 (90..180)
+    return 0;
+}
+
 fn test_intra_driver_unsupported() {
     var e = 0;
     var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
-    # Angled directional (D45, pAngle 45) — deferred.
-    var rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_D45_PRED, 0, 0, 2, 2, 2, 2);
-    assert_eq(rc, DR_ERR_UNSUPPORTED, "angled directional unsupported");
-    # V_PRED with a non-zero angle delta -> pAngle != 90 -> deferred.
-    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_V_PRED, 1, 0, 2, 2, 2, 2);
-    assert_eq(rc, DR_ERR_UNSUPPORTED, "angled V (delta != 0) unsupported");
-    # filter-intra on plane 0 -> deferred.
-    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 1, 2, 2, 2, 2);
+    # Angled directional is now implemented (returns DR_OK).
+    var rc = av1_intra_predict(f, 0, 4, 4, 1, 1, 0, 0, AV1_D45_PRED, 0, 0, 0, 0, 2, 2, 2, 2);
+    assert_eq(rc, DR_OK, "angled directional now supported");
+    # filter-intra on plane 0 -> still deferred.
+    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 1, 0, 0, 2, 2, 2, 2);
     assert_eq(rc, DR_ERR_UNSUPPORTED, "filter-intra unsupported");
     # Bad block size.
-    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 1, 2, 2, 2);
+    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 0, 0, 1, 2, 2, 2);
     assert_eq(rc, DR_ERR_BOUNDS, "log2w < 2 rejected");
+    return 0;
+}
+
+# Directional helper tables.
+fn test_intra_directional_helpers() {
+    assert_eq(av1_dr_intra_derivative(3), 1023, "Dr[3]");
+    assert_eq(av1_dr_intra_derivative(45), 64, "Dr[45]");
+    assert_eq(av1_dr_intra_derivative(87), 3, "Dr[87]");
+    assert_eq(av1_dr_intra_derivative(1), 0, "Dr[1] = 0 (unused angle)");
+    # Edge kernel rows.
+    assert_eq(av1_edge_kernel(0, 2), 8, "kernel[0][2]");
+    assert_eq(av1_edge_kernel(1, 1), 5, "kernel[1][1]");
+    assert_eq(av1_edge_kernel(2, 0), 2, "kernel[2][0]");
+    assert_eq(av1_edge_kernel(2, 2), 4, "kernel[2][2]");
+    # Strength selection (a few spec rows).
+    assert_eq(av1_edge_filter_strength(4, 4, 0, 60), 1, "strength blk8 d>=56");
+    assert_eq(av1_edge_filter_strength(16, 16, 0, 40), 3, "strength blk32 d>=32");
+    assert_eq(av1_edge_filter_strength(4, 4, 1, 64), 2, "strength ft1 blk8 d>=64");
+    # Upsample selection.
+    assert_eq(av1_edge_upsample_sel(4, 4, 0, 10), 1, "upsample blk8 ft0 d<40");
+    assert_eq(av1_edge_upsample_sel(4, 4, 0, 40), 0, "no upsample d>=40");
+    assert_eq(av1_edge_upsample_sel(16, 16, 1, 10), 0, "no upsample ft1 blk32");
     return 0;
 }
 
@@ -220,6 +268,9 @@ fn main() {
     test_intra_driver_default();
     test_intra_driver_vertical();
     test_intra_driver_unsupported();
+    test_group("intra directional");
+    test_intra_directional_helpers();
+    test_intra_directional_flat();
     return assert_summary();
 }
 

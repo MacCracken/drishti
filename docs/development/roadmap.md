@@ -111,9 +111,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   0.7.3)** → inverse transforms **(done 0.7.4)**: DCT 4-64 / ADST 4-16 /
   identity / WHT + the 2D driver (`src/av1_itx.cyr`) → intra prediction
   **(0.7.6: `src/av1_intra.cyr` — non-directional DC/PAETH/SMOOTH×3 +
-  V/H; angled-directional + intra edge filter/upsample, filter-intra,
-  and chroma-from-luma still to come)** → coefficient decode (+ default
-  CDFs) → reconstruction glue (first pixels).
+  V/H; 0.7.8: the full angled directional prediction + intra edge
+  filter/upsample/corner; filter-intra + chroma-from-luma still to
+  come)** → coefficient decode (+ default CDFs) → reconstruction glue
+  (first pixels).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

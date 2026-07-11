@@ -4,6 +4,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-07-10
+
+Completes AV1 directional intra prediction — the fourth milestone
+sub-bite. Derived from spec 7.11.2.4 + the intra edge machinery
+(7.11.2.7-12), and cross-checked by a 4-agent adversarial spec review
+(clean). **3,974 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 directional intra prediction** (`src/av1_intra.cyr`): the full
+  `av1_intra_directional` (7.11.2.4) — all four angle quadrants
+  (pAngle <90, 90-180 with the LeftCol fallback, >180, and the 90°/180°
+  copies), the intra edge **filter corner** (7.11.2.7), **filter strength
+  selection** (7.11.2.9), **upsample selection** (7.11.2.10), **edge
+  upsample** (7.11.2.11), and **edge filter** (7.11.2.12), plus the
+  `Dr_Intra_Derivative` and `Intra_Edge_Kernel` tables. The `predict_intra`
+  driver now routes every directional mode here (the reference scratch
+  gained -2 headroom for the edge upsample) and takes `enable_edge_filter`
+  + `filter_type` inputs. The signed shift in the 90-180 quadrant uses the
+  arithmetic `>>>`. 96 assertions (up from 48).
+
+### Notes
+- `drishti_version()` → 708. Filter-intra (7.11.2.3) and chroma-from-luma
+  (7.11.5) remain later sub-bites.
+
 ## [0.7.7] - 2026-07-10
 
 Adopt cyrius 6.4.46's new arithmetic-shift operator and retire the 0.7.5

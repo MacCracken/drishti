@@ -1,9 +1,9 @@
 # @public — drishti AV1: intra prediction (spec 7.11.2). Predicts a
 # transform block into the reconstructed frame from its already-decoded
-# above / left neighbours. This bite covers the non-directional modes —
-# DC, PAETH, SMOOTH / SMOOTH_V / SMOOTH_H — and the exact vertical (90°) /
-# horizontal (180°) directional cases, driven by predict_intra's
-# reference-sample construction.
+# above / left neighbours. Covers the non-directional modes (DC, PAETH,
+# SMOOTH / SMOOTH_V / SMOOTH_H) and the full directional prediction
+# (all angles, with the intra edge filter / upsample / corner), driven by
+# predict_intra's reference-sample construction.
 #
 # FLAT module (no includes) — wiring in src/main.cyr. Depends on
 # src/drishti.cyr (DR_ERR_*), src/frame.cyr (DrFrame get/set, dr_clip1),
@@ -13,17 +13,19 @@
 # Derived from the AV1 spec section 7.11.2 (cited inline):
 #   7.11.2.1 predict_intra (reference-sample setup + dispatch + writeback)
 #   7.11.2.2 basic (PAETH) intra prediction
+#   7.11.2.4 directional intra prediction (all four angle quadrants)
 #   7.11.2.5 DC intra prediction
 #   7.11.2.6 smooth intra prediction (Sm_Weights tables)
-#   7.11.2.4 directional intra prediction — only the pAngle == 90 / 180
-#            copy cases here; the angled interpolation + intra edge filter
-#            / upsample (7.11.2.7-12) and the recursive filter-intra
-#            (7.11.2.3) + chroma-from-luma (7.11.5) are later 0.7.x
-#            sub-bites (see docs/development/roadmap.md).
+#   7.11.2.7 filter corner, 7.11.2.9 edge filter strength, 7.11.2.10
+#            edge upsample selection, 7.11.2.11 edge upsample, 7.11.2.12
+#            edge filter; Dr_Intra_Derivative + Intra_Edge_Kernel tables.
+# The recursive filter-intra (7.11.2.3) and chroma-from-luma (7.11.5)
+# remain later 0.7.x sub-bites (see docs/development/roadmap.md); the
+# get_filter_type computation (7.11.2.8) is a caller-provided input.
 #
-# AboveRow / LeftCol are i64 scratch arrays indexed from -1 (the corner)
-# to w+h-1; callers pass the ORIGIN pointer (element 0), so index -1 is
-# the element one slot before it.
+# AboveRow / LeftCol are i64 scratch arrays; callers pass the ORIGIN
+# pointer with -2 headroom (index -2 .. 2*(w+h)-2) so the edge upsample,
+# which doubles the arrays and writes buf[-2], is in bounds.
 
 enum Av1IntraConst {
     AV1_DC_PRED       = 0;
@@ -238,6 +240,299 @@ fn av1_intra_horizontal(left, w, h, pred): i64 {
 }
 
 # ================================================================
+# Directional intra prediction — 7.11.2.4 + the intra edge filter /
+# upsample / corner (7.11.2.7-12) and Dr_Intra_Derivative.
+# ================================================================
+
+# Dr_Intra_Derivative[angle] — the sparse 90-entry derivative table
+# (lazy, cached; non-zero only at the valid directional angles).
+var Av1_DrDeriv = 0;
+fn av1_dr_intra_derivative(angle): i64 {
+    if (Av1_DrDeriv == 0) {
+        var t = alloc(90 * 8);
+        if (t == 0) { return 0; }
+        memset(t, 0, 90 * 8);
+        store64(t + (3 * 8), 1023);  store64(t + (6 * 8), 547);   store64(t + (9 * 8), 372);
+        store64(t + (14 * 8), 273);  store64(t + (17 * 8), 215);  store64(t + (20 * 8), 178);
+        store64(t + (23 * 8), 151);  store64(t + (26 * 8), 132);  store64(t + (29 * 8), 116);
+        store64(t + (32 * 8), 102);  store64(t + (36 * 8), 90);   store64(t + (39 * 8), 80);
+        store64(t + (42 * 8), 71);   store64(t + (45 * 8), 64);   store64(t + (48 * 8), 57);
+        store64(t + (51 * 8), 51);   store64(t + (54 * 8), 45);   store64(t + (58 * 8), 40);
+        store64(t + (61 * 8), 35);   store64(t + (64 * 8), 31);   store64(t + (67 * 8), 27);
+        store64(t + (70 * 8), 23);   store64(t + (73 * 8), 19);   store64(t + (76 * 8), 15);
+        store64(t + (81 * 8), 11);   store64(t + (84 * 8), 7);    store64(t + (87 * 8), 3);
+        Av1_DrDeriv = t;
+    }
+    return load64(Av1_DrDeriv + (angle * 8));
+}
+
+# Intra_Edge_Kernel[strength-1][j] — {{0,4,8,4,0},{0,5,6,5,0},{2,4,4,4,2}}.
+fn av1_edge_kernel(s0, j): i64 {
+    if (s0 == 0) {
+        if ((j == 1) || (j == 3)) { return 4; }
+        if (j == 2) { return 8; }
+        return 0;
+    }
+    if (s0 == 1) {
+        if ((j == 1) || (j == 3)) { return 5; }
+        if (j == 2) { return 6; }
+        return 0;
+    }
+    if ((j == 0) || (j == 4)) { return 2; }
+    return 4;
+}
+
+# Filter corner (7.11.2.7): a three-tap value for the top-left corner.
+fn av1_intra_filter_corner(above, left): i64 {
+    var s = (load64(left + 0) * 5) + (load64(above + (0 - 8)) * 6) + (load64(above + 0) * 5);
+    return av1_round2(s, 4);
+}
+
+# Intra edge filter strength selection (7.11.2.9) -> 0..3.
+fn av1_edge_filter_strength(w, h, filter_type, delta): i64 {
+    var d = av1_iabs(delta);
+    var blk = w + h;
+    var s = 0;
+    if (filter_type == 0) {
+        if (blk <= 8) {
+            if (d >= 56) { s = 1; }
+        } else {
+            if (blk <= 16) {
+                if (d >= 40) { s = 1; }
+            } else {
+                if (blk <= 24) {
+                    if (d >= 8) { s = 1; }
+                    if (d >= 16) { s = 2; }
+                    if (d >= 32) { s = 3; }
+                } else {
+                    if (blk <= 32) {
+                        s = 1;
+                        if (d >= 4) { s = 2; }
+                        if (d >= 32) { s = 3; }
+                    } else {
+                        s = 3;
+                    }
+                }
+            }
+        }
+    } else {
+        if (blk <= 8) {
+            if (d >= 40) { s = 1; }
+            if (d >= 64) { s = 2; }
+        } else {
+            if (blk <= 16) {
+                if (d >= 20) { s = 1; }
+                if (d >= 48) { s = 2; }
+            } else {
+                if (blk <= 24) {
+                    if (d >= 4) { s = 3; }
+                } else {
+                    s = 3;
+                }
+            }
+        }
+    }
+    return s;
+}
+
+# Intra edge upsample selection (7.11.2.10).
+fn av1_edge_upsample_sel(w, h, filter_type, delta): i64 {
+    var d = av1_iabs(delta);
+    var blk = w + h;
+    if ((d <= 0) || (d >= 40)) { return 0; }
+    if (filter_type == 0) {
+        if (blk <= 16) { return 1; }
+        return 0;
+    }
+    if (blk <= 8) { return 1; }
+    return 0;
+}
+
+# Intra edge filter process (7.11.2.12): filter `buf` (AboveRow or LeftCol,
+# passed as ORIGIN) in place over sz samples. buf[i-1] for i=1..sz-1 is
+# rewritten from a snapshot; buf[-1] is left intact.
+fn av1_intra_edge_filter(buf, sz, strength): i64 {
+    if (strength == 0) { return DR_OK; }
+    var edge = alloc(sz * 8);
+    if (edge == 0) { return DR_ERR_OOM; }
+    var i = 0;
+    while (i < sz) {
+        store64(edge + (i * 8), load64(buf + ((i - 1) * 8)));   # edge[i] = buf[i-1]
+        i = i + 1;
+    }
+    i = 1;
+    while (i < sz) {
+        var s = 0;
+        var j = 0;
+        while (j < 5) {   # INTRA_EDGE_TAPS
+            var k = av1_clip3(0, sz - 1, i - 2 + j);
+            s = s + (av1_edge_kernel(strength - 1, j) * load64(edge + (k * 8)));
+            j = j + 1;
+        }
+        store64(buf + ((i - 1) * 8), (s + 8) >> 4);   # non-negative sum
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# Intra edge upsample process (7.11.2.11): on entry buf[-1..numPx-1] are
+# valid; on exit buf[-2..2*numPx-2] hold the upsampled edge. `buf` is the
+# ORIGIN pointer (with headroom for index -2).
+fn av1_intra_edge_upsample(buf, num_px, bit_depth): i64 {
+    var dup = alloc((num_px + 3) * 8);
+    if (dup == 0) { return DR_ERR_OOM; }
+    store64(dup + 0, load64(buf + (0 - 8)));   # dup[0] = buf[-1]
+    var i = 0 - 1;
+    while (i < num_px) {
+        store64(dup + ((i + 2) * 8), load64(buf + (i * 8)));   # dup[i+2] = buf[i]
+        i = i + 1;
+    }
+    store64(dup + ((num_px + 2) * 8), load64(buf + ((num_px - 1) * 8)));
+    store64(buf + ((0 - 2) * 8), load64(dup + 0));   # buf[-2] = dup[0]
+    i = 0;
+    while (i < num_px) {
+        var s = (0 - load64(dup + (i * 8))) + (9 * load64(dup + ((i + 1) * 8)))
+        + (9 * load64(dup + ((i + 2) * 8))) - load64(dup + ((i + 3) * 8));
+        s = dr_clip1(av1_round2(s, 4), bit_depth);
+        store64(buf + (((2 * i) - 1) * 8), s);
+        store64(buf + ((2 * i) * 8), load64(dup + ((i + 2) * 8)));
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# Directional intra prediction (7.11.2.4). above/left are ORIGIN pointers
+# with -2 headroom (edge upsample may write buf[-2]). Modes with pAngle
+# 90/180 fall through to the vertical/horizontal copies; the edge
+# filter/upsample only runs when enable_edge_filter is set and the angle
+# is off-axis. filter_type comes from the neighbour modes (caller input).
+fn av1_intra_directional(above, left, plane, x, y, have_left, have_above,
+mode, angle_delta, w, h, max_x, max_y, bit_depth, enable_edge_filter,
+filter_type, pred): i64 {
+    var p_angle = av1_mode_to_angle(mode) + (angle_delta * AV1_ANGLE_STEP);
+    var upsample_above = 0;
+    var upsample_left = 0;
+    if (enable_edge_filter) {
+        if ((p_angle != 90) && (p_angle != 180)) {
+            if ((p_angle > 90) && (p_angle < 180) && ((w + h) >= 24)) {
+                var corner = av1_intra_filter_corner(above, left);
+                store64(above + (0 - 8), corner);
+                store64(left + (0 - 8), corner);
+            }
+            if (have_above) {
+                var st = av1_edge_filter_strength(w, h, filter_type, p_angle - 90);
+                var npx = av1_imin(w, max_x - x + 1);
+                if (p_angle < 90) { npx = npx + h; }
+                var rce = av1_intra_edge_filter(above, npx + 1, st);
+                if (rce != DR_OK) { return rce; }
+            }
+            if (have_left) {
+                var stl = av1_edge_filter_strength(w, h, filter_type, p_angle - 180);
+                var npxl = av1_imin(h, max_y - y + 1);
+                if (p_angle > 180) { npxl = npxl + w; }
+                var rcel = av1_intra_edge_filter(left, npxl + 1, stl);
+                if (rcel != DR_OK) { return rcel; }
+            }
+        }
+        upsample_above = av1_edge_upsample_sel(w, h, filter_type, p_angle - 90);
+        var nua = w;
+        if (p_angle < 90) { nua = w + h; }
+        if (upsample_above) {
+            var rcu = av1_intra_edge_upsample(above, nua, bit_depth);
+            if (rcu != DR_OK) { return rcu; }
+        }
+        upsample_left = av1_edge_upsample_sel(w, h, filter_type, p_angle - 180);
+        var nul = h;
+        if (p_angle > 180) { nul = h + w; }
+        if (upsample_left) {
+            var rcul = av1_intra_edge_upsample(left, nul, bit_depth);
+            if (rcul != DR_OK) { return rcul; }
+        }
+    }
+    # dx (pAngle < 180) and dy (pAngle > 90).
+    var dx = 0;
+    if (p_angle < 90) {
+        dx = av1_dr_intra_derivative(p_angle);
+    } else {
+        if (p_angle < 180) { dx = av1_dr_intra_derivative(180 - p_angle); }
+    }
+    var dy = 0;
+    if ((p_angle > 90) && (p_angle < 180)) {
+        dy = av1_dr_intra_derivative(p_angle - 90);
+    } else {
+        if (p_angle > 180) { dy = av1_dr_intra_derivative(270 - p_angle); }
+    }
+
+    if (p_angle == 90) { return av1_intra_vertical(above, w, h, pred); }
+    if (p_angle == 180) { return av1_intra_horizontal(left, w, h, pred); }
+
+    if (p_angle < 90) {
+        var max_base_x = (w + h - 1) << upsample_above;
+        var i = 0;
+        while (i < h) {
+            var j = 0;
+            while (j < w) {
+                var idx = (i + 1) * dx;
+                var base = (idx >> (6 - upsample_above)) + (j << upsample_above);
+                var shift = ((idx << upsample_above) >> 1) & 31;
+                if (base < max_base_x) {
+                    store64(pred + (((i * w) + j) * 8),
+                    av1_round2((load64(above + (base * 8)) * (32 - shift))
+                    + (load64(above + ((base + 1) * 8)) * shift), 5));
+                } else {
+                    store64(pred + (((i * w) + j) * 8), load64(above + (max_base_x * 8)));
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        return DR_OK;
+    }
+    if ((p_angle > 90) && (p_angle < 180)) {
+        var i2 = 0;
+        while (i2 < h) {
+            var j2 = 0;
+            while (j2 < w) {
+                var idx2 = (j2 << 6) - ((i2 + 1) * dx);
+                var base2 = idx2 >>> (6 - upsample_above);   # idx2 may be negative
+                if (base2 >= (0 - (1 << upsample_above))) {
+                    var shift2 = ((idx2 << upsample_above) >> 1) & 31;
+                    store64(pred + (((i2 * w) + j2) * 8),
+                    av1_round2((load64(above + (base2 * 8)) * (32 - shift2))
+                    + (load64(above + ((base2 + 1) * 8)) * shift2), 5));
+                } else {
+                    var idx3 = (i2 << 6) - ((j2 + 1) * dy);
+                    var base3 = idx3 >>> (6 - upsample_left);
+                    var shift3 = ((idx3 << upsample_left) >> 1) & 31;
+                    store64(pred + (((i2 * w) + j2) * 8),
+                    av1_round2((load64(left + (base3 * 8)) * (32 - shift3))
+                    + (load64(left + ((base3 + 1) * 8)) * shift3), 5));
+                }
+                j2 = j2 + 1;
+            }
+            i2 = i2 + 1;
+        }
+        return DR_OK;
+    }
+    # p_angle > 180.
+    var i3 = 0;
+    while (i3 < h) {
+        var j3 = 0;
+        while (j3 < w) {
+            var idx4 = (j3 + 1) * dy;
+            var base4 = (idx4 >> (6 - upsample_left)) + (i3 << upsample_left);
+            var shift4 = ((idx4 << upsample_left) >> 1) & 31;
+            store64(pred + (((i3 * w) + j3) * 8),
+            av1_round2((load64(left + (base4 * 8)) * (32 - shift4))
+            + (load64(left + ((base4 + 1) * 8)) * shift4), 5));
+            j3 = j3 + 1;
+        }
+        i3 = i3 + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
 # predict_intra — 7.11.2.1: build the reference samples from the frame,
 # dispatch to the mode kernel, write the prediction back.
 # ================================================================
@@ -246,12 +541,13 @@ fn av1_intra_horizontal(left, w, h, pred): i64 {
 # (1<<log2h) into `frame`, using mode + angle_delta. have{Left,Above,
 # AboveRight,BelowLeft} flag reconstructed-neighbour availability; mi_cols
 # / mi_rows are the frame's MI dimensions (for the edge clamps).
+# enable_edge_filter is the sequence header's enable_intra_edge_filter;
+# filter_type (0/1) is derived from the neighbour modes (caller input).
 # Returns DR_OK, or DR_ERR_UNSUPPORTED for the not-yet-implemented paths
-# (filter-intra, and directional modes whose pAngle is not 90/180),
-# DR_ERR_OOM, DR_ERR_BOUNDS.
+# (recursive filter-intra), DR_ERR_OOM, DR_ERR_BOUNDS.
 fn av1_intra_predict(frame, plane, x, y, have_left, have_above,
 have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
-log2w, log2h, mi_cols, mi_rows): i64 {
+enable_edge_filter, filter_type, log2w, log2h, mi_cols, mi_rows): i64 {
     if ((log2w < 2) || (log2w > 6) || (log2h < 2) || (log2h > 6)) {
         return DR_ERR_BOUNDS;
     }
@@ -264,12 +560,16 @@ log2w, log2h, mi_cols, mi_rows): i64 {
         max_x = ((mi_cols * AV1_MI_SIZE) >> dr_frame_subx(frame)) - 1;
         max_y = ((mi_rows * AV1_MI_SIZE) >> dr_frame_suby(frame)) - 1;
     }
-    # Reference scratch: index -1 .. w+h-1, so alloc w+h+1 and offset by 1.
-    var abuf = alloc((w + h + 1) * 8);
-    var lbuf = alloc((w + h + 1) * 8);
+    # Reference scratch: the directional edge upsample doubles the arrays
+    # and writes buf[-2], so alloc 2*(w+h)+8 and set the origin 2 elements
+    # in (supports index -2 .. 2*(w+h)+5). Non-directional modes use the
+    # -1..w+h-1 subset.
+    var span = (2 * (w + h)) + 8;
+    var abuf = alloc(span * 8);
+    var lbuf = alloc(span * 8);
     if ((abuf == 0) || (lbuf == 0)) { return DR_ERR_OOM; }
-    var above = abuf + 8;    # above[-1] == abuf[0]
-    var left = lbuf + 8;
+    var above = abuf + (2 * 8);   # above[-2] == abuf[0]
+    var left = lbuf + (2 * 8);
 
     # AboveRow[0 .. w+h-1].
     var i = 0;
@@ -333,16 +633,9 @@ log2w, log2h, mi_cols, mi_rows): i64 {
         rc = DR_ERR_UNSUPPORTED;                     # recursive filter-intra: deferred (roadmap.md 0.7.x)
     } else {
         if (av1_is_directional_mode(mode)) {
-            var p_angle = av1_mode_to_angle(mode) + (angle_delta * AV1_ANGLE_STEP);
-            if (p_angle == 90) {
-                rc = av1_intra_vertical(above, w, h, pred);
-            } else {
-                if (p_angle == 180) {
-                    rc = av1_intra_horizontal(left, w, h, pred);
-                } else {
-                    rc = DR_ERR_UNSUPPORTED;         # angled directional: deferred (roadmap.md 0.7.x)
-                }
-            }
+            rc = av1_intra_directional(above, left, plane, x, y, have_left,
+            have_above, mode, angle_delta, w, h, max_x, max_y, bit_depth,
+            enable_edge_filter, filter_type, pred);
         } else {
             if ((mode == AV1_SMOOTH_PRED) || (mode == AV1_SMOOTH_V_PRED) || (mode == AV1_SMOOTH_H_PRED)) {
                 rc = av1_intra_smooth(above, left, mode, log2w, log2h, w, h, pred);
