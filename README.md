@@ -18,18 +18,19 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.22 (AV1 decode arc in progress)
+## Status — 0.7.23 (AV1 decode arc in progress)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (19,784 suite assertions + 1,140 fuzz
+derived, and adversarially tested (19,803 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc is underway — the frame
 header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue (**first pixels** from a coefficient array), the
 **coefficient reading loop** (a transform block decodes end-to-end, with
 adaptive CDFs), the block-decode CDF tables, the intra **mode-info
-reads**, the intra **transform-size read**, and the **transform-type
-derivation** are in:
+reads**, the intra **transform-size read**, the **transform-type
+derivation**, and the **residual driver** (a transform block now decodes
+to pixels end-to-end) are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
@@ -55,8 +56,10 @@ derivation** are in:
   read (spec 5.11.15 `read_tx_size`: the tx_depth split of Max_Tx_Size_Rect,
   decode + inverse encode) + the transform-type derivation (spec 5.11.48/40
   `compute_tx_type`: `intra_tx_type` read + `get_tx_set` + `Mode_To_Txfm`,
-  spliced into the coeffs loop) — a transform block now decodes with its own
-  computed transform type
+  spliced into the coeffs loop) + the residual driver (spec 5.11.34/36
+  `residual()` / `transform_block()`: predict_intra → coeffs() → reconstruct()
+  per tx block, with CfL + the BlockDecoded availability grid) — a transform
+  block now decodes to pixels end-to-end
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,

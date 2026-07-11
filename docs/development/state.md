@@ -6,16 +6,16 @@
 
 ## Version
 
-**0.7.22** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
-AV1 arc** advances the **block/partition decode** (the last stretch to a
-decoded keyframe) with bite 4 — the trickiest seam: the **transform-type
-derivation** (`av1_txtype.cyr` — `compute_tx_type` / `transform_type` /
-`get_tx_set`) spliced INTO the coeffs loop, so a transform block decodes
-with its own computed tx type (the `intra_tx_type` symbol, read between
-all_zero and the eob position). On top of the tx-size read (0.7.21),
-mode-info reads (0.7.20), and the coefficient decode (0.7.13-0.7.18). The
-remaining distance to 1.0 is the rest of the per-codec completion arcs
-(0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.23** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
+AV1 arc** reaches a composition milestone in the **block/partition decode**:
+bite 5, the **residual driver** (`av1_residual.cyr` — `residual()` /
+`transform_block()`) drives predict_intra → coeffs() → reconstruct() per
+transform block, so a transform block now decodes **end-to-end to pixels**
+in a DrFrame (with CfL, the BlockDecoded availability grid, and MaxLumaW/H).
+On top of the transform-type seam (0.7.22), tx-size read (0.7.21), mode-info
+reads (0.7.20), and the coefficient decode (0.7.13-0.7.18). The remaining
+distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 →
+0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -30,7 +30,7 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (27 `[lib]` modules, dependency order)
+## Source (28 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -54,6 +54,7 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
+| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H); get_tx_size; Av1Tile + Av1Block decode contexts |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -67,12 +68,12 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 22 suites / **19,784 assertions**: drishti 51 · bits
+- `make test` — 23 suites / **19,803 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · av1_txtype
-  142 · h264 326 · h265 276 · vpx 287
+  142 · av1_residual 19 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -115,7 +116,10 @@ remaining distance to 1.0 is the rest of the per-codec completion arcs
   hostile-input safety → all clean, no findings), and the transform-type
   seam (5 slices: transform_type fidelity + compute_tx_type/get_tx_set +
   per-value table diff + the coeffs splice/Tx_Size_Sqr move + hostile-input
-  safety → all clean, no findings)
+  safety → all clean, no findings), and the residual driver (5 slices:
+  transform_block orchestration + residual loop/get_tx_size + BlockDecoded/
+  availability + coordinate/subsampling math + hostile-input safety → all
+  clean, no findings)
 
 ## Dependencies
 
@@ -174,13 +178,17 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    take `cc`+`ncc`+`Av1TxTypeCtx` and return the computed tx type. Coeffs
    round-trip stayed green (DCT_DCT via `base_q=0` = byte-identical stream).
    **[done 0.7.22]**
-5. **residual driver** — `residual()`/`transform_block()` (5.11.34/35):
-   per tx block, predict_intra → coeffs() → reconstruct(); manages
-   BlockDecoded availability + the level-context strips + CfL MaxLumaW/H.
-   **← NEXT BITE.**
+5. **residual driver** — `av1_residual.cyr`: `residual()`/`transform_block()`
+   (5.11.34/36) — per tx block, predict_intra → coeffs() → reconstruct() into
+   a DrFrame; CfL (predict_chroma_from_luma) + MaxLumaW/H; the BlockDecoded
+   availability grid (haveAboveRight/haveBelowLeft); get_tx_size; the Av1Tile +
+   Av1Block decode contexts (populated by bite 7). A transform block decodes
+   end-to-end to pixels; verified by concrete DC/skip/eob checks + a
+   driver-vs-manual reconstruct consistency test. **[done 0.7.23]**
 6. **`decode_partition` tree + `decode_block`** (5.11.4/5.11.5) — the
    partition symbol/ctx + split_or_horz/vert edge CDFs + Partition_Subsize;
-   writes the MiSizes grid.
+   writes the MiSizes grid, and per block: mode-info → tx-size → residual.
+   **← NEXT BITE.**
 7. **tile/frame loop** (`decode_tile`/tile_group) — clear_above/left,
    the SB loop, init the CDF contexts (av1_ncdf_new + av1_ccdf_new), drive
    into `DrFrame` = **first decoded keyframe**.

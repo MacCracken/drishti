@@ -137,8 +137,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size tables); 0.7.22
   `src/av1_txtype.cyr` the transform-type derivation (`compute_tx_type` /
   `transform_type` / `get_tx_set`) spliced into the coeffs loop, retiring the
-  PlaneTxType caller-input; then residual driver → decode_partition tree →
-  tile/frame loop = decoded keyframe)**.
+  PlaneTxType caller-input; 0.7.23 `src/av1_residual.cyr` the residual driver
+  (`residual()` / `transform_block()`) composing predict_intra → coeffs() →
+  reconstruct() per tx block into a DrFrame — a transform block decodes to
+  pixels; then decode_partition tree → tile/frame loop = decoded keyframe)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

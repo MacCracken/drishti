@@ -40,6 +40,7 @@ modules = [
     "src/av1_txsize.cyr",
     "src/av1_txtype.cyr",
     "src/av1_coeffs.cyr",
+    "src/av1_residual.cyr",
     "src/h264_nal.cyr",
     "src/h264_ps.cyr",
     "src/h265_nal.cyr",

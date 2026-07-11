@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-07-11
+
+Bite 5 of the AV1 **block/partition decode** arc — the composition milestone: a
+transform block now decodes **end-to-end to pixels**. A new `src/av1_residual.cyr`
+implements `residual()` / `transform_block()` (spec 5.11.34/36), driving
+`predict_intra` → `coeffs()` → `reconstruct()` per transform block into a
+`DrFrame`, with chroma-from-luma, the `BlockDecoded` availability grid, and the
+`MaxLumaW/H` CfL extents. A 5-agent adversarial spec review (transform_block
+orchestration, residual loop + get_tx_size, BlockDecoded + availability,
+coordinate/subsampling math, hostile-input safety) confirmed it with **no
+findings**. **19,803 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 residual driver** (`src/av1_residual.cyr`, new flat module): the intra
+  keyframe residual composition. `av1_transform_block` predicts a tx block into
+  the frame (`av1_intra_predict`, DC + `av1_predict_chroma_from_luma` for
+  `UV_CFL_PRED`), then — unless `skip` — reads its coefficients (`av1_coeffs_decode`,
+  which computes the `PlaneTxType` via the 0.7.22 seam) and, if `eob>0`, adds the
+  reconstructed residual (`av1_reconstruct`). It manages the `BlockDecoded`
+  availability grid (feeding `haveAboveRight`/`haveBelowLeft` to prediction) and
+  the luma `MaxLumaW/H` that CfL reads. `av1_residual` drives `transform_block`
+  over each plane's tx grid. `av1_get_tx_size` (spec 5.11.36) picks the per-plane
+  tx size. The `Av1Tile` decode context (frame + entropy + per-tile constants +
+  per-plane `BlockDecoded` / coeff level-context strips + reusable `Quant[]`
+  scratch) and the `Av1Block` per-block record are populated by the tile/frame
+  loop (bite 7).
+- **Tests** (`tests/av1_residual.tcyr`, 19 assertions): `get_tx_size`
+  known-answers; concrete checks — a DC-predicted skip block is all `2^(bd-1)`,
+  the `BlockDecoded` grid + `MaxLumaW/H` are set, an all-zero (`eob 0`) block is
+  prediction-only, a 3-plane 420 block predicts all planes, a CfL block on flat
+  luma is a no-op; and a driver-vs-manual consistency check on the reconstruct
+  path (predict + coeffs + reconstruct producing matching pixels, with a verified
+  nonzero residual).
+
+### Notes
+- `drishti_version()` → 723. A transform block reconstructs to pixels through the
+  driver. Next in the block-decode arc (bite 6): `decode_partition` / `decode_block`
+  (5.11.4/5.11.5) — the partition symbol + split_or_horz/vert edge CDFs +
+  `Partition_Subsize`, writing the `MiSizes` grid and calling mode-info →
+  tx-size → residual per block; then the tile/frame loop = a decoded keyframe.
+
 ## [0.7.22] - 2026-07-11
 
 Bite 4 of the AV1 **block/partition decode** arc — the trickiest seam: the

@@ -1,0 +1,369 @@
+# src/av1_residual.cyr — AV1 residual driver (spec 5.11.34 residual() +
+# 5.11.36 transform_block) for an intra keyframe. Bite 5 of the block/partition
+# decode arc: this is where the intra layer composes — per transform block it
+# runs predict_intra (7.11.2) → coeffs() (5.11.39) → reconstruct (7.12.3),
+# producing DECODED PIXELS in a DrFrame. It ties together every 0.7.x AV1
+# primitive built so far.
+#
+# transform_block: predicts the tx block into CurrFrame[plane] (DC + CfL for
+# UV_CFL_PRED), then — unless skip — reads its coefficients (coeffs() computes
+# the PlaneTxType via the 0.7.22 seam) and, if eob>0, adds the reconstructed
+# residual. It manages the BlockDecoded availability grid (feeding
+# haveAboveRight / haveBelowLeft to prediction) and the luma MaxLumaW/H that CfL
+# reads. residual() drives transform_block over each plane's tx grid.
+#
+# SCOPE (intra keyframe baseline): is_inter=0, one 64x64 superblock chunk
+# (widthChunks==heightChunks==1). The 128x128 chunk split, palette, inter
+# transform_tree, and the loop-filter tx-size grid (LoopfilterTxSizes) are all
+# out of this bite (deferred; roadmap.md). Per-plane quantizer deltas are 0
+# (segmentation / delta-q deferred; roadmap.md). The tile context here (Av1Tile)
+# is populated by the tile/frame loop (bite 7); this bite supplies the driver.
+#
+# FLAT module — wiring in src/main.cyr after av1_coeffs.cyr (needs the coeffs
+# loop). Family av1_. Depends on: av1_intra (av1_intra_predict /
+# av1_predict_chroma_from_luma), av1_coeffs (av1_coeffs_decode), av1_recon
+# (av1_reconstruct), av1_quant (av1_get_dc/ac_quant), av1_txsize
+# (av1_max_tx_size_rect / av1_tx_width / _height / av1_tx_size_sqr), av1_txtype
+# (Av1TxTypeCtx), av1_modeinfo (Av1ModeInfo, block tables, get_plane_residual_size),
+# frame (DrFrame), drishti (DR_OK).
+
+# get_tx_size(plane, txSz) (5.11.36): luma uses txSz; chroma the largest rect tx
+# for the plane residual size, with the 64-dim -> 32-clamp rules.
+fn av1_get_tx_size(plane, tx_size, mi_size, subx, suby): i64 {
+    if (plane == 0) { return tx_size; }
+    var uv_tx = av1_max_tx_size_rect(av1_get_plane_residual_size(mi_size, plane, subx, suby));
+    if ((av1_tx_width(uv_tx) == 64) || (av1_tx_height(uv_tx) == 64)) {
+        if (av1_tx_width(uv_tx) == 16) { return 9; }    # TX_16X32
+        if (av1_tx_height(uv_tx) == 16) { return 10; }  # TX_32X16
+        return 3;                                       # TX_32X32
+    }
+    return uv_tx;
+}
+
+# ================================================================
+# Av1Tile — the tile decode context (persistent across the tile's blocks,
+# populated by the tile/frame loop). Holds the frame, the entropy state, the
+# per-tile constants, the per-plane BlockDecoded grids + coeff level-context
+# strips, and the reusable per-tx scratch (Quant[] + the computed tx type) and
+# the CfL MaxLumaW/H. Per-plane pointer arrays live at BD/ALVL/LLVL/ADC/LDC,
+# indexed base + plane*8.
+# ================================================================
+enum Av1TileOff {
+    AV1TILE_FRAME     = 0;
+    AV1TILE_SD        = 8;
+    AV1TILE_CC        = 16;
+    AV1TILE_NCC       = 24;
+    AV1TILE_MI_COLS   = 32;
+    AV1TILE_MI_ROWS   = 40;
+    AV1TILE_SUBX      = 48;
+    AV1TILE_SUBY      = 56;
+    AV1TILE_BIT_DEPTH = 64;
+    AV1TILE_BASE_Q    = 72;
+    AV1TILE_ENABLE_EF = 80;   # enable_intra_edge_filter
+    AV1TILE_IS_INTER  = 88;   # 0 for an intra keyframe
+    AV1TILE_REDUCED_TX = 96;
+    AV1TILE_TTX       = 104;  # Av1TxTypeCtx (rebuilt per block)
+    AV1TILE_QUANT     = 112;  # 1024-i64 Quant[] scratch (min(32,w)*min(32,h))
+    AV1TILE_OTT       = 120;  # out_tx_type scratch (1 i64)
+    AV1TILE_MAXLW     = 128;  # MaxLumaW (luma sample extent, CfL)
+    AV1TILE_MAXLH     = 136;  # MaxLumaH
+    AV1TILE_BD        = 144;  # BlockDecoded: 3 plane arrays ((SB4+2)^2)
+    AV1TILE_ALVL      = 168;  # AboveLevelContext: 3 plane arrays
+    AV1TILE_LLVL      = 192;  # LeftLevelContext: 3
+    AV1TILE_ADC       = 216;  # AboveDcContext: 3
+    AV1TILE_LDC       = 240;  # LeftDcContext: 3
+    AV1TILE_SIZE      = 264;
+}
+# BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
+# 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
+enum Av1BdConst {
+    AV1_SB4       = 16;    # 64x64 superblock in 4x4 (MI) units
+    AV1_BD_STRIDE = 18;    # SB4 + 2 (the -1 border on each side)
+}
+fn av1_bd_plane(tile, plane): i64 { return load64(tile + AV1TILE_BD + (plane * 8)); }
+fn av1_bd_get(tile, plane, r, c): i64 {
+    return load64(av1_bd_plane(tile, plane) + ((((r + 1) * AV1_BD_STRIDE) + (c + 1)) * 8));
+}
+fn av1_bd_set(tile, plane, r, c, v): i64 {
+    store64(av1_bd_plane(tile, plane) + ((((r + 1) * AV1_BD_STRIDE) + (c + 1)) * 8), v);
+    return 0;
+}
+
+# Allocate + wire a tile context. num_planes = 1 (mono) or 3. The level strips
+# are sized to the tile's plane extent; BlockDecoded to one superblock. Returns
+# the tile pointer, or 0 on OOM. sd/cc/ncc are set by the caller each tile.
+fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_planes): i64 {
+    var tile = alloc(AV1TILE_SIZE);
+    if (tile == 0) { return 0; }
+    store64(tile + AV1TILE_FRAME, frame);
+    store64(tile + AV1TILE_SD, 0);
+    store64(tile + AV1TILE_CC, 0);
+    store64(tile + AV1TILE_NCC, 0);
+    store64(tile + AV1TILE_MI_COLS, mi_cols);
+    store64(tile + AV1TILE_MI_ROWS, mi_rows);
+    store64(tile + AV1TILE_SUBX, dr_frame_subx(frame));
+    store64(tile + AV1TILE_SUBY, dr_frame_suby(frame));
+    store64(tile + AV1TILE_BIT_DEPTH, dr_frame_bit_depth(frame));
+    store64(tile + AV1TILE_BASE_Q, base_q);
+    store64(tile + AV1TILE_ENABLE_EF, enable_ef);
+    store64(tile + AV1TILE_IS_INTER, 0);
+    store64(tile + AV1TILE_REDUCED_TX, reduced_tx);
+    var ttx = av1_txtypectx_new();
+    if (ttx == 0) { return 0; }
+    store64(tile + AV1TILE_TTX, ttx);
+    var quant = alloc(1024 * 8);
+    if (quant == 0) { return 0; }
+    store64(tile + AV1TILE_QUANT, quant);
+    var ott = alloc(8);
+    if (ott == 0) { return 0; }
+    store64(tile + AV1TILE_OTT, ott);
+    store64(tile + AV1TILE_MAXLW, 0);
+    store64(tile + AV1TILE_MAXLH, 0);
+    # per-plane strips: above = tile 4x4 cols + pad, left = tile 4x4 rows + pad.
+    var above_sz = mi_cols + 32;
+    var left_sz = mi_rows + 32;
+    var p = 0;
+    while (p < 3) {
+        var bd = 0;
+        var al = 0;
+        var ll = 0;
+        var ad = 0;
+        var ld = 0;
+        if (p < num_planes) {
+            bd = alloc(AV1_BD_STRIDE * AV1_BD_STRIDE * 8);
+            al = alloc(above_sz * 8);
+            ll = alloc(left_sz * 8);
+            ad = alloc(above_sz * 8);
+            ld = alloc(left_sz * 8);
+            if ((bd == 0) || (al == 0) || (ll == 0) || (ad == 0) || (ld == 0)) { return 0; }
+        }
+        store64(tile + AV1TILE_BD + (p * 8), bd);
+        store64(tile + AV1TILE_ALVL + (p * 8), al);
+        store64(tile + AV1TILE_LLVL + (p * 8), ll);
+        store64(tile + AV1TILE_ADC + (p * 8), ad);
+        store64(tile + AV1TILE_LDC + (p * 8), ld);
+        p = p + 1;
+    }
+    return tile;
+}
+
+# clear_block_decoded_flags (5.11.3) for one superblock at MI (r, c). Seeds the
+# above (-1) row and left (-1) col to 1 within the tile extent, the interior to
+# 0, and BlockDecoded[plane][SB4>>subY][-1] = 0.
+fn av1_bd_clear(tile, r, c, sb4, num_planes): i64 {
+    var mi_col_end = load64(tile + AV1TILE_MI_COLS);
+    var mi_row_end = load64(tile + AV1TILE_MI_ROWS);
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var plane = 0;
+    while (plane < num_planes) {
+        var sx = 0;
+        var sy = 0;
+        if (plane > 0) { sx = subx; sy = suby; }
+        var sb_w4 = (mi_col_end - c) >> sx;
+        var sb_h4 = (mi_row_end - r) >> sy;
+        var y = 0 - 1;
+        while (y <= (sb4 >> sy)) {
+            var x = 0 - 1;
+            while (x <= (sb4 >> sx)) {
+                var v = 0;
+                if ((y < 0) && (x < sb_w4)) { v = 1; }
+                if ((x < 0) && (y < sb_h4)) { v = 1; }
+                av1_bd_set(tile, plane, y, x, v);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        av1_bd_set(tile, plane, sb4 >> sy, 0 - 1, 0);
+        plane = plane + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Av1Block — the per-block decode state (populated by decode_block, bite 6, from
+# the mode-info reads + the partition tree). AV1BLK_MI points at the block's
+# Av1ModeInfo (skip / y+uv mode / angles / CfL alphas / filter-intra).
+# ================================================================
+enum Av1BlockOff {
+    AV1BLK_MI_ROW      = 0;
+    AV1BLK_MI_COL      = 8;
+    AV1BLK_MI_SIZE     = 16;
+    AV1BLK_HAS_CHROMA  = 24;
+    AV1BLK_LOSSLESS    = 32;
+    AV1BLK_TX_SIZE     = 40;   # luma TxSize (from read_tx_size)
+    AV1BLK_MI          = 48;   # ptr to Av1ModeInfo
+    AV1BLK_AVAIL_L     = 56;
+    AV1BLK_AVAIL_U     = 64;
+    AV1BLK_AVAIL_LC    = 72;   # AvailLChroma
+    AV1BLK_AVAIL_UC    = 80;   # AvailUChroma
+    AV1BLK_FILTER_TYPE = 88;   # get_filter_type (7.11.2.8), forwarded to predict
+    AV1BLK_SIZE        = 96;
+}
+fn av1_block_new(): i64 {
+    var b = alloc(AV1BLK_SIZE);
+    if (b == 0) { return 0; }
+    var i = 0;
+    while (i < (AV1BLK_SIZE / 8)) { store64(b + (i * 8), 0); i = i + 1; }
+    return b;
+}
+
+# ================================================================
+# transform_block (5.11.36) — predict → (coeffs → reconstruct) for one tx block.
+# blk is an Av1Block; mi (AV1MI_*) carries the mode info. plane/tx_sz/x/y select
+# the block. tx_sz is the plane tx size (from get_tx_size). x/y are the 4x4 grid
+# offsets within the block's plane residual.
+# ================================================================
+fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var mi = load64(blk + AV1BLK_MI);
+    var subx = 0;
+    var suby = 0;
+    if (plane > 0) {
+        subx = load64(tile + AV1TILE_SUBX);
+        suby = load64(tile + AV1TILE_SUBY);
+    }
+    var base_x_block = (load64(blk + AV1BLK_MI_COL) >> subx) * AV1_MI_SIZE;
+    var base_y_block = (load64(blk + AV1BLK_MI_ROW) >> suby) * AV1_MI_SIZE;
+    var start_x = base_x_block + (4 * x);
+    var start_y = base_y_block + (4 * y);
+    var row = (start_y << suby) >> 2;
+    var col = (start_x << subx) >> 2;
+    var sub_mi_row = row & 15;                 # sbMask = 15 (64x64 SB)
+    var sub_mi_col = col & 15;
+    var step_x = av1_tx_width(tx_sz) >> 2;
+    var step_y = av1_tx_height(tx_sz) >> 2;
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var max_x = (mi_cols * AV1_MI_SIZE) >> subx;
+    var max_y = (mi_rows * AV1_MI_SIZE) >> suby;
+    if ((start_x >= max_x) || (start_y >= max_y)) { return DR_OK; }
+
+    var log2w = av1_tx_width_log2(tx_sz);
+    var log2h = av1_tx_height_log2(tx_sz);
+    var y_mode = load64(mi + AV1MI_YMODE);
+    var uv_mode = load64(mi + AV1MI_UVMODE);
+    var is_cfl = 0;
+    if ((plane > 0) && (uv_mode == AV1_UV_CFL_PRED)) { is_cfl = 1; }
+    var mode = y_mode;
+    if (plane > 0) {
+        mode = uv_mode;
+        if (is_cfl) { mode = AV1_DC_PRED; }
+    }
+    var angle_delta = load64(mi + AV1MI_ANGLE_Y);
+    if (plane > 0) { angle_delta = load64(mi + AV1MI_ANGLE_UV); }
+    var use_fi = 0;
+    if (plane == 0) { use_fi = load64(mi + AV1MI_USE_FI); }
+
+    # availability: base avail (chroma has its own) OR already-decoded within row.
+    var have_left = load64(blk + AV1BLK_AVAIL_L);
+    var have_above = load64(blk + AV1BLK_AVAIL_U);
+    if (plane > 0) {
+        have_left = load64(blk + AV1BLK_AVAIL_LC);
+        have_above = load64(blk + AV1BLK_AVAIL_UC);
+    }
+    if (x > 0) { have_left = 1; }
+    if (y > 0) { have_above = 1; }
+    var have_ar = av1_bd_get(tile, plane, (sub_mi_row >> suby) - 1, (sub_mi_col >> subx) + step_x);
+    var have_bl = av1_bd_get(tile, plane, (sub_mi_row >> suby) + step_y, (sub_mi_col >> subx) - 1);
+
+    var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
+    have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
+    load64(tile + AV1TILE_ENABLE_EF), load64(blk + AV1BLK_FILTER_TYPE),
+    log2w, log2h, mi_cols, mi_rows);
+    if (rc != DR_OK) { return rc; }
+    if (is_cfl) {
+        var alpha = load64(mi + AV1MI_CFL_U);
+        if (plane == 2) { alpha = load64(mi + AV1MI_CFL_V); }
+        av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
+        alpha, load64(tile + AV1TILE_MAXLW), load64(tile + AV1TILE_MAXLH));
+    }
+    if (plane == 0) {
+        store64(tile + AV1TILE_MAXLW, start_x + (step_x * 4));
+        store64(tile + AV1TILE_MAXLH, start_y + (step_y * 4));
+    }
+
+    if (load64(mi + AV1MI_SKIP) == 0) {
+        var plane_sz = av1_get_plane_residual_size(load64(blk + AV1BLK_MI_SIZE), plane, subx, suby);
+        var bw = av1_block_width(plane_sz);
+        var bh = av1_block_height(plane_sz);
+        var bit_depth = load64(tile + AV1TILE_BIT_DEPTH);
+        var qindex = load64(tile + AV1TILE_BASE_Q);
+        var quant = load64(tile + AV1TILE_QUANT);
+        var eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
+        load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),
+        start_x >> 2, start_y >> 2, mi_cols >> subx, mi_rows >> suby, bw, bh,
+        load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
+        load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
+        quant, load64(tile + AV1TILE_OTT));
+        if (eob > 0) {
+            var q_dc = av1_get_dc_quant(bit_depth, qindex, 0);
+            var q_ac = av1_get_ac_quant(bit_depth, qindex, 0);
+            av1_reconstruct(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
+            load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac);
+        }
+    }
+    # mark this tx block decoded (BlockDecoded[plane][+i][+j] = 1).
+    var i = 0;
+    while (i < step_y) {
+        var j = 0;
+        while (j < step_x) {
+            av1_bd_set(tile, plane, (sub_mi_row >> suby) + i, (sub_mi_col >> subx) + j, 1);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# residual (5.11.34) — drive transform_block over each plane's tx grid. Builds
+# the block's Av1TxTypeCtx from the mode info + tile constants first (coeffs()
+# reads it to compute the PlaneTxType). One 64x64 chunk (baseline).
+# ================================================================
+fn av1_residual(tile, blk): i64 {
+    var mi = load64(blk + AV1BLK_MI);
+    var mi_size = load64(blk + AV1BLK_MI_SIZE);
+    var lossless = load64(blk + AV1BLK_LOSSLESS);
+    var has_chroma = load64(blk + AV1BLK_HAS_CHROMA);
+    # build the tx-type context for this block.
+    var ttx = load64(tile + AV1TILE_TTX);
+    store64(ttx + AV1TTC_YMODE, load64(mi + AV1MI_YMODE));
+    store64(ttx + AV1TTC_UVMODE, load64(mi + AV1MI_UVMODE));
+    store64(ttx + AV1TTC_USE_FI, load64(mi + AV1MI_USE_FI));
+    store64(ttx + AV1TTC_FI_MODE, load64(mi + AV1MI_FI_MODE));
+    store64(ttx + AV1TTC_IS_INTER, 0);
+    store64(ttx + AV1TTC_LOSSLESS, lossless);
+    store64(ttx + AV1TTC_BASE_Q, load64(tile + AV1TILE_BASE_Q));
+    store64(ttx + AV1TTC_REDUCED_TX, load64(tile + AV1TILE_REDUCED_TX));
+
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var num_planes = 1;
+    if (has_chroma) { num_planes = 3; }
+    var plane = 0;
+    while (plane < num_planes) {
+        var sx = 0;
+        var sy = 0;
+        if (plane > 0) { sx = subx; sy = suby; }
+        var tx_sz = load64(blk + AV1BLK_TX_SIZE);
+        if (lossless) { tx_sz = 0; }                # TX_4X4
+        else { tx_sz = av1_get_tx_size(plane, tx_sz, mi_size, subx, suby); }
+        var step_x = av1_tx_width(tx_sz) >> 2;
+        var step_y = av1_tx_height(tx_sz) >> 2;
+        var plane_sz = av1_get_plane_residual_size(mi_size, plane, subx, suby);
+        var num4x4w = av1_num_4x4_w(plane_sz);
+        var num4x4h = av1_num_4x4_h(plane_sz);
+        var y = 0;
+        while (y < num4x4h) {
+            var x = 0;
+            while (x < num4x4w) {
+                av1_transform_block(tile, blk, plane, tx_sz, x, y);
+                x = x + step_x;
+            }
+            y = y + step_y;
+        }
+        plane = plane + 1;
+    }
+    return DR_OK;
+}
