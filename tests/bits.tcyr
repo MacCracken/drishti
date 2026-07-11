@@ -551,6 +551,103 @@ fn test_endian_helpers() {
     return 0;
 }
 
+# ================================================================
+# FloorLog2 + su(n) / ns(n) — AV1 bit descriptors (spec 4.10.6/4.10.7)
+# ================================================================
+fn test_floor_log2() {
+    assert_eq(dr_floor_log2(1), 0, "FloorLog2(1) = 0");
+    assert_eq(dr_floor_log2(2), 1, "FloorLog2(2) = 1");
+    assert_eq(dr_floor_log2(3), 1, "FloorLog2(3) = 1");
+    assert_eq(dr_floor_log2(4), 2, "FloorLog2(4) = 2");
+    assert_eq(dr_floor_log2(5), 2, "FloorLog2(5) = 2");
+    assert_eq(dr_floor_log2(255), 7, "FloorLog2(255) = 7");
+    assert_eq(dr_floor_log2(256), 8, "FloorLog2(256) = 8");
+    return 0;
+}
+
+fn test_su_read() {
+    # su(4) over bit patterns. 0x50 = 0101 0000: first nibble 0101 = 5
+    # (positive, sign bit 0). second nibble 0000 = 0.
+    var b = alloc(2);
+    store8(b, 0x50);
+    store8(b + 1, 0xF3);   # 1111 0011: 1111 = -1 (su4), 0011 = 3
+    var br = dr_br_init(b, 2);
+    var v = 0;
+    assert_eq(dr_su_read(br, 4, &v), DR_OK, "su4 reads");
+    assert_eq(v, 5, "0101 -> +5");
+    assert_eq(dr_su_read(br, 4, &v), DR_OK, "su4 reads");
+    assert_eq(v, 0, "0000 -> 0");
+    assert_eq(dr_su_read(br, 4, &v), DR_OK, "su4 reads");
+    assert_eq(v, 0 - 1, "1111 -> -1");
+    assert_eq(dr_su_read(br, 4, &v), DR_OK, "su4 reads");
+    assert_eq(v, 3, "0011 -> +3");
+    # n out of range and truncation.
+    var br2 = dr_br_init(b, 2);
+    assert_eq(dr_su_read(br2, 0, &v), DR_ERR_BOUNDS, "su(0) rejected");
+    var br3 = dr_br_init(b, 0);
+    assert_eq(dr_su_read(br3, 4, &v), DR_ERR_TRUNCATED, "su truncation");
+    return 0;
+}
+
+fn test_su_roundtrip() {
+    # Every signed value in su(7) = [-64, 63] round-trips through the
+    # writer and back, byte-exact bit position.
+    var v = 0 - 64;
+    while (v <= 63) {
+        var bw = dr_bw_init(4);
+        assert_eq(dr_su_write(bw, v, 7), DR_OK, "su7 writes");
+        var n = dr_bw_flush(bw);
+        var br = dr_br_init(dr_bw_buf(bw), n);
+        var got = 0;
+        assert_eq(dr_su_read(br, 7, &got), DR_OK, "su7 reads back");
+        assert_eq(got, v, "su7 round-trip");
+        assert_eq(dr_br_bit_pos(br), 7, "su7 consumed exactly 7 bits");
+        v = v + 1;
+    }
+    # Range rejection.
+    var bw2 = dr_bw_init(4);
+    assert_eq(dr_su_write(bw2, 64, 7), DR_ERR_BOUNDS, "su7 +64 out of range");
+    bw2 = dr_bw_init(4);
+    assert_eq(dr_su_write(bw2, 0 - 65, 7), DR_ERR_BOUNDS, "su7 -65 out of range");
+    return 0;
+}
+
+fn test_ns_roundtrip() {
+    # ns(n) round-trip for each n in [1, 17] over the full value range,
+    # asserting the reduced-bit-count property (spec 4.10.7 example:
+    # ns(5) codes {0,1} in 2 bits, {2,3,4} in 3 bits).
+    var n = 1;
+    while (n <= 17) {
+        var val = 0;
+        while (val < n) {
+            var bw = dr_bw_init(4);
+            assert_eq(dr_ns_write(bw, val, n), DR_OK, "ns writes");
+            var nbytes = dr_bw_flush(bw);
+            var br = dr_br_init(dr_bw_buf(bw), nbytes);
+            var got = 0;
+            assert_eq(dr_ns_read(br, n, &got), DR_OK, "ns reads back");
+            assert_eq(got, val, "ns round-trip value");
+            val = val + 1;
+        }
+        n = n + 1;
+    }
+    # n == 1 reads/writes ZERO bits (only value is 0).
+    var bw3 = dr_bw_init(4);
+    assert_eq(dr_ns_write(bw3, 0, 1), DR_OK, "ns(1) writes 0");
+    assert_eq(dr_bw_bit_pos(bw3), 0, "ns(1) emits no bits");
+    # ns(5) bit-count check: value 1 uses 2 bits, value 4 uses 3 bits.
+    var bwa = dr_bw_init(4);
+    dr_ns_write(bwa, 1, 5);
+    assert_eq(dr_bw_bit_pos(bwa), 2, "ns(5) value 1 -> 2 bits");
+    var bwb = dr_bw_init(4);
+    dr_ns_write(bwb, 4, 5);
+    assert_eq(dr_bw_bit_pos(bwb), 3, "ns(5) value 4 -> 3 bits");
+    # Out-of-range rejection.
+    var bwc = dr_bw_init(4);
+    assert_eq(dr_ns_write(bwc, 5, 5), DR_ERR_BOUNDS, "ns(5) value 5 rejected");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("bitreader bits");
@@ -575,6 +672,11 @@ fn main() {
     test_bw_grow();
     test_group("endian helpers");
     test_endian_helpers();
+    test_group("su/ns descriptors");
+    test_floor_log2();
+    test_su_read();
+    test_su_roundtrip();
+    test_ns_roundtrip();
     return assert_summary();
 }
 

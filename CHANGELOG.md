@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-10
+
+The **0.7.x AV1 arc** opens: the full uncompressed frame header (spec
+5.9.2) for every frame type — key / inter / intra-only / switch /
+show_existing — parsed cursor-true, plus the reference-frame state
+machine. Spec-derived and adversarially reviewed (a 12-agent
+field-by-field cross-check against the AV1 spec markdown found and fixed
+one tile-count heap-overflow). **3,349 suite assertions + 1,140 fuzz
+assertions, all green** (up from 2,220 + 1,140).
+
+### Added
+- **AV1 frame header** (`src/av1_frame.cyr`, prefix `av1_`): the complete
+  `uncompressed_header()` (5.9.2) — the frame-type / show / error-
+  resilient prologue, screen-content + integer-mv gating, order hints,
+  frame-size overrides + superres (5.9.5–5.9.9), interpolation filter,
+  loop-filter / quantization / segmentation / delta-Q / delta-LF /
+  tile-info (5.9.3 tile_log2 + `ns()`) / CDEF / loop-restoration /
+  TX-mode / reference-mode / skip-mode / global-motion (subexp decode
+  5.9.25–5.9.29) / film-grain (5.9.30) params — cursor-true for key,
+  inter, intra-only, switch, and show_existing frames. Emits an
+  `Av1FrameHeader` record with a `CodedLossless` / `AllLossless`
+  derivation via `get_qindex` (7.12.2). 134 assertions.
+- **AV1 reference-frame state machine**: `set_frame_refs` (7.8),
+  `frame_size_with_refs`, `mark_ref_frames`, and the reference frame
+  update (7.20) over an eight-slot `Av1RefState` tracking RefValid /
+  RefOrderHint / RefFrameId / Ref{Upscaled,Frame,Render}{Width,Height} /
+  RefFrameType / SavedGmParams — the geometry and order hints the header
+  reads back on later frames.
+- **Full-fidelity `Av1Seq` growth** (`src/av1_seq.cyr`): the sequence
+  header now captures every field the frame header consults (OrderHintBits,
+  the `seq_force_*` SELECT defaults, frame-id lengths,
+  `use_128x128_superblock`, the `enable_*` tool flags, decoder-model
+  field lengths, subsampling / NumPlanes / separate_uv_delta_q, per-op
+  operating-point idc + decoder-model flags) — not just the 0.7.0
+  summary set. ABI-stable for the original seven accessors.
+- **Core `su(n)` / `ns(n)` descriptors** (`src/bits.cyr`): the AV1 signed
+  (4.10.6) and non-symmetric (4.10.7) bit descriptors — read and write —
+  plus `FloorLog2`, with exhaustive round-trip tests.
+
+### Security
+- **Tile-count bound** (MAX_TILE_COLS / MAX_TILE_ROWS): the non-uniform
+  `tile_info` loop is capped so a hostile stream of one-superblock tiles
+  cannot overrun the fixed `MiColStarts` / `MiRowStarts` arrays — found by
+  the adversarial spec review, rejected with `AV1_ERR_BAD_FRAME`, and
+  covered by a regression vector.
+
+### Notes
+- `drishti_version()` → 701; toolchain pin unchanged (`6.4.43`).
+
 ## [0.7.0] - 2026-07-10
 
 The first cut — one repo, four codec families as flat `[lib]` modules

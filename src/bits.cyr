@@ -337,6 +337,78 @@ fn dr_se_read(br, out): i64 {
 }
 
 # ================================================================
+# FloorLog2 + the AV1 su(n)/ns(n) descriptors (spec 4.10.6/4.10.7,
+# reproduced in the spec's conventions section). su/ns are pure bit
+# descriptors — not arithmetic-coder symbols — so they live in the
+# shared bit-I/O core, not a family module. AV1 is the only consumer
+# today (H.264/H.265 use se(v); VP8 uses sign-magnitude).
+# ================================================================
+
+# FloorLog2(x) — floor of the base-2 log of x (spec convention). Defined
+# for x >= 1: returns the 0-based index of the most significant set bit
+# (FloorLog2(1) = 0, FloorLog2(5) = 2). x <= 0 returns -1 (the loop runs
+# zero times); callers pass x >= 1.
+fn dr_floor_log2(x): i64 {
+    var s = 0;
+    var v = x;
+    while (v != 0) {
+        v = v >> 1;
+        s = s + 1;
+    }
+    return s - 1;
+}
+
+# su(n) — signed integer from n bits, two's-complement (spec 4.10.6):
+# read f(n), then if the top bit (bit n-1) is set, subtract 2^n. Stores
+# the signed result (i64) at *out. n must be in [1, 32] (DR_ERR_BOUNDS
+# otherwise, latched sticky). Truncation latches DR_ERR_TRUNCATED via the
+# underlying reader. Returns DR_OK / sticky error code.
+fn dr_su_read(br, n, out): i64 {
+    var e = dr_br_err(br);
+    if (e != DR_OK) { return e; }
+    if ((n < 1) || (n > 32)) {
+        return dr_br_set_err(br, DR_ERR_BOUNDS);
+    }
+    var v = dr_br_read_bits(br, n);
+    e = dr_br_err(br);
+    if (e != DR_OK) { return e; }
+    var sign_mask = 1 << (n - 1);
+    if (v & sign_mask) {
+        v = v - (sign_mask << 1);   # v - 2^n
+    }
+    store64(out, v);
+    return DR_OK;
+}
+
+# ns(n) — non-symmetric unsigned integer with n possible values, output
+# range 0..n-1 (spec 4.10.7). w = FloorLog2(n) + 1; m = (1<<w) - n; read
+# v = f(w-1); if v < m the value is v (one fewer bit), else read one more
+# bit: (v<<1) - m + extra_bit. Stores the value at *out. n must be >= 1
+# (DR_ERR_BOUNDS otherwise). For n == 1 this reads ZERO bits and yields 0.
+# Returns DR_OK / sticky error code.
+fn dr_ns_read(br, n, out): i64 {
+    var e = dr_br_err(br);
+    if (e != DR_OK) { return e; }
+    if (n < 1) {
+        return dr_br_set_err(br, DR_ERR_BOUNDS);
+    }
+    var w = dr_floor_log2(n) + 1;
+    var m = (1 << w) - n;
+    var v = dr_br_read_bits(br, w - 1);
+    e = dr_br_err(br);
+    if (e != DR_OK) { return e; }
+    if (v < m) {
+        store64(out, v);
+        return DR_OK;
+    }
+    var extra = dr_br_read_bit(br);
+    e = dr_br_err(br);
+    if (e != DR_OK) { return e; }
+    store64(out, (v << 1) - m + extra);
+    return DR_OK;
+}
+
+# ================================================================
 # DrBw — MSB-first bitwriter (for the encode lanes)
 # ================================================================
 
@@ -529,4 +601,43 @@ fn dr_se_write(bw, value): i64 {
         k = 0 - (value << 1);
     }
     return dr_ue_write(bw, k);
+}
+
+# Write su(n) — the inverse of dr_su_read. value must fit the signed
+# n-bit range [-2^(n-1), 2^(n-1) - 1] (DR_ERR_BOUNDS otherwise); the low
+# n bits of value are the two's-complement encoding dr_bw_put_bits emits.
+# n in [1, 32]. Returns DR_OK / error code.
+fn dr_su_write(bw, value, n): i64 {
+    var e = dr_bw_err(bw);
+    if (e != DR_OK) { return e; }
+    if ((n < 1) || (n > 32)) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    var hi = 1 << (n - 1);
+    if ((value < (0 - hi)) || (value > (hi - 1))) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    # put_bits masks to the low n bits, so a negative value writes its
+    # two's-complement representation directly.
+    return dr_bw_put_bits(bw, value, n);
+}
+
+# Write ns(n) — the inverse of dr_ns_read. value in [0, n-1], n >= 1
+# (DR_ERR_BOUNDS otherwise). Emits w-1 bits when value < m, else w bits.
+# Returns DR_OK / error code.
+fn dr_ns_write(bw, value, n): i64 {
+    var e = dr_bw_err(bw);
+    if (e != DR_OK) { return e; }
+    if ((n < 1) || (value < 0) || (value > (n - 1))) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    var w = dr_floor_log2(n) + 1;
+    var m = (1 << w) - n;
+    if (value < m) {
+        return dr_bw_put_bits(bw, value, w - 1);
+    }
+    var t = value + m;
+    var rc = dr_bw_put_bits(bw, t >> 1, w - 1);   # v = (value + m) >> 1
+    if (rc != DR_OK) { return rc; }
+    return dr_bw_put_bit(bw, t & 1);              # extra_bit
 }

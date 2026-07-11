@@ -1,0 +1,1875 @@
+# @public — drishti AV1: uncompressed frame header (5.9.2) + the
+# reference-frame state machine. Turns a frame_header_obu / frame_obu
+# payload into an Av1FrameHeader record (frame type, dimensions,
+# superres, quant/segmentation/tile/cdef/lr/loop-filter/global-motion/
+# film-grain parameters) and maintains the eight-slot RefValid /
+# RefOrderHint / RefFrameId / Ref{Upscaled,Frame,Render}{Width,Height} /
+# RefFrameType / SavedGmParams state the header both reads from and
+# updates.
+#
+# FLAT module (no includes) — wiring in src/main.cyr. Depends on
+# src/drishti.cyr (DR_ERR_*), src/bits.cyr (DrBr, f/su/ns descriptors),
+# and src/av1_seq.cyr (Av1Seq accessors + AV1_ERR_BAD_FRAME).
+#
+# Derived from the "AV1 Bitstream & Decoding Process Specification"
+# v1.0.0 with Errata 1 (AOMedia) — section numbers cited inline. The
+# whole uncompressed_header is parsed CURSOR-TRUE for every frame type
+# (key / inter / intra-only / switch / show_existing): every
+# bit-affecting derivation (OrderHintBits, CodedLossless via get_qindex,
+# skipModeAllowed, set_frame_refs, ref-order-hint invalidation) is
+# computed so the reader always lands exactly at byte_alignment().
+# Sections used: 5.9.2 uncompressed_header, 5.9.4 get_relative_dist,
+# 5.9.5 frame_size, 5.9.6 render_size, 5.9.7 frame_size_with_refs,
+# 5.9.8 superres_params, 5.9.9 compute_image_size, 5.9.10
+# read_interpolation_filter, 5.9.11 loop_filter_params, 5.9.12
+# quantization_params, 5.9.13 read_delta_q, 5.9.14 segmentation_params,
+# 5.9.15 tile_info, 5.9.3 tile_log2, 5.9.17 delta_q_params, 5.9.18
+# delta_lf_params, 5.9.19 cdef_params, 5.9.20 lr_params, 5.9.21
+# read_tx_mode, 5.9.22 frame_reference_mode, 5.9.23 skip_mode_params,
+# 5.9.24 global_motion_params, 5.9.25 read_global_param, 5.9.26-28
+# subexp, 5.9.30 film_grain_params, 5.9.31 temporal_point_info; 7.8
+# set_frame_refs; 7.20 reference frame update; 7.21 reference frame
+# loading; 7.12.2 get_qindex.
+# Cross-checked against dav1d src/obu.c (parse_frame_hdr) and libaom
+# av1/decoder/decodeframe.c (read_uncompressed_header) — field order and
+# every conditional branch match both.
+#
+# SCOPE (0.7.x frame-header bite): the header is parsed and every field
+# stored or (for film-grain point/AR-coefficient arrays) consumed
+# bit-exactly. Cross-frame CDF / loop-filter-delta / segment-id
+# inheritance via load_previous (primary_ref_frame != PRIMARY_REF_NONE)
+# is a decode-state concern (deferred; docs/development/roadmap.md 0.7.x).
+# The ref state machine tracks the dimension/order-hint/gm slots the
+# header itself consults, which is what set_frame_refs and
+# frame_size_with_refs need.
+
+# ================================================================
+# Spec constants (5.9 semantics + section 3 symbols).
+# ================================================================
+enum Av1FrameConst {
+    AV1_KEY_FRAME                   = 0;
+    AV1_INTER_FRAME                 = 1;
+    AV1_INTRA_ONLY_FRAME            = 2;
+    AV1_SWITCH_FRAME                = 3;
+    AV1_NUM_REF_FRAMES              = 8;
+    AV1_REFS_PER_FRAME              = 7;
+    AV1_PRIMARY_REF_NONE            = 7;
+    AV1_SELECT_SCREEN_CONTENT_TOOLS = 2;
+    AV1_SELECT_INTEGER_MV           = 2;
+    AV1_SUPERRES_NUM                = 8;
+    AV1_SUPERRES_DENOM_MIN          = 9;
+    AV1_SUPERRES_DENOM_BITS         = 3;
+    # reference frame indices (INTRA + 7 inter)
+    AV1_INTRA_FRAME                 = 0;
+    AV1_LAST_FRAME                  = 1;
+    AV1_LAST2_FRAME                 = 2;
+    AV1_LAST3_FRAME                 = 3;
+    AV1_GOLDEN_FRAME                = 4;
+    AV1_BWDREF_FRAME                = 5;
+    AV1_ALTREF2_FRAME               = 6;
+    AV1_ALTREF_FRAME                = 7;
+    # restoration types (post Remap_Lr_Type)
+    AV1_RESTORE_NONE                = 0;
+    AV1_RESTORE_WIENER              = 1;
+    AV1_RESTORE_SGRPROJ             = 2;
+    AV1_RESTORE_SWITCHABLE          = 3;
+    # interpolation filter sentinel
+    AV1_INTERP_SWITCHABLE           = 4;
+    # tx modes
+    AV1_ONLY_4X4                    = 0;
+    AV1_TX_MODE_LARGEST             = 1;
+    AV1_TX_MODE_SELECT              = 2;
+    # warp model types
+    AV1_GM_IDENTITY                 = 0;
+    AV1_GM_TRANSLATION              = 1;
+    AV1_GM_ROTZOOM                  = 2;
+    AV1_GM_AFFINE                   = 3;
+    AV1_WARPEDMODEL_PREC_BITS       = 16;
+    AV1_GM_ABS_TRANS_BITS           = 12;
+    AV1_GM_ABS_TRANS_ONLY_BITS      = 9;
+    AV1_GM_ABS_ALPHA_BITS           = 12;
+    AV1_GM_ALPHA_PREC_BITS          = 15;
+    AV1_GM_TRANS_PREC_BITS          = 6;
+    AV1_GM_TRANS_ONLY_PREC_BITS     = 3;
+    # segmentation
+    AV1_MAX_SEGMENTS                = 8;
+    AV1_SEG_LVL_MAX                 = 8;
+    AV1_SEG_LVL_ALT_Q               = 0;
+    AV1_SEG_LVL_REF_FRAME           = 5;
+    AV1_MAX_LOOP_FILTER             = 63;
+    # tiles
+    AV1_MAX_TILE_WIDTH              = 4096;
+    AV1_MAX_TILE_AREA               = 9437184;   # MAX_TILE_WIDTH * 2304
+    AV1_MAX_TILE_COLS               = 64;
+    AV1_MAX_TILE_ROWS               = 64;
+    AV1_RESTORATION_TILESIZE_MAX    = 256;
+}
+
+# ================================================================
+# Av1FrameHeader byte offsets. Scalar block first (0..656), then the
+# fixed-size arrays. AV1FH_SIZE bytes, memset-zeroed at parse.
+# ================================================================
+enum Av1FhOff {
+    AV1FH_SHOW_EXISTING          = 0;
+    AV1FH_FRAME_TO_SHOW          = 8;
+    AV1FH_FRAME_TYPE             = 16;
+    AV1FH_FRAME_IS_INTRA         = 24;
+    AV1FH_SHOW_FRAME             = 32;
+    AV1FH_SHOWABLE_FRAME         = 40;
+    AV1FH_ERROR_RESILIENT        = 48;
+    AV1FH_DISABLE_CDF_UPDATE     = 56;
+    AV1FH_ALLOW_SCT              = 64;    # allow_screen_content_tools
+    AV1FH_FORCE_INT_MV           = 72;    # force_integer_mv (frame level)
+    AV1FH_CURRENT_FRAME_ID       = 80;
+    AV1FH_FRAME_SIZE_OVERRIDE    = 88;
+    AV1FH_ORDER_HINT             = 96;
+    AV1FH_PRIMARY_REF_FRAME      = 104;
+    AV1FH_REFRESH_FRAME_FLAGS    = 112;
+    AV1FH_DISABLE_FE_UPDATE_CDF  = 120;   # disable_frame_end_update_cdf
+    AV1FH_FRAME_WIDTH            = 128;
+    AV1FH_FRAME_HEIGHT           = 136;
+    AV1FH_UPSCALED_WIDTH         = 144;
+    AV1FH_RENDER_WIDTH           = 152;
+    AV1FH_RENDER_HEIGHT          = 160;
+    AV1FH_SUPERRES_DENOM         = 168;
+    AV1FH_USE_SUPERRES           = 176;
+    AV1FH_MI_COLS                = 184;
+    AV1FH_MI_ROWS                = 192;
+    AV1FH_ALLOW_INTRABC          = 200;
+    AV1FH_ALLOW_HIGH_PREC_MV     = 208;
+    AV1FH_USE_REF_FRAME_MVS      = 216;
+    AV1FH_MOTION_MODE_SWITCHABLE = 224;
+    AV1FH_INTERP_FILTER          = 232;
+    AV1FH_SHORT_SIGNALING        = 240;   # frame_refs_short_signaling
+    AV1FH_BASE_Q_IDX             = 248;
+    AV1FH_DELTA_Q_Y_DC           = 256;
+    AV1FH_DELTA_Q_U_DC           = 264;
+    AV1FH_DELTA_Q_U_AC           = 272;
+    AV1FH_DELTA_Q_V_DC           = 280;
+    AV1FH_DELTA_Q_V_AC           = 288;
+    AV1FH_USING_QMATRIX          = 296;
+    AV1FH_QM_Y                   = 304;
+    AV1FH_QM_U                   = 312;
+    AV1FH_QM_V                   = 320;
+    AV1FH_DIFF_UV_DELTA          = 328;
+    AV1FH_DELTA_Q_PRESENT        = 336;
+    AV1FH_DELTA_Q_RES            = 344;
+    AV1FH_DELTA_LF_PRESENT       = 352;
+    AV1FH_DELTA_LF_RES           = 360;
+    AV1FH_DELTA_LF_MULTI         = 368;
+    AV1FH_CODED_LOSSLESS         = 376;
+    AV1FH_ALL_LOSSLESS           = 384;
+    AV1FH_LF_SHARPNESS           = 392;
+    AV1FH_LF_DELTA_ENABLED       = 400;
+    AV1FH_LF_DELTA_UPDATE        = 408;
+    AV1FH_CDEF_DAMPING           = 416;
+    AV1FH_CDEF_BITS              = 424;
+    AV1FH_USES_LR                = 432;
+    AV1FH_TX_MODE                = 440;
+    AV1FH_REFERENCE_SELECT       = 448;
+    AV1FH_SKIP_MODE_PRESENT      = 456;
+    AV1FH_ALLOW_WARPED           = 464;
+    AV1FH_REDUCED_TX_SET         = 472;
+    AV1FH_SEG_ENABLED            = 480;
+    AV1FH_SEG_UPDATE_MAP         = 488;
+    AV1FH_SEG_TEMPORAL_UPDATE    = 496;
+    AV1FH_SEG_UPDATE_DATA        = 504;
+    AV1FH_TILE_COLS              = 512;
+    AV1FH_TILE_ROWS              = 520;
+    AV1FH_TILE_COLS_LOG2         = 528;
+    AV1FH_TILE_ROWS_LOG2         = 536;
+    AV1FH_TILE_SIZE_BYTES        = 544;
+    AV1FH_CONTEXT_UPDATE_TILE_ID = 552;
+    AV1FH_UNIFORM_TILE           = 560;
+    AV1FH_APPLY_GRAIN            = 568;
+    AV1FH_GRAIN_SEED             = 576;
+    AV1FH_UPDATE_GRAIN           = 584;
+    AV1FH_GRAIN_REF_IDX          = 592;
+    AV1FH_NUM_Y_POINTS           = 600;
+    AV1FH_CHROMA_SCALE_FROM_LUMA = 608;
+    AV1FH_NUM_CB_POINTS          = 616;
+    AV1FH_NUM_CR_POINTS          = 624;
+    AV1FH_SKIP_MODE_FRAME0       = 632;
+    AV1FH_SKIP_MODE_FRAME1       = 640;
+    AV1FH_BITS_CONSUMED          = 648;   # reader bit position at header end
+    # arrays
+    AV1FH_LF_LEVEL               = 704;   # [4]           -> 736
+    AV1FH_LF_REF_DELTAS          = 736;   # [8] signed    -> 800
+    AV1FH_LF_MODE_DELTAS         = 800;   # [2] signed    -> 816
+    AV1FH_CDEF_Y_PRI             = 816;   # [8]           -> 880
+    AV1FH_CDEF_Y_SEC             = 880;   # [8]           -> 944
+    AV1FH_CDEF_UV_PRI            = 944;   # [8]           -> 1008
+    AV1FH_CDEF_UV_SEC            = 1008;  # [8]           -> 1072
+    AV1FH_FRAME_RESTORATION_TYPE = 1072;  # [3]           -> 1096
+    AV1FH_LR_SIZE                = 1096;  # [3]           -> 1120
+    AV1FH_REF_FRAME_IDX          = 1120;  # [7]           -> 1176
+    AV1FH_ORDER_HINTS            = 1176;  # [8] by refFrame-> 1240
+    AV1FH_GM_TYPE                = 1240;  # [7] (ref-1)   -> 1296
+    AV1FH_GM_PARAMS              = 1296;  # [7*6=42]      -> 1632
+    AV1FH_FEATURE_ENABLED        = 1632;  # [8*8=64]      -> 2144
+    AV1FH_FEATURE_DATA           = 2144;  # [8*8=64] sign -> 2656
+    AV1FH_MI_COL_STARTS          = 2656;  # [65]          -> 3176
+    AV1FH_MI_ROW_STARTS          = 3176;  # [65]          -> 3696
+    AV1FH_SIZE                   = 3712;
+}
+
+# ================================================================
+# Av1RefState byte offsets — eight reference slots. Only the fields the
+# frame header consults (7.20 subset) are tracked; frame samples, MVs,
+# and CDFs live in the decoder proper.
+# ================================================================
+enum Av1RefOff {
+    AV1REF_VALID              = 0;      # [8]
+    AV1REF_FRAME_ID           = 64;     # [8]
+    AV1REF_UPSCALED_W         = 128;    # [8]
+    AV1REF_FRAME_W            = 192;    # [8]
+    AV1REF_FRAME_H            = 256;    # [8]
+    AV1REF_RENDER_W           = 320;    # [8]
+    AV1REF_RENDER_H           = 384;    # [8]
+    AV1REF_MI_COLS            = 448;    # [8]
+    AV1REF_MI_ROWS            = 512;    # [8]
+    AV1REF_FRAME_TYPE         = 576;    # [8]
+    AV1REF_SUBX               = 640;    # [8]
+    AV1REF_SUBY               = 704;    # [8]
+    AV1REF_BITDEPTH           = 768;    # [8]
+    AV1REF_ORDER_HINT         = 832;    # [8]
+    AV1REF_SAVED_ORDER_HINTS  = 896;    # [8][8]  -> 1408
+    AV1REF_SAVED_GM           = 1408;   # [8][7][6] -> 4096
+    AV1REF_SIZE               = 4096;
+}
+
+# ================================================================
+# Small integer helpers (av1_ prefixed — cyrius has no module scoping).
+# ================================================================
+fn av1_min(a, b): i64 { if (a < b) { return a; } return b; }
+fn av1_max(a, b): i64 { if (a > b) { return a; } return b; }
+fn av1_clip3(lo, hi, v): i64 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+# tile_log2(blkSize, target) — 5.9.3: smallest k with (blkSize << k) >= target.
+fn av1_tile_log2(blk_size, target): i64 {
+    var k = 0;
+    while ((blk_size << k) < target) { k = k + 1; }
+    return k;
+}
+
+# inverse_recenter(r, v) — 5.9.29 (used by subexp decode).
+fn av1_inverse_recenter(r, v): i64 {
+    if (v > (2 * r)) { return v; }
+    if (v & 1) { return r - ((v + 1) >> 1); }
+    return r + (v >> 1);
+}
+
+# get_relative_dist(a, b) — 5.9.4. Needs the sequence header for
+# enable_order_hint / OrderHintBits.
+fn av1_get_relative_dist(s, a, b): i64 {
+    if (av1_seq_enable_order_hint(s) == 0) { return 0; }
+    var diff = a - b;
+    var m = 1 << (av1_seq_order_hint_bits(s) - 1);
+    diff = (diff & (m - 1)) - (diff & m);
+    return diff;
+}
+
+# Segmentation feature tables (5.9.14): Segmentation_Feature_Bits /
+# _Signed / _Max, indexed by feature j in [0, SEG_LVL_MAX).
+fn av1_seg_feature_bits(j): i64 {
+    if (j == 0) { return 8; }
+    if (j == 5) { return 3; }
+    if (j >= 6) { return 0; }
+    return 6;                      # j in 1..4
+}
+fn av1_seg_feature_signed(j): i64 {
+    if (j <= 4) { return 1; }
+    return 0;
+}
+fn av1_seg_feature_max(j): i64 {
+    if (j == 0) { return 255; }
+    if (j == 5) { return 7; }
+    if (j >= 6) { return 0; }
+    return AV1_MAX_LOOP_FILTER;    # j in 1..4
+}
+
+# Remap_Lr_Type[4] — 5.9.20.
+fn av1_remap_lr_type(t): i64 {
+    if (t == 0) { return AV1_RESTORE_NONE; }
+    if (t == 1) { return AV1_RESTORE_SWITCHABLE; }
+    if (t == 2) { return AV1_RESTORE_WIENER; }
+    return AV1_RESTORE_SGRPROJ;
+}
+
+# ================================================================
+# Av1RefState — allocate + zero (fresh decoder: all slots invalid, order
+# hints 0). Returns the handle or 0 on OOM.
+# ================================================================
+fn av1_ref_state_new(): i64 {
+    var r = alloc(AV1REF_SIZE);
+    if (r == 0) { return 0; }
+    memset(r, 0, AV1REF_SIZE);
+    return r;
+}
+
+fn av1_ref_valid(r, i): i64 { return load64(r + AV1REF_VALID + (i * 8)); }
+fn av1_ref_frame_id(r, i): i64 { return load64(r + AV1REF_FRAME_ID + (i * 8)); }
+fn av1_ref_upscaled_width(r, i): i64 { return load64(r + AV1REF_UPSCALED_W + (i * 8)); }
+fn av1_ref_frame_width(r, i): i64 { return load64(r + AV1REF_FRAME_W + (i * 8)); }
+fn av1_ref_frame_height(r, i): i64 { return load64(r + AV1REF_FRAME_H + (i * 8)); }
+fn av1_ref_render_width(r, i): i64 { return load64(r + AV1REF_RENDER_W + (i * 8)); }
+fn av1_ref_render_height(r, i): i64 { return load64(r + AV1REF_RENDER_H + (i * 8)); }
+fn av1_ref_mi_cols(r, i): i64 { return load64(r + AV1REF_MI_COLS + (i * 8)); }
+fn av1_ref_mi_rows(r, i): i64 { return load64(r + AV1REF_MI_ROWS + (i * 8)); }
+fn av1_ref_frame_type(r, i): i64 { return load64(r + AV1REF_FRAME_TYPE + (i * 8)); }
+fn av1_ref_order_hint(r, i): i64 { return load64(r + AV1REF_ORDER_HINT + (i * 8)); }
+fn av1_ref_saved_order_hint(r, i, refFrame): i64 {
+    return load64(r + AV1REF_SAVED_ORDER_HINTS + ((i * 8 + refFrame) * 8));
+}
+fn av1_ref_saved_gm(r, i, ref, idx): i64 {
+    return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
+}
+
+# ================================================================
+# Av1FrameHeader accessors.
+# ================================================================
+fn av1_fh_show_existing_frame(fh): i64 { return load64(fh + AV1FH_SHOW_EXISTING); }
+fn av1_fh_frame_to_show(fh): i64 { return load64(fh + AV1FH_FRAME_TO_SHOW); }
+fn av1_fh_frame_type(fh): i64 { return load64(fh + AV1FH_FRAME_TYPE); }
+fn av1_fh_frame_is_intra(fh): i64 { return load64(fh + AV1FH_FRAME_IS_INTRA); }
+fn av1_fh_show_frame(fh): i64 { return load64(fh + AV1FH_SHOW_FRAME); }
+fn av1_fh_showable_frame(fh): i64 { return load64(fh + AV1FH_SHOWABLE_FRAME); }
+fn av1_fh_error_resilient_mode(fh): i64 { return load64(fh + AV1FH_ERROR_RESILIENT); }
+fn av1_fh_disable_cdf_update(fh): i64 { return load64(fh + AV1FH_DISABLE_CDF_UPDATE); }
+fn av1_fh_allow_screen_content_tools(fh): i64 { return load64(fh + AV1FH_ALLOW_SCT); }
+fn av1_fh_force_integer_mv(fh): i64 { return load64(fh + AV1FH_FORCE_INT_MV); }
+fn av1_fh_current_frame_id(fh): i64 { return load64(fh + AV1FH_CURRENT_FRAME_ID); }
+fn av1_fh_frame_size_override(fh): i64 { return load64(fh + AV1FH_FRAME_SIZE_OVERRIDE); }
+fn av1_fh_order_hint(fh): i64 { return load64(fh + AV1FH_ORDER_HINT); }
+fn av1_fh_primary_ref_frame(fh): i64 { return load64(fh + AV1FH_PRIMARY_REF_FRAME); }
+fn av1_fh_refresh_frame_flags(fh): i64 { return load64(fh + AV1FH_REFRESH_FRAME_FLAGS); }
+fn av1_fh_disable_frame_end_update_cdf(fh): i64 { return load64(fh + AV1FH_DISABLE_FE_UPDATE_CDF); }
+fn av1_fh_frame_width(fh): i64 { return load64(fh + AV1FH_FRAME_WIDTH); }
+fn av1_fh_frame_height(fh): i64 { return load64(fh + AV1FH_FRAME_HEIGHT); }
+fn av1_fh_upscaled_width(fh): i64 { return load64(fh + AV1FH_UPSCALED_WIDTH); }
+fn av1_fh_render_width(fh): i64 { return load64(fh + AV1FH_RENDER_WIDTH); }
+fn av1_fh_render_height(fh): i64 { return load64(fh + AV1FH_RENDER_HEIGHT); }
+fn av1_fh_superres_denom(fh): i64 { return load64(fh + AV1FH_SUPERRES_DENOM); }
+fn av1_fh_use_superres(fh): i64 { return load64(fh + AV1FH_USE_SUPERRES); }
+fn av1_fh_mi_cols(fh): i64 { return load64(fh + AV1FH_MI_COLS); }
+fn av1_fh_mi_rows(fh): i64 { return load64(fh + AV1FH_MI_ROWS); }
+fn av1_fh_allow_intrabc(fh): i64 { return load64(fh + AV1FH_ALLOW_INTRABC); }
+fn av1_fh_allow_high_precision_mv(fh): i64 { return load64(fh + AV1FH_ALLOW_HIGH_PREC_MV); }
+fn av1_fh_use_ref_frame_mvs(fh): i64 { return load64(fh + AV1FH_USE_REF_FRAME_MVS); }
+fn av1_fh_is_motion_mode_switchable(fh): i64 { return load64(fh + AV1FH_MOTION_MODE_SWITCHABLE); }
+fn av1_fh_interpolation_filter(fh): i64 { return load64(fh + AV1FH_INTERP_FILTER); }
+fn av1_fh_frame_refs_short_signaling(fh): i64 { return load64(fh + AV1FH_SHORT_SIGNALING); }
+fn av1_fh_base_q_idx(fh): i64 { return load64(fh + AV1FH_BASE_Q_IDX); }
+fn av1_fh_delta_q_y_dc(fh): i64 { return load64(fh + AV1FH_DELTA_Q_Y_DC); }
+fn av1_fh_delta_q_u_dc(fh): i64 { return load64(fh + AV1FH_DELTA_Q_U_DC); }
+fn av1_fh_delta_q_u_ac(fh): i64 { return load64(fh + AV1FH_DELTA_Q_U_AC); }
+fn av1_fh_delta_q_v_dc(fh): i64 { return load64(fh + AV1FH_DELTA_Q_V_DC); }
+fn av1_fh_delta_q_v_ac(fh): i64 { return load64(fh + AV1FH_DELTA_Q_V_AC); }
+fn av1_fh_using_qmatrix(fh): i64 { return load64(fh + AV1FH_USING_QMATRIX); }
+fn av1_fh_qm_y(fh): i64 { return load64(fh + AV1FH_QM_Y); }
+fn av1_fh_qm_u(fh): i64 { return load64(fh + AV1FH_QM_U); }
+fn av1_fh_qm_v(fh): i64 { return load64(fh + AV1FH_QM_V); }
+fn av1_fh_delta_q_present(fh): i64 { return load64(fh + AV1FH_DELTA_Q_PRESENT); }
+fn av1_fh_delta_q_res(fh): i64 { return load64(fh + AV1FH_DELTA_Q_RES); }
+fn av1_fh_delta_lf_present(fh): i64 { return load64(fh + AV1FH_DELTA_LF_PRESENT); }
+fn av1_fh_delta_lf_res(fh): i64 { return load64(fh + AV1FH_DELTA_LF_RES); }
+fn av1_fh_delta_lf_multi(fh): i64 { return load64(fh + AV1FH_DELTA_LF_MULTI); }
+fn av1_fh_coded_lossless(fh): i64 { return load64(fh + AV1FH_CODED_LOSSLESS); }
+fn av1_fh_all_lossless(fh): i64 { return load64(fh + AV1FH_ALL_LOSSLESS); }
+fn av1_fh_loop_filter_level(fh, i): i64 { return load64(fh + AV1FH_LF_LEVEL + (i * 8)); }
+fn av1_fh_loop_filter_sharpness(fh): i64 { return load64(fh + AV1FH_LF_SHARPNESS); }
+fn av1_fh_loop_filter_delta_enabled(fh): i64 { return load64(fh + AV1FH_LF_DELTA_ENABLED); }
+fn av1_fh_loop_filter_ref_delta(fh, i): i64 { return load64(fh + AV1FH_LF_REF_DELTAS + (i * 8)); }
+fn av1_fh_loop_filter_mode_delta(fh, i): i64 { return load64(fh + AV1FH_LF_MODE_DELTAS + (i * 8)); }
+fn av1_fh_cdef_damping(fh): i64 { return load64(fh + AV1FH_CDEF_DAMPING); }
+fn av1_fh_cdef_bits(fh): i64 { return load64(fh + AV1FH_CDEF_BITS); }
+fn av1_fh_cdef_y_pri(fh, i): i64 { return load64(fh + AV1FH_CDEF_Y_PRI + (i * 8)); }
+fn av1_fh_cdef_y_sec(fh, i): i64 { return load64(fh + AV1FH_CDEF_Y_SEC + (i * 8)); }
+fn av1_fh_cdef_uv_pri(fh, i): i64 { return load64(fh + AV1FH_CDEF_UV_PRI + (i * 8)); }
+fn av1_fh_cdef_uv_sec(fh, i): i64 { return load64(fh + AV1FH_CDEF_UV_SEC + (i * 8)); }
+fn av1_fh_frame_restoration_type(fh, i): i64 { return load64(fh + AV1FH_FRAME_RESTORATION_TYPE + (i * 8)); }
+fn av1_fh_uses_lr(fh): i64 { return load64(fh + AV1FH_USES_LR); }
+fn av1_fh_loop_restoration_size(fh, i): i64 { return load64(fh + AV1FH_LR_SIZE + (i * 8)); }
+fn av1_fh_tx_mode(fh): i64 { return load64(fh + AV1FH_TX_MODE); }
+fn av1_fh_reference_select(fh): i64 { return load64(fh + AV1FH_REFERENCE_SELECT); }
+fn av1_fh_skip_mode_present(fh): i64 { return load64(fh + AV1FH_SKIP_MODE_PRESENT); }
+fn av1_fh_skip_mode_frame(fh, i): i64 { return load64(fh + AV1FH_SKIP_MODE_FRAME0 + (i * 8)); }
+fn av1_fh_allow_warped_motion(fh): i64 { return load64(fh + AV1FH_ALLOW_WARPED); }
+fn av1_fh_reduced_tx_set(fh): i64 { return load64(fh + AV1FH_REDUCED_TX_SET); }
+fn av1_fh_segmentation_enabled(fh): i64 { return load64(fh + AV1FH_SEG_ENABLED); }
+fn av1_fh_segmentation_update_map(fh): i64 { return load64(fh + AV1FH_SEG_UPDATE_MAP); }
+fn av1_fh_segmentation_temporal_update(fh): i64 { return load64(fh + AV1FH_SEG_TEMPORAL_UPDATE); }
+fn av1_fh_feature_enabled(fh, seg, j): i64 { return load64(fh + AV1FH_FEATURE_ENABLED + ((seg * 8 + j) * 8)); }
+fn av1_fh_feature_data(fh, seg, j): i64 { return load64(fh + AV1FH_FEATURE_DATA + ((seg * 8 + j) * 8)); }
+fn av1_fh_tile_cols(fh): i64 { return load64(fh + AV1FH_TILE_COLS); }
+fn av1_fh_tile_rows(fh): i64 { return load64(fh + AV1FH_TILE_ROWS); }
+fn av1_fh_tile_cols_log2(fh): i64 { return load64(fh + AV1FH_TILE_COLS_LOG2); }
+fn av1_fh_tile_rows_log2(fh): i64 { return load64(fh + AV1FH_TILE_ROWS_LOG2); }
+fn av1_fh_tile_size_bytes(fh): i64 { return load64(fh + AV1FH_TILE_SIZE_BYTES); }
+fn av1_fh_context_update_tile_id(fh): i64 { return load64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID); }
+fn av1_fh_mi_col_start(fh, i): i64 { return load64(fh + AV1FH_MI_COL_STARTS + (i * 8)); }
+fn av1_fh_mi_row_start(fh, i): i64 { return load64(fh + AV1FH_MI_ROW_STARTS + (i * 8)); }
+fn av1_fh_ref_frame_idx(fh, i): i64 { return load64(fh + AV1FH_REF_FRAME_IDX + (i * 8)); }
+fn av1_fh_order_hint_ref(fh, refFrame): i64 { return load64(fh + AV1FH_ORDER_HINTS + (refFrame * 8)); }
+fn av1_fh_gm_type(fh, ref): i64 { return load64(fh + AV1FH_GM_TYPE + ((ref - 1) * 8)); }
+fn av1_fh_gm_param(fh, ref, idx): i64 { return load64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + idx) * 8)); }
+fn av1_fh_apply_grain(fh): i64 { return load64(fh + AV1FH_APPLY_GRAIN); }
+fn av1_fh_grain_seed(fh): i64 { return load64(fh + AV1FH_GRAIN_SEED); }
+fn av1_fh_update_grain(fh): i64 { return load64(fh + AV1FH_UPDATE_GRAIN); }
+fn av1_fh_num_y_points(fh): i64 { return load64(fh + AV1FH_NUM_Y_POINTS); }
+fn av1_fh_num_cb_points(fh): i64 { return load64(fh + AV1FH_NUM_CB_POINTS); }
+fn av1_fh_num_cr_points(fh): i64 { return load64(fh + AV1FH_NUM_CR_POINTS); }
+fn av1_fh_bits_consumed(fh): i64 { return load64(fh + AV1FH_BITS_CONSUMED); }
+
+# ================================================================
+# 5.9.5-5.9.9 — frame_size / superres / render_size / image size.
+# All write derived dimensions into fh; superres/frame_size read seq.
+# ================================================================
+
+# compute_image_size() — 5.9.9.
+fn av1_compute_image_size(fh): i64 {
+    store64(fh + AV1FH_MI_COLS, 2 * ((av1_fh_frame_width(fh) + 7) >> 3));
+    store64(fh + AV1FH_MI_ROWS, 2 * ((av1_fh_frame_height(fh) + 7) >> 3));
+    return DR_OK;
+}
+
+# superres_params() — 5.9.8.
+fn av1_superres_params(br, s, fh): i64 {
+    var use_superres = 0;
+    if (av1_seq_enable_superres(s)) {
+        use_superres = dr_br_read_bit(br);   # use_superres f(1)
+    }
+    var denom = AV1_SUPERRES_NUM;
+    if (use_superres) {
+        var coded_denom = dr_br_read_bits(br, AV1_SUPERRES_DENOM_BITS);   # coded_denom f(3)
+        denom = coded_denom + AV1_SUPERRES_DENOM_MIN;
+    }
+    store64(fh + AV1FH_USE_SUPERRES, use_superres);
+    store64(fh + AV1FH_SUPERRES_DENOM, denom);
+    var upscaled = av1_fh_frame_width(fh);
+    store64(fh + AV1FH_UPSCALED_WIDTH, upscaled);
+    store64(fh + AV1FH_FRAME_WIDTH,
+    (upscaled * AV1_SUPERRES_NUM + (denom / 2)) / denom);
+    return dr_br_err(br);
+}
+
+# frame_size() — 5.9.5.
+fn av1_frame_size(br, s, fh): i64 {
+    if (av1_fh_frame_size_override(fh)) {
+        var n = av1_seq_frame_width_bits(s);
+        var fw = dr_br_read_bits(br, n) + 1;   # frame_width_minus_1 f(n)
+        var m = av1_seq_frame_height_bits(s);
+        var fhh = dr_br_read_bits(br, m) + 1;  # frame_height_minus_1 f(m)
+        store64(fh + AV1FH_FRAME_WIDTH, fw);
+        store64(fh + AV1FH_FRAME_HEIGHT, fhh);
+    } else {
+        store64(fh + AV1FH_FRAME_WIDTH, av1_seq_width(s));
+        store64(fh + AV1FH_FRAME_HEIGHT, av1_seq_height(s));
+    }
+    var rc = av1_superres_params(br, s, fh);
+    if (rc != DR_OK) { return rc; }
+    return av1_compute_image_size(fh);
+}
+
+# render_size() — 5.9.6.
+fn av1_render_size(br, fh): i64 {
+    var diff = dr_br_read_bit(br);   # render_and_frame_size_different f(1)
+    if (diff == 1) {
+        var rw = dr_br_read_bits(br, 16) + 1;   # render_width_minus_1  f(16)
+        var rh = dr_br_read_bits(br, 16) + 1;   # render_height_minus_1 f(16)
+        store64(fh + AV1FH_RENDER_WIDTH, rw);
+        store64(fh + AV1FH_RENDER_HEIGHT, rh);
+    } else {
+        store64(fh + AV1FH_RENDER_WIDTH, av1_fh_upscaled_width(fh));
+        store64(fh + AV1FH_RENDER_HEIGHT, av1_fh_frame_height(fh));
+    }
+    return dr_br_err(br);
+}
+
+# frame_size_with_refs() — 5.9.7.
+fn av1_frame_size_with_refs(br, s, refs, fh): i64 {
+    var found = 0;
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        found = dr_br_read_bit(br);   # found_ref f(1)
+        if (dr_br_err(br) != DR_OK) { return dr_br_err(br); }
+        if (found == 1) {
+            var slot = av1_fh_ref_frame_idx(fh, i);
+            var uw = av1_ref_upscaled_width(refs, slot);
+            store64(fh + AV1FH_UPSCALED_WIDTH, uw);
+            store64(fh + AV1FH_FRAME_WIDTH, uw);
+            store64(fh + AV1FH_FRAME_HEIGHT, av1_ref_frame_height(refs, slot));
+            store64(fh + AV1FH_RENDER_WIDTH, av1_ref_render_width(refs, slot));
+            store64(fh + AV1FH_RENDER_HEIGHT, av1_ref_render_height(refs, slot));
+            break;
+        }
+        i = i + 1;
+    }
+    if (found == 0) {
+        var rc = av1_frame_size(br, s, fh);
+        if (rc != DR_OK) { return rc; }
+        return av1_render_size(br, fh);
+    }
+    var rc2 = av1_superres_params(br, s, fh);
+    if (rc2 != DR_OK) { return rc2; }
+    return av1_compute_image_size(fh);
+}
+
+# read_interpolation_filter() — 5.9.10.
+fn av1_read_interpolation_filter(br, fh): i64 {
+    var switchable = dr_br_read_bit(br);   # is_filter_switchable f(1)
+    if (switchable == 1) {
+        store64(fh + AV1FH_INTERP_FILTER, AV1_INTERP_SWITCHABLE);
+    } else {
+        store64(fh + AV1FH_INTERP_FILTER, dr_br_read_bits(br, 2));   # interpolation_filter f(2)
+    }
+    return dr_br_err(br);
+}
+
+# ================================================================
+# 5.9.11 loop_filter_params.
+# ================================================================
+fn av1_loop_filter_params(br, s, fh): i64 {
+    # setup_past_independence / lossless defaults for the ref/mode deltas
+    # (identical in both spec branches): INTRA 1, GOLDEN/ALTREF/ALTREF2 -1,
+    # the rest 0.
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_INTRA_FRAME * 8), 1);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST_FRAME * 8), 0);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST2_FRAME * 8), 0);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST3_FRAME * 8), 0);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_BWDREF_FRAME * 8), 0);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_GOLDEN_FRAME * 8), 0 - 1);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_ALTREF_FRAME * 8), 0 - 1);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_ALTREF2_FRAME * 8), 0 - 1);
+    store64(fh + AV1FH_LF_MODE_DELTAS + 0, 0);
+    store64(fh + AV1FH_LF_MODE_DELTAS + 8, 0);
+    if (av1_fh_coded_lossless(fh) || av1_fh_allow_intrabc(fh)) {
+        store64(fh + AV1FH_LF_LEVEL + 0, 0);
+        store64(fh + AV1FH_LF_LEVEL + 8, 0);
+        return DR_OK;
+    }
+    var lvl0 = dr_br_read_bits(br, 6);   # loop_filter_level[0] f(6)
+    var lvl1 = dr_br_read_bits(br, 6);   # loop_filter_level[1] f(6)
+    store64(fh + AV1FH_LF_LEVEL + 0, lvl0);
+    store64(fh + AV1FH_LF_LEVEL + 8, lvl1);
+    if (av1_seq_num_planes(s) > 1) {
+        if (lvl0 || lvl1) {
+            store64(fh + AV1FH_LF_LEVEL + 16, dr_br_read_bits(br, 6));   # [2] f(6)
+            store64(fh + AV1FH_LF_LEVEL + 24, dr_br_read_bits(br, 6));   # [3] f(6)
+        }
+    }
+    store64(fh + AV1FH_LF_SHARPNESS, dr_br_read_bits(br, 3));   # loop_filter_sharpness f(3)
+    var delta_enabled = dr_br_read_bit(br);   # loop_filter_delta_enabled f(1)
+    store64(fh + AV1FH_LF_DELTA_ENABLED, delta_enabled);
+    if (delta_enabled == 1) {
+        var delta_update = dr_br_read_bit(br);   # loop_filter_delta_update f(1)
+        store64(fh + AV1FH_LF_DELTA_UPDATE, delta_update);
+        if (delta_update == 1) {
+            var i = 0;
+            while (i < 8) {   # TOTAL_REFS_PER_FRAME
+                var upd = dr_br_read_bit(br);   # update_ref_delta f(1)
+                if (upd == 1) {
+                    var v = 0;
+                    var rc = dr_su_read(br, 7, &v);   # loop_filter_ref_deltas[i] su(1+6)
+                    if (rc != DR_OK) { return rc; }
+                    store64(fh + AV1FH_LF_REF_DELTAS + (i * 8), v);
+                }
+                i = i + 1;
+            }
+            var j = 0;
+            while (j < 2) {
+                var upm = dr_br_read_bit(br);   # update_mode_delta f(1)
+                if (upm == 1) {
+                    var vm = 0;
+                    var rc2 = dr_su_read(br, 7, &vm);   # loop_filter_mode_deltas[j] su(1+6)
+                    if (rc2 != DR_OK) { return rc2; }
+                    store64(fh + AV1FH_LF_MODE_DELTAS + (j * 8), vm);
+                }
+                j = j + 1;
+            }
+        }
+    }
+    return dr_br_err(br);
+}
+
+# read_delta_q() — 5.9.13.
+fn av1_read_delta_q(br, out): i64 {
+    var coded = dr_br_read_bit(br);   # delta_coded f(1)
+    if (coded) {
+        return dr_su_read(br, 7, out);   # delta_q su(1+6)
+    }
+    store64(out, 0);
+    return dr_br_err(br);
+}
+
+# quantization_params() — 5.9.12.
+fn av1_quantization_params(br, s, fh): i64 {
+    store64(fh + AV1FH_BASE_Q_IDX, dr_br_read_bits(br, 8));   # base_q_idx f(8)
+    var v = 0;
+    var rc = av1_read_delta_q(br, &v);                        # DeltaQYDc
+    if (rc != DR_OK) { return rc; }
+    store64(fh + AV1FH_DELTA_Q_Y_DC, v);
+    if (av1_seq_num_planes(s) > 1) {
+        var diff_uv = 0;
+        if (av1_seq_separate_uv_delta_q(s)) {
+            diff_uv = dr_br_read_bit(br);   # diff_uv_delta f(1)
+        }
+        store64(fh + AV1FH_DIFF_UV_DELTA, diff_uv);
+        rc = av1_read_delta_q(br, &v); if (rc != DR_OK) { return rc; }   # DeltaQUDc
+        store64(fh + AV1FH_DELTA_Q_U_DC, v);
+        rc = av1_read_delta_q(br, &v); if (rc != DR_OK) { return rc; }   # DeltaQUAc
+        store64(fh + AV1FH_DELTA_Q_U_AC, v);
+        if (diff_uv) {
+            rc = av1_read_delta_q(br, &v); if (rc != DR_OK) { return rc; }   # DeltaQVDc
+            store64(fh + AV1FH_DELTA_Q_V_DC, v);
+            rc = av1_read_delta_q(br, &v); if (rc != DR_OK) { return rc; }   # DeltaQVAc
+            store64(fh + AV1FH_DELTA_Q_V_AC, v);
+        } else {
+            store64(fh + AV1FH_DELTA_Q_V_DC, av1_fh_delta_q_u_dc(fh));
+            store64(fh + AV1FH_DELTA_Q_V_AC, av1_fh_delta_q_u_ac(fh));
+        }
+    }
+    var using_qm = dr_br_read_bit(br);   # using_qmatrix f(1)
+    store64(fh + AV1FH_USING_QMATRIX, using_qm);
+    if (using_qm) {
+        var qm_y = dr_br_read_bits(br, 4);   # qm_y f(4)
+        var qm_u = dr_br_read_bits(br, 4);   # qm_u f(4)
+        store64(fh + AV1FH_QM_Y, qm_y);
+        store64(fh + AV1FH_QM_U, qm_u);
+        if (av1_seq_separate_uv_delta_q(s) == 0) {
+            store64(fh + AV1FH_QM_V, qm_u);
+        } else {
+            store64(fh + AV1FH_QM_V, dr_br_read_bits(br, 4));   # qm_v f(4)
+        }
+    }
+    return dr_br_err(br);
+}
+
+# segmentation_params() — 5.9.14.
+fn av1_segmentation_params(br, fh): i64 {
+    var enabled = dr_br_read_bit(br);   # segmentation_enabled f(1)
+    store64(fh + AV1FH_SEG_ENABLED, enabled);
+    if (enabled == 1) {
+        var update_data = 1;
+        if (av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE) {
+            store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+            store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
+            store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+        } else {
+            var update_map = dr_br_read_bit(br);   # segmentation_update_map f(1)
+            store64(fh + AV1FH_SEG_UPDATE_MAP, update_map);
+            if (update_map == 1) {
+                store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, dr_br_read_bit(br));   # temporal_update f(1)
+            }
+            update_data = dr_br_read_bit(br);   # segmentation_update_data f(1)
+            store64(fh + AV1FH_SEG_UPDATE_DATA, update_data);
+        }
+        if (update_data == 1) {
+            var i = 0;
+            while (i < AV1_MAX_SEGMENTS) {
+                var j = 0;
+                while (j < AV1_SEG_LVL_MAX) {
+                    var fe = dr_br_read_bit(br);   # feature_enabled f(1)
+                    store64(fh + AV1FH_FEATURE_ENABLED + ((i * 8 + j) * 8), fe);
+                    var clipped = 0;
+                    if (fe == 1) {
+                        var bits = av1_seg_feature_bits(j);
+                        var limit = av1_seg_feature_max(j);
+                        if (av1_seg_feature_signed(j) == 1) {
+                            var fv = 0;
+                            var rc = dr_su_read(br, bits + 1, &fv);   # feature_value su(1+bitsToRead)
+                            if (rc != DR_OK) { return rc; }
+                            clipped = av1_clip3(0 - limit, limit, fv);
+                        } else {
+                            var fv2 = dr_br_read_bits(br, bits);      # feature_value f(bitsToRead)
+                            clipped = av1_clip3(0, limit, fv2);
+                        }
+                    }
+                    store64(fh + AV1FH_FEATURE_DATA + ((i * 8 + j) * 8), clipped);
+                    j = j + 1;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    # FeatureEnabled/FeatureData for the not-updated case default to 0
+    # (memset). SegIdPreSkip / LastActiveSegId are derived-only and not
+    # stored (no bit dependency in the header).
+    return dr_br_err(br);
+}
+
+# delta_q_params() — 5.9.17.
+fn av1_delta_q_params(br, fh): i64 {
+    store64(fh + AV1FH_DELTA_Q_RES, 0);
+    var present = 0;
+    if (av1_fh_base_q_idx(fh) > 0) {
+        present = dr_br_read_bit(br);   # delta_q_present f(1)
+    }
+    store64(fh + AV1FH_DELTA_Q_PRESENT, present);
+    if (present) {
+        store64(fh + AV1FH_DELTA_Q_RES, dr_br_read_bits(br, 2));   # delta_q_res f(2)
+    }
+    return dr_br_err(br);
+}
+
+# delta_lf_params() — 5.9.18.
+fn av1_delta_lf_params(br, fh): i64 {
+    store64(fh + AV1FH_DELTA_LF_PRESENT, 0);
+    store64(fh + AV1FH_DELTA_LF_RES, 0);
+    store64(fh + AV1FH_DELTA_LF_MULTI, 0);
+    if (av1_fh_delta_q_present(fh)) {
+        var present = 0;
+        if (av1_fh_allow_intrabc(fh) == 0) {
+            present = dr_br_read_bit(br);   # delta_lf_present f(1)
+            store64(fh + AV1FH_DELTA_LF_PRESENT, present);
+        }
+        if (present) {
+            store64(fh + AV1FH_DELTA_LF_RES, dr_br_read_bits(br, 2));   # delta_lf_res f(2)
+            store64(fh + AV1FH_DELTA_LF_MULTI, dr_br_read_bit(br));     # delta_lf_multi f(1)
+        }
+    }
+    return dr_br_err(br);
+}
+
+# get_qindex(ignoreDeltaQ=1, segmentId) — 7.12.2. Only the CodedLossless
+# call site (ignoreDeltaQ always 1) is needed in the header.
+fn av1_get_qindex_ignore_delta(fh, segmentId): i64 {
+    var active = 0;
+    if (av1_fh_segmentation_enabled(fh)) {
+        if (av1_fh_feature_enabled(fh, segmentId, AV1_SEG_LVL_ALT_Q)) { active = 1; }
+    }
+    if (active) {
+        var data = av1_fh_feature_data(fh, segmentId, AV1_SEG_LVL_ALT_Q);
+        return av1_clip3(0, 255, av1_fh_base_q_idx(fh) + data);
+    }
+    return av1_fh_base_q_idx(fh);
+}
+
+# CodedLossless / AllLossless derivation (5.9.2 lines after delta_lf).
+fn av1_compute_lossless(fh): i64 {
+    var coded_lossless = 1;
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        var qindex = av1_get_qindex_ignore_delta(fh, seg);
+        var lossless = 0;
+        if ((qindex == 0) && (av1_fh_delta_q_y_dc(fh) == 0)
+        && (av1_fh_delta_q_u_ac(fh) == 0) && (av1_fh_delta_q_u_dc(fh) == 0)
+        && (av1_fh_delta_q_v_ac(fh) == 0) && (av1_fh_delta_q_v_dc(fh) == 0)) {
+            lossless = 1;
+        }
+        if (lossless == 0) { coded_lossless = 0; }
+        seg = seg + 1;
+    }
+    store64(fh + AV1FH_CODED_LOSSLESS, coded_lossless);
+    var all = 0;
+    if (coded_lossless && (av1_fh_frame_width(fh) == av1_fh_upscaled_width(fh))) {
+        all = 1;
+    }
+    store64(fh + AV1FH_ALL_LOSSLESS, all);
+    return DR_OK;
+}
+
+# tile_info() — 5.9.15 (+ 5.9.3 tile_log2). Writes MiColStarts/MiRowStarts
+# and the tile-count/log2/size-bytes fields.
+fn av1_tile_info(br, s, fh): i64 {
+    var mi_cols = av1_fh_mi_cols(fh);
+    var mi_rows = av1_fh_mi_rows(fh);
+    var sb128 = av1_seq_use_128x128(s);
+    var sb_shift = 4;
+    if (sb128) { sb_shift = 5; }
+    var sb_cols = (mi_cols + 15) >> 4;
+    var sb_rows = (mi_rows + 15) >> 4;
+    if (sb128) {
+        sb_cols = (mi_cols + 31) >> 5;
+        sb_rows = (mi_rows + 31) >> 5;
+    }
+    var sb_size = sb_shift + 2;
+    var max_tile_width_sb = AV1_MAX_TILE_WIDTH >> sb_size;
+    var max_tile_area_sb = AV1_MAX_TILE_AREA >> (2 * sb_size);
+    var min_log2_tile_cols = av1_tile_log2(max_tile_width_sb, sb_cols);
+    var max_log2_tile_cols = av1_tile_log2(1, av1_min(sb_cols, AV1_MAX_TILE_COLS));
+    var max_log2_tile_rows = av1_tile_log2(1, av1_min(sb_rows, AV1_MAX_TILE_ROWS));
+    var min_log2_tiles = av1_max(min_log2_tile_cols,
+    av1_tile_log2(max_tile_area_sb, sb_rows * sb_cols));
+    var tile_cols_log2 = 0;
+    var tile_rows_log2 = 0;
+    var uniform = dr_br_read_bit(br);   # uniform_tile_spacing_flag f(1)
+    store64(fh + AV1FH_UNIFORM_TILE, uniform);
+    if (uniform) {
+        tile_cols_log2 = min_log2_tile_cols;
+        while (tile_cols_log2 < max_log2_tile_cols) {
+            var inc = dr_br_read_bit(br);   # increment_tile_cols_log2 f(1)
+            if (inc == 1) { tile_cols_log2 = tile_cols_log2 + 1; }
+            else { break; }
+        }
+        var tile_width_sb = (sb_cols + (1 << tile_cols_log2) - 1) >> tile_cols_log2;
+        var i = 0;
+        var start = 0;
+        while (start < sb_cols) {
+            store64(fh + AV1FH_MI_COL_STARTS + (i * 8), start << sb_shift);
+            i = i + 1;
+            start = start + tile_width_sb;
+        }
+        store64(fh + AV1FH_MI_COL_STARTS + (i * 8), mi_cols);
+        store64(fh + AV1FH_TILE_COLS, i);
+        var min_log2_tile_rows = av1_max(min_log2_tiles - tile_cols_log2, 0);
+        tile_rows_log2 = min_log2_tile_rows;
+        while (tile_rows_log2 < max_log2_tile_rows) {
+            var incr = dr_br_read_bit(br);   # increment_tile_rows_log2 f(1)
+            if (incr == 1) { tile_rows_log2 = tile_rows_log2 + 1; }
+            else { break; }
+        }
+        var tile_height_sb = (sb_rows + (1 << tile_rows_log2) - 1) >> tile_rows_log2;
+        var r = 0;
+        var startr = 0;
+        while (startr < sb_rows) {
+            store64(fh + AV1FH_MI_ROW_STARTS + (r * 8), startr << sb_shift);
+            r = r + 1;
+            startr = startr + tile_height_sb;
+        }
+        store64(fh + AV1FH_MI_ROW_STARTS + (r * 8), mi_rows);
+        store64(fh + AV1FH_TILE_ROWS, r);
+    } else {
+        var widest_tile_sb = 0;
+        var start2 = 0;
+        var i2 = 0;
+        while (start2 < sb_cols) {
+            # Trust no input byte: the 64-tile cap (MAX_TILE_COLS) is a
+            # conformance requirement the ns() loop does NOT self-enforce.
+            # A hostile stream of 1-superblock tiles would otherwise run
+            # i2 past the fixed MiColStarts[MAX_TILE_COLS+1] array and
+            # corrupt the record. Reject instead.
+            if (i2 >= AV1_MAX_TILE_COLS) {
+                return dr_br_set_err(br, AV1_ERR_BAD_FRAME);
+            }
+            store64(fh + AV1FH_MI_COL_STARTS + (i2 * 8), start2 << sb_shift);
+            var max_width = av1_min(sb_cols - start2, max_tile_width_sb);
+            var w = 0;
+            var rc = dr_ns_read(br, max_width, &w);   # width_in_sbs_minus_1 ns(maxWidth)
+            if (rc != DR_OK) { return rc; }
+            var size_sb = w + 1;
+            widest_tile_sb = av1_max(size_sb, widest_tile_sb);
+            start2 = start2 + size_sb;
+            i2 = i2 + 1;
+        }
+        store64(fh + AV1FH_MI_COL_STARTS + (i2 * 8), mi_cols);
+        store64(fh + AV1FH_TILE_COLS, i2);
+        tile_cols_log2 = av1_tile_log2(1, i2);
+        var max_area = sb_rows * sb_cols;
+        if (min_log2_tiles > 0) {
+            max_area = (sb_rows * sb_cols) >> (min_log2_tiles + 1);
+        }
+        var max_tile_height_sb = av1_max(max_area / widest_tile_sb, 1);
+        var start3 = 0;
+        var i3 = 0;
+        while (start3 < sb_rows) {
+            # Same MAX_TILE_ROWS bound guard as the column loop above.
+            if (i3 >= AV1_MAX_TILE_ROWS) {
+                return dr_br_set_err(br, AV1_ERR_BAD_FRAME);
+            }
+            store64(fh + AV1FH_MI_ROW_STARTS + (i3 * 8), start3 << sb_shift);
+            var max_height = av1_min(sb_rows - start3, max_tile_height_sb);
+            var h = 0;
+            var rc2 = dr_ns_read(br, max_height, &h);   # height_in_sbs_minus_1 ns(maxHeight)
+            if (rc2 != DR_OK) { return rc2; }
+            var size_sb2 = h + 1;
+            start3 = start3 + size_sb2;
+            i3 = i3 + 1;
+        }
+        store64(fh + AV1FH_MI_ROW_STARTS + (i3 * 8), mi_rows);
+        store64(fh + AV1FH_TILE_ROWS, i3);
+        tile_rows_log2 = av1_tile_log2(1, i3);
+    }
+    store64(fh + AV1FH_TILE_COLS_LOG2, tile_cols_log2);
+    store64(fh + AV1FH_TILE_ROWS_LOG2, tile_rows_log2);
+    if ((tile_cols_log2 > 0) || (tile_rows_log2 > 0)) {
+        store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID,
+        dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2));   # context_update_tile_id
+        store64(fh + AV1FH_TILE_SIZE_BYTES, dr_br_read_bits(br, 2) + 1);   # tile_size_bytes_minus_1 f(2)
+    } else {
+        store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 0);
+        store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    }
+    return dr_br_err(br);
+}
+
+# cdef_params() — 5.9.19.
+fn av1_cdef_params(br, s, fh): i64 {
+    if (av1_fh_coded_lossless(fh) || av1_fh_allow_intrabc(fh)
+    || (av1_seq_enable_cdef(s) == 0)) {
+        store64(fh + AV1FH_CDEF_BITS, 0);
+        store64(fh + AV1FH_CDEF_Y_PRI + 0, 0);
+        store64(fh + AV1FH_CDEF_Y_SEC + 0, 0);
+        store64(fh + AV1FH_CDEF_UV_PRI + 0, 0);
+        store64(fh + AV1FH_CDEF_UV_SEC + 0, 0);
+        store64(fh + AV1FH_CDEF_DAMPING, 3);
+        return DR_OK;
+    }
+    store64(fh + AV1FH_CDEF_DAMPING, dr_br_read_bits(br, 2) + 3);   # cdef_damping_minus_3 f(2)
+    var bits = dr_br_read_bits(br, 2);   # cdef_bits f(2)
+    store64(fh + AV1FH_CDEF_BITS, bits);
+    var i = 0;
+    var n = 1 << bits;
+    var num_planes = av1_seq_num_planes(s);
+    while (i < n) {
+        store64(fh + AV1FH_CDEF_Y_PRI + (i * 8), dr_br_read_bits(br, 4));   # cdef_y_pri_strength f(4)
+        var ysec = dr_br_read_bits(br, 2);   # cdef_y_sec_strength f(2)
+        if (ysec == 3) { ysec = ysec + 1; }
+        store64(fh + AV1FH_CDEF_Y_SEC + (i * 8), ysec);
+        if (num_planes > 1) {
+            store64(fh + AV1FH_CDEF_UV_PRI + (i * 8), dr_br_read_bits(br, 4));   # cdef_uv_pri_strength f(4)
+            var uvsec = dr_br_read_bits(br, 2);   # cdef_uv_sec_strength f(2)
+            if (uvsec == 3) { uvsec = uvsec + 1; }
+            store64(fh + AV1FH_CDEF_UV_SEC + (i * 8), uvsec);
+        }
+        i = i + 1;
+    }
+    return dr_br_err(br);
+}
+
+# lr_params() — 5.9.20.
+fn av1_lr_params(br, s, fh): i64 {
+    if (av1_fh_all_lossless(fh) || av1_fh_allow_intrabc(fh)
+    || (av1_seq_enable_restoration(s) == 0)) {
+        store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 0, AV1_RESTORE_NONE);
+        store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 8, AV1_RESTORE_NONE);
+        store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 16, AV1_RESTORE_NONE);
+        store64(fh + AV1FH_USES_LR, 0);
+        return DR_OK;
+    }
+    var uses_lr = 0;
+    var uses_chroma_lr = 0;
+    var num_planes = av1_seq_num_planes(s);
+    var i = 0;
+    while (i < num_planes) {
+        var lr_type = dr_br_read_bits(br, 2);   # lr_type f(2)
+        var rt = av1_remap_lr_type(lr_type);
+        store64(fh + AV1FH_FRAME_RESTORATION_TYPE + (i * 8), rt);
+        if (rt != AV1_RESTORE_NONE) {
+            uses_lr = 1;
+            if (i > 0) { uses_chroma_lr = 1; }
+        }
+        i = i + 1;
+    }
+    store64(fh + AV1FH_USES_LR, uses_lr);
+    if (uses_lr) {
+        var lr_unit_shift = 0;
+        if (av1_seq_use_128x128(s)) {
+            lr_unit_shift = dr_br_read_bit(br);   # lr_unit_shift f(1)
+            lr_unit_shift = lr_unit_shift + 1;
+        } else {
+            lr_unit_shift = dr_br_read_bit(br);   # lr_unit_shift f(1)
+            if (lr_unit_shift) {
+                var extra = dr_br_read_bit(br);   # lr_unit_extra_shift f(1)
+                lr_unit_shift = lr_unit_shift + extra;
+            }
+        }
+        var size0 = AV1_RESTORATION_TILESIZE_MAX >> (2 - lr_unit_shift);
+        store64(fh + AV1FH_LR_SIZE + 0, size0);
+        var lr_uv_shift = 0;
+        if (av1_seq_subsampling_x(s) && av1_seq_subsampling_y(s) && uses_chroma_lr) {
+            lr_uv_shift = dr_br_read_bit(br);   # lr_uv_shift f(1)
+        }
+        store64(fh + AV1FH_LR_SIZE + 8, size0 >> lr_uv_shift);
+        store64(fh + AV1FH_LR_SIZE + 16, size0 >> lr_uv_shift);
+    }
+    return dr_br_err(br);
+}
+
+# read_tx_mode() — 5.9.21.
+fn av1_read_tx_mode(br, fh): i64 {
+    if (av1_fh_coded_lossless(fh) == 1) {
+        store64(fh + AV1FH_TX_MODE, AV1_ONLY_4X4);
+    } else {
+        var sel = dr_br_read_bit(br);   # tx_mode_select f(1)
+        if (sel) { store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_SELECT); }
+        else { store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_LARGEST); }
+    }
+    return dr_br_err(br);
+}
+
+# frame_reference_mode() — 5.9.22.
+fn av1_frame_reference_mode(br, fh): i64 {
+    if (av1_fh_frame_is_intra(fh)) {
+        store64(fh + AV1FH_REFERENCE_SELECT, 0);
+    } else {
+        store64(fh + AV1FH_REFERENCE_SELECT, dr_br_read_bit(br));   # reference_select f(1)
+    }
+    return dr_br_err(br);
+}
+
+# skip_mode_params() — 5.9.23. skipModeAllowed drives whether the
+# skip_mode_present bit is coded; the forward/backward hint search
+# reproduces that gate cursor-true.
+fn av1_skip_mode_params(br, s, refs, fh): i64 {
+    var skip_allowed = 0;
+    if (av1_fh_frame_is_intra(fh) || (av1_fh_reference_select(fh) == 0)
+    || (av1_seq_enable_order_hint(s) == 0)) {
+        skip_allowed = 0;
+    } else {
+        var forward_idx = 0 - 1;
+        var backward_idx = 0 - 1;
+        var forward_hint = 0;
+        var backward_hint = 0;
+        var i = 0;
+        while (i < AV1_REFS_PER_FRAME) {
+            var ref_hint = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, i));
+            if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) < 0) {
+                if ((forward_idx < 0)
+                || (av1_get_relative_dist(s, ref_hint, forward_hint) > 0)) {
+                    forward_idx = i;
+                    forward_hint = ref_hint;
+                }
+            } else {
+                if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) > 0) {
+                    if ((backward_idx < 0)
+                    || (av1_get_relative_dist(s, ref_hint, backward_hint) < 0)) {
+                        backward_idx = i;
+                        backward_hint = ref_hint;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if (forward_idx < 0) {
+            skip_allowed = 0;
+        } else {
+            if (backward_idx >= 0) {
+                skip_allowed = 1;
+                store64(fh + AV1FH_SKIP_MODE_FRAME0, AV1_LAST_FRAME + av1_min(forward_idx, backward_idx));
+                store64(fh + AV1FH_SKIP_MODE_FRAME1, AV1_LAST_FRAME + av1_max(forward_idx, backward_idx));
+            } else {
+                var second_idx = 0 - 1;
+                var second_hint = 0;
+                var k = 0;
+                while (k < AV1_REFS_PER_FRAME) {
+                    var rh = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, k));
+                    if (av1_get_relative_dist(s, rh, forward_hint) < 0) {
+                        if ((second_idx < 0)
+                        || (av1_get_relative_dist(s, rh, second_hint) > 0)) {
+                            second_idx = k;
+                            second_hint = rh;
+                        }
+                    }
+                    k = k + 1;
+                }
+                if (second_idx < 0) {
+                    skip_allowed = 0;
+                } else {
+                    skip_allowed = 1;
+                    store64(fh + AV1FH_SKIP_MODE_FRAME0, AV1_LAST_FRAME + av1_min(forward_idx, second_idx));
+                    store64(fh + AV1FH_SKIP_MODE_FRAME1, AV1_LAST_FRAME + av1_max(forward_idx, second_idx));
+                }
+            }
+        }
+    }
+    if (skip_allowed) {
+        store64(fh + AV1FH_SKIP_MODE_PRESENT, dr_br_read_bit(br));   # skip_mode_present f(1)
+    } else {
+        store64(fh + AV1FH_SKIP_MODE_PRESENT, 0);
+    }
+    return dr_br_err(br);
+}
+
+# ================================================================
+# 5.9.24-5.9.28 global motion + subexp decode.
+# ================================================================
+
+# decode_subexp(numSyms) — 5.9.28.
+fn av1_decode_subexp(br, num_syms, out): i64 {
+    var i = 0;
+    var mk = 0;
+    var k = 3;
+    while (1) {
+        var b2 = k;
+        if (i != 0) { b2 = k + i - 1; }
+        var a = 1 << b2;
+        if (num_syms <= (mk + 3 * a)) {
+            var fb = 0;
+            var rc = dr_ns_read(br, num_syms - mk, &fb);   # subexp_final_bits ns(numSyms - mk)
+            if (rc != DR_OK) { return rc; }
+            store64(out, fb + mk);
+            return DR_OK;
+        }
+        var more = dr_br_read_bit(br);   # subexp_more_bits f(1)
+        if (dr_br_err(br) != DR_OK) { return dr_br_err(br); }
+        if (more) {
+            i = i + 1;
+            mk = mk + a;
+        } else {
+            var bits = dr_br_read_bits(br, b2);   # subexp_bits f(b2)
+            if (dr_br_err(br) != DR_OK) { return dr_br_err(br); }
+            store64(out, bits + mk);
+            return DR_OK;
+        }
+    }
+    return DR_OK;
+}
+
+# decode_unsigned_subexp_with_ref(mx, r) — 5.9.27.
+fn av1_decode_unsigned_subexp_with_ref(br, mx, r, out): i64 {
+    var v = 0;
+    var rc = av1_decode_subexp(br, mx, &v);
+    if (rc != DR_OK) { return rc; }
+    if ((r << 1) <= mx) {
+        store64(out, av1_inverse_recenter(r, v));
+    } else {
+        store64(out, mx - 1 - av1_inverse_recenter(mx - 1 - r, v));
+    }
+    return DR_OK;
+}
+
+# decode_signed_subexp_with_ref(low, high, r) — 5.9.26.
+fn av1_decode_signed_subexp_with_ref(br, low, high, r, out): i64 {
+    var x = 0;
+    var rc = av1_decode_unsigned_subexp_with_ref(br, high - low, r - low, &x);
+    if (rc != DR_OK) { return rc; }
+    store64(out, x + low);
+    return DR_OK;
+}
+
+# PrevGmParams[ref][idx]: identity default when there is no primary
+# reference (setup_past_independence), else the primary ref's saved gm.
+fn av1_prev_gm_param(fh, refs, ref, idx): i64 {
+    if (av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE) {
+        if ((idx % 3) == 2) { return 1 << AV1_WARPEDMODEL_PREC_BITS; }
+        return 0;
+    }
+    var slot = av1_fh_ref_frame_idx(fh, av1_fh_primary_ref_frame(fh));
+    return av1_ref_saved_gm(refs, slot, ref, idx);
+}
+
+# read_global_param(type, ref, idx) — 5.9.25.
+fn av1_read_global_param(br, fh, refs, type, ref, idx): i64 {
+    var abs_bits = AV1_GM_ABS_ALPHA_BITS;
+    var prec_bits = AV1_GM_ALPHA_PREC_BITS;
+    if (idx < 2) {
+        if (type == AV1_GM_TRANSLATION) {
+            var hp = av1_fh_allow_high_precision_mv(fh);
+            abs_bits = AV1_GM_ABS_TRANS_ONLY_BITS - (1 - hp);   # - !allow_high_precision_mv
+            prec_bits = AV1_GM_TRANS_ONLY_PREC_BITS - (1 - hp);
+        } else {
+            abs_bits = AV1_GM_ABS_TRANS_BITS;
+            prec_bits = AV1_GM_TRANS_PREC_BITS;
+        }
+    }
+    var prec_diff = AV1_WARPEDMODEL_PREC_BITS - prec_bits;
+    var round = 0;
+    var sub = 0;
+    if ((idx % 3) == 2) {
+        round = 1 << AV1_WARPEDMODEL_PREC_BITS;
+        sub = 1 << prec_bits;
+    }
+    var mx = 1 << abs_bits;
+    var r = (av1_prev_gm_param(fh, refs, ref, idx) >> prec_diff) - sub;
+    var decoded = 0;
+    var rc = av1_decode_signed_subexp_with_ref(br, 0 - mx, mx + 1, r, &decoded);
+    if (rc != DR_OK) { return rc; }
+    store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + idx) * 8),
+    (decoded << prec_diff) + round);
+    return DR_OK;
+}
+
+# global_motion_params() — 5.9.24.
+fn av1_global_motion_params(br, fh, refs): i64 {
+    var ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) {
+        store64(fh + AV1FH_GM_TYPE + ((ref - 1) * 8), AV1_GM_IDENTITY);
+        var j = 0;
+        while (j < 6) {
+            var def = 0;
+            if ((j % 3) == 2) { def = 1 << AV1_WARPEDMODEL_PREC_BITS; }
+            store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + j) * 8), def);
+            j = j + 1;
+        }
+        ref = ref + 1;
+    }
+    if (av1_fh_frame_is_intra(fh)) { return DR_OK; }
+    ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) {
+        var type = AV1_GM_IDENTITY;
+        var is_global = dr_br_read_bit(br);   # is_global f(1)
+        if (is_global) {
+            var is_rot_zoom = dr_br_read_bit(br);   # is_rot_zoom f(1)
+            if (is_rot_zoom) {
+                type = AV1_GM_ROTZOOM;
+            } else {
+                var is_trans = dr_br_read_bit(br);   # is_translation f(1)
+                if (is_trans) { type = AV1_GM_TRANSLATION; }
+                else { type = AV1_GM_AFFINE; }
+            }
+        }
+        store64(fh + AV1FH_GM_TYPE + ((ref - 1) * 8), type);
+        if (type >= AV1_GM_ROTZOOM) {
+            var rc = av1_read_global_param(br, fh, refs, type, ref, 2);
+            if (rc != DR_OK) { return rc; }
+            rc = av1_read_global_param(br, fh, refs, type, ref, 3);
+            if (rc != DR_OK) { return rc; }
+            if (type == AV1_GM_AFFINE) {
+                rc = av1_read_global_param(br, fh, refs, type, ref, 4);
+                if (rc != DR_OK) { return rc; }
+                rc = av1_read_global_param(br, fh, refs, type, ref, 5);
+                if (rc != DR_OK) { return rc; }
+            } else {
+                var p3 = av1_fh_gm_param(fh, ref, 3);
+                var p2 = av1_fh_gm_param(fh, ref, 2);
+                store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + 4) * 8), 0 - p3);
+                store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + 5) * 8), p2);
+            }
+        }
+        if (type >= AV1_GM_TRANSLATION) {
+            var rc2 = av1_read_global_param(br, fh, refs, type, ref, 0);
+            if (rc2 != DR_OK) { return rc2; }
+            rc2 = av1_read_global_param(br, fh, refs, type, ref, 1);
+            if (rc2 != DR_OK) { return rc2; }
+        }
+        ref = ref + 1;
+    }
+    return dr_br_err(br);
+}
+
+# film_grain_params() — 5.9.30. Cursor-true: every field consumed; the
+# scalar summary is stored, the point/AR-coefficient arrays are read and
+# discarded (grain synthesis lands in the 0.7.x AV1 arc, see
+# docs/development/roadmap.md). mono_chrome / subsampling
+# come from the sequence header.
+fn av1_film_grain_params(br, s, fh): i64 {
+    if ((av1_seq_film_grain_present(s) == 0)
+    || ((av1_fh_show_frame(fh) == 0) && (av1_fh_showable_frame(fh) == 0))) {
+        store64(fh + AV1FH_APPLY_GRAIN, 0);
+        return DR_OK;
+    }
+    var apply_grain = dr_br_read_bit(br);   # apply_grain f(1)
+    store64(fh + AV1FH_APPLY_GRAIN, apply_grain);
+    if (apply_grain == 0) { return DR_OK; }
+    store64(fh + AV1FH_GRAIN_SEED, dr_br_read_bits(br, 16));   # grain_seed f(16)
+    var update_grain = 1;
+    if (av1_fh_frame_type(fh) == AV1_INTER_FRAME) {
+        update_grain = dr_br_read_bit(br);   # update_grain f(1)
+    }
+    store64(fh + AV1FH_UPDATE_GRAIN, update_grain);
+    if (update_grain == 0) {
+        store64(fh + AV1FH_GRAIN_REF_IDX, dr_br_read_bits(br, 3));   # film_grain_params_ref_idx f(3)
+        return dr_br_err(br);
+    }
+    var num_y = dr_br_read_bits(br, 4);   # num_y_points f(4)
+    store64(fh + AV1FH_NUM_Y_POINTS, num_y);
+    var i = 0;
+    while (i < num_y) {
+        dr_br_read_bits(br, 8);   # point_y_value[i]   f(8)
+        dr_br_read_bits(br, 8);   # point_y_scaling[i] f(8)
+        i = i + 1;
+    }
+    var mono = av1_seq_mono(s);
+    var csfl = 0;
+    if (mono == 0) {
+        csfl = dr_br_read_bit(br);   # chroma_scaling_from_luma f(1)
+    }
+    store64(fh + AV1FH_CHROMA_SCALE_FROM_LUMA, csfl);
+    var num_cb = 0;
+    var num_cr = 0;
+    var ssx = av1_seq_subsampling_x(s);
+    var ssy = av1_seq_subsampling_y(s);
+    if (mono || csfl || ((ssx == 1) && (ssy == 1) && (num_y == 0))) {
+        num_cb = 0;
+        num_cr = 0;
+    } else {
+        num_cb = dr_br_read_bits(br, 4);   # num_cb_points f(4)
+        var c = 0;
+        while (c < num_cb) {
+            dr_br_read_bits(br, 8);   # point_cb_value[c]   f(8)
+            dr_br_read_bits(br, 8);   # point_cb_scaling[c] f(8)
+            c = c + 1;
+        }
+        num_cr = dr_br_read_bits(br, 4);   # num_cr_points f(4)
+        var d = 0;
+        while (d < num_cr) {
+            dr_br_read_bits(br, 8);   # point_cr_value[d]   f(8)
+            dr_br_read_bits(br, 8);   # point_cr_scaling[d] f(8)
+            d = d + 1;
+        }
+    }
+    store64(fh + AV1FH_NUM_CB_POINTS, num_cb);
+    store64(fh + AV1FH_NUM_CR_POINTS, num_cr);
+    dr_br_read_bits(br, 2);   # grain_scaling_minus_8 f(2)
+    var ar_lag = dr_br_read_bits(br, 2);   # ar_coeff_lag f(2)
+    var num_pos_luma = 2 * ar_lag * (ar_lag + 1);
+    var num_pos_chroma = num_pos_luma;
+    if (num_y) {
+        num_pos_chroma = num_pos_luma + 1;
+        var p = 0;
+        while (p < num_pos_luma) {
+            dr_br_read_bits(br, 8);   # ar_coeffs_y_plus_128[p] f(8)
+            p = p + 1;
+        }
+    }
+    if (csfl || num_cb) {
+        var q = 0;
+        while (q < num_pos_chroma) {
+            dr_br_read_bits(br, 8);   # ar_coeffs_cb_plus_128[q] f(8)
+            q = q + 1;
+        }
+    }
+    if (csfl || num_cr) {
+        var t = 0;
+        while (t < num_pos_chroma) {
+            dr_br_read_bits(br, 8);   # ar_coeffs_cr_plus_128[t] f(8)
+            t = t + 1;
+        }
+    }
+    dr_br_read_bits(br, 2);   # ar_coeff_shift_minus_6 f(2)
+    dr_br_read_bits(br, 2);   # grain_scale_shift f(2)
+    if (num_cb) {
+        dr_br_read_bits(br, 8);   # cb_mult      f(8)
+        dr_br_read_bits(br, 8);   # cb_luma_mult f(8)
+        dr_br_read_bits(br, 9);   # cb_offset    f(9)
+    }
+    if (num_cr) {
+        dr_br_read_bits(br, 8);   # cr_mult      f(8)
+        dr_br_read_bits(br, 8);   # cr_luma_mult f(8)
+        dr_br_read_bits(br, 9);   # cr_offset    f(9)
+    }
+    dr_br_read_bit(br);   # overlap_flag f(1)
+    dr_br_read_bit(br);   # clip_to_restricted_range f(1)
+    return dr_br_err(br);
+}
+
+# temporal_point_info() — 5.9.31.
+fn av1_temporal_point_info_skip(br, s): i64 {
+    dr_br_read_bits(br, av1_seq_frame_presentation_time_len(s));   # frame_presentation_time f(n)
+    return dr_br_err(br);
+}
+
+# ================================================================
+# Reference-frame state helpers.
+# ================================================================
+
+# mark_ref_frames(idLen) — 5.9.2 helper: invalidate refs whose frame id
+# is now outside the expected window.
+fn av1_mark_ref_frames(refs, s, fh, id_len): i64 {
+    var diff_len = av1_seq_delta_frame_id_len(s);
+    var current = av1_fh_current_frame_id(fh);
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        var ref_id = av1_ref_frame_id(refs, i);
+        if (current > (1 << diff_len)) {
+            if ((ref_id > current) || (ref_id < (current - (1 << diff_len)))) {
+                store64(refs + AV1REF_VALID + (i * 8), 0);
+            }
+        } else {
+            if ((ref_id > current)
+            && (ref_id < ((1 << id_len) + current - (1 << diff_len)))) {
+                store64(refs + AV1REF_VALID + (i * 8), 0);
+            }
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# find_* helpers for set_frame_refs — operate on the shiftedOrderHints /
+# usedFrame scratch arrays (8 entries each).
+fn av1_find_latest_backward(shifted, used, cur_hint): i64 {
+    var ref = 0 - 1;
+    var latest = 0;
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        var hint = load64(shifted + (i * 8));
+        if ((load64(used + (i * 8)) == 0) && (hint >= cur_hint)
+        && ((ref < 0) || (hint >= latest))) {
+            ref = i;
+            latest = hint;
+        }
+        i = i + 1;
+    }
+    return ref;
+}
+fn av1_find_earliest_backward(shifted, used, cur_hint): i64 {
+    var ref = 0 - 1;
+    var earliest = 0;
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        var hint = load64(shifted + (i * 8));
+        if ((load64(used + (i * 8)) == 0) && (hint >= cur_hint)
+        && ((ref < 0) || (hint < earliest))) {
+            ref = i;
+            earliest = hint;
+        }
+        i = i + 1;
+    }
+    return ref;
+}
+fn av1_find_latest_forward(shifted, used, cur_hint): i64 {
+    var ref = 0 - 1;
+    var latest = 0;
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        var hint = load64(shifted + (i * 8));
+        if ((load64(used + (i * 8)) == 0) && (hint < cur_hint)
+        && ((ref < 0) || (hint >= latest))) {
+            ref = i;
+            latest = hint;
+        }
+        i = i + 1;
+    }
+    return ref;
+}
+
+# set_frame_refs() — 7.8: derive ref_frame_idx[] from last/gold_frame_idx
+# and the RefOrderHint array (no bits read).
+fn av1_set_frame_refs(s, refs, fh, last_idx, gold_idx): i64 {
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        store64(fh + AV1FH_REF_FRAME_IDX + (i * 8), 0 - 1);
+        i = i + 1;
+    }
+    store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_LAST_FRAME - AV1_LAST_FRAME) * 8), last_idx);
+    store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_GOLDEN_FRAME - AV1_LAST_FRAME) * 8), gold_idx);
+    var scratch = alloc(128);   # used[8] + shifted[8], 64 bytes each
+    if (scratch == 0) { return DR_ERR_OOM; }
+    var used = scratch;
+    var shifted = scratch + 64;
+    var j = 0;
+    while (j < AV1_NUM_REF_FRAMES) {
+        store64(used + (j * 8), 0);
+        j = j + 1;
+    }
+    store64(used + (last_idx * 8), 1);
+    store64(used + (gold_idx * 8), 1);
+    var cur_hint = 1 << (av1_seq_order_hint_bits(s) - 1);
+    var order_hint = av1_fh_order_hint(fh);
+    var k = 0;
+    while (k < AV1_NUM_REF_FRAMES) {
+        store64(shifted + (k * 8),
+        cur_hint + av1_get_relative_dist(s, av1_ref_order_hint(refs, k), order_hint));
+        k = k + 1;
+    }
+    var ref = av1_find_latest_backward(shifted, used, cur_hint);
+    if (ref >= 0) {
+        store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_ALTREF_FRAME - AV1_LAST_FRAME) * 8), ref);
+        store64(used + (ref * 8), 1);
+    }
+    ref = av1_find_earliest_backward(shifted, used, cur_hint);
+    if (ref >= 0) {
+        store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_BWDREF_FRAME - AV1_LAST_FRAME) * 8), ref);
+        store64(used + (ref * 8), 1);
+    }
+    ref = av1_find_earliest_backward(shifted, used, cur_hint);
+    if (ref >= 0) {
+        store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_ALTREF2_FRAME - AV1_LAST_FRAME) * 8), ref);
+        store64(used + (ref * 8), 1);
+    }
+    # Remaining forward references in anti-chronological order.
+    # Ref_Frame_List = {LAST2, LAST3, BWDREF, ALTREF2, ALTREF}.
+    var list = alloc(40);
+    store64(list + 0, AV1_LAST2_FRAME);
+    store64(list + 8, AV1_LAST3_FRAME);
+    store64(list + 16, AV1_BWDREF_FRAME);
+    store64(list + 24, AV1_ALTREF2_FRAME);
+    store64(list + 32, AV1_ALTREF_FRAME);
+    var m = 0;
+    while (m < (AV1_REFS_PER_FRAME - 2)) {
+        var ref_frame = load64(list + (m * 8));
+        if (av1_fh_ref_frame_idx(fh, ref_frame - AV1_LAST_FRAME) < 0) {
+            var fref = av1_find_latest_forward(shifted, used, cur_hint);
+            if (fref >= 0) {
+                store64(fh + AV1FH_REF_FRAME_IDX + ((ref_frame - AV1_LAST_FRAME) * 8), fref);
+                store64(used + (fref * 8), 1);
+            }
+        }
+        m = m + 1;
+    }
+    # Fill any still-unset slot with the smallest-output-order reference.
+    var smallest = 0 - 1;
+    var earliest = 0;
+    var p = 0;
+    while (p < AV1_NUM_REF_FRAMES) {
+        var hint = load64(shifted + (p * 8));
+        if ((smallest < 0) || (hint < earliest)) {
+            smallest = p;
+            earliest = hint;
+        }
+        p = p + 1;
+    }
+    var q = 0;
+    while (q < AV1_REFS_PER_FRAME) {
+        if (av1_fh_ref_frame_idx(fh, q) < 0) {
+            store64(fh + AV1FH_REF_FRAME_IDX + (q * 8), smallest);
+        }
+        q = q + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# uncompressed_header() — 5.9.2. The main entry.
+# ================================================================
+
+# Parse a frame_header_obu / frame_obu PAYLOAD (bytes AFTER the OBU
+# header) from buf[0..len). `s` is the active sequence header, `refs` the
+# reference state (allocate via av1_ref_state_new for a fresh stream),
+# tid/sid the OBU temporal_id/spatial_id (for buffer_removal_time; pass 0
+# when unknown). Returns an Av1FrameHeader, or 0 with the error code at
+# *out_err (DR_ERR_BOUNDS / DR_ERR_TRUNCATED / AV1_ERR_BAD_FRAME /
+# DR_ERR_OOM). The caller invokes av1_frame_update_refs afterwards to
+# advance the state machine (the decode step sits between in a real
+# decoder). On any fault the (arena) record is abandoned and 0 returned.
+fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i64 {
+    store64(out_err, DR_OK);
+    if ((len < 0) || (s == 0) || (refs == 0)) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var br = dr_br_init(buf, len);
+    if (br == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var fh = alloc(AV1FH_SIZE);
+    if (fh == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    memset(fh, 0, AV1FH_SIZE);
+
+    var id_len = 0;
+    if (av1_seq_frame_id_present(s)) {
+        id_len = av1_seq_add_frame_id_len(s) + av1_seq_delta_frame_id_len(s);
+    }
+    var all_frames = (1 << AV1_NUM_REF_FRAMES) - 1;   # 255
+    var reduced = av1_seq_reduced(s);
+    var order_hint_bits = av1_seq_order_hint_bits(s);
+    var enable_order_hint = av1_seq_enable_order_hint(s);
+
+    var frame_type = AV1_KEY_FRAME;
+    var frame_is_intra = 1;
+    var show_frame = 1;
+    var showable_frame = 0;
+    var error_resilient = 0;
+
+    if (reduced) {
+        store64(fh + AV1FH_SHOW_EXISTING, 0);
+        # frame_type KEY_FRAME, FrameIsIntra 1, show_frame 1, showable 0.
+    } else {
+        var show_existing = dr_br_read_bit(br);   # show_existing_frame f(1)
+        store64(fh + AV1FH_SHOW_EXISTING, show_existing);
+        if (show_existing == 1) {
+            var idx = dr_br_read_bits(br, 3);   # frame_to_show_map_idx f(3)
+            store64(fh + AV1FH_FRAME_TO_SHOW, idx);
+            if (av1_seq_decoder_model_present(s)
+            && (av1_seq_equal_picture_interval(s) == 0)) {
+                av1_temporal_point_info_skip(br, s);
+            }
+            store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 0);
+            if (av1_seq_frame_id_present(s)) {
+                dr_br_read_bits(br, id_len);   # display_frame_id f(idLen)
+            }
+            var ft = av1_ref_frame_type(refs, idx);
+            store64(fh + AV1FH_FRAME_TYPE, ft);
+            if (ft == AV1_KEY_FRAME) {
+                store64(fh + AV1FH_REFRESH_FRAME_FLAGS, all_frames);
+            }
+            # 7.21 reference frame loading — surface the shown frame's
+            # geometry so update_refs (KEY_FRAME show_existing refreshes
+            # all slots) and callers see real dimensions.
+            store64(fh + AV1FH_CURRENT_FRAME_ID, av1_ref_frame_id(refs, idx));
+            store64(fh + AV1FH_UPSCALED_WIDTH, av1_ref_upscaled_width(refs, idx));
+            store64(fh + AV1FH_FRAME_WIDTH, av1_ref_frame_width(refs, idx));
+            store64(fh + AV1FH_FRAME_HEIGHT, av1_ref_frame_height(refs, idx));
+            store64(fh + AV1FH_RENDER_WIDTH, av1_ref_render_width(refs, idx));
+            store64(fh + AV1FH_RENDER_HEIGHT, av1_ref_render_height(refs, idx));
+            store64(fh + AV1FH_MI_COLS, av1_ref_mi_cols(refs, idx));
+            store64(fh + AV1FH_MI_ROWS, av1_ref_mi_rows(refs, idx));
+            store64(fh + AV1FH_ORDER_HINT, av1_ref_order_hint(refs, idx));
+            store64(fh + AV1FH_FRAME_IS_INTRA, 1);
+            if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
+            store64(fh + AV1FH_BITS_CONSUMED, dr_br_bit_pos(br));
+            return fh;
+        }
+        frame_type = dr_br_read_bits(br, 2);   # frame_type f(2)
+        frame_is_intra = 0;
+        if ((frame_type == AV1_INTRA_ONLY_FRAME) || (frame_type == AV1_KEY_FRAME)) {
+            frame_is_intra = 1;
+        }
+        show_frame = dr_br_read_bit(br);   # show_frame f(1)
+        if (show_frame && av1_seq_decoder_model_present(s)
+        && (av1_seq_equal_picture_interval(s) == 0)) {
+            av1_temporal_point_info_skip(br, s);
+        }
+        if (show_frame) {
+            showable_frame = 0;
+            if (frame_type != AV1_KEY_FRAME) { showable_frame = 1; }
+        } else {
+            showable_frame = dr_br_read_bit(br);   # showable_frame f(1)
+        }
+        if ((frame_type == AV1_SWITCH_FRAME)
+        || ((frame_type == AV1_KEY_FRAME) && show_frame)) {
+            error_resilient = 1;
+        } else {
+            error_resilient = dr_br_read_bit(br);   # error_resilient_mode f(1)
+        }
+    }
+    store64(fh + AV1FH_FRAME_TYPE, frame_type);
+    store64(fh + AV1FH_FRAME_IS_INTRA, frame_is_intra);
+    store64(fh + AV1FH_SHOW_FRAME, show_frame);
+    store64(fh + AV1FH_SHOWABLE_FRAME, showable_frame);
+    store64(fh + AV1FH_ERROR_RESILIENT, error_resilient);
+    if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
+
+    if ((frame_type == AV1_KEY_FRAME) && show_frame) {
+        var ri = 0;
+        while (ri < AV1_NUM_REF_FRAMES) {
+            store64(refs + AV1REF_VALID + (ri * 8), 0);
+            store64(refs + AV1REF_ORDER_HINT + (ri * 8), 0);
+            ri = ri + 1;
+        }
+        # OrderHints[LAST_FRAME + i] = 0 (fh order-hints default 0 via memset).
+    }
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, dr_br_read_bit(br));   # disable_cdf_update f(1)
+    var allow_sct = av1_seq_force_screen_content_tools(s);
+    if (av1_seq_force_screen_content_tools(s) == AV1_SELECT_SCREEN_CONTENT_TOOLS) {
+        allow_sct = dr_br_read_bit(br);   # allow_screen_content_tools f(1)
+    }
+    store64(fh + AV1FH_ALLOW_SCT, allow_sct);
+    var force_int_mv = 0;
+    if (allow_sct) {
+        force_int_mv = av1_seq_force_integer_mv(s);
+        if (av1_seq_force_integer_mv(s) == AV1_SELECT_INTEGER_MV) {
+            force_int_mv = dr_br_read_bit(br);   # force_integer_mv f(1)
+        }
+    }
+    if (frame_is_intra) { force_int_mv = 1; }
+    store64(fh + AV1FH_FORCE_INT_MV, force_int_mv);
+    if (av1_seq_frame_id_present(s)) {
+        var cfid = dr_br_read_bits(br, id_len);   # current_frame_id f(idLen)
+        store64(fh + AV1FH_CURRENT_FRAME_ID, cfid);
+        av1_mark_ref_frames(refs, s, fh, id_len);
+    } else {
+        store64(fh + AV1FH_CURRENT_FRAME_ID, 0);
+    }
+    var frame_size_override = 0;
+    if (frame_type == AV1_SWITCH_FRAME) {
+        frame_size_override = 1;
+    } else {
+        if (reduced == 0) {
+            frame_size_override = dr_br_read_bit(br);   # frame_size_override_flag f(1)
+        }
+    }
+    store64(fh + AV1FH_FRAME_SIZE_OVERRIDE, frame_size_override);
+    var order_hint = dr_br_read_bits(br, order_hint_bits);   # order_hint f(OrderHintBits)
+    store64(fh + AV1FH_ORDER_HINT, order_hint);
+    var primary_ref_frame = AV1_PRIMARY_REF_NONE;
+    if (frame_is_intra || error_resilient) {
+        primary_ref_frame = AV1_PRIMARY_REF_NONE;
+    } else {
+        primary_ref_frame = dr_br_read_bits(br, 3);   # primary_ref_frame f(3)
+    }
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, primary_ref_frame);
+    if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
+
+    if (av1_seq_decoder_model_present(s)) {
+        var brt_present = dr_br_read_bit(br);   # buffer_removal_time_present_flag f(1)
+        if (brt_present) {
+            var op = 0;
+            var op_cnt = av1_seq_op_cnt_minus_1(s);
+            while (op <= op_cnt) {
+                if (av1_seq_op_dm_present(s, op)) {
+                    var op_idc = av1_seq_op_idc(s, op);
+                    var in_temporal = (op_idc >> tid) & 1;
+                    var in_spatial = (op_idc >> (sid + 8)) & 1;
+                    if ((op_idc == 0) || (in_temporal && in_spatial)) {
+                        dr_br_read_bits(br, av1_seq_buffer_removal_time_len(s));   # buffer_removal_time[op] f(n)
+                    }
+                }
+                op = op + 1;
+            }
+        }
+    }
+
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 0);
+    store64(fh + AV1FH_USE_REF_FRAME_MVS, 0);
+    store64(fh + AV1FH_ALLOW_INTRABC, 0);
+    var refresh_frame_flags = 0;
+    if ((frame_type == AV1_SWITCH_FRAME)
+    || ((frame_type == AV1_KEY_FRAME) && show_frame)) {
+        refresh_frame_flags = all_frames;
+    } else {
+        refresh_frame_flags = dr_br_read_bits(br, 8);   # refresh_frame_flags f(8)
+    }
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, refresh_frame_flags);
+
+    if ((frame_is_intra == 0) || (refresh_frame_flags != all_frames)) {
+        if (error_resilient && enable_order_hint) {
+            var ri2 = 0;
+            while (ri2 < AV1_NUM_REF_FRAMES) {
+                var roh = dr_br_read_bits(br, order_hint_bits);   # ref_order_hint[i] f(OrderHintBits)
+                if (roh != av1_ref_order_hint(refs, ri2)) {
+                    store64(refs + AV1REF_VALID + (ri2 * 8), 0);
+                }
+                ri2 = ri2 + 1;
+            }
+        }
+    }
+    if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
+
+    if (frame_is_intra) {
+        var rc = av1_frame_size(br, s, fh);
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        rc = av1_render_size(br, fh);
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        if (allow_sct && (av1_fh_upscaled_width(fh) == av1_fh_frame_width(fh))) {
+            store64(fh + AV1FH_ALLOW_INTRABC, dr_br_read_bit(br));   # allow_intrabc f(1)
+        }
+    } else {
+        var short_sig = 0;
+        if (enable_order_hint) {
+            short_sig = dr_br_read_bit(br);   # frame_refs_short_signaling f(1)
+            if (short_sig) {
+                var last_idx = dr_br_read_bits(br, 3);   # last_frame_idx f(3)
+                var gold_idx = dr_br_read_bits(br, 3);   # gold_frame_idx f(3)
+                av1_set_frame_refs(s, refs, fh, last_idx, gold_idx);
+            }
+        }
+        store64(fh + AV1FH_SHORT_SIGNALING, short_sig);
+        var i = 0;
+        while (i < AV1_REFS_PER_FRAME) {
+            if (short_sig == 0) {
+                store64(fh + AV1FH_REF_FRAME_IDX + (i * 8), dr_br_read_bits(br, 3));   # ref_frame_idx[i] f(3)
+            }
+            if (av1_seq_frame_id_present(s)) {
+                dr_br_read_bits(br, av1_seq_delta_frame_id_len(s));   # delta_frame_id_minus_1 f(n)
+            }
+            i = i + 1;
+        }
+        if (frame_size_override && (error_resilient == 0)) {
+            var rc2 = av1_frame_size_with_refs(br, s, refs, fh);
+            if (rc2 != DR_OK) { store64(out_err, rc2); return 0; }
+        } else {
+            var rc3 = av1_frame_size(br, s, fh);
+            if (rc3 != DR_OK) { store64(out_err, rc3); return 0; }
+            rc3 = av1_render_size(br, fh);
+            if (rc3 != DR_OK) { store64(out_err, rc3); return 0; }
+        }
+        if (force_int_mv) {
+            store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 0);
+        } else {
+            store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, dr_br_read_bit(br));   # allow_high_precision_mv f(1)
+        }
+        var rcf = av1_read_interpolation_filter(br, fh);
+        if (rcf != DR_OK) { store64(out_err, rcf); return 0; }
+        store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, dr_br_read_bit(br));   # is_motion_mode_switchable f(1)
+        if (error_resilient || (av1_seq_enable_ref_frame_mvs(s) == 0)) {
+            store64(fh + AV1FH_USE_REF_FRAME_MVS, 0);
+        } else {
+            store64(fh + AV1FH_USE_REF_FRAME_MVS, dr_br_read_bit(br));   # use_ref_frame_mvs f(1)
+        }
+        # OrderHints[LAST_FRAME + i] derivation (no bits).
+        var oi = 0;
+        while (oi < AV1_REFS_PER_FRAME) {
+            var hint = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, oi));
+            store64(fh + AV1FH_ORDER_HINTS + ((AV1_LAST_FRAME + oi) * 8), hint);
+            oi = oi + 1;
+        }
+    }
+    if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
+
+    if (reduced || av1_fh_disable_cdf_update(fh)) {
+        store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, 1);
+    } else {
+        store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, dr_br_read_bit(br));   # disable_frame_end_update_cdf f(1)
+    }
+
+    var rct = av1_tile_info(br, s, fh);
+    if (rct != DR_OK) { store64(out_err, rct); return 0; }
+    var rcq = av1_quantization_params(br, s, fh);
+    if (rcq != DR_OK) { store64(out_err, rcq); return 0; }
+    var rcs = av1_segmentation_params(br, fh);
+    if (rcs != DR_OK) { store64(out_err, rcs); return 0; }
+    var rcdq = av1_delta_q_params(br, fh);
+    if (rcdq != DR_OK) { store64(out_err, rcdq); return 0; }
+    var rcdl = av1_delta_lf_params(br, fh);
+    if (rcdl != DR_OK) { store64(out_err, rcdl); return 0; }
+    av1_compute_lossless(fh);
+    var rclf = av1_loop_filter_params(br, s, fh);
+    if (rclf != DR_OK) { store64(out_err, rclf); return 0; }
+    var rccd = av1_cdef_params(br, s, fh);
+    if (rccd != DR_OK) { store64(out_err, rccd); return 0; }
+    var rclr = av1_lr_params(br, s, fh);
+    if (rclr != DR_OK) { store64(out_err, rclr); return 0; }
+    var rctx = av1_read_tx_mode(br, fh);
+    if (rctx != DR_OK) { store64(out_err, rctx); return 0; }
+    var rcrm = av1_frame_reference_mode(br, fh);
+    if (rcrm != DR_OK) { store64(out_err, rcrm); return 0; }
+    var rcsm = av1_skip_mode_params(br, s, refs, fh);
+    if (rcsm != DR_OK) { store64(out_err, rcsm); return 0; }
+    if (frame_is_intra || error_resilient || (av1_seq_enable_warped_motion(s) == 0)) {
+        store64(fh + AV1FH_ALLOW_WARPED, 0);
+    } else {
+        store64(fh + AV1FH_ALLOW_WARPED, dr_br_read_bit(br));   # allow_warped_motion f(1)
+    }
+    store64(fh + AV1FH_REDUCED_TX_SET, dr_br_read_bit(br));   # reduced_tx_set f(1)
+    var rcg = av1_global_motion_params(br, fh, refs);
+    if (rcg != DR_OK) { store64(out_err, rcg); return 0; }
+    var rcfg = av1_film_grain_params(br, s, fh);
+    if (rcfg != DR_OK) { store64(out_err, rcfg); return 0; }
+
+    if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
+    store64(fh + AV1FH_BITS_CONSUMED, dr_br_bit_pos(br));
+    return fh;
+}
+
+# ================================================================
+# Reference frame update process — 7.20. Invoked by the caller AFTER a
+# frame is (conceptually) decoded: saves the current frame's geometry /
+# order hints / global-motion into every slot flagged by
+# refresh_frame_flags. subsampling / bit depth come from the sequence
+# header. Returns DR_OK.
+# ================================================================
+fn av1_frame_update_refs(refs, s, fh): i64 {
+    var flags = av1_fh_refresh_frame_flags(fh);
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        if ((flags >> i) & 1) {
+            store64(refs + AV1REF_VALID + (i * 8), 1);
+            store64(refs + AV1REF_FRAME_ID + (i * 8), av1_fh_current_frame_id(fh));
+            store64(refs + AV1REF_UPSCALED_W + (i * 8), av1_fh_upscaled_width(fh));
+            store64(refs + AV1REF_FRAME_W + (i * 8), av1_fh_frame_width(fh));
+            store64(refs + AV1REF_FRAME_H + (i * 8), av1_fh_frame_height(fh));
+            store64(refs + AV1REF_RENDER_W + (i * 8), av1_fh_render_width(fh));
+            store64(refs + AV1REF_RENDER_H + (i * 8), av1_fh_render_height(fh));
+            store64(refs + AV1REF_MI_COLS + (i * 8), av1_fh_mi_cols(fh));
+            store64(refs + AV1REF_MI_ROWS + (i * 8), av1_fh_mi_rows(fh));
+            store64(refs + AV1REF_FRAME_TYPE + (i * 8), av1_fh_frame_type(fh));
+            store64(refs + AV1REF_SUBX + (i * 8), av1_seq_subsampling_x(s));
+            store64(refs + AV1REF_SUBY + (i * 8), av1_seq_subsampling_y(s));
+            store64(refs + AV1REF_BITDEPTH + (i * 8), av1_seq_bitdepth(s));
+            store64(refs + AV1REF_ORDER_HINT + (i * 8), av1_fh_order_hint(fh));
+            var j = 0;
+            while (j < AV1_REFS_PER_FRAME) {
+                var rf = AV1_LAST_FRAME + j;
+                store64(refs + AV1REF_SAVED_ORDER_HINTS + ((i * 8 + rf) * 8),
+                av1_fh_order_hint_ref(fh, rf));
+                j = j + 1;
+            }
+            var ref = AV1_LAST_FRAME;
+            while (ref <= AV1_ALTREF_FRAME) {
+                var idx = 0;
+                while (idx < 6) {
+                    store64(refs + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8),
+                    av1_fh_gm_param(fh, ref, idx));
+                    idx = idx + 1;
+                }
+                ref = ref + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# frame_type -> printable cstring (never null). Table from spec 6.8.2.
+fn av1_frame_type_name(frame_type): i64 {
+    if (frame_type == AV1_KEY_FRAME)        { return "key"; }
+    if (frame_type == AV1_INTER_FRAME)      { return "inter"; }
+    if (frame_type == AV1_INTRA_ONLY_FRAME) { return "intra_only"; }
+    if (frame_type == AV1_SWITCH_FRAME)     { return "switch"; }
+    return "unknown";
+}

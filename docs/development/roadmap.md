@@ -83,8 +83,12 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 Baseline (0.7.0): OBU layer + sequence header.
 
-- **frame-header OBU** — uncompressed frame header, ref-frame state
-  machine, frame-size overrides / superres; full-fidelity Av1Seq growth.
+- **frame-header OBU** — **done (0.7.1)**: full `uncompressed_header()`
+  (5.9.2) for every frame type (key / inter / intra-only / switch /
+  show_existing), cursor-true; the ref-frame state machine
+  (`set_frame_refs` 7.8, `frame_size_with_refs`, reference update 7.20,
+  `mark_ref_frames`); frame-size overrides + superres + render size;
+  full-fidelity `Av1Seq` growth; the shared `su(n)`/`ns(n)` descriptors.
 - **entropy decoder** — multi-symbol adaptive-CDF arithmetic decoder
   (daala lineage); the substrate every tile decode needs.
 - **intra still-picture decode — MILESTONE** — partition tree, intra

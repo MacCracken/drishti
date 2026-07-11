@@ -1,0 +1,668 @@
+# tests/av1_frame.tcyr — AV1 uncompressed frame header (spec 5.9.2) +
+# the reference-frame state machine. Every vector is built field-by-field
+# through the core bitwriter, then parsed; the key invariant asserted
+# throughout is that the parser consumes EXACTLY the bits the builder
+# wrote (av1_fh_bits_consumed == captured bit count), which catches any
+# field-order or bit-width drift. Covers: reduced-still keyframe (the
+# still-picture milestone path), the lossless / superres / cdef / seg /
+# multi-tile branches, the full (non-reduced) keyframe path, the ref
+# state machine (key -> update_refs -> inter via frame_size_with_refs),
+# show_existing_frame, and adversarial truncation.
+include "src/main.cyr"
+include "src/av1_obu.cyr"
+include "src/av1_seq.cyr"
+include "src/av1_frame.cyr"
+
+# ================================================================
+# Sequence-header builders — build via the writer, parse, return Av1Seq.
+# Dimension fields use a fixed 16-bit width (frame_width_bits_minus_1 =
+# 15) so any width/height up to 65536 is expressible without per-value
+# bit-width bookkeeping.
+# ================================================================
+
+# Reduced still-picture header, profile 0, 8-bit 4:2:0 (non-mono).
+fn fx_seq_reduced(w, h, sb128, en_superres, en_cdef, en_restoration, film_grain): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 1);            # still_picture = 1
+    dr_bw_put_bit(bw, 1);            # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1  = 15 (16-bit)
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, w - 1, 16);   # max_frame_width_minus_1
+    dr_bw_put_bits(bw, h - 1, 16);   # max_frame_height_minus_1
+    dr_bw_put_bit(bw, sb128);        # use_128x128_superblock
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra
+    dr_bw_put_bit(bw, 0);            # enable_intra_edge_filter
+    dr_bw_put_bit(bw, en_superres);  # enable_superres
+    dr_bw_put_bit(bw, en_cdef);      # enable_cdef
+    dr_bw_put_bit(bw, en_restoration); # enable_restoration
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 0);            # mono_chrome = 0
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # color_range = 0
+    dr_bw_put_bits(bw, 0, 2);        # chroma_sample_position (4:2:0)
+    dr_bw_put_bit(bw, 0);            # separate_uv_delta_q = 0
+    dr_bw_put_bit(bw, film_grain);   # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    return av1_seq_parse(dr_bw_buf(bw), n, &e);
+}
+
+# Full (non-reduced) header, profile 0, 8-bit 4:2:0, one operating point,
+# no timing / decoder-model / frame-id. seq_force_screen_content_tools = 0
+# (so frame headers code no allow_screen_content_tools bit).
+fn fx_seq_full(w, h, en_order_hint, ohb_m1, en_superres, en_cdef, en_restoration, en_warped, en_ref_mvs, film_grain): i64 {
+    var bw = dr_bw_init(32);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 0);            # still_picture = 0
+    dr_bw_put_bit(bw, 0);            # reduced_still_picture_header = 0
+    dr_bw_put_bit(bw, 0);            # timing_info_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # initial_display_delay_present_flag = 0
+    dr_bw_put_bits(bw, 0, 5);        # operating_points_cnt_minus_1 = 0
+    dr_bw_put_bits(bw, 0, 12);       # operating_point_idc[0] = 0
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0 (<=7 -> no tier)
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, w - 1, 16);   # max_frame_width_minus_1
+    dr_bw_put_bits(bw, h - 1, 16);   # max_frame_height_minus_1
+    dr_bw_put_bit(bw, 0);            # frame_id_numbers_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra
+    dr_bw_put_bit(bw, 0);            # enable_intra_edge_filter
+    dr_bw_put_bit(bw, 0);            # enable_interintra_compound
+    dr_bw_put_bit(bw, 0);            # enable_masked_compound
+    dr_bw_put_bit(bw, en_warped);    # enable_warped_motion
+    dr_bw_put_bit(bw, 0);            # enable_dual_filter
+    dr_bw_put_bit(bw, en_order_hint); # enable_order_hint
+    if (en_order_hint) {
+        dr_bw_put_bit(bw, 0);        # enable_jnt_comp
+        dr_bw_put_bit(bw, en_ref_mvs); # enable_ref_frame_mvs
+    }
+    dr_bw_put_bit(bw, 0);            # seq_choose_screen_content_tools = 0
+    dr_bw_put_bit(bw, 0);            # seq_force_screen_content_tools = 0
+    # force_sct == 0 -> seq_force_integer_mv = SELECT (no choose bit).
+    if (en_order_hint) {
+        dr_bw_put_bits(bw, ohb_m1, 3);   # order_hint_bits_minus_1
+    }
+    dr_bw_put_bit(bw, en_superres);  # enable_superres
+    dr_bw_put_bit(bw, en_cdef);      # enable_cdef
+    dr_bw_put_bit(bw, en_restoration); # enable_restoration
+    dr_bw_put_bit(bw, 0);            # high_bitdepth -> 8-bit
+    dr_bw_put_bit(bw, 0);            # mono_chrome = 0
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # color_range = 0
+    dr_bw_put_bits(bw, 0, 2);        # chroma_sample_position
+    dr_bw_put_bit(bw, 0);            # separate_uv_delta_q = 0
+    dr_bw_put_bit(bw, film_grain);   # film_grain_params_present
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    return av1_seq_parse(dr_bw_buf(bw), n, &e);
+}
+
+# ================================================================
+# Reduced still-picture KEY frame — the still-picture milestone path.
+# ================================================================
+fn test_av1_fh_reduced_key() {
+    var s = fx_seq_reduced(64, 64, 0, 0, 0, 0, 0);
+    assert(s != 0, "reduced seq parses");
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update = 0
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools = 0
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different = 0
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag = 1
+    dr_bw_put_bits(bw, 32, 8);   # base_q_idx = 32
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded = 0
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded = 0
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded = 0
+    dr_bw_put_bit(bw, 0);        # using_qmatrix = 0
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled = 0
+    dr_bw_put_bit(bw, 0);        # delta_q_present = 0
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[0] = 0
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[1] = 0
+    dr_bw_put_bits(bw, 0, 3);    # loop_filter_sharpness = 0
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_enabled = 0
+    dr_bw_put_bit(bw, 1);        # tx_mode_select = 1 -> TX_MODE_SELECT
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set = 0
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "reduced key header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_frame_type(fh), AV1_KEY_FRAME, "frame_type KEY");
+    assert_eq(av1_fh_frame_is_intra(fh), 1, "FrameIsIntra");
+    assert_eq(av1_fh_show_frame(fh), 1, "show_frame");
+    assert_eq(av1_fh_showable_frame(fh), 0, "not showable");
+    assert_eq(av1_fh_error_resilient_mode(fh), 0, "reduced leaves error_resilient 0");
+    assert_eq(av1_fh_show_existing_frame(fh), 0, "not show_existing");
+    assert_eq(av1_fh_refresh_frame_flags(fh), 255, "key+show refreshes all slots");
+    assert_eq(av1_fh_primary_ref_frame(fh), AV1_PRIMARY_REF_NONE, "intra -> PRIMARY_REF_NONE");
+    assert_eq(av1_fh_frame_width(fh), 64, "FrameWidth 64");
+    assert_eq(av1_fh_frame_height(fh), 64, "FrameHeight 64");
+    assert_eq(av1_fh_upscaled_width(fh), 64, "UpscaledWidth 64 (no superres)");
+    assert_eq(av1_fh_render_width(fh), 64, "RenderWidth = UpscaledWidth");
+    assert_eq(av1_fh_render_height(fh), 64, "RenderHeight = FrameHeight");
+    assert_eq(av1_fh_mi_cols(fh), 16, "MiCols = 2*ceil(64/8)");
+    assert_eq(av1_fh_mi_rows(fh), 16, "MiRows");
+    assert_eq(av1_fh_base_q_idx(fh), 32, "base_q_idx 32");
+    assert_eq(av1_fh_coded_lossless(fh), 0, "not lossless (q>0)");
+    assert_eq(av1_fh_tx_mode(fh), AV1_TX_MODE_SELECT, "TX_MODE_SELECT");
+    assert_eq(av1_fh_tile_cols(fh), 1, "single tile col");
+    assert_eq(av1_fh_tile_rows(fh), 1, "single tile row");
+    assert_eq(av1_fh_tile_cols_log2(fh), 0, "TileColsLog2 0");
+    assert_eq(av1_fh_disable_frame_end_update_cdf(fh), 1, "reduced -> disable_fe_cdf 1");
+    assert_eq(av1_fh_allow_intrabc(fh), 0, "no intrabc");
+    return 0;
+}
+
+# Lossless (base_q_idx == 0, no deltas): loop_filter / cdef / lr default
+# and read no bits; read_tx_mode yields ONLY_4X4 with no bit.
+fn test_av1_fh_lossless() {
+    var s = fx_seq_reduced(64, 64, 0, 0, 0, 0, 0);
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, 0, 8);    # base_q_idx = 0
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled
+    # base_q_idx == 0 -> no delta_q_present bit.
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set (loop_filter/cdef/lr/tx read nothing)
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "lossless header parses");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_coded_lossless(fh), 1, "CodedLossless");
+    assert_eq(av1_fh_all_lossless(fh), 1, "AllLossless (no superres)");
+    assert_eq(av1_fh_tx_mode(fh), AV1_ONLY_4X4, "lossless -> ONLY_4X4");
+    assert_eq(av1_fh_loop_filter_level(fh, 0), 0, "lf level 0 defaulted");
+    assert_eq(av1_fh_cdef_bits(fh), 0, "cdef defaulted");
+    assert_eq(av1_fh_cdef_damping(fh), 3, "CdefDamping default 3");
+    assert_eq(av1_fh_frame_restoration_type(fh, 0), AV1_RESTORE_NONE, "lr NONE");
+    return 0;
+}
+
+# Superres: FrameWidth downscaled from UpscaledWidth by SuperresDenom.
+fn test_av1_fh_superres() {
+    var s = fx_seq_reduced(64, 64, 0, 1, 0, 0, 0);   # enable_superres = 1
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools
+    # frame_size(): override 0 -> dims from seq; superres_params():
+    dr_bw_put_bit(bw, 1);        # use_superres = 1
+    dr_bw_put_bits(bw, 7, 3);    # coded_denom = 7 -> SuperresDenom = 16
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different = 0
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, 32, 8);   # base_q_idx = 32
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled
+    dr_bw_put_bit(bw, 0);        # delta_q_present
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[0]
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[1]
+    dr_bw_put_bits(bw, 0, 3);    # loop_filter_sharpness
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_enabled
+    dr_bw_put_bit(bw, 0);        # tx_mode_select
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "superres header parses");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_use_superres(fh), 1, "use_superres");
+    assert_eq(av1_fh_superres_denom(fh), 16, "SuperresDenom 16");
+    assert_eq(av1_fh_upscaled_width(fh), 64, "UpscaledWidth 64");
+    # FrameWidth = (64*8 + 16/2) / 16 = 520/16 = 32.
+    assert_eq(av1_fh_frame_width(fh), 32, "FrameWidth downscaled to 32");
+    assert_eq(av1_fh_render_width(fh), 64, "RenderWidth = UpscaledWidth 64");
+    assert_eq(av1_fh_mi_cols(fh), 8, "MiCols from downscaled width");
+    assert_eq(av1_fh_all_lossless(fh), 0, "not all-lossless (W != UpscaledW)");
+    return 0;
+}
+
+# CDEF + nonzero loop-filter levels: exercises the level[2]/[3] branch and
+# the cdef strength loop (incl. the sec-strength == 3 -> 4 remap).
+fn test_av1_fh_cdef_lf() {
+    var s = fx_seq_reduced(64, 64, 0, 0, 1, 0, 0);   # enable_cdef = 1
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, 40, 8);   # base_q_idx = 40
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled
+    dr_bw_put_bit(bw, 0);        # delta_q_present
+    dr_bw_put_bits(bw, 8, 6);    # loop_filter_level[0] = 8
+    dr_bw_put_bits(bw, 8, 6);    # loop_filter_level[1] = 8
+    dr_bw_put_bits(bw, 4, 6);    # loop_filter_level[2] = 4 (num_planes>1 && level)
+    dr_bw_put_bits(bw, 4, 6);    # loop_filter_level[3] = 4
+    dr_bw_put_bits(bw, 1, 3);    # loop_filter_sharpness = 1
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_enabled = 0
+    # cdef_params: not lossless, enable_cdef -> read
+    dr_bw_put_bits(bw, 1, 2);    # cdef_damping_minus_3 = 1 -> damping 4
+    dr_bw_put_bits(bw, 1, 2);    # cdef_bits = 1 -> 2 strengths
+    dr_bw_put_bits(bw, 2, 4);    # cdef_y_pri_strength[0] = 2
+    dr_bw_put_bits(bw, 1, 2);    # cdef_y_sec_strength[0] = 1
+    dr_bw_put_bits(bw, 3, 4);    # cdef_uv_pri_strength[0] = 3
+    dr_bw_put_bits(bw, 0, 2);    # cdef_uv_sec_strength[0] = 0
+    dr_bw_put_bits(bw, 5, 4);    # cdef_y_pri_strength[1] = 5
+    dr_bw_put_bits(bw, 3, 2);    # cdef_y_sec_strength[1] = 3 -> remaps to 4
+    dr_bw_put_bits(bw, 1, 4);    # cdef_uv_pri_strength[1] = 1
+    dr_bw_put_bits(bw, 3, 2);    # cdef_uv_sec_strength[1] = 3 -> remaps to 4
+    dr_bw_put_bit(bw, 1);        # tx_mode_select = 1
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "cdef/lf header parses");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_loop_filter_level(fh, 0), 8, "lf level 0");
+    assert_eq(av1_fh_loop_filter_level(fh, 1), 8, "lf level 1");
+    assert_eq(av1_fh_loop_filter_level(fh, 2), 4, "lf level 2 (chroma) read");
+    assert_eq(av1_fh_loop_filter_level(fh, 3), 4, "lf level 3 read");
+    assert_eq(av1_fh_loop_filter_sharpness(fh), 1, "lf sharpness");
+    assert_eq(av1_fh_cdef_damping(fh), 4, "CdefDamping = minus_3 + 3");
+    assert_eq(av1_fh_cdef_bits(fh), 1, "cdef_bits");
+    assert_eq(av1_fh_cdef_y_pri(fh, 0), 2, "cdef y pri[0]");
+    assert_eq(av1_fh_cdef_y_sec(fh, 0), 1, "cdef y sec[0]");
+    assert_eq(av1_fh_cdef_y_sec(fh, 1), 4, "cdef y sec[1] 3->4 remap");
+    assert_eq(av1_fh_cdef_uv_sec(fh, 1), 4, "cdef uv sec[1] 3->4 remap");
+    return 0;
+}
+
+# Segmentation: intra keyframe (primary_ref = NONE forces the update
+# flags) with one signed ALT_Q feature enabled on segment 0.
+fn test_av1_fh_segmentation() {
+    var s = fx_seq_reduced(64, 64, 0, 0, 0, 0, 0);
+    var bw = dr_bw_init(32);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, 40, 8);   # base_q_idx = 40
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 1);        # segmentation_enabled = 1
+    # primary_ref == NONE -> update_map/temporal/data implied (no bits),
+    # update_data == 1 -> feature loop MAX_SEGMENTS x SEG_LVL_MAX.
+    var seg = 0;
+    while (seg < 8) {
+        var j = 0;
+        while (j < 8) {
+            if ((seg == 0) && (j == 0)) {
+                dr_bw_put_bit(bw, 1);         # feature_enabled seg0 ALT_Q
+                dr_bw_put_bits(bw, 0 - 10, 9); # feature_value su(1+8) = -10
+            } else {
+                dr_bw_put_bit(bw, 0);         # feature_enabled = 0
+            }
+            j = j + 1;
+        }
+        seg = seg + 1;
+    }
+    dr_bw_put_bit(bw, 0);        # delta_q_present (base_q>0)
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[0]
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[1]
+    dr_bw_put_bits(bw, 0, 3);    # loop_filter_sharpness
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_enabled
+    dr_bw_put_bit(bw, 1);        # tx_mode_select
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "segmentation header parses");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_segmentation_enabled(fh), 1, "segmentation enabled");
+    assert_eq(av1_fh_segmentation_update_map(fh), 1, "update_map forced (primary NONE)");
+    assert_eq(av1_fh_feature_enabled(fh, 0, AV1_SEG_LVL_ALT_Q), 1, "seg0 ALT_Q enabled");
+    assert_eq(av1_fh_feature_data(fh, 0, AV1_SEG_LVL_ALT_Q), 0 - 10, "seg0 ALT_Q value -10");
+    assert_eq(av1_fh_feature_enabled(fh, 1, 1), 0, "other feature disabled");
+    # CodedLossless: get_qindex(1,0) = clip3(0,255, 40 + (-10)) = 30 != 0.
+    assert_eq(av1_fh_coded_lossless(fh), 0, "not lossless with seg ALT_Q");
+    return 0;
+}
+
+# Multi-tile (uniform spacing): a 1024x64 frame yields 2 tile columns and
+# exercises the increment_tile_cols_log2 loop + context_update_tile_id.
+# sbCols = 17 -> maxLog2TileCols = 5; one increment bit set then cleared
+# gives TileColsLog2 = 1 (2 columns). sbRows = 1 -> no row increment bits.
+fn test_av1_fh_tile_multi_impl(s): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bit(bw, 1);        # increment_tile_cols_log2 = 1
+    dr_bw_put_bit(bw, 0);        # increment_tile_cols_log2 = 0 (stop) -> TileColsLog2 1
+    dr_bw_put_bit(bw, 0);        # context_update_tile_id f(1) = 0
+    dr_bw_put_bits(bw, 0, 2);    # tile_size_bytes_minus_1 = 0 -> TileSizeBytes 1
+    dr_bw_put_bits(bw, 32, 8);   # base_q_idx
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled
+    dr_bw_put_bit(bw, 0);        # delta_q_present
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[0]
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[1]
+    dr_bw_put_bits(bw, 0, 3);    # loop_filter_sharpness
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_enabled
+    dr_bw_put_bit(bw, 1);        # tx_mode_select
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "multi-tile header parses");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_frame_width(fh), 1024, "FrameWidth 1024");
+    assert_eq(av1_fh_tile_cols(fh), 2, "2 tile columns");
+    assert_eq(av1_fh_tile_cols_log2(fh), 1, "TileColsLog2 1");
+    assert_eq(av1_fh_tile_rows(fh), 1, "1 tile row");
+    assert_eq(av1_fh_mi_col_start(fh, 0), 0, "MiColStarts[0] = 0");
+    assert_eq(av1_fh_mi_col_start(fh, 1), 128, "MiColStarts[1] = 8<<4 (tileWidthSb 8)");
+    assert_eq(av1_fh_mi_col_start(fh, 2), 256, "MiColStarts[2] = MiCols");
+    assert_eq(av1_fh_tile_size_bytes(fh), 1, "TileSizeBytes 1");
+    return 0;
+}
+
+# Full (non-reduced) KEY frame path — exercises show_existing_frame f(1),
+# frame_type f(2), show_frame, error_resilient forcing, order_hint.
+fn test_av1_fh_full_key() {
+    var s = fx_seq_full(64, 64, 1, 6, 0, 0, 0, 0, 0, 0);   # order_hint bits = 7
+    assert(s != 0, "full seq parses");
+    assert_eq(av1_seq_order_hint_bits(s), 7, "OrderHintBits 7");
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);        # show_existing_frame = 0
+    dr_bw_put_bits(bw, 0, 2);    # frame_type = 0 (KEY)
+    dr_bw_put_bit(bw, 1);        # show_frame = 1
+    # show -> showable derived; KEY && show -> error_resilient forced 1.
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    # force_sct = 0 (!= SELECT) -> no allow_screen_content_tools bit.
+    dr_bw_put_bit(bw, 0);        # frame_size_override_flag = 0
+    dr_bw_put_bits(bw, 5, 7);    # order_hint = 5 (f(OrderHintBits))
+    # intra -> primary_ref NONE (no bit); KEY&&show -> refresh all (no bit).
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(bw, 0);        # disable_frame_end_update_cdf
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, 32, 8);   # base_q_idx
+    dr_bw_put_bit(bw, 0);        # DeltaQYDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUDc delta_coded
+    dr_bw_put_bit(bw, 0);        # DeltaQUAc delta_coded
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled
+    dr_bw_put_bit(bw, 0);        # delta_q_present
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[0]
+    dr_bw_put_bits(bw, 0, 6);    # loop_filter_level[1]
+    dr_bw_put_bits(bw, 0, 3);    # loop_filter_sharpness
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_enabled
+    dr_bw_put_bit(bw, 1);        # tx_mode_select
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "full key header parses");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_show_existing_frame(fh), 0, "not show_existing");
+    assert_eq(av1_fh_frame_type(fh), AV1_KEY_FRAME, "frame_type KEY");
+    assert_eq(av1_fh_show_frame(fh), 1, "show_frame");
+    assert_eq(av1_fh_error_resilient_mode(fh), 1, "KEY+show forces error_resilient");
+    assert_eq(av1_fh_order_hint(fh), 5, "order_hint 5");
+    assert_eq(av1_fh_primary_ref_frame(fh), AV1_PRIMARY_REF_NONE, "primary NONE");
+    assert_eq(av1_fh_refresh_frame_flags(fh), 255, "refresh all");
+    assert_eq(av1_fh_frame_width(fh), 64, "FrameWidth 64");
+    assert(av1_frame_type_name(AV1_KEY_FRAME) != 0, "type name resolves");
+    return 0;
+}
+
+# Reference-frame state machine: a KEY frame is decoded and stored via
+# av1_frame_update_refs, then an INTER frame inherits its geometry through
+# frame_size_with_refs and its order hint through the OrderHints array.
+fn test_av1_fh_inter_refstate() {
+    var s = fx_seq_full(64, 64, 1, 6, 0, 0, 0, 0, 0, 0);
+    var refs = av1_ref_state_new();
+    # --- KEY frame (order_hint 3), then commit to the ref state. ---
+    var kbw = dr_bw_init(16);
+    dr_bw_put_bit(kbw, 0);        # show_existing_frame = 0
+    dr_bw_put_bits(kbw, 0, 2);    # frame_type = KEY
+    dr_bw_put_bit(kbw, 1);        # show_frame = 1
+    dr_bw_put_bit(kbw, 0);        # disable_cdf_update
+    dr_bw_put_bit(kbw, 0);        # frame_size_override_flag = 0
+    dr_bw_put_bits(kbw, 3, 7);    # order_hint = 3
+    dr_bw_put_bit(kbw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(kbw, 0);        # disable_frame_end_update_cdf
+    dr_bw_put_bit(kbw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(kbw, 32, 8);   # base_q_idx
+    dr_bw_put_bit(kbw, 0); dr_bw_put_bit(kbw, 0); dr_bw_put_bit(kbw, 0);  # dq delta_coded x3
+    dr_bw_put_bit(kbw, 0);        # using_qmatrix
+    dr_bw_put_bit(kbw, 0);        # segmentation_enabled
+    dr_bw_put_bit(kbw, 0);        # delta_q_present
+    dr_bw_put_bits(kbw, 0, 6); dr_bw_put_bits(kbw, 0, 6); dr_bw_put_bits(kbw, 0, 3); dr_bw_put_bit(kbw, 0);  # lf
+    dr_bw_put_bit(kbw, 1);        # tx_mode_select
+    dr_bw_put_bit(kbw, 0);        # reduced_tx_set
+    var kn = dr_bw_flush(kbw);
+    var ke = 0;
+    var kfh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(kbw), kn, &ke);
+    assert(kfh != 0, "key frame parses");
+    assert_eq(av1_frame_update_refs(refs, s, kfh), DR_OK, "ref update");
+    assert_eq(av1_ref_valid(refs, 0), 1, "slot 0 valid after key");
+    assert_eq(av1_ref_frame_type(refs, 0), AV1_KEY_FRAME, "slot 0 is KEY");
+    assert_eq(av1_ref_order_hint(refs, 0), 3, "slot 0 order hint 3");
+    assert_eq(av1_ref_upscaled_width(refs, 0), 64, "slot 0 width 64");
+    # --- INTER frame: override + non-error-resilient -> frame_size_with_refs. ---
+    var bw = dr_bw_init(32);
+    dr_bw_put_bit(bw, 0);        # show_existing_frame = 0
+    dr_bw_put_bits(bw, 1, 2);    # frame_type = INTER
+    dr_bw_put_bit(bw, 1);        # show_frame = 1
+    dr_bw_put_bit(bw, 0);        # error_resilient_mode = 0
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 1);        # frame_size_override_flag = 1
+    dr_bw_put_bits(bw, 5, 7);    # order_hint = 5
+    dr_bw_put_bits(bw, 0, 3);    # primary_ref_frame = 0
+    dr_bw_put_bits(bw, 255, 8);  # refresh_frame_flags = 0xFF
+    dr_bw_put_bit(bw, 0);        # frame_refs_short_signaling = 0
+    var i = 0;
+    while (i < 7) {
+        dr_bw_put_bits(bw, 0, 3);  # ref_frame_idx[i] = 0
+        i = i + 1;
+    }
+    dr_bw_put_bit(bw, 1);        # found_ref (i=0) = 1 -> inherit slot 0 dims
+    dr_bw_put_bit(bw, 0);        # allow_high_precision_mv = 0
+    dr_bw_put_bit(bw, 0);        # is_filter_switchable = 0
+    dr_bw_put_bits(bw, 0, 2);    # interpolation_filter = 0
+    dr_bw_put_bit(bw, 0);        # is_motion_mode_switchable = 0
+    # use_ref_frame_mvs: enable_ref_frame_mvs = 0 -> no bit.
+    dr_bw_put_bit(bw, 0);        # disable_frame_end_update_cdf
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, 40, 8);   # base_q_idx
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);   # dq delta_coded x3
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    dr_bw_put_bit(bw, 0);        # segmentation_enabled
+    dr_bw_put_bit(bw, 0);        # delta_q_present
+    dr_bw_put_bits(bw, 0, 6); dr_bw_put_bits(bw, 0, 6); dr_bw_put_bits(bw, 0, 3); dr_bw_put_bit(bw, 0);  # lf
+    dr_bw_put_bit(bw, 0);        # tx_mode_select
+    dr_bw_put_bit(bw, 0);        # reference_select = 0
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var g = 0;
+    while (g < 7) {
+        dr_bw_put_bit(bw, 0);    # is_global = 0 for each of LAST..ALTREF
+        g = g + 1;
+    }
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "inter frame parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    assert_eq(av1_fh_frame_type(fh), AV1_INTER_FRAME, "frame_type INTER");
+    assert_eq(av1_fh_frame_is_intra(fh), 0, "not intra");
+    assert_eq(av1_fh_error_resilient_mode(fh), 0, "error_resilient 0");
+    assert_eq(av1_fh_frame_size_override(fh), 1, "frame_size_override 1");
+    assert_eq(av1_fh_order_hint(fh), 5, "order_hint 5");
+    assert_eq(av1_fh_primary_ref_frame(fh), 0, "primary_ref_frame 0");
+    assert_eq(av1_fh_ref_frame_idx(fh, 0), 0, "ref_frame_idx[0] = 0");
+    assert_eq(av1_fh_ref_frame_idx(fh, 6), 0, "ref_frame_idx[6] = 0");
+    # frame_size_with_refs inherited slot 0's 64x64 geometry.
+    assert_eq(av1_fh_frame_width(fh), 64, "FrameWidth inherited 64");
+    assert_eq(av1_fh_upscaled_width(fh), 64, "UpscaledWidth inherited 64");
+    assert_eq(av1_fh_frame_height(fh), 64, "FrameHeight inherited 64");
+    # OrderHints[LAST_FRAME] = RefOrderHint[ref_frame_idx[0]] = 3.
+    assert_eq(av1_fh_order_hint_ref(fh, AV1_LAST_FRAME), 3, "OrderHints[LAST] = ref hint 3");
+    assert_eq(av1_fh_reference_select(fh), 0, "reference_select 0");
+    assert_eq(av1_fh_interpolation_filter(fh), 0, "interp filter EIGHTTAP");
+    assert_eq(av1_fh_gm_type(fh, AV1_LAST_FRAME), AV1_GM_IDENTITY, "global motion IDENTITY");
+    return 0;
+}
+
+# show_existing_frame: a stored KEY frame is replayed; frame_type and
+# geometry come from the reference slot, no further bits are read.
+fn test_av1_fh_show_existing() {
+    # Populate the ref state with a KEY frame via the reduced path.
+    var sred = fx_seq_reduced(48, 32, 0, 0, 0, 0, 0);
+    var refs = av1_ref_state_new();
+    var kbw = dr_bw_init(16);
+    dr_bw_put_bit(kbw, 0);        # disable_cdf_update
+    dr_bw_put_bit(kbw, 0);        # allow_screen_content_tools
+    dr_bw_put_bit(kbw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(kbw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(kbw, 20, 8);   # base_q_idx
+    dr_bw_put_bit(kbw, 0); dr_bw_put_bit(kbw, 0); dr_bw_put_bit(kbw, 0);  # dq x3
+    dr_bw_put_bit(kbw, 0);        # using_qmatrix
+    dr_bw_put_bit(kbw, 0);        # segmentation_enabled
+    dr_bw_put_bit(kbw, 0);        # delta_q_present
+    dr_bw_put_bits(kbw, 0, 6); dr_bw_put_bits(kbw, 0, 6); dr_bw_put_bits(kbw, 0, 3); dr_bw_put_bit(kbw, 0);  # lf
+    dr_bw_put_bit(kbw, 1);        # tx_mode_select
+    dr_bw_put_bit(kbw, 0);        # reduced_tx_set
+    var kn = dr_bw_flush(kbw);
+    var ke = 0;
+    var kfh = av1_frame_parse_uncompressed_header(sred, refs, 0, 0, dr_bw_buf(kbw), kn, &ke);
+    assert(kfh != 0, "key frame parses");
+    av1_frame_update_refs(refs, sred, kfh);
+    # show_existing lives on the non-reduced path.
+    var s = fx_seq_full(48, 32, 1, 6, 0, 0, 0, 0, 0, 0);
+    var bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1);        # show_existing_frame = 1
+    dr_bw_put_bits(bw, 0, 3);    # frame_to_show_map_idx = 0
+    # decoder_model absent, frame_id absent -> nothing more.
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, "show_existing header parses");
+    assert_eq(e, DR_OK, "no error");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly show_existing bits");
+    assert_eq(av1_fh_show_existing_frame(fh), 1, "show_existing set");
+    assert_eq(av1_fh_frame_to_show(fh), 0, "frame_to_show 0");
+    assert_eq(av1_fh_frame_type(fh), AV1_KEY_FRAME, "frame_type from ref (KEY)");
+    assert_eq(av1_fh_refresh_frame_flags(fh), 255, "KEY show_existing refreshes all");
+    assert_eq(av1_fh_frame_width(fh), 48, "geometry loaded from ref (width 48)");
+    assert_eq(av1_fh_frame_height(fh), 32, "geometry loaded from ref (height 32)");
+    return 0;
+}
+
+# Adversarial: a hostile non-uniform tiling of 1-superblock tiles must be
+# rejected before the tile count overruns the fixed MiColStarts array
+# (the 64-tile MAX_TILE_COLS cap is a conformance requirement the ns()
+# loop does not self-enforce). Frame 4480 wide -> sbCols = 70 > 64.
+fn test_av1_fh_tile_bomb() {
+    var s = fx_seq_reduced(4480, 64, 0, 0, 0, 0, 0);
+    assert(s != 0, "wide seq parses");
+    var bw = dr_bw_init(64);
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 0);        # allow_screen_content_tools
+    dr_bw_put_bit(bw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(bw, 0);        # uniform_tile_spacing_flag = 0 (non-uniform)
+    # 64 one-superblock column tiles; the parser must reject the 65th
+    # before writing out of bounds. maxWidth = min(sbCols - start, 64).
+    var j = 0;
+    while (j < 64) {
+        var max_width = 70 - j;
+        if (max_width > 64) { max_width = 64; }
+        dr_ns_write(bw, 0, max_width);   # width_in_sbs_minus_1 = 0
+        j = j + 1;
+    }
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert_eq(fh, 0, "over-tiled frame rejected (no OOB write)");
+    assert_eq(e, AV1_ERR_BAD_FRAME, "tile bomb -> AV1_ERR_BAD_FRAME");
+    assert(AV1_ERR_BAD_FRAME >= 10, "family code in AV1 band (low)");
+    assert(AV1_ERR_BAD_FRAME <= 29, "family code in AV1 band (high)");
+    return 0;
+}
+
+# Adversarial: a truncated header latches DR_ERR_TRUNCATED and yields 0.
+fn test_av1_fh_truncation() {
+    var s = fx_seq_reduced(64, 64, 0, 0, 0, 0, 0);
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 32, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);
+    dr_bw_put_bits(bw, 0, 6); dr_bw_put_bits(bw, 0, 6); dr_bw_put_bits(bw, 0, 3);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 1); dr_bw_put_bit(bw, 0);
+    var n = dr_bw_flush(bw);
+    var refs = av1_ref_state_new();
+    var e = 0;
+    # Feed only the first 2 bytes: the header runs off the end mid-parse.
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), 2, &e);
+    assert_eq(fh, 0, "truncated header rejected");
+    assert_eq(e, DR_ERR_TRUNCATED, "truncation -> DR_ERR_TRUNCATED");
+    # Negative length and null seq/refs.
+    assert_eq(av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), 0 - 1, &e), 0, "negative len rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "negative len -> bounds");
+    assert_eq(av1_frame_parse_uncompressed_header(0, refs, 0, 0, dr_bw_buf(bw), n, &e), 0, "null seq rejected");
+    assert_eq(e, DR_ERR_BOUNDS, "null seq -> bounds");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("av1 frame header — intra / still-picture");
+    test_av1_fh_reduced_key();
+    test_av1_fh_lossless();
+    test_av1_fh_superres();
+    test_av1_fh_cdef_lf();
+    test_av1_fh_segmentation();
+    test_av1_fh_tile_multi_impl(fx_seq_reduced(1024, 64, 0, 0, 0, 0, 0));
+    test_group("av1 frame header — full path");
+    test_av1_fh_full_key();
+    test_group("av1 frame header — reference state machine");
+    test_av1_fh_inter_refstate();
+    test_av1_fh_show_existing();
+    test_group("av1 frame header — adversarial");
+    test_av1_fh_tile_bomb();
+    test_av1_fh_truncation();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
