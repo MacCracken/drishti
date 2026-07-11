@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.27] - 2026-07-11
+
+Starts the AV1 **in-loop filter** layer (the first item toward AV1 100% after
+the intra keyframe milestone): the **deblocking loop-filter kernels** (spec
+7.14.3-7.14.6). A new `src/av1_deblock.cyr` implements the correctness-critical
+pixel math — the filter-size / strength / limit derivations and the sample
+filters (mask, narrow 4-tap, wide low-pass) that smooth block/transform-boundary
+artifacts. During implementation an arithmetic-shift bug was caught and fixed
+(the narrow filter's `filter1`/`filter2` must use the sign-preserving `>>>` — a
+logical `>>` corrupts the frequently-negative intermediate when the q side is
+darker); the 2-agent adversarial review independently flagged the same shift and
+its verifier confirmed the fix in place, with no surviving findings. **20,094
+suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 deblocking filter kernels** (`src/av1_deblock.cyr`, new flat module):
+  `av1_lf_filter_size` (7.14.3), `av1_lf_strength` (7.14.5 level selection —
+  `loop_filter_level` + ref/mode deltas), `av1_lf_limits` (7.14.4 limit/blimit/
+  thresh from lvl + sharpness), `av1_lf_mask` (7.14.6.2 hev/filter/flat/flat2
+  masks), `av1_lf_narrow` (7.14.6.3 the 4-tap filter), `av1_lf_wide` (7.14.6.4
+  the 8/14-tap low-pass), and `av1_lf_sample` (7.14.6.1 the mask → narrow/wide
+  dispatch). All operate on a reconstructed `DrFrame` at (x,y) along a
+  perpendicular direction (dx,dy).
+- **Tests** (`tests/av1_deblock.tcyr`, 46 assertions): hand-computed
+  known-answers for every kernel — the size/limits/strength arithmetic, a
+  step-edge through the narrow filter (both `hev` values **and** a reversed
+  darker-q step exercising the negative-`filter` arithmetic-shift path), the
+  wide filter's DC-preserving unity gain + a step, the mask (flat / big-jump /
+  high-variance) and the dispatch (narrow route + filterMask-0 no-op).
+
+### Fixed
+- **Logical→arithmetic shift in the narrow deblock filter** (caught during
+  0.7.27 implementation, independently flagged by the review): `filter1`/`filter2`
+  now use `>>>` (sign-preserving), matching spec 7.14.6.3's arithmetic `>>3` and
+  the `av1_round2` convention.
+
+### Notes
+- `drishti_version()` → 727. Next (0.7.28): the deblocking edge loop + main driver
+  (7.14.1/2) + the `LoopfilterTxSizes` grid, wiring these kernels into a
+  whole-frame deblock; then CDEF and loop restoration.
+
 ## [0.7.26] - 2026-07-11
 
 Closes the last correctness gap in the intra keyframe **prediction**: the intra

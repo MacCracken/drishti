@@ -6,17 +6,19 @@
 
 ## Version
 
-**0.7.26** — cut 2026-07-11, not yet tagged (user's git). A post-milestone
-refinement: **`get_filter_type`** (7.11.2.8) closes the last correctness gap
-in the intra keyframe prediction — the intra edge-filter type is now derived
-from the neighbour intra modes (the YModes/UVModes grids) and fed to the
-edge-filter strength, instead of the hard-coded 0 deferred through the
-block-decode arc. On top of the **first fully decoded keyframe** (0.7.25,
-which closed the block/partition decode arc 0.7.19-0.7.25 and the intra
-still-picture decode milestone). The remaining distance to 1.0 is the AV1
-inter + in-loop-filter layer, conformance/10-bit, and the encode-lane
-completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
-0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.27** — cut 2026-07-11, not yet tagged (user's git). Starts the AV1
+**in-loop filter** layer (post-milestone, toward AV1 100%): the **deblocking
+loop-filter kernels** (`av1_deblock.cyr`, spec 7.14.3-7.14.6) — the
+filter-size / strength / limit derivations and the sample filters (mask,
+narrow 4-tap, wide low-pass) that smooth boundary artifacts. A shift bug
+(logical vs arithmetic on the negative-filter path) was caught + fixed during
+implementation and confirmed by the review. On top of the intra keyframe
+prediction completion (`get_filter_type`, 0.7.26) and the **first fully
+decoded keyframe** (0.7.25). The remaining distance to 1.0 is the rest of the
+in-loop filters (edge loop/driver, CDEF, loop restoration) + inter +
+conformance/10-bit + the encode-lane completion (finishing 0.7.x), then the
+other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) +
+freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -31,7 +33,7 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (30 `[lib]` modules, dependency order)
+## Source (31 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -58,6 +60,7 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
 | `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids) + Av1Block decode contexts |
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
+| `src/av1_deblock.cyr` | `av1_` | deblocking loop-filter kernels (7.14.3-6) — filter-size / strength (lvl) / limits + mask + narrow (4-tap) + wide (low-pass) sample filters + dispatch (the edge loop/driver is next) |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -71,13 +74,13 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 25 suites / **20,048 assertions**: drishti 51 · bits
+- `make test` — 26 suites / **20,094 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · av1_txtype
-  142 · av1_residual 28 · av1_partition 216 · av1_tile 20 · h264 326 ·
-  h265 276 · vpx 287
+  142 · av1_residual 28 · av1_partition 216 · av1_tile 20 · av1_deblock 46 ·
+  h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -130,7 +133,10 @@ completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 →
   regression-tested), and the tile/frame loop (4 slices: decode_tile SB loop
   + CDF/symbol/qbucket wiring + clear-context + encode-symmetry/safety → all
   clean, no findings), and get_filter_type (2 slices: derivation incl. the
-  chroma subsampling neighbour-position math + wiring/safety → all clean)
+  chroma subsampling neighbour-position math + wiring/safety → all clean), and
+  the deblock kernels (2 slices: filter fidelity + strength/safety → the review
+  independently flagged the narrow-filter arithmetic-shift bug, already fixed
+  proactively, verifier confirmed the fix → no surviving findings)
 
 ## Dependencies
 
