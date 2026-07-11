@@ -4,6 +4,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-07-11
+
+Bite 6 of the AV1 **block/partition decode** arc: the **partition tree**. A new
+`src/av1_partition.cyr` implements `decode_partition` / `decode_block` (spec
+5.11.4/5.11.5) — the recursive partition of a superblock into coding blocks,
+and per block the orchestration mode_info → read_tx_size → residual() that ties
+bites 2/3/5 together and writes the MI grids the neighbour contexts read — plus
+the paired encode lane. A 5-agent adversarial spec review found **one real,
+confirmed defect** — an unclamped MI-grid write that was an out-of-bounds heap
+write for an edge coding block on a non-64-aligned frame — which is **fixed and
+regression-tested** (the other 4 dimensions clean). **20,019 suite assertions +
+1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 partition tree** (`src/av1_partition.cyr`, new flat module):
+  `av1_decode_partition` reads the partition symbol (`av1_ncdf_partition_w8/16/32/64`
+  by `bsl`, or the `split_or_horz` / `split_or_vert` binary CDF *synthesized*
+  from the partition CDF) and recurses / dispatches all 10 partition types.
+  `av1_decode_block` derives `HasChroma` + the availability flags, runs
+  `intra_frame_mode_info` → `read_block_tx_size` → `residual()`, and writes the
+  `MiSizes` / `YModes` / `Skips` / `InterTxSizes` grids. The paired
+  `av1_encode_partition` / `av1_encode_block` (the block-orchestration entropy)
+  make the tree round-trip. Tables: `Partition_Subsize[10][22]` (checksum-pinned);
+  `is_inside`, the partition ctx, and `reset_block_context`. The `Av1Tile`
+  context (`src/av1_residual.cyr`) grows the MI grids (`av1_tile_grids_new`).
+- **Tests** (`tests/av1_partition.tcyr`, 216 assertions): `Partition_Subsize` /
+  `is_inside` / partition-ctx known-answers; a **grid-write clamp regression**
+  for the edge-overhang OOB; the partition + `split_or_horz/vert` symbol
+  round-trips (all types / contexts); a single `decode_block` from a hand-built
+  stream (verifying pixels + the MI grids); and a `decode_partition` round-trip
+  on a 16x16 SPLIT → 4× 8x8 skip tree through the encode lane (grids agree,
+  pixels are the flat DC value).
+
+### Fixed
+- **OOB heap write in the MI-grid write** (`av1_block_write_grids`, found by the
+  0.7.24 adversarial review): a coding block that straddles the bottom/right edge
+  of a non-superblock-aligned frame wrote past the `MiCols*MiRows` grids. The
+  write is now clamped to the tile MI extent — spec-equivalent, since an overhang
+  position is outside the frame and is never read as a neighbour (`is_inside` /
+  the avail flags reject it), and it upholds the trust-no-input-byte rule.
+
+### Notes
+- `drishti_version()` → 724. The block/partition decode is complete end-to-end
+  (a full partition tree round-trips). Next (bite 7, the arc's close): the
+  tile/frame loop (`decode_tile` / tile_group) — clear_above/left, the superblock
+  loop, the CDF-context init — driving into a `DrFrame` = the **first fully
+  decoded keyframe**.
+
 ## [0.7.23] - 2026-07-11
 
 Bite 5 of the AV1 **block/partition decode** arc — the composition milestone: a

@@ -140,7 +140,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   PlaneTxType caller-input; 0.7.23 `src/av1_residual.cyr` the residual driver
   (`residual()` / `transform_block()`) composing predict_intra → coeffs() →
   reconstruct() per tx block into a DrFrame — a transform block decodes to
-  pixels; then decode_partition tree → tile/frame loop = decoded keyframe)**.
+  pixels; 0.7.24 `src/av1_partition.cyr` the partition tree
+  (`decode_partition` / `decode_block`, all 10 partition types + the block
+  orchestration + MI grids + encode lane) — a full partition tree round-trips;
+  then the tile/frame loop = decoded keyframe)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

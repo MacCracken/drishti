@@ -1,0 +1,271 @@
+# tests/av1_partition.tcyr — AV1 partition tree (spec 5.11.4 decode_partition +
+# 5.11.5 decode_block). Partition_Subsize / is_inside / partition-ctx by
+# known-answers; the partition symbol + split_or_horz/vert by round-trip; a
+# single decode_block by a hand-built stream (mode_info + tx_size + coeffs)
+# verifying pixels + the MI grids; and a decode_partition round-trip on a
+# 16x16 SPLIT -> 4x 8x8 skip tree via the paired encode lane.
+include "src/main.cyr"
+include "src/av1_partition.cyr"
+
+fn az(p, n): i64 { var k = 0; while (k < n) { store64(p + (k * 8), 0); k = k + 1; } return 0; }
+
+# ---- tables / is_inside / ctx ----
+fn test_partsub_checksum() {
+    var b = av1_partsub_tables();
+    var s = 0;
+    var k = 0;
+    while (k < 220) { s = s + ((k + 1) * load64(b + (k * 8))); k = k + 1; }
+    assert_eq(s, 28261, "Partition_Subsize checksum");
+    return 0;
+}
+fn test_partsub_values() {
+    assert_eq(av1_partition_subsize(0, 3), 3, "NONE 8x8 -> BLOCK_8X8");
+    assert_eq(av1_partition_subsize(0, 6), 6, "NONE 16x16");
+    assert_eq(av1_partition_subsize(1, 6), 5, "HORZ 16x16 -> BLOCK_16X8");
+    assert_eq(av1_partition_subsize(2, 6), 4, "VERT 16x16 -> BLOCK_8X16");
+    assert_eq(av1_partition_subsize(3, 6), 3, "SPLIT 16x16 -> BLOCK_8X8");
+    assert_eq(av1_partition_subsize(3, 12), 9, "SPLIT 64x64 -> BLOCK_32X32");
+    assert_eq(av1_partition_subsize(8, 9), 19, "HORZ_4 32x32 -> BLOCK_32X8");
+    assert_eq(av1_partition_subsize(9, 12), 20, "VERT_4 64x64 -> BLOCK_16X64");
+    return 0;
+}
+fn mono_tile(mi_cols, mi_rows, base_q): i64 {
+    var oe = alloc(8);
+    var frame = dr_frame_new(mi_cols * 4, mi_rows * 4, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, mi_cols, mi_rows, base_q, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    return tile;
+}
+fn test_is_inside() {
+    var t = mono_tile(4, 4, 40);
+    assert_eq(av1_is_inside(t, 0, 0), 1, "inside 0,0");
+    assert_eq(av1_is_inside(t, 3, 3), 1, "inside 3,3");
+    assert_eq(av1_is_inside(t, 0 - 1, 0), 0, "outside r=-1");
+    assert_eq(av1_is_inside(t, 0, 0 - 1), 0, "outside c=-1");
+    assert_eq(av1_is_inside(t, 4, 0), 0, "outside r=4");
+    assert_eq(av1_is_inside(t, 0, 4), 0, "outside c=4");
+    return 0;
+}
+fn test_partition_ctx() {
+    var t = mono_tile(4, 4, 40);
+    # all neighbours BLOCK_16X16 (bsl 2): neither smaller than bsl -> ctx 0.
+    var y = 0;
+    while (y < 4) { var x = 0; while (x < 4) { av1_grid_set(t, AV1TILE_MISIZES, y, x, 6); x = x + 1; } y = y + 1; }
+    assert_eq(av1_partition_ctx(t, 2, 2, 6, 1, 1), 0, "ctx both same size -> 0");
+    # above neighbour BLOCK_8X8 (mi_width_log2 1 < 2) -> above=1 -> ctx 1.
+    av1_grid_set(t, AV1TILE_MISIZES, 1, 2, 3);
+    assert_eq(av1_partition_ctx(t, 2, 2, 6, 1, 1), 1, "ctx above smaller -> 1");
+    # left neighbour also BLOCK_8X8 -> left=1 -> ctx 1*2+1 = 3.
+    av1_grid_set(t, AV1TILE_MISIZES, 2, 1, 3);
+    assert_eq(av1_partition_ctx(t, 2, 2, 6, 1, 1), 3, "ctx both smaller -> 3");
+    # no availability -> ctx 0 regardless.
+    assert_eq(av1_partition_ctx(t, 2, 2, 6, 0, 0), 0, "ctx no avail -> 0");
+    return 0;
+}
+# A coding block may straddle a non-64-aligned frame edge; the MI-grid write must
+# CLAMP to the tile extent (MiCols*MiRows grids, no SB padding) — else an OOB
+# heap write. Here a 2x2-MI (8x8) block at (2,2) in a 3x3-MI grid overhangs to
+# (3,3): reaching the assert proves no OOB, and the in-frame cells are written.
+fn test_grid_write_clamp() {
+    var t = mono_tile(3, 3, 40);
+    av1_block_write_grids(t, 2, 2, 2, 2, 3, AV1_DC_PRED, 0, 1, 1, 0);
+    assert_eq(av1_grid_get(t, AV1TILE_MISIZES, 2, 2), 3, "in-frame edge cell written");
+    assert_eq(av1_grid_get(t, AV1TILE_YMODES, 2, 2), AV1_DC_PRED, "in-frame YMode written");
+    assert_eq(1, 1, "overhanging grid write clamped (no OOB)");
+    return 0;
+}
+
+# ---- partition symbol round-trip ----
+fn part_rt(ctx, bsl, p): i64 {
+    var ncc = av1_noncoeff_cdf_blob();
+    var enc = av1_sym_enc_init(16, 1);
+    av1_write_partition(enc, ncc, ctx, bsl, p);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_read_partition(sd, ncc, ctx, bsl), p, "partition symbol rt");
+    return 0;
+}
+fn test_partition_symbol_rt() {
+    var ctx = 0;
+    while (ctx < 4) {
+        # W8 (bsl 1): 4 symbols.
+        var p = 0;
+        while (p < 4) { part_rt(ctx, 1, p); p = p + 1; }
+        # W16/W32/W64 (bsl 2/3/4): 10 symbols.
+        var bsl = 2;
+        while (bsl < 5) {
+            var p2 = 0;
+            while (p2 < 10) { part_rt(ctx, bsl, p2); p2 = p2 + 1; }
+            bsl = bsl + 1;
+        }
+        ctx = ctx + 1;
+    }
+    return 0;
+}
+fn soh_rt(ctx, bsl, sym, is_horz): i64 {
+    var ncc = av1_noncoeff_cdf_blob();
+    var enc = av1_sym_enc_init(16, 1);
+    if (is_horz) { av1_write_split_or_horz(enc, ncc, ctx, bsl, sym); }
+    else { av1_write_split_or_vert(enc, ncc, ctx, bsl, sym); }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = 0;
+    if (is_horz) { got = av1_read_split_or_horz(sd, ncc, ctx, bsl); }
+    else { got = av1_read_split_or_vert(sd, ncc, ctx, bsl); }
+    assert_eq(got, sym, "split_or_* rt");
+    return 0;
+}
+fn test_split_or_rt() {
+    var bsl = 2;
+    while (bsl < 5) {
+        var ctx = 0;
+        while (ctx < 4) {
+            soh_rt(ctx, bsl, 0, 1); soh_rt(ctx, bsl, 1, 1);   # horz
+            soh_rt(ctx, bsl, 0, 0); soh_rt(ctx, bsl, 1, 0);   # vert
+            ctx = ctx + 1;
+        }
+        bsl = bsl + 1;
+    }
+    return 0;
+}
+
+# ---- single decode_block (non-skip, DC coeff) via a hand-built stream ----
+fn test_decode_block() {
+    var base_q = 40;
+    var ncc = av1_noncoeff_cdf_blob();
+    # mode-info: 8x8 DC, skip 0, mono.
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 0);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    # tx-type ctx matching residual's (DC luma, base_q).
+    var ttx = av1_txtypectx_new();
+    store64(ttx + AV1TTC_BASE_Q, base_q);
+    # coefficients: a single DC level.
+    var qsrc = alloc(64 * 8);
+    az(qsrc, 64);
+    store64(qsrc + 0, 5);
+    var al = alloc(64 * 8); var ll = alloc(64 * 8); var ad = alloc(64 * 8); var ce = alloc(64 * 8);
+    az(al, 64); az(ll, 64); az(ad, 64); az(ce, 64);
+    # encode the block stream in decode_block order: mode_info, tx_size, coeffs.
+    var enc = av1_sym_enc_init(128, 1);
+    av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    av1_write_tx_size(enc, ncc, 3, 0, 2, 1, 0, 1);            # TX_MODE_SELECT, ctx 0, TX_8X8
+    av1_coeffs_encode(enc, av1_ccdf_new(0), ncc, 0, 1, ttx, AV1_DCT_DCT, 0, 0, 4, 4, 8, 8, al, ll, ad, ce, qsrc, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    # decode via decode_block.
+    var tile = mono_tile(4, 4, base_q);
+    var frame = load64(tile + AV1TILE_FRAME);
+    store64(tile + AV1TILE_SD, av1_sym_dec_init(out, olen, 1));
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, ncc);
+    av1_bd_clear(tile, 0, 0, 16, 1);
+    av1_decode_block(tile, 0, 0, 3);
+    # grids written for the 2x2 MI positions of the 8x8 block.
+    assert_eq(av1_grid_get(tile, AV1TILE_MISIZES, 0, 0), 3, "MiSizes = BLOCK_8X8");
+    assert_eq(av1_grid_get(tile, AV1TILE_MISIZES, 1, 1), 3, "MiSizes[1][1]");
+    assert_eq(av1_grid_get(tile, AV1TILE_YMODES, 0, 0), AV1_DC_PRED, "YModes = DC");
+    assert_eq(av1_grid_get(tile, AV1TILE_SKIPS, 0, 0), 0, "Skips = 0");
+    assert_eq(av1_grid_get(tile, AV1TILE_INTERTX, 0, 0), 1, "InterTxSizes = TX_8X8");
+    # reconstruct ran: at least one luma pixel differs from the flat DC 128.
+    var changed = 0;
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) { if (dr_frame_get(frame, 0, x, y) != 128) { changed = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(changed, 1, "decode_block reconstructed a residual");
+    return 0;
+}
+
+# ---- decode_partition round-trip: 16x16 SPLIT -> 4x 8x8 skip DC via encode lane ----
+fn test_decode_partition_tree() {
+    var base_q = 40;
+    var ncc = av1_noncoeff_cdf_blob();
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);           # skip -> no coeffs
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    # plan: partition types pre-order, block mi/tx per decode_block.
+    var plan_part = alloc(5 * 8);
+    store64(plan_part + 0, AV1_PARTITION_SPLIT);
+    store64(plan_part + 8, AV1_PARTITION_NONE);   store64(plan_part + 16, AV1_PARTITION_NONE);
+    store64(plan_part + 24, AV1_PARTITION_NONE);  store64(plan_part + 32, AV1_PARTITION_NONE);
+    var plan_mi = alloc(4 * 8);
+    var plan_tx = alloc(4 * 8);
+    var k = 0;
+    while (k < 4) { store64(plan_mi + (k * 8), mi); store64(plan_tx + (k * 8), 1); k = k + 1; }  # TX_8X8
+    # ENCODE the tree.
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(16, 16, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 4, 4, base_q, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    var enc = av1_sym_enc_init(128, 1);
+    store64(etile + AV1TILE_ENC, enc);
+    store64(etile + AV1TILE_NCC, ncc);
+    var pc = alloc(8); store64(pc, 0);
+    var bc = alloc(8); store64(bc, 0);
+    av1_encode_partition(etile, 0, 0, 6, plan_part, pc, plan_mi, plan_tx, bc);   # BLOCK_16X16
+    assert_eq(load64(bc), 4, "encoded 4 blocks");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    # DECODE the tree.
+    var dtile = mono_tile(4, 4, base_q);
+    var frame = load64(dtile + AV1TILE_FRAME);
+    store64(dtile + AV1TILE_SD, av1_sym_dec_init(out, olen, 1));
+    store64(dtile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(dtile + AV1TILE_NCC, ncc);
+    av1_bd_clear(dtile, 0, 0, 16, 1);
+    av1_decode_partition(dtile, 0, 0, 6);
+    assert_eq(av1_sym_dec_err(load64(dtile + AV1TILE_SD)), DR_OK, "decode ok");
+    # every MI position: BLOCK_8X8, DC, skip; and encode/decode grids agree.
+    var bad = 0;
+    var y = 0;
+    while (y < 4) {
+        var x = 0;
+        while (x < 4) {
+            if (av1_grid_get(dtile, AV1TILE_MISIZES, y, x) != 3) { bad = 1; }
+            if (av1_grid_get(dtile, AV1TILE_YMODES, y, x) != AV1_DC_PRED) { bad = 1; }
+            if (av1_grid_get(dtile, AV1TILE_SKIPS, y, x) != 1) { bad = 1; }
+            if (av1_grid_get(dtile, AV1TILE_MISIZES, y, x) != av1_grid_get(etile, AV1TILE_MISIZES, y, x)) { bad = 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "tree grids: all BLOCK_8X8 DC skip, enc==dec");
+    # all 16x16 luma pixels predicted to the flat DC 128 (skip, no residual).
+    var bad2 = 0;
+    y = 0;
+    while (y < 16) {
+        var x2 = 0;
+        while (x2 < 16) { if (dr_frame_get(frame, 0, x2, y) != 128) { bad2 = 1; } x2 = x2 + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad2, 0, "tree pixels all 128 (skip DC)");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("Partition_Subsize / is_inside / partition ctx");
+    test_partsub_checksum();
+    test_partsub_values();
+    test_is_inside();
+    test_partition_ctx();
+    test_grid_write_clamp();
+    test_group("partition symbol round-trip");
+    test_partition_symbol_rt();
+    test_split_or_rt();
+    test_group("decode_block");
+    test_decode_block();
+    test_group("decode_partition tree round-trip");
+    test_decode_partition_tree();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,533 @@
+# src/av1_partition.cyr — AV1 partition tree (spec 5.11.4 decode_partition +
+# 5.11.5 decode_block) for an intra keyframe. Bite 6 of the block/partition
+# decode arc: the recursive partition of a superblock into coding blocks, and
+# per block the orchestration mode_info → read_block_tx_size → residual() that
+# ties bites 2/3/5 together and writes the MI grids (MiSizes / YModes / Skips /
+# InterTxSizes) that the neighbour contexts read. Decode AND the paired encode
+# lane (the partition + block-orchestration entropy), so the tree round-trips
+# through the symbol coder.
+#
+# The partition symbol is read via the 0.7.19 CDFs (av1_ncdf_partition_w8/16/32/64);
+# split_or_horz / split_or_vert use a binary CDF SYNTHESIZED from the partition
+# CDF (spec 9.3). MI grids live in the Av1Tile context (av1_residual).
+#
+# SCOPE (intra keyframe baseline): is_inter=0; a 64x64 superblock (no 128x128 →
+# partition W128 / bsl 5 deferred, roadmap.md). Palette, segmentation, and the
+# get_filter_type edge refinement (7.11.2.8) are deferred (roadmap.md) —
+# filter_type is 0 here (exact for DC/SMOOTH/PAETH; a small edge-filter refinement
+# for directional-with-smooth-neighbour blocks lands later). Lossless is derived
+# as base_q_idx==0 (no per-plane delta-q in scope). The encode lane covers the
+# block-orchestration entropy (mode_info + tx_size); the per-tx coeffs-encode in
+# residual order is grown with the tile-loop bite (roadmap.md) — the round-trip
+# test drives skip blocks (no coeffs) + hand-builds the single non-skip stream.
+#
+# FLAT module — wiring in src/main.cyr after av1_residual.cyr. Family av1_.
+# Depends on: av1_residual (Av1Tile + grids + av1_residual + Av1Block),
+# av1_modeinfo (block tables + mode-info reads), av1_txsize (read_tx_size +
+# Max_Tx_Size_Rect), av1_symbol, av1_noncoeffcdf, av1_intra (mode enum), frame.
+
+enum Av1PartitionConst {
+    AV1_PARTITION_NONE   = 0;
+    AV1_PARTITION_HORZ   = 1;
+    AV1_PARTITION_VERT   = 2;
+    AV1_PARTITION_SPLIT  = 3;
+    AV1_PARTITION_HORZ_A = 4;
+    AV1_PARTITION_HORZ_B = 5;
+    AV1_PARTITION_VERT_A = 6;
+    AV1_PARTITION_VERT_B = 7;
+    AV1_PARTITION_HORZ_4 = 8;
+    AV1_PARTITION_VERT_4 = 9;
+}
+
+# Partition_Subsize[10][22] (partition -> subSize per block size). -1 = INVALID.
+var Av1_PartSub = 0;
+fn av1_partsub_tables(): i64 {
+    if (Av1_PartSub != 0) { return Av1_PartSub; }
+    var t = alloc(220 * 8);          # 10 * 22 i64
+    if (t == 0) { return 0; }
+    av1_mi_fill22(t, 0, 0, 0 - 1, 0 - 1, 3, 0 - 1, 0 - 1, 6, 0 - 1, 0 - 1, 9, 0 - 1,
+    0 - 1, 12, 0 - 1, 0 - 1, 15, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 22, 0 - 1, 0 - 1, 0 - 1, 2, 0 - 1, 0 - 1, 5, 0 - 1, 0 - 1, 8, 0 - 1,
+    0 - 1, 11, 0 - 1, 0 - 1, 14, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 44, 0 - 1, 0 - 1, 0 - 1, 1, 0 - 1, 0 - 1, 4, 0 - 1, 0 - 1, 7, 0 - 1,
+    0 - 1, 10, 0 - 1, 0 - 1, 13, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 66, 0 - 1, 0 - 1, 0 - 1, 0, 0 - 1, 0 - 1, 3, 0 - 1, 0 - 1, 6, 0 - 1,
+    0 - 1, 9, 0 - 1, 0 - 1, 12, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 88, 0 - 1, 0 - 1, 0 - 1, 2, 0 - 1, 0 - 1, 5, 0 - 1, 0 - 1, 8, 0 - 1,
+    0 - 1, 11, 0 - 1, 0 - 1, 14, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 110, 0 - 1, 0 - 1, 0 - 1, 2, 0 - 1, 0 - 1, 5, 0 - 1, 0 - 1, 8, 0 - 1,
+    0 - 1, 11, 0 - 1, 0 - 1, 14, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 132, 0 - 1, 0 - 1, 0 - 1, 1, 0 - 1, 0 - 1, 4, 0 - 1, 0 - 1, 7, 0 - 1,
+    0 - 1, 10, 0 - 1, 0 - 1, 13, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 154, 0 - 1, 0 - 1, 0 - 1, 1, 0 - 1, 0 - 1, 4, 0 - 1, 0 - 1, 7, 0 - 1,
+    0 - 1, 10, 0 - 1, 0 - 1, 13, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 176, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 17, 0 - 1, 0 - 1, 19,
+    0 - 1, 0 - 1, 21, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    av1_mi_fill22(t, 198, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 16, 0 - 1, 0 - 1, 18,
+    0 - 1, 0 - 1, 20, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
+    Av1_PartSub = t;
+    return t;
+}
+fn av1_partition_subsize(partition, bsize): i64 {
+    return load64(av1_partsub_tables() + (((partition * 22) + bsize) * 8));
+}
+
+# is_inside (5.11.4) for a single tile: 0 <= r < MiRows, 0 <= c < MiCols.
+fn av1_is_inside(tile, r, c): i64 {
+    if ((c < 0) || (c >= load64(tile + AV1TILE_MI_COLS))) { return 0; }
+    if ((r < 0) || (r >= load64(tile + AV1TILE_MI_ROWS))) { return 0; }
+    return 1;
+}
+
+# partition ctx (9.3): ctx = left*2 + above, above/left from whether the
+# neighbour's Mi_{Width,Height}_Log2 is smaller than bsl = Mi_Width_Log2[bSize].
+fn av1_partition_ctx(tile, r, c, bsize, avail_u, avail_l): i64 {
+    var bsl = av1_mi_width_log2(bsize);
+    var above = 0;
+    if (avail_u && (av1_mi_width_log2(av1_grid_get(tile, AV1TILE_MISIZES, r - 1, c)) < bsl)) { above = 1; }
+    var left = 0;
+    if (avail_l && (av1_mi_height_log2(av1_grid_get(tile, AV1TILE_MISIZES, r, c - 1)) < bsl)) { left = 1; }
+    return (left * 2) + above;
+}
+
+# partition symbol dispatch by bsl (1->W8 4-sym, 2/3/4 -> W16/32/64 10-sym).
+fn av1_partition_cdf(ncc, ctx, bsl): i64 {
+    if (bsl == 2) { return av1_ncdf_partition_w16(ncc, ctx); }
+    if (bsl == 3) { return av1_ncdf_partition_w32(ncc, ctx); }
+    return av1_ncdf_partition_w64(ncc, ctx);
+}
+fn av1_read_partition(sd, ncc, ctx, bsl): i64 {
+    if (bsl == 1) { return av1_sym_read_symbol(sd, av1_ncdf_partition_w8(ncc, ctx), 4); }
+    return av1_sym_read_symbol(sd, av1_partition_cdf(ncc, ctx, bsl), 10);
+}
+fn av1_write_partition(enc, ncc, ctx, bsl, partition): i64 {
+    if (bsl == 1) { return av1_sym_encode_symbol(enc, av1_ncdf_partition_w8(ncc, ctx), 4, partition); }
+    return av1_sym_encode_symbol(enc, av1_partition_cdf(ncc, ctx, bsl), 10, partition);
+}
+
+# P(symbol x) in the forward-cumulative partition cdf: cdf[x] - cdf[x-1].
+fn av1_part_prob(pcdf, x): i64 {
+    var lo = 0;
+    if (x > 0) { lo = load64(pcdf + ((x - 1) * 8)); }
+    return load64(pcdf + (x * 8)) - lo;
+}
+# split_or_{horz,vert} synthesized binary cdf (9.3): the not-split probability is
+# 1<<15 minus the summed probabilities of the vertical- / horizontal-splitting
+# partition types. cdf[0]=1<<15-psum, cdf[1]=1<<15, cdf[2]=0 (never adapted).
+fn av1_synth_horz_cdf(pcdf, out): i64 {
+    var psum = av1_part_prob(pcdf, AV1_PARTITION_VERT) + av1_part_prob(pcdf, AV1_PARTITION_SPLIT)
+    + av1_part_prob(pcdf, AV1_PARTITION_HORZ_A) + av1_part_prob(pcdf, AV1_PARTITION_VERT_A)
+    + av1_part_prob(pcdf, AV1_PARTITION_VERT_B) + av1_part_prob(pcdf, AV1_PARTITION_VERT_4);
+    store64(out + 0, 32768 - psum);
+    store64(out + 8, 32768);
+    store64(out + 16, 0);
+    return 0;
+}
+fn av1_synth_vert_cdf(pcdf, out): i64 {
+    var psum = av1_part_prob(pcdf, AV1_PARTITION_HORZ) + av1_part_prob(pcdf, AV1_PARTITION_SPLIT)
+    + av1_part_prob(pcdf, AV1_PARTITION_HORZ_A) + av1_part_prob(pcdf, AV1_PARTITION_HORZ_B)
+    + av1_part_prob(pcdf, AV1_PARTITION_VERT_A) + av1_part_prob(pcdf, AV1_PARTITION_HORZ_4);
+    store64(out + 0, 32768 - psum);
+    store64(out + 8, 32768);
+    store64(out + 16, 0);
+    return 0;
+}
+fn av1_read_split_or_horz(sd, ncc, ctx, bsl): i64 {
+    var out = alloc(3 * 8);
+    av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    return av1_sym_decode(sd, out, 2, 0);
+}
+fn av1_read_split_or_vert(sd, ncc, ctx, bsl): i64 {
+    var out = alloc(3 * 8);
+    av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    return av1_sym_decode(sd, out, 2, 0);
+}
+fn av1_write_split_or_horz(enc, ncc, ctx, bsl, sym): i64 {
+    var out = alloc(3 * 8);
+    av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    return av1_sym_encode(enc, out, 2, sym, 0);
+}
+fn av1_write_split_or_vert(enc, ncc, ctx, bsl, sym): i64 {
+    var out = alloc(3 * 8);
+    av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    return av1_sym_encode(enc, out, 2, sym, 0);
+}
+
+# reset_block_context (5.11.5): clear the coeff level context strips for the
+# block's positions (a skip block contributes no levels).
+fn av1_reset_block_context(tile, mi_col, mi_row, bw4, bh4, has_chroma): i64 {
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var num_planes = 1;
+    if (has_chroma) { num_planes = 3; }
+    var plane = 0;
+    while (plane < num_planes) {
+        var sx = 0;
+        var sy = 0;
+        if (plane > 0) { sx = subx; sy = suby; }
+        var al = load64(tile + AV1TILE_ALVL + (plane * 8));
+        var ad = load64(tile + AV1TILE_ADC + (plane * 8));
+        var ll = load64(tile + AV1TILE_LLVL + (plane * 8));
+        var ld = load64(tile + AV1TILE_LDC + (plane * 8));
+        var i = mi_col >> sx;
+        while (i < ((mi_col + bw4) >> sx)) {
+            store64(al + (i * 8), 0);
+            store64(ad + (i * 8), 0);
+            i = i + 1;
+        }
+        var j = mi_row >> sy;
+        while (j < ((mi_row + bh4) >> sy)) {
+            store64(ll + (j * 8), 0);
+            store64(ld + (j * 8), 0);
+            j = j + 1;
+        }
+        plane = plane + 1;
+    }
+    return 0;
+}
+
+# Read the (guarded) neighbour grid values into out[6]: above_ymode, left_ymode,
+# above_skip, left_skip, above_tx (InterTxSizes), left_tx.
+fn av1_block_neighbours(tile, r, c, avail_u, avail_l, out): i64 {
+    var aym = 0;
+    var lym = 0;
+    var ask = 0;
+    var lsk = 0;
+    var atx = 0;
+    var ltx = 0;
+    if (avail_u) {
+        aym = av1_grid_get(tile, AV1TILE_YMODES, r - 1, c);
+        ask = av1_grid_get(tile, AV1TILE_SKIPS, r - 1, c);
+        atx = av1_grid_get(tile, AV1TILE_INTERTX, r - 1, c);
+    }
+    if (avail_l) {
+        lym = av1_grid_get(tile, AV1TILE_YMODES, r, c - 1);
+        lsk = av1_grid_get(tile, AV1TILE_SKIPS, r, c - 1);
+        ltx = av1_grid_get(tile, AV1TILE_INTERTX, r, c - 1);
+    }
+    store64(out + 0, aym);
+    store64(out + 8, lym);
+    store64(out + 16, ask);
+    store64(out + 24, lsk);
+    store64(out + 32, atx);
+    store64(out + 40, ltx);
+    return 0;
+}
+# Write the MI grids for the block's bw4 x bh4 positions (for future neighbour
+# ctx). CLAMPED to the tile MI extent: a coding block may straddle the bottom/
+# right frame edge (MiCols/MiRows are frame-exact, not superblock-aligned), and
+# the grids are allocated exactly MiCols*MiRows. The spec writes the full extent
+# relying on SB-padded MI arrays; clamping is equivalent because an overhang
+# position is outside the frame and is never read as a neighbour (is_inside /
+# the avail flags reject r>=MiRows / c>=MiCols). Without the clamp an edge block
+# on a non-64-aligned frame is an OOB heap write (trust-no-input-byte).
+fn av1_block_write_grids(tile, r, c, bw4, bh4, mi_size, y_mode, uv_mode, skip, tx_size, has_chroma): i64 {
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    var y = 0;
+    while ((y < bh4) && ((r + y) < mi_rows)) {
+        var x = 0;
+        while ((x < bw4) && ((c + x) < mi_cols)) {
+            av1_grid_set(tile, AV1TILE_YMODES, r + y, c + x, y_mode);
+            if (has_chroma) { av1_grid_set(tile, AV1TILE_UVMODES, r + y, c + x, uv_mode); }
+            av1_grid_set(tile, AV1TILE_MISIZES, r + y, c + x, mi_size);
+            av1_grid_set(tile, AV1TILE_SKIPS, r + y, c + x, skip);
+            av1_grid_set(tile, AV1TILE_INTERTX, r + y, c + x, tx_size);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+# HasChroma (5.11.5): mono / edge-4x4 chroma-sharing rules.
+fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
+    if (dr_frame_num_planes(frame) <= 1) { return 0; }
+    if ((bh4 == 1) && suby && ((r & 1) == 0)) { return 0; }
+    if ((bw4 == 1) && subx && ((c & 1) == 0)) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# decode_block (5.11.5) — the per-block orchestration for an intra keyframe:
+# mode_info → read_block_tx_size → residual, then the MI-grid writes.
+# ================================================================
+fn av1_decode_block(tile, r, c, sub_size): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var sd = load64(tile + AV1TILE_SD);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var bw4 = av1_num_4x4_w(sub_size);
+    var bh4 = av1_num_4x4_h(sub_size);
+    var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
+    var avail_u = av1_is_inside(tile, r - 1, c);
+    var avail_l = av1_is_inside(tile, r, c - 1);
+    var avail_uc = avail_u;
+    var avail_lc = avail_l;
+    if (has_chroma) {
+        if (suby && (bh4 == 1)) { avail_uc = av1_is_inside(tile, r - 2, c); }
+        if (subx && (bw4 == 1)) { avail_lc = av1_is_inside(tile, r, c - 2); }
+    } else {
+        avail_uc = 0;
+        avail_lc = 0;
+    }
+    var lossless = 0;
+    if (load64(tile + AV1TILE_BASE_Q) == 0) { lossless = 1; }
+    var enable_fi = load64(tile + AV1TILE_ENABLE_FI);
+    var nb = alloc(6 * 8);
+    av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
+
+    var mi = av1_modeinfo_new();
+    av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
+    avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
+    lossless, subx, suby, enable_fi);
+
+    var max_rect = av1_max_tx_size_rect(sub_size);
+    var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40), max_rect);
+    var tx_size = av1_read_tx_size(sd, ncc, sub_size, lossless,
+    load64(tile + AV1TILE_TX_MODE), 1, tx_ctx);
+
+    var skip = load64(mi + AV1MI_SKIP);
+    if (skip) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
+
+    var blk = av1_block_new();
+    store64(blk + AV1BLK_MI_ROW, r);
+    store64(blk + AV1BLK_MI_COL, c);
+    store64(blk + AV1BLK_MI_SIZE, sub_size);
+    store64(blk + AV1BLK_HAS_CHROMA, has_chroma);
+    store64(blk + AV1BLK_LOSSLESS, lossless);
+    store64(blk + AV1BLK_TX_SIZE, tx_size);
+    store64(blk + AV1BLK_MI, mi);
+    store64(blk + AV1BLK_AVAIL_L, avail_l);
+    store64(blk + AV1BLK_AVAIL_U, avail_u);
+    store64(blk + AV1BLK_AVAIL_LC, avail_lc);
+    store64(blk + AV1BLK_AVAIL_UC, avail_uc);
+    store64(blk + AV1BLK_FILTER_TYPE, 0);        # get_filter_type deferred (roadmap.md)
+    av1_residual(tile, blk);
+
+    av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),
+    load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma);
+    return av1_sym_dec_err(sd);
+}
+
+# encode_block — the paired entropy encode (mode_info + tx_size + grids). mi
+# carries the block's mode; tx_size is the chosen luma TxSize. (Skip blocks only:
+# the non-skip coeffs-encode in residual order is deferred, roadmap.md.)
+fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var enc = load64(tile + AV1TILE_ENC);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var bw4 = av1_num_4x4_w(sub_size);
+    var bh4 = av1_num_4x4_h(sub_size);
+    var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
+    var avail_u = av1_is_inside(tile, r - 1, c);
+    var avail_l = av1_is_inside(tile, r, c - 1);
+    var lossless = 0;
+    if (load64(tile + AV1TILE_BASE_Q) == 0) { lossless = 1; }
+    var nb = alloc(6 * 8);
+    av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
+
+    av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
+    avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
+    lossless, subx, suby, load64(tile + AV1TILE_ENABLE_FI));
+
+    var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40),
+    av1_max_tx_size_rect(sub_size));
+    av1_write_tx_size(enc, ncc, sub_size, lossless, load64(tile + AV1TILE_TX_MODE), 1, tx_ctx, tx_size);
+
+    var skip = load64(mi + AV1MI_SKIP);
+    if (skip) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
+    av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),
+    load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma);
+    return av1_sym_enc_err(enc);
+}
+
+# Non-SPLIT partition dispatch (5.11.4) into decode_block calls. Kept flat (a
+# top-level helper) so the 10-way branch stays readable. has_rows/has_cols and
+# the HORZ_4/VERT_4 edge guards are recomputed from the tile extent.
+fn av1_decode_partition_leaf(tile, partition, r, c, half, quarter, sub_size, split_size): i64 {
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    if (partition == AV1_PARTITION_NONE) {
+        av1_decode_block(tile, r, c, sub_size);
+        return 0;
+    }
+    if (partition == AV1_PARTITION_HORZ) {
+        av1_decode_block(tile, r, c, sub_size);
+        if ((r + half) < mi_rows) { av1_decode_block(tile, r + half, c, sub_size); }
+        return 0;
+    }
+    if (partition == AV1_PARTITION_VERT) {
+        av1_decode_block(tile, r, c, sub_size);
+        if ((c + half) < mi_cols) { av1_decode_block(tile, r, c + half, sub_size); }
+        return 0;
+    }
+    if (partition == AV1_PARTITION_HORZ_A) {
+        av1_decode_block(tile, r, c, split_size);
+        av1_decode_block(tile, r, c + half, split_size);
+        av1_decode_block(tile, r + half, c, sub_size);
+        return 0;
+    }
+    if (partition == AV1_PARTITION_HORZ_B) {
+        av1_decode_block(tile, r, c, sub_size);
+        av1_decode_block(tile, r + half, c, split_size);
+        av1_decode_block(tile, r + half, c + half, split_size);
+        return 0;
+    }
+    if (partition == AV1_PARTITION_VERT_A) {
+        av1_decode_block(tile, r, c, split_size);
+        av1_decode_block(tile, r + half, c, split_size);
+        av1_decode_block(tile, r, c + half, sub_size);
+        return 0;
+    }
+    if (partition == AV1_PARTITION_VERT_B) {
+        av1_decode_block(tile, r, c, sub_size);
+        av1_decode_block(tile, r, c + half, split_size);
+        av1_decode_block(tile, r + half, c + half, split_size);
+        return 0;
+    }
+    if (partition == AV1_PARTITION_HORZ_4) {
+        av1_decode_block(tile, r, c, sub_size);
+        av1_decode_block(tile, r + quarter, c, sub_size);
+        av1_decode_block(tile, r + (quarter * 2), c, sub_size);
+        if ((r + (quarter * 3)) < mi_rows) {
+            av1_decode_block(tile, r + (quarter * 3), c, sub_size);
+        }
+        return 0;
+    }
+    # PARTITION_VERT_4
+    av1_decode_block(tile, r, c, sub_size);
+    av1_decode_block(tile, r, c + quarter, sub_size);
+    av1_decode_block(tile, r, c + (quarter * 2), sub_size);
+    if ((c + (quarter * 3)) < mi_cols) {
+        av1_decode_block(tile, r, c + (quarter * 3), sub_size);
+    }
+    return 0;
+}
+
+# ================================================================
+# decode_partition (5.11.4) — read the partition, recurse or decode_block.
+# ================================================================
+fn av1_decode_partition(tile, r, c, bsize): i64 {
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    if ((r >= mi_rows) || (c >= mi_cols)) { return DR_OK; }
+    var sd = load64(tile + AV1TILE_SD);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var avail_u = av1_is_inside(tile, r - 1, c);
+    var avail_l = av1_is_inside(tile, r, c - 1);
+    var num4x4 = av1_num_4x4_w(bsize);
+    var half = num4x4 >> 1;
+    var quarter = half >> 1;
+    var has_rows = 0;
+    if ((r + half) < mi_rows) { has_rows = 1; }
+    var has_cols = 0;
+    if ((c + half) < mi_cols) { has_cols = 1; }
+    var bsl = av1_mi_width_log2(bsize);
+    var partition = AV1_PARTITION_NONE;
+    if (bsize >= AV1_BLOCK_8X8) {
+        var ctx = av1_partition_ctx(tile, r, c, bsize, avail_u, avail_l);
+        if (has_rows && has_cols) {
+            partition = av1_read_partition(sd, ncc, ctx, bsl);
+        } else {
+            if (has_cols) {
+                partition = AV1_PARTITION_HORZ;
+                if (av1_read_split_or_horz(sd, ncc, ctx, bsl)) { partition = AV1_PARTITION_SPLIT; }
+            } else {
+                if (has_rows) {
+                    partition = AV1_PARTITION_VERT;
+                    if (av1_read_split_or_vert(sd, ncc, ctx, bsl)) { partition = AV1_PARTITION_SPLIT; }
+                } else {
+                    partition = AV1_PARTITION_SPLIT;
+                }
+            }
+        }
+    }
+    var sub_size = av1_partition_subsize(partition, bsize);
+    if (partition == AV1_PARTITION_SPLIT) {
+        av1_decode_partition(tile, r, c, sub_size);
+        av1_decode_partition(tile, r, c + half, sub_size);
+        av1_decode_partition(tile, r + half, c, sub_size);
+        av1_decode_partition(tile, r + half, c + half, sub_size);
+    } else {
+        av1_decode_partition_leaf(tile, partition, r, c, half, quarter, sub_size,
+        av1_partition_subsize(AV1_PARTITION_SPLIT, bsize));
+    }
+    return DR_OK;
+}
+
+# encode_partition — the paired encode. The tree is driven by a pre-order plan:
+# plan_part[*part_cur] is the partition type at each node; plan_mi[*blk_cur] /
+# plan_tx[*blk_cur] are the block mode / tx size at each decode_block. Cursors
+# are i64 pointers. Mirrors decode_partition's traversal so the stream reads back
+# identically. (Supports NONE / HORZ / VERT / SPLIT — the encode-lane subset the
+# round-trip test exercises; the A/B/4 encode is grown with the encoder arc.)
+fn av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur): i64 {
+    var i = load64(blk_cur);
+    av1_encode_block(tile, r, c, sub_size, load64(plan_mi + (i * 8)), load64(plan_tx + (i * 8)));
+    store64(blk_cur, i + 1);
+    return 0;
+}
+fn av1_encode_partition(tile, r, c, bsize, plan_part, part_cur, plan_mi, plan_tx, blk_cur): i64 {
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    if ((r >= mi_rows) || (c >= mi_cols)) { return DR_OK; }
+    var enc = load64(tile + AV1TILE_ENC);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var avail_u = av1_is_inside(tile, r - 1, c);
+    var avail_l = av1_is_inside(tile, r, c - 1);
+    var num4x4 = av1_num_4x4_w(bsize);
+    var half = num4x4 >> 1;
+    var has_rows = 0;
+    if ((r + half) < mi_rows) { has_rows = 1; }
+    var has_cols = 0;
+    if ((c + half) < mi_cols) { has_cols = 1; }
+    var bsl = av1_mi_width_log2(bsize);
+    var partition = AV1_PARTITION_NONE;
+    if (bsize >= AV1_BLOCK_8X8) {
+        partition = load64(plan_part + (load64(part_cur) * 8));
+        store64(part_cur, load64(part_cur) + 1);
+        var ctx = av1_partition_ctx(tile, r, c, bsize, avail_u, avail_l);
+        if (has_rows && has_cols) {
+            av1_write_partition(enc, ncc, ctx, bsl, partition);
+        } else {
+            if (has_cols) {
+                var sh = 0;
+                if (partition == AV1_PARTITION_SPLIT) { sh = 1; }
+                av1_write_split_or_horz(enc, ncc, ctx, bsl, sh);
+            } else {
+                if (has_rows) {
+                    var sv = 0;
+                    if (partition == AV1_PARTITION_SPLIT) { sv = 1; }
+                    av1_write_split_or_vert(enc, ncc, ctx, bsl, sv);
+                }
+            }
+        }
+    }
+    var sub_size = av1_partition_subsize(partition, bsize);
+    if (partition == AV1_PARTITION_NONE) {
+        av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur);
+    } else {
+        if (partition == AV1_PARTITION_HORZ) {
+            av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur);
+            if (has_rows) { av1_encode_block_next(tile, r + half, c, sub_size, plan_mi, plan_tx, blk_cur); }
+        } else {
+            if (partition == AV1_PARTITION_VERT) {
+                av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur);
+                if (has_cols) { av1_encode_block_next(tile, r, c + half, sub_size, plan_mi, plan_tx, blk_cur); }
+            } else {
+                av1_encode_partition(tile, r, c, sub_size,
+                plan_part, part_cur, plan_mi, plan_tx, blk_cur);
+                av1_encode_partition(tile, r, c + half, sub_size,
+                plan_part, part_cur, plan_mi, plan_tx, blk_cur);
+                av1_encode_partition(tile, r + half, c, sub_size,
+                plan_part, part_cur, plan_mi, plan_tx, blk_cur);
+                av1_encode_partition(tile, r + half, c + half, sub_size,
+                plan_part, part_cur, plan_mi, plan_tx, blk_cur);
+            }
+        }
+    }
+    return DR_OK;
+}

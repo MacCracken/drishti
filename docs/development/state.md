@@ -6,16 +6,17 @@
 
 ## Version
 
-**0.7.23** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
-AV1 arc** reaches a composition milestone in the **block/partition decode**:
-bite 5, the **residual driver** (`av1_residual.cyr` — `residual()` /
-`transform_block()`) drives predict_intra → coeffs() → reconstruct() per
-transform block, so a transform block now decodes **end-to-end to pixels**
-in a DrFrame (with CfL, the BlockDecoded availability grid, and MaxLumaW/H).
-On top of the transform-type seam (0.7.22), tx-size read (0.7.21), mode-info
-reads (0.7.20), and the coefficient decode (0.7.13-0.7.18). The remaining
-distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 →
-0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.24** — cut 2026-07-11, not yet tagged (user's git). The **0.7.x
+AV1 arc** completes the **block/partition decode** end-to-end with bite 6,
+the **partition tree** (`av1_partition.cyr` — `decode_partition` /
+`decode_block`): the recursive superblock partition, and per block the
+orchestration mode_info → tx-size → residual() that composes bites 2/3/5,
+plus the paired encode lane — a full partition tree round-trips. On top of
+the residual driver (0.7.23), transform-type seam (0.7.22), tx-size read
+(0.7.21), mode-info reads (0.7.20), and coefficient decode (0.7.13-0.7.18).
+The remaining distance to 1.0 is the tile/frame loop (bite 7, the first
+decoded keyframe), then the rest of the per-codec completion arcs (0.7.x
+AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 ## Toolchain
@@ -30,7 +31,7 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 →
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (28 `[lib]` modules, dependency order)
+## Source (29 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -54,7 +55,8 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 →
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
-| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H); get_tx_size; Av1Tile + Av1Block decode contexts |
+| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H); get_tx_size; Av1Tile (+ MI grids) + Av1Block decode contexts |
+| `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |
@@ -68,12 +70,12 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 →
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 23 suites / **19,803 assertions**: drishti 51 · bits
+- `make test` — 24 suites / **20,019 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · av1_txtype
-  142 · av1_residual 19 · h264 326 · h265 276 · vpx 287
+  142 · av1_residual 19 · av1_partition 216 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -119,7 +121,11 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1 →
   safety → all clean, no findings), and the residual driver (5 slices:
   transform_block orchestration + residual loop/get_tx_size + BlockDecoded/
   availability + coordinate/subsampling math + hostile-input safety → all
-  clean, no findings)
+  clean, no findings), and the partition tree (5 slices: decode_partition
+  dispatch + decode_block orchestration + partition symbol/ctx + tables/grids
+  + encode-symmetry/safety → 4 clean + 1 real finding, an unclamped MI-grid
+  write that was OOB for an edge block on a non-64-aligned frame, fixed +
+  regression-tested)
 
 ## Dependencies
 
@@ -185,13 +191,16 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    Av1Block decode contexts (populated by bite 7). A transform block decodes
    end-to-end to pixels; verified by concrete DC/skip/eob checks + a
    driver-vs-manual reconstruct consistency test. **[done 0.7.23]**
-6. **`decode_partition` tree + `decode_block`** (5.11.4/5.11.5) — the
-   partition symbol/ctx + split_or_horz/vert edge CDFs + Partition_Subsize;
-   writes the MiSizes grid, and per block: mode-info → tx-size → residual.
-   **← NEXT BITE.**
+6. **`decode_partition` tree + `decode_block`** — `av1_partition.cyr`: the
+   partition symbol/ctx + split_or_horz/vert synthesized CDFs +
+   Partition_Subsize; all 10 partition types; per block mode-info → tx-size →
+   residual + the MiSizes/YModes/Skips/InterTxSizes grid writes; paired encode
+   lane. A full partition tree round-trips. The adversarial review caught +
+   fixed an OOB MI-grid write for edge blocks on non-64-aligned frames.
+   **[done 0.7.24]**
 7. **tile/frame loop** (`decode_tile`/tile_group) — clear_above/left,
    the SB loop, init the CDF contexts (av1_ncdf_new + av1_ccdf_new), drive
-   into `DrFrame` = **first decoded keyframe**.
+   into `DrFrame` = **first decoded keyframe**. **← NEXT BITE (arc close).**
 
 Deferred (feature-gated, after the baseline keyframe): 128×128 SBs,
 palette, intrabc, segmentation, active delta-q/lf, multi-tile, and the

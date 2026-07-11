@@ -72,7 +72,17 @@ enum Av1TileOff {
     AV1TILE_LLVL      = 192;  # LeftLevelContext: 3
     AV1TILE_ADC       = 216;  # AboveDcContext: 3
     AV1TILE_LDC       = 240;  # LeftDcContext: 3
-    AV1TILE_SIZE      = 264;
+    # --- extended for the partition tree (bite 6): the encode-side handle,
+    #     frame constants, and the MI grids (MiCols*MiRows i64 each). ---
+    AV1TILE_ENC       = 264;  # av1_sym_enc handle (encode lane; 0 on decode)
+    AV1TILE_TX_MODE   = 272;  # TxMode (TX_MODE_SELECT etc.)
+    AV1TILE_ENABLE_FI = 280;  # enable_filter_intra
+    AV1TILE_MISIZES   = 288;  # MiSizes grid
+    AV1TILE_YMODES    = 296;  # YModes grid
+    AV1TILE_UVMODES   = 304;  # UVModes grid
+    AV1TILE_SKIPS     = 312;  # Skips grid
+    AV1TILE_INTERTX   = 320;  # InterTxSizes grid
+    AV1TILE_SIZE      = 328;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -108,6 +118,16 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_ENABLE_EF, enable_ef);
     store64(tile + AV1TILE_IS_INTER, 0);
     store64(tile + AV1TILE_REDUCED_TX, reduced_tx);
+    # extended fields default to 0 / empty; the partition-tree caller (bite 6)
+    # sets ENC / TX_MODE / ENABLE_FI and allocates the grids via av1_tile_grids_new.
+    store64(tile + AV1TILE_ENC, 0);
+    store64(tile + AV1TILE_TX_MODE, AV1_TX_MODE_SELECT);
+    store64(tile + AV1TILE_ENABLE_FI, 0);
+    store64(tile + AV1TILE_MISIZES, 0);
+    store64(tile + AV1TILE_YMODES, 0);
+    store64(tile + AV1TILE_UVMODES, 0);
+    store64(tile + AV1TILE_SKIPS, 0);
+    store64(tile + AV1TILE_INTERTX, 0);
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
@@ -145,6 +165,36 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
         p = p + 1;
     }
     return tile;
+}
+
+# Allocate the MI grids (MiSizes / YModes / UVModes / Skips / InterTxSizes),
+# each MiCols*MiRows i64, zeroed. Called by the partition-tree caller (bite 6)
+# after av1_tile_new. Returns DR_OK, or DR_ERR_OOM.
+fn av1_tile_grids_new(tile): i64 {
+    var n = load64(tile + AV1TILE_MI_COLS) * load64(tile + AV1TILE_MI_ROWS);
+    var offs = alloc(5 * 8);
+    if (offs == 0) { return DR_ERR_OOM; }
+    store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
+    store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
+    store64(offs + 32, AV1TILE_INTERTX);
+    var g = 0;
+    while (g < 5) {
+        var arr = alloc(n * 8);
+        if (arr == 0) { return DR_ERR_OOM; }
+        var i = 0;
+        while (i < n) { store64(arr + (i * 8), 0); i = i + 1; }
+        store64(tile + load64(offs + (g * 8)), arr);
+        g = g + 1;
+    }
+    return DR_OK;
+}
+# MI-grid accessors: grid[r][c] flat as r*MiCols + c. base is the AV1TILE_* off.
+fn av1_grid_get(tile, base, r, c): i64 {
+    return load64(load64(tile + base) + (((r * load64(tile + AV1TILE_MI_COLS)) + c) * 8));
+}
+fn av1_grid_set(tile, base, r, c, v): i64 {
+    store64(load64(tile + base) + (((r * load64(tile + AV1TILE_MI_COLS)) + c) * 8), v);
+    return 0;
 }
 
 # clear_block_decoded_flags (5.11.3) for one superblock at MI (r, c). Seeds the
