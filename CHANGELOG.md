@@ -4,6 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-10
+
+The **0.7.x AV1 arc** continues with the entropy substrate: the
+multi-symbol adaptive-CDF arithmetic (symbol) decoder (spec 8.2) that
+every tile decode reads through, plus its paired encoder (the
+encode-lane seed). Encoder-independent known-answers pin the decoder to
+the spec; encode→decode round-trips (bit-exact CDF adaptation on both
+sides) prove the encoder is its exact inverse; a 5-agent adversarial
+spec review came back clean. **3,629 suite assertions + 1,140 fuzz
+assertions, all green.**
+
+### Added
+- **AV1 symbol coder** (`src/av1_symbol.cyr`, prefix `av1_`): the daala/
+  msac-lineage multi-symbol range coder. DECODER (spec 8.2) — `init_symbol`
+  (SymbolValue/Range/MaxBits), `read_symbol` (the multi-symbol decode +
+  in-place CDF adaptation, `EC_PROB_SHIFT`/`EC_MIN_PROB`), `read_bool`,
+  `read_literal`, `exit_symbol` — over an `Av1SymDec` reading a partition
+  through the core MSB-first bitreader. ENCODER — the exact inverse
+  (`u=U(R,s-1)`, `v=U(R,s)`, `low+=R-u`, `rng=u-v`) with the daala
+  normalization + carry flush (cross-checked against rav1e `src/ec.rs`),
+  over an `Av1SymEnc`; the two share one CDF-adaptation routine so they
+  stay bit-for-bit in lockstep. 280 assertions.
+- **Core `dr_br_skip`** (`src/bits.cyr`): forward bit-skip that (unlike
+  `dr_br_read_bits`) accepts n > 32, bounds-checked — used by
+  `exit_symbol` to advance over trailing bits.
+
+### Notes
+- `drishti_version()` → 702; toolchain pin unchanged (`6.4.43`).
+- Symbol-decoder fuzz-corpus expansion (random bytes / CDFs) is folded
+  into the 0.11.x audit arc; this cut relies on the round-trip,
+  known-answer, and truncation-padding tests plus the spec review.
+
 ## [0.7.1] - 2026-07-10
 
 The **0.7.x AV1 arc** opens: the full uncompressed frame header (spec

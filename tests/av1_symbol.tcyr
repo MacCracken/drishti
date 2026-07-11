@@ -1,0 +1,257 @@
+# tests/av1_symbol.tcyr — the AV1 multi-symbol arithmetic (symbol) coder
+# (spec 8.2). Two kinds of check:
+#   1. encoder-INDEPENDENT known-answers on the decoder (init state; an
+#      all-zeros / all-ones partition drives read_literal to 0 / all-ones)
+#      — these pin the decoder to the spec without trusting the encoder.
+#   2. round-trips: encode a stream, flush, decode it back, and require the
+#      symbols (and, with adaptation on, the final CDF state) to match —
+#      which proves the encoder is the exact inverse of the spec decoder.
+include "src/main.cyr"
+include "src/bits.cyr"
+include "src/av1_symbol.cyr"
+
+# A uniform CDF for N symbols: cdf[i] = round((i+1) << 15 / N), cdf[N-1] =
+# 1<<15, cdf[N] = 0 (adaptation count). N+1 i64 slots.
+fn mk_uniform_cdf(n): i64 {
+    var cdf = alloc((n + 1) * 8);
+    var i = 0;
+    while (i < n) {
+        store64(cdf + (i * 8), ((i + 1) * 32768) / n);
+        i = i + 1;
+    }
+    store64(cdf + ((n - 1) * 8), 32768);   # exact top
+    store64(cdf + (n * 8), 0);             # count
+    return cdf;
+}
+
+fn fill(buf, len, byte) {
+    var i = 0;
+    while (i < len) { store8(buf + i, byte); i = i + 1; }
+    return 0;
+}
+
+# ================================================================
+# Encoder-independent known-answers (decoder pinned to the spec).
+# ================================================================
+fn test_sym_init_known() {
+    # All-zero partition, sz = 4: buf = f(15) = 0, paddedBuf = 0,
+    # SymbolValue = (1<<15)-1 = 32767, SymbolRange = 1<<15, MaxBits = 17.
+    var z = alloc(4);
+    fill(z, 4, 0x00);
+    var sd = av1_sym_dec_init(z, 4, 1);
+    assert(sd != 0, "decoder inits");
+    assert_eq(av1_sym_dec_value(sd), 32767, "SymbolValue = 32767 (zeros)");
+    assert_eq(av1_sym_dec_range(sd), 32768, "SymbolRange = 1<<15");
+    assert_eq(av1_sym_dec_max_bits(sd), 17, "SymbolMaxBits = 8*4-15");
+    # All-ones partition: f(15) = 0x7FFF, SymbolValue = 32767 ^ 32767 = 0.
+    var o = alloc(4);
+    fill(o, 4, 0xFF);
+    var sd2 = av1_sym_dec_init(o, 4, 1);
+    assert_eq(av1_sym_dec_value(sd2), 0, "SymbolValue = 0 (ones)");
+    return 0;
+}
+
+fn test_sym_decode_known() {
+    # An all-zeros partition decodes read_bool -> 0 forever; all-ones -> 1.
+    var z = alloc(8);
+    fill(z, 8, 0x00);
+    var sd = av1_sym_dec_init(z, 8, 1);
+    assert_eq(av1_sym_read_literal(sd, 8), 0, "zeros -> literal 0");
+    var o = alloc(8);
+    fill(o, 8, 0xFF);
+    var sd2 = av1_sym_dec_init(o, 8, 1);
+    assert_eq(av1_sym_read_literal(sd2, 8), 255, "ones -> literal 255");
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "no fault");
+    return 0;
+}
+
+# ================================================================
+# Round-trips.
+# ================================================================
+fn test_sym_bool_roundtrip() {
+    # Encode a fixed bit pattern, flush, decode it back.
+    var bits = alloc(16 * 8);
+    var pat = alloc(16);
+    store8(pat, 1); store8(pat + 1, 0); store8(pat + 2, 1); store8(pat + 3, 1);
+    store8(pat + 4, 0); store8(pat + 5, 0); store8(pat + 6, 1); store8(pat + 7, 0);
+    store8(pat + 8, 1); store8(pat + 9, 1); store8(pat + 10, 0); store8(pat + 11, 1);
+    store8(pat + 12, 0); store8(pat + 13, 1); store8(pat + 14, 1); store8(pat + 15, 1);
+    var enc = av1_sym_enc_init(64, 1);
+    var i = 0;
+    while (i < 16) {
+        av1_sym_encode_bool(enc, load8(pat + i));
+        i = i + 1;
+    }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    assert(out != 0, "encoder flushes");
+    assert(olen > 0, "produced bytes");
+    var sd = av1_sym_dec_init(out, olen, 1);
+    i = 0;
+    while (i < 16) {
+        assert_eq(av1_sym_read_bool(sd), load8(pat + i), "bool round-trips");
+        i = i + 1;
+    }
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "clean decode");
+    return 0;
+}
+
+fn test_sym_literal_roundtrip() {
+    # A handful of literals of assorted widths.
+    var enc = av1_sym_enc_init(64, 1);
+    av1_sym_encode_literal(enc, 0xA5, 8);
+    av1_sym_encode_literal(enc, 5, 3);
+    av1_sym_encode_literal(enc, 0x1FF, 9);
+    av1_sym_encode_literal(enc, 0, 4);
+    av1_sym_encode_literal(enc, 0xDEAD, 16);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_sym_read_literal(sd, 8), 0xA5, "literal 8");
+    assert_eq(av1_sym_read_literal(sd, 3), 5, "literal 3");
+    assert_eq(av1_sym_read_literal(sd, 9), 0x1FF, "literal 9");
+    assert_eq(av1_sym_read_literal(sd, 4), 0, "literal 4");
+    assert_eq(av1_sym_read_literal(sd, 16), 0xDEAD, "literal 16");
+    return 0;
+}
+
+# Fixed symbol stream (10 symbols in [0,3]) round-tripped with a uniform
+# CDF and adaptation OFF (both sides use the same constant CDF).
+fn test_sym_symbol_roundtrip_noadapt() {
+    var syms = alloc(10);
+    store8(syms, 0); store8(syms + 1, 3); store8(syms + 2, 1); store8(syms + 3, 2);
+    store8(syms + 4, 2); store8(syms + 5, 0); store8(syms + 6, 3); store8(syms + 7, 1);
+    store8(syms + 8, 0); store8(syms + 9, 0);
+    var cdf_e = mk_uniform_cdf(4);
+    var enc = av1_sym_enc_init(64, 1);   # disable_cdf_update = 1
+    var i = 0;
+    while (i < 10) {
+        av1_sym_encode_symbol(enc, cdf_e, 4, load8(syms + i));
+        i = i + 1;
+    }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var cdf_d = mk_uniform_cdf(4);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    i = 0;
+    while (i < 10) {
+        assert_eq(av1_sym_read_symbol(sd, cdf_d, 4), load8(syms + i), "symbol round-trips (noadapt)");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Same stream WITH adaptation on: symbols must match AND the encoder's and
+# decoder's CDFs must end identical (they ran the same update sequence).
+fn test_sym_symbol_roundtrip_adapt() {
+    var syms = alloc(20);
+    var i = 0;
+    while (i < 20) { store8(syms + i, (i * 7 + 3) % 6); i = i + 1; }   # values in [0,5]
+    var cdf_e = mk_uniform_cdf(6);
+    var enc = av1_sym_enc_init(64, 0);   # disable_cdf_update = 0 (adapt)
+    i = 0;
+    while (i < 20) {
+        av1_sym_encode_symbol(enc, cdf_e, 6, load8(syms + i));
+        i = i + 1;
+    }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var cdf_d = mk_uniform_cdf(6);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    i = 0;
+    while (i < 20) {
+        assert_eq(av1_sym_read_symbol(sd, cdf_d, 6), load8(syms + i), "symbol round-trips (adapt)");
+        i = i + 1;
+    }
+    # CDFs (7 slots each) evolved identically on both sides.
+    var j = 0;
+    while (j < 7) {
+        assert_eq(load64(cdf_d + (j * 8)), load64(cdf_e + (j * 8)), "adapted CDF slot matches");
+        j = j + 1;
+    }
+    assert(load64(cdf_d + (6 * 8)) > 0, "adaptation count advanced");
+    return 0;
+}
+
+# Interleave bool / literal / symbol in one stream.
+fn test_sym_mixed_roundtrip() {
+    var cdf_e = mk_uniform_cdf(3);
+    var enc = av1_sym_enc_init(64, 0);
+    av1_sym_encode_bool(enc, 1);
+    av1_sym_encode_symbol(enc, cdf_e, 3, 2);
+    av1_sym_encode_literal(enc, 0x2A, 6);
+    av1_sym_encode_symbol(enc, cdf_e, 3, 0);
+    av1_sym_encode_bool(enc, 0);
+    av1_sym_encode_symbol(enc, cdf_e, 3, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var cdf_d = mk_uniform_cdf(3);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    assert_eq(av1_sym_read_bool(sd), 1, "mixed bool 1");
+    assert_eq(av1_sym_read_symbol(sd, cdf_d, 3), 2, "mixed symbol 2");
+    assert_eq(av1_sym_read_literal(sd, 6), 0x2A, "mixed literal");
+    assert_eq(av1_sym_read_symbol(sd, cdf_d, 3), 0, "mixed symbol 0");
+    assert_eq(av1_sym_read_bool(sd), 0, "mixed bool 0");
+    assert_eq(av1_sym_read_symbol(sd, cdf_d, 3), 1, "mixed symbol 1");
+    return 0;
+}
+
+# Larger N and a longer stream to exercise renorm / carry across bytes.
+fn test_sym_large() {
+    var cdf_e = mk_uniform_cdf(16);
+    var enc = av1_sym_enc_init(64, 0);
+    var i = 0;
+    while (i < 200) {
+        av1_sym_encode_symbol(enc, cdf_e, 16, (i * 5 + 1) % 16);
+        i = i + 1;
+    }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    assert(olen > 8, "long stream spans many bytes");
+    var cdf_d = mk_uniform_cdf(16);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    i = 0;
+    while (i < 200) {
+        assert_eq(av1_sym_read_symbol(sd, cdf_d, 16), (i * 5 + 1) % 16, "large-N symbol round-trips");
+        i = i + 1;
+    }
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "no fault over long stream");
+    return 0;
+}
+
+# Adversarial: a decoder handed a 1-byte partition reads padding zeros for
+# the rest — it must not crash or read out of bounds, just keep returning
+# decoded symbols against the padded tail.
+fn test_sym_truncated() {
+    var b = alloc(1);
+    store8(b, 0x80);
+    var sd = av1_sym_dec_init(b, 1, 1);
+    assert(sd != 0, "inits on 1-byte partition");
+    var i = 0;
+    while (i < 40) {
+        av1_sym_read_bool(sd);          # keeps decoding against padding
+        i = i + 1;
+    }
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "padding decode never faults");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("av1 symbol coder — known answers");
+    test_sym_init_known();
+    test_sym_decode_known();
+    test_group("av1 symbol coder — round-trips");
+    test_sym_bool_roundtrip();
+    test_sym_literal_roundtrip();
+    test_sym_symbol_roundtrip_noadapt();
+    test_sym_symbol_roundtrip_adapt();
+    test_sym_mixed_roundtrip();
+    test_sym_large();
+    test_group("av1 symbol coder — adversarial");
+    test_sym_truncated();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

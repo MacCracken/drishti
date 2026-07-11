@@ -89,8 +89,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   (`set_frame_refs` 7.8, `frame_size_with_refs`, reference update 7.20,
   `mark_ref_frames`); frame-size overrides + superres + render size;
   full-fidelity `Av1Seq` growth; the shared `su(n)`/`ns(n)` descriptors.
-- **entropy decoder** — multi-symbol adaptive-CDF arithmetic decoder
-  (daala lineage); the substrate every tile decode needs.
+- **entropy decoder** — **done (0.7.2)**: the multi-symbol adaptive-CDF
+  arithmetic (symbol) decoder (spec 8.2 — init_symbol / read_symbol +
+  CDF adaptation / read_bool / read_literal / exit_symbol), plus the
+  paired symbol encoder (encode-lane seed) so every path round-trips.
 - **intra still-picture decode — MILESTONE** — partition tree, intra
   prediction modes, inverse transforms, reconstruction (profile-0
   keyframes: first pixels out).

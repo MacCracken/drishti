@@ -180,6 +180,24 @@ fn dr_br_read_bits(br, n): i64 {
     return v;
 }
 
+# Skip n bits forward (n may exceed 32, unlike dr_br_read_bits). Sets
+# sticky DR_ERR_BOUNDS on negative n, DR_ERR_TRUNCATED when fewer than n
+# bits remain (cursor unmoved on fault). Returns DR_OK / sticky code.
+fn dr_br_skip(br, n): i64 {
+    var e = load64(br + 24);
+    if (e != DR_OK) { return e; }
+    if (n < 0) {
+        store64(br + 24, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
+    if (dr_br_bits_left(br) < n) {
+        store64(br + 24, DR_ERR_TRUNCATED);
+        return DR_ERR_TRUNCATED;
+    }
+    store64(br + 16, load64(br + 16) + n);
+    return DR_OK;
+}
+
 # Advance the cursor to the next byte boundary (no-op if aligned).
 # Discarded bits are not inspected. Cannot overrun: pos lands at most
 # on len*8. Returns DR_OK (or the sticky error if already faulted).
