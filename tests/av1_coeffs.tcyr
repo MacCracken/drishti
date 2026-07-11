@@ -1,0 +1,244 @@
+# tests/av1_coeffs.tcyr — AV1 coefficient reading loop (spec 5.11.39) + the
+# txb_skip / dc_sign / txSzCtx contexts (8.3.2). Contexts are pinned by
+# hand-computed known-answers on constructed neighbour arrays; the coeffs()
+# decode/encode pair is verified by round-trip (encode a known Quant[] with a
+# fresh symbol coder, decode it back, assert equal).
+include "src/main.cyr"
+include "src/av1_coeffs.cyr"
+
+fn az(p, n): i64 { var k = 0; while (k < n) { store64(p + (k * 8), 0); k = k + 1; } return 0; }
+
+fn test_tx_size_ctx() {
+    assert_eq(av1_tx_size_ctx(0), 0, "txSzCtx 4x4");
+    assert_eq(av1_tx_size_ctx(1), 1, "txSzCtx 8x8");
+    assert_eq(av1_tx_size_ctx(2), 2, "txSzCtx 16x16");
+    assert_eq(av1_tx_size_ctx(3), 3, "txSzCtx 32x32");
+    assert_eq(av1_tx_size_ctx(4), 4, "txSzCtx 64x64");
+    assert_eq(av1_tx_size_ctx(5), 1, "txSzCtx 4x8");
+    assert_eq(av1_tx_size_ctx(7), 2, "txSzCtx 8x16");
+    assert_eq(av1_tx_size_ctx(9), 3, "txSzCtx 16x32");
+    assert_eq(av1_tx_size_ctx(11), 4, "txSzCtx 32x64");
+    assert_eq(av1_tx_size_ctx(17), 3, "txSzCtx 16x64");
+    assert_eq(av1_tx_size_sqr(5), 0, "Tx_Size_Sqr 4x8 -> 4x4");
+    assert_eq(av1_tx_size_sqr_up(5), 1, "Tx_Size_Sqr_Up 4x8 -> 8x8");
+    return 0;
+}
+
+# txb_skip (all_zero) context. Isolated 4x4 block at (0,0): w4=h4=1, w=h=4.
+fn test_txb_skip_ctx() {
+    var al = alloc(8 * 8);
+    var ll = alloc(8 * 8);
+    var ad = alloc(8 * 8);
+    var ld = alloc(8 * 8);
+    az(al, 8); az(ll, 8); az(ad, 8); az(ld, 8);
+    # plane 0, block == tx (bw==w, bh==h) -> ctx 0
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 4, 4, al, ll, ad, ld), 0, "txb bw==w -> 0");
+    # plane 0, block > tx, no neighbour levels -> ctx 1
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 1, "txb empty -> 1");
+    # top=5, left=0 -> one side only, max>3 -> ctx 3
+    store64(al + 0, 5);
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 3, "txb top>3 -> 3");
+    # top=2, left=0 -> one side only, max<=3 -> ctx 2
+    store64(al + 0, 2);
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 2, "txb top<=3 -> 2");
+    # top=2, left=1 -> both, max<=3 -> ctx 4
+    store64(al + 0, 2); store64(ll + 0, 1);
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 4, "txb both<=3 -> 4");
+    # top=5, left=2 -> both, max>3, min<=3 -> ctx 5
+    store64(al + 0, 5); store64(ll + 0, 2);
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 5, "txb max>3 min<=3 -> 5");
+    # top=10, left=8 -> both >3 -> ctx 6
+    store64(al + 0, 10); store64(ll + 0, 8);
+    assert_eq(av1_txb_skip_ctx(0, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 6, "txb both>3 -> 6");
+    # chroma (plane 1). reset.
+    az(al, 8); az(ll, 8); az(ad, 8); az(ld, 8);
+    assert_eq(av1_txb_skip_ctx(1, 0, 0, 1, 1, 4, 4, 100, 100, 4, 4, al, ll, ad, ld), 7, "txb chroma empty -> 7");
+    store64(al + 0, 3);
+    assert_eq(av1_txb_skip_ctx(1, 0, 0, 1, 1, 4, 4, 100, 100, 4, 4, al, ll, ad, ld), 8, "txb chroma above -> 8");
+    store64(ll + 0, 1);
+    assert_eq(av1_txb_skip_ctx(1, 0, 0, 1, 1, 4, 4, 100, 100, 4, 4, al, ll, ad, ld), 9, "txb chroma both -> 9");
+    # bw*bh (8*4=32) > w*h (16) -> +3
+    assert_eq(av1_txb_skip_ctx(1, 0, 0, 1, 1, 4, 4, 100, 100, 8, 4, al, ll, ad, ld), 12, "txb chroma bigger blk -> 12");
+    # dc-context also ORs in on chroma: only above_dc set
+    az(al, 8); az(ll, 8); az(ad, 8); az(ld, 8);
+    store64(ad + 0, 2);
+    assert_eq(av1_txb_skip_ctx(1, 0, 0, 1, 1, 4, 4, 100, 100, 4, 4, al, ll, ad, ld), 8, "txb chroma above_dc -> 8");
+    return 0;
+}
+
+fn test_dc_sign_ctx() {
+    var ad = alloc(8 * 8);
+    var ld = alloc(8 * 8);
+    az(ad, 8); az(ld, 8);
+    assert_eq(av1_dc_sign_ctx(0, 0, 1, 1, 100, 100, ad, ld), 0, "dc_sign empty -> 0");
+    store64(ad + 0, 1);
+    assert_eq(av1_dc_sign_ctx(0, 0, 1, 1, 100, 100, ad, ld), 1, "dc_sign neg -> 1");
+    store64(ad + 0, 2);
+    assert_eq(av1_dc_sign_ctx(0, 0, 1, 1, 100, 100, ad, ld), 2, "dc_sign pos -> 2");
+    # above negative, left positive -> net 0
+    store64(ad + 0, 1); store64(ld + 0, 2);
+    assert_eq(av1_dc_sign_ctx(0, 0, 1, 1, 100, 100, ad, ld), 0, "dc_sign mix -> 0");
+    # two positives (8-wide, w4=2) -> +2 -> ctx 2
+    az(ad, 8); az(ld, 8);
+    store64(ad + 0, 2); store64(ad + 8, 2);
+    assert_eq(av1_dc_sign_ctx(0, 0, 2, 1, 100, 100, ad, ld), 2, "dc_sign two pos -> 2");
+    return 0;
+}
+
+# Encode a known signed quant[] for one transform block, then decode it back
+# and assert the coefficients + eob match. Neighbour arrays start zeroed on
+# both sides (isolated block); disable_cdf_update = 1 (CDFs read-only).
+fn coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob): i64 {
+    var al = alloc(256 * 8);
+    var ll = alloc(256 * 8);
+    var ad = alloc(256 * 8);
+    var ld = alloc(256 * 8);
+    az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
+    var w = 1 << av1_tx_width_log2(tx_size);
+    var h = 1 << av1_tx_height_log2(tx_size);
+    var enc = av1_sym_enc_init(512, 1);
+    av1_coeffs_encode(enc, 0, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, al, ll, ad, ld, quant, eob);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "encode ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dal = alloc(256 * 8);
+    var dll = alloc(256 * 8);
+    var dad = alloc(256 * 8);
+    var dld = alloc(256 * 8);
+    az(dal, 256); az(dll, 256); az(dad, 256); az(dld, 256);
+    var dq = alloc(seg_eob * 8);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var deob = av1_coeffs_decode(sd, 0, plane, tx_size, tx_type, 0, 0, 100, 100, w, h, dal, dll, dad, dld, dq);
+    assert_eq(deob, eob, "eob round-trips");
+    var i = 0;
+    while (i < seg_eob) {
+        assert_eq(load64(dq + (i * 8)), load64(quant + (i * 8)), "coeff round-trips");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 4x4 DCT_DCT, exercising: DC base+br, a small negative, a golomb value, an
+# interior zero, a level-3 negative, and an eob coefficient with golomb.
+# Default_Scan_4x4 = [0,1,4,8,5,2,...]; eob=6 covers scan[0..5].
+fn test_coeffs_4x4() {
+    var quant = alloc(16 * 8);
+    az(quant, 16);
+    store64(quant + (0 * 8), 5);         # scan[0]=0: level 5 (base3+br2)
+    store64(quant + (1 * 8), 0 - 1);     # scan[1]=1: -1
+    store64(quant + (4 * 8), 20);        # scan[2]=4: 20 (golomb x=6)
+    store64(quant + (8 * 8), 0);         # scan[3]=8: interior zero
+    store64(quant + (5 * 8), 0 - 3);     # scan[4]=5: -3
+    store64(quant + (2 * 8), 100);       # scan[5]=2: eob coeff, 100 (golomb x=86)
+    coeffs_roundtrip(0, AV1_DCT_DCT, 0, quant, 16, 6);
+    return 0;
+}
+
+# all_zero: eob=0 -> the block is skipped; decode returns eob 0, quant all zero.
+fn test_coeffs_all_zero() {
+    var quant = alloc(16 * 8);
+    az(quant, 16);
+    coeffs_roundtrip(0, AV1_DCT_DCT, 0, quant, 16, 0);
+    return 0;
+}
+
+# 8x8 DCT_DCT with a single DC coefficient (eob=1 -> only the eob coeff).
+fn test_coeffs_8x8_dc() {
+    var quant = alloc(64 * 8);
+    az(quant, 64);
+    store64(quant + (0 * 8), 0 - 7);     # DC = -7 (eob coeff, level 7)
+    coeffs_roundtrip(1, AV1_DCT_DCT, 0, quant, 64, 1);
+    return 0;
+}
+
+# Chroma (plane 1) 4x4 with a couple of coefficients.
+fn test_coeffs_chroma() {
+    var quant = alloc(16 * 8);
+    az(quant, 16);
+    store64(quant + (0 * 8), 3);         # scan[0]=0
+    store64(quant + (1 * 8), 0 - 2);     # scan[1]=1 (eob coeff)
+    coeffs_roundtrip(0, AV1_DCT_DCT, 1, quant, 16, 2);
+    return 0;
+}
+
+# Fill quant[] by SCAN order (vals[c] -> quant[scan[c]]) so every position
+# beyond eob is guaranteed zero, then round-trip. vals[eob-1] must be nonzero.
+fn coeffs_rt_scan(tx_size, tx_type, plane, vals, eob, seg_eob): i64 {
+    var quant = alloc(seg_eob * 8);
+    az(quant, seg_eob);
+    var scan = av1_get_scan(tx_size, tx_type);
+    var c = 0;
+    while (c < eob) {
+        store64(quant + (load64(scan + (c * 8)) * 8), load64(vals + (c * 8)));
+        c = c + 1;
+    }
+    coeffs_roundtrip(tx_size, tx_type, plane, quant, seg_eob, eob);
+    return 0;
+}
+
+# 4x4 V_DCT — exercises the mrow scan + the 1D (vertical) coeff_base/br
+# contexts, distinct from the 2D path.
+fn test_coeffs_1d() {
+    var v = alloc(8 * 8);
+    store64(v + 0, 4); store64(v + 8, 0 - 6); store64(v + 16, 0);
+    store64(v + 24, 30);   # golomb, eob coeff
+    coeffs_rt_scan(0, AV1_V_DCT, 0, v, 4, 16);
+    return 0;
+}
+
+# 16x16 with a larger eob (exercises multi-bit eob_extra) and a spread of
+# magnitudes filled in scan order.
+fn test_coeffs_16x16() {
+    var v = alloc(16 * 8);
+    var k = 0;
+    while (k < 16) { store64(v + (k * 8), (k % 5) - 2); k = k + 1; }   # -2..2, some zero
+    store64(v + (15 * 8), 0 - 9);   # eob coeff must be nonzero
+    coeffs_rt_scan(2, AV1_DCT_DCT, 0, v, 16, 256);
+    return 0;
+}
+
+# Truncated / hostile input must TERMINATE (bounded loops, esp. the golomb
+# length cap) — never hang. Reaching the assertion is the proof of no-hang.
+fn test_coeffs_truncation() {
+    var buf = alloc(8);
+    store8(buf + 0, 255); store8(buf + 1, 255); store8(buf + 2, 255); store8(buf + 3, 255);
+    var al = alloc(256 * 8);
+    var ll = alloc(256 * 8);
+    var ad = alloc(256 * 8);
+    var ld = alloc(256 * 8);
+    az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
+    var dq = alloc(1024 * 8);
+    # A few tx sizes (4x4, 8x8, 16x16) over a 4-byte 0xFF buffer: the decode
+    # reads far past the buffer into padding, exercising the exhausted reader.
+    var sizes = alloc(3 * 8);
+    store64(sizes + 0, 0); store64(sizes + 8, 1); store64(sizes + 16, 2);
+    var k = 0;
+    while (k < 3) {
+        az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
+        var sd = av1_sym_dec_init(buf, 4, 1);
+        av1_coeffs_decode(sd, 0, 0, load64(sizes + (k * 8)), AV1_DCT_DCT, 0, 0, 100, 100, 4, 4, al, ll, ad, ld, dq);
+        assert_eq(1, 1, "truncated decode terminated (no hang)");
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("coeff contexts (txSzCtx / txb_skip / dc_sign)");
+    test_tx_size_ctx();
+    test_txb_skip_ctx();
+    test_dc_sign_ctx();
+    test_group("coeffs() decode/encode round-trip");
+    test_coeffs_4x4();
+    test_coeffs_all_zero();
+    test_coeffs_8x8_dc();
+    test_coeffs_chroma();
+    test_coeffs_1d();
+    test_coeffs_16x16();
+    test_coeffs_truncation();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

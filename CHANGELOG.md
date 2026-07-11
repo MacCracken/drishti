@@ -4,6 +4,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-07-11
+
+**A transform block decodes end-to-end.** The AV1 `coeffs()` reading loop
+(spec 5.11.39) in a new `src/av1_coeffs.cyr` module ties together the
+scan orders, the level + txb_skip/dc_sign contexts, all seven default
+CDFs, and the symbol coder — so encoded coefficient bytes now round-trip
+to a `Quant[]` array. A 4-agent adversarial review (decode conformance,
+encode symmetry, per-symbol CDF/context selection, libaom + edge cases)
+surfaced one real DoS-hardening gap (an unbounded golomb length loop),
+which is fixed. **13,920 suite assertions + 1,140 fuzz assertions, all
+green.**
+
+### Added
+- **AV1 coefficient reading loop** (`src/av1_coeffs.cyr`, new flat
+  module): `av1_coeffs_decode` reads one transform block's coefficients
+  (all_zero, the eob position via `eob_pt` + `eob_extra`, the base levels,
+  the `coeff_br` range extension, the signs, and the Exp-Golomb tail) from
+  the symbol decoder into `Quant[]` and returns eob; `av1_coeffs_encode`
+  is its exact inverse. Plus the remaining CDF-selection contexts
+  (`av1_txb_skip_ctx`, `av1_dc_sign_ctx`), the `txSzCtx` derivation, and
+  the `Tx_Size_Sqr` / `Tx_Size_Sqr_Up` tables. Scope: `PlaneTxType` is a
+  caller input and the CDFs are read-only (`disable_cdf_update` mode); the
+  adaptive per-tile CDF copy and `compute_tx_type` land in later bites.
+  428 assertions: the contexts by hand-computed known-answers, and the
+  decode/encode pair by **round-trip** across mixed 4x4 / 8x8 / 16x16 /
+  chroma / 1D-transform blocks (base, br, golomb, signs, interior zeros,
+  all-zero) plus a truncation-terminates check.
+
+### Fixed
+- **Unbounded Exp-Golomb length loop** in the coefficient decode: a
+  truncated/hostile stream whose exhausted symbol reader returns padding
+  without latching an error could loop forever. The unary length is now
+  capped (a valid coefficient is <= 20 bits), matching libaom's guard —
+  honouring the never-hang rule. Found by the adversarial review.
+
+### Notes
+- `drishti_version()` → 717. Next: the block/partition decode (mode info +
+  `compute_tx_type` + the adaptive CDF context) that drives `coeffs()` +
+  predict + reconstruct per block, toward a fully decoded keyframe.
+
 ## [0.7.16] - 2026-07-10
 
 Completes the AV1 default coefficient CDF tables with the two largest
