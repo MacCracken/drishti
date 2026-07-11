@@ -78,17 +78,16 @@ Not its own arc; these land inside whichever codec arc first needs them:
 - **Container scope** — IVF is the test-bench container; MP4/WebM demux
   is out of scope for drishti (a future container lib's job).
 
-## Upstream workaround watch (remove when the toolchain fix lands)
+## Upstream workaround watch
 
-- **`dr_ashr` arithmetic-shift shim** (`src/bits.cyr`, added 0.7.5) —
-  cyrius runtime `>>` is a LOGICAL shift, so every signed right-shift
-  (inverse-transform `Round2`/WHT, `av1_read_global_param`) routes through
-  `dr_ashr`. Filed upstream as
-  `cyrius/docs/development/issues/2026-07-10-drishti-runtime-shift-logical-not-arithmetic.md`.
-  **When cyrius makes `>>` arithmetic (or adds an arithmetic-shift
-  operator), delete `dr_ashr` and its callers' indirection and use the
-  native operator** — verify against the `dr_ashr` negative-value tests
-  and re-run the transform/gm known-answers, which must be unchanged.
+- **`dr_ashr` arithmetic-shift shim** — **RESOLVED (0.7.7)**. cyrius 6.4.46
+  added a dedicated arithmetic (sign-preserving) right shift `>>>`
+  (`>>` stays LOGICAL — note the convention is the reverse of JS/Java).
+  The `dr_ashr` shim (added 0.7.5) was deleted and its call sites
+  (inverse-transform `Round2`/WHT, `av1_read_global_param`) now use `>>>`;
+  the toolchain pin moved to 6.4.46. Upstream issue
+  `cyrius/docs/development/issues/2026-07-10-drishti-runtime-shift-logical-not-arithmetic.md`
+  is closed. The transform/gm known-answers are unchanged.
 
 ---
 

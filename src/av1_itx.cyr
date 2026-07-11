@@ -128,12 +128,12 @@ fn av1_tx_row_shift(tx): i64 { return load64(av1_itx_tables() + ((103 + tx) * 8)
 # Primitives — Round2, brev, cos128 / sin128, butterflies B / H.
 # ================================================================
 
-# Round2(x, n) — spec section 4: floor((x + 2^(n-1)) / 2^n). Uses the core
-# arithmetic shift dr_ashr (cyrius `>>` is logical and would corrupt the
-# negative transform intermediates this rounds).
+# Round2(x, n) — spec section 4: floor((x + 2^(n-1)) / 2^n). Uses the
+# arithmetic (sign-preserving) shift `>>>` — cyrius `>>` is LOGICAL and
+# would corrupt the negative transform intermediates this rounds.
 fn av1_round2(x, n): i64 {
     if (n == 0) { return x; }
-    return dr_ashr(x + (1 << (n - 1)), n);
+    return (x + (1 << (n - 1))) >>> n;
 }
 
 fn av1_itx_abs(x): i64 {
@@ -495,13 +495,13 @@ fn av1_itx_adst(T, n, r): i64 {
 # Inverse Walsh-Hadamard (7.13.2.10) + identity transforms (7.13.2.11-15).
 # ================================================================
 fn av1_itx_wht(T, shift): i64 {
-    var a = dr_ashr(load64(T + 0), shift);
-    var c = dr_ashr(load64(T + 8), shift);
-    var d = dr_ashr(load64(T + 16), shift);
-    var b = dr_ashr(load64(T + 24), shift);
+    var a = load64(T + 0) >>> shift;
+    var c = load64(T + 8) >>> shift;
+    var d = load64(T + 16) >>> shift;
+    var b = load64(T + 24) >>> shift;
     a = a + c;
     d = d - b;
-    var e = dr_ashr(a - d, 1);
+    var e = (a - d) >>> 1;
     b = e - b;
     c = e - c;
     a = a - b;

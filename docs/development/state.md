@@ -6,19 +6,19 @@
 
 ## Version
 
-**0.7.6** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
-AV1 arc** continues through the intra still-picture decode milestone:
-intra prediction (`av1_intra.cyr` — the non-directional DC/PAETH/SMOOTH×3
-modes + V/H, with the `predict_intra` reference-sample setup) on top of
-the 0.7.5 shift fix, 0.7.4 inverse transforms, and 0.7.3 frame buffer.
-The remaining distance to 1.0 is the rest of the per-codec completion
-arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs
-(0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
+**0.7.7** — cut 2026-07-10, not yet tagged (user's git). Adopts cyrius
+6.4.46's native arithmetic-shift `>>>` (retiring the 0.7.5 `dr_ashr`
+shim; toolchain pin → 6.4.46). The **0.7.x AV1 arc** remains inside the
+intra still-picture decode milestone (0.7.6 landed non-directional intra
+prediction). The remaining distance to 1.0 is the rest of the per-codec
+completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) +
+freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
 [`roadmap.md`](roadmap.md).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.43` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
+  version for the arithmetic-shift operator `>>>`
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
@@ -26,8 +26,8 @@ arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 706, format sniff |
-| `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, arithmetic-shift (dr_ashr), bit-skip, sticky-latch seam |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 707, format sniff |
+| `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
 | `src/av1_obu.cyr` | `av1_` | OBU parse/walk/write |
@@ -49,7 +49,7 @@ arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 12 suites / **3,927 assertions**: drishti 51 · bits 1,212
+- `make test` — 12 suites / **3,926 assertions**: drishti 51 · bits 1,211
   · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · av1_intra 48 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes

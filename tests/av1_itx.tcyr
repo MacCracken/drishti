@@ -116,7 +116,7 @@ fn test_adst4_1d() {
 }
 
 # Negative inputs exercise the arithmetic-shift path inside the transforms
-# (cyrius `>>` is logical, so signed intermediates go through dr_ashr).
+# (cyrius `>>` is logical, so signed intermediates use the `>>>` shift).
 fn test_negative_inputs() {
     # WHT([-8,0,0,0], 0) = [-4,-4,-4,-4] (mirror of the positive case).
     var T = mk_t(set4(0 - 8, 0, 0, 0), 4);

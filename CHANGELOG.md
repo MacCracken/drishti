@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-07-10
+
+Adopt cyrius 6.4.46's new arithmetic-shift operator and retire the 0.7.5
+workaround. **3,926 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Changed
+- **Arithmetic right shift now uses the native `>>>`** (cyrius 6.4.46):
+  the `dr_ashr` shim added in 0.7.5 is deleted, and its call sites — the
+  inverse-transform `Round2` / WHT and `av1_read_global_param`'s
+  `PrevGmParams` shift — use `x >>> n` directly. `>>` remains a LOGICAL
+  shift (note: the reverse of JS/Java, because `>>` is load-bearing for
+  crypto rotates upstream). The transform / global-motion known-answers
+  are unchanged. Closes the upstream issue filed at 0.7.5.
+- **Toolchain pin → 6.4.46** (`cyrius.cyml`), the minimum with `>>>`;
+  resolves the pin-drift warning.
+
+### Notes
+- `drishti_version()` → 707.
+
 ## [0.7.6] - 2026-07-10
 
 The third sub-bite of the AV1 intra still-picture decode milestone: intra
