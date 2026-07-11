@@ -1,0 +1,139 @@
+# tests/av1_coeffcdf.tcyr — AV1 default coefficient CDF tables (the smaller
+# families: txb_skip, eob_pt_16..1024, eob_extra, dc_sign, coeff_base_eob).
+# Verified by a position-weighted checksum over the whole 3396-entry blob
+# (order-sensitive), a structural sweep validating every cdf via its accessor
+# (non-decreasing, ends in 32768, count 0 — a bad accessor offset yields
+# garbage that fails this), and specific known cdf values.
+include "src/main.cyr"
+include "src/av1_coeffcdf.cyr"
+
+# A cdf for nsym symbols: nsym+1 slots, cdf[0..nsym-1] non-decreasing with
+# cdf[nsym-1]==32768, and cdf[nsym]==0 (the adaptation count).
+fn cdf_valid(cdf, nsym): i64 {
+    if (load64(cdf + (nsym * 8)) != 0) { return 0; }
+    if (load64(cdf + ((nsym - 1) * 8)) != 32768) { return 0; }
+    var i = 1;
+    while (i < nsym) {
+        if (load64(cdf + (i * 8)) < load64(cdf + ((i - 1) * 8))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn test_cdf_checksum() {
+    var b = av1_coeff_cdf_blob();
+    var s = 0;
+    var k = 0;
+    while (k < 3396) {
+        s = s + ((k + 1) * load64(b + (k * 8)));
+        k = k + 1;
+    }
+    assert_eq(s, 106187869632, "coeff cdf blob weighted checksum");
+    return 0;
+}
+
+# Sweep every context tuple of every family; each returned cdf must be valid.
+fn test_cdf_structure() {
+    var q = 0;
+    while (q < 4) {
+        var p = 0;
+        while (p < 2) {
+            # eob_pt 16..256 (ctx 0/1), 512/1024 (no ctx)
+            var cx = 0;
+            while (cx < 2) {
+                assert_eq(cdf_valid(av1_eob_pt16_cdf(q, p, cx), 5), 1, "eob_pt16 valid");
+                assert_eq(cdf_valid(av1_eob_pt32_cdf(q, p, cx), 6), 1, "eob_pt32 valid");
+                assert_eq(cdf_valid(av1_eob_pt64_cdf(q, p, cx), 7), 1, "eob_pt64 valid");
+                assert_eq(cdf_valid(av1_eob_pt128_cdf(q, p, cx), 8), 1, "eob_pt128 valid");
+                assert_eq(cdf_valid(av1_eob_pt256_cdf(q, p, cx), 9), 1, "eob_pt256 valid");
+                cx = cx + 1;
+            }
+            assert_eq(cdf_valid(av1_eob_pt512_cdf(q, p), 10), 1, "eob_pt512 valid");
+            assert_eq(cdf_valid(av1_eob_pt1024_cdf(q, p), 11), 1, "eob_pt1024 valid");
+            var dc = 0;
+            while (dc < 3) {
+                assert_eq(cdf_valid(av1_dc_sign_cdf(q, p, dc), 2), 1, "dc_sign valid");
+                dc = dc + 1;
+            }
+            var ts = 0;
+            while (ts < 5) {
+                var ee = 0;
+                while (ee < 9) {
+                    assert_eq(cdf_valid(av1_eob_extra_cdf(q, ts, p, ee), 2), 1, "eob_extra valid");
+                    ee = ee + 1;
+                }
+                var cb = 0;
+                while (cb < 4) {
+                    assert_eq(cdf_valid(av1_coeff_base_eob_cdf(q, ts, p, cb), 3), 1, "coeff_base_eob valid");
+                    cb = cb + 1;
+                }
+                ts = ts + 1;
+            }
+            p = p + 1;
+        }
+        # txb_skip[q][txSzCtx][ctx]
+        var t2 = 0;
+        while (t2 < 5) {
+            var c2 = 0;
+            while (c2 < 13) {
+                assert_eq(cdf_valid(av1_txb_skip_cdf(q, t2, c2), 2), 1, "txb_skip valid");
+                c2 = c2 + 1;
+            }
+            t2 = t2 + 1;
+        }
+        q = q + 1;
+    }
+    return 0;
+}
+
+# Specific known cdf values (spec additional-tables annex).
+fn test_cdf_known() {
+    var c = av1_txb_skip_cdf(0, 0, 0);
+    assert_eq(load64(c + 0), 31849, "txb_skip[0][0][0][0]");
+    assert_eq(load64(c + 8), 32768, "txb_skip[0][0][0][1]");
+    c = av1_txb_skip_cdf(3, 4, 12);
+    assert_eq(load64(c + 0), 16384, "txb_skip[3][4][12][0]");
+    c = av1_dc_sign_cdf(0, 0, 0);
+    assert_eq(load64(c + 0), 16000, "dc_sign[0][0][0][0] = 128*125");
+    c = av1_eob_pt16_cdf(0, 0, 0);
+    assert_eq(load64(c + 0), 840, "eob_pt16[0][0][0][0]");
+    assert_eq(load64(c + 24), 4895, "eob_pt16[0][0][0][3]");
+    c = av1_eob_pt16_cdf(0, 0, 1);
+    assert_eq(load64(c + 0), 370, "eob_pt16[0][0][1][0]");
+    c = av1_eob_pt1024_cdf(0, 0);
+    assert_eq(load64(c + 0), 393, "eob_pt1024[0][0][0]");
+    assert_eq(load64(c + (10 * 8)), 32768, "eob_pt1024[0][0][10]");
+    c = av1_eob_extra_cdf(0, 0, 0, 0);
+    assert_eq(load64(c + 0), 16961, "eob_extra[0][0][0][0][0]");
+    c = av1_coeff_base_eob_cdf(0, 0, 0, 0);
+    assert_eq(load64(c + 0), 17837, "coeff_base_eob[0][0][0][0][0]");
+    assert_eq(load64(c + 8), 29055, "coeff_base_eob[0][0][0][0][1]");
+    return 0;
+}
+
+# Accessor offset arithmetic: the pointer equals blob + offset*8.
+fn test_cdf_offsets() {
+    var b = av1_coeff_cdf_blob();
+    assert_eq(av1_txb_skip_cdf(0, 0, 0), b + (0 * 8), "txb_skip base offset");
+    assert_eq(av1_eob_pt16_cdf(0, 0, 0), b + (780 * 8), "eob_pt16 base offset");
+    assert_eq(av1_eob_extra_cdf(0, 0, 0, 0), b + (1604 * 8), "eob_extra base offset");
+    assert_eq(av1_dc_sign_cdf(0, 0, 0), b + (2684 * 8), "dc_sign base offset");
+    assert_eq(av1_coeff_base_eob_cdf(0, 0, 0, 0), b + (2756 * 8), "coeff_base_eob base offset");
+    # last coeff_base_eob cdf: q=3,ts=4,p=1,ctx=3 -> offset 2756 + (((((3*5+4)*2+1)*4+3))*4) = 3392.
+    assert_eq(av1_coeff_base_eob_cdf(3, 4, 1, 3), b + (3392 * 8), "coeff_base_eob last offset");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("coeff cdf blob");
+    test_cdf_checksum();
+    test_cdf_structure();
+    test_group("coeff cdf known values + offsets");
+    test_cdf_known();
+    test_cdf_offsets();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

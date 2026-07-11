@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-07-10
+
+Continues the AV1 coefficient decode with the first batch of default
+coefficient CDF tables in a new `src/av1_coeffcdf.cyr` module — the
+initial adaptive-CDF values the `coeffs()` loop loads per quantizer
+bucket. A 3-agent adversarial review (per-family table diffs evaluating
+the `128 * x` products, accessor-index arithmetic, and a format +
+libaom `token_cdfs.h` cross-check) confirmed every value with no defects.
+**10,961 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 default coefficient CDF tables — smaller families**
+  (`src/av1_coeffcdf.cyr`, new flat module): `Default_Txb_Skip_Cdf`,
+  `Default_Eob_Pt_{16,32,64,128,256,512,1024}_Cdf`, `Default_Eob_Extra_Cdf`,
+  `Default_Dc_Sign_Cdf`, and `Default_Coeff_Base_Eob_Cdf` (3,396 entries
+  across the 4 `COEFF_CDF_Q_CTXS` quantizer buckets), in one lazily-built
+  blob with per-family CDF accessors. Values are stored in the symbol
+  coder's format (N cumulative freqs ending in 32768, then a 0 adaptation
+  count), so they load straight into the adaptive-CDF decoder. Extracted
+  from the spec (with the `128 * x` products evaluated) and validated —
+  every CDF is non-decreasing, ends in 32768, and has a 0 count. 919
+  assertions: a position-weighted blob checksum, a structural sweep
+  validating every CDF via its accessor, known values, and the accessor
+  offset arithmetic.
+
+### Notes
+- `drishti_version()` → 715. `Default_Coeff_Base_Cdf` and
+  `Default_Coeff_Br_Cdf` (the two largest families) follow in the next CDF
+  sub-bites, then the `coeffs()` reading loop.
+
 ## [0.7.14] - 2026-07-10
 
 Continues the AV1 coefficient decode with the level-context layer (spec
