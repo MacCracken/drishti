@@ -114,8 +114,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   DC/PAETH/SMOOTH×3 + V/H; the full angled directional prediction + intra
   edge filter/upsample/corner; recursive filter-intra (7.11.2.3);
   chroma-from-luma (7.11.5). The 7.11.2 + 7.11.5 intra layer is
-  complete.)** → coefficient decode (+ default CDFs) → reconstruction
-  glue (first pixels).
+  complete.)** → dequantization **(done 0.7.11: `src/av1_quant.cyr` —
+  Dc/Ac Qlookup + get_qindex/get_dc_quant/get_ac_quant, 7.12.2)** → the
+  reconstruct glue (7.12.3) → coefficient decode (+ default CDFs) → the
+  block/partition wiring (first pixels).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

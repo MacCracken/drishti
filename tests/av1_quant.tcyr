@@ -1,0 +1,139 @@
+# tests/av1_quant.tcyr — AV1 dequantization (spec 7.12.2). The Dc/Ac
+# quantizer lookups are pinned by hand-checked spec anchors across all
+# three bit-depth rows PLUS a full-table checksum (sum of every one of the
+# 2*768 entries through the real lookup path — catches any transcription
+# or generation error). get_qindex / get_dc_quant / get_ac_quant pin the
+# 7.12.2 selection + delta logic.
+include "src/main.cyr"
+include "src/av1_quant.cyr"
+
+# ---- dc_q / ac_q spot-checks (extracted spec values, cross-checked
+# against libaom av1/common/quant_common.c) ----
+fn test_q_lookup_anchors() {
+    # 8-bit (row 0)
+    assert_eq(av1_dc_q(8, 0), 4, "dc_q 8b [0]");
+    assert_eq(av1_dc_q(8, 128), 140, "dc_q 8b [128]");
+    assert_eq(av1_dc_q(8, 255), 1336, "dc_q 8b [255]");
+    assert_eq(av1_ac_q(8, 0), 4, "ac_q 8b [0]");
+    assert_eq(av1_ac_q(8, 128), 176, "ac_q 8b [128]");
+    assert_eq(av1_ac_q(8, 255), 1828, "ac_q 8b [255]");
+    # 10-bit (row 1)
+    assert_eq(av1_dc_q(10, 0), 4, "dc_q 10b [0]");
+    assert_eq(av1_dc_q(10, 100), 369, "dc_q 10b [100]");
+    assert_eq(av1_dc_q(10, 255), 5347, "dc_q 10b [255]");
+    assert_eq(av1_ac_q(10, 100), 441, "ac_q 10b [100]");
+    assert_eq(av1_ac_q(10, 255), 7312, "ac_q 10b [255]");
+    # 12-bit (row 2)
+    assert_eq(av1_dc_q(12, 0), 4, "dc_q 12b [0]");
+    assert_eq(av1_dc_q(12, 200), 6234, "dc_q 12b [200]");
+    assert_eq(av1_dc_q(12, 255), 21387, "dc_q 12b [255]");
+    assert_eq(av1_ac_q(12, 200), 10220, "ac_q 12b [200]");
+    assert_eq(av1_ac_q(12, 255), 29247, "ac_q 12b [255]");
+    return 0;
+}
+
+# b is clamped to [0,255] before the lookup (Clip3 in dc_q/ac_q).
+fn test_q_clip() {
+    assert_eq(av1_dc_q(8, 0 - 5), 4, "dc_q clamps b<0 to [0]");
+    assert_eq(av1_dc_q(8, 300), 1336, "dc_q clamps b>255 to [255]");
+    assert_eq(av1_ac_q(8, 0 - 1), 4, "ac_q clamps b<0 to [0]");
+    assert_eq(av1_ac_q(12, 999), 29247, "ac_q clamps b>255 to [255]");
+    # depth is clamped to 0..2 (OOB backstop): a bit_depth past 12 reuses
+    # the 12-bit row rather than reading past the table.
+    assert_eq(av1_dc_q(16, 255), 21387, "dc_q depth backstop -> 12-bit row");
+    assert_eq(av1_ac_q(16, 255), 29247, "ac_q depth backstop -> 12-bit row");
+    return 0;
+}
+
+# Full-table checksum: sum every entry (3 depths x 256) through the lookup.
+fn q_sum_dc(): i64 {
+    var s = 0;
+    var di = 0;
+    while (di < 3) {
+        var bd = 8 + (di * 2);
+        var b = 0;
+        while (b < 256) { s = s + av1_dc_q(bd, b); b = b + 1; }
+        di = di + 1;
+    }
+    return s;
+}
+fn q_sum_ac(): i64 {
+    var s = 0;
+    var di = 0;
+    while (di < 3) {
+        var bd = 8 + (di * 2);
+        var b = 0;
+        while (b < 256) { s = s + av1_ac_q(bd, b); b = b + 1; }
+        di = di + 1;
+    }
+    return s;
+}
+fn test_q_checksum() {
+    assert_eq(q_sum_dc(), 1323902, "Dc_Qlookup full checksum");
+    assert_eq(q_sum_ac(), 2045707, "Ac_Qlookup full checksum");
+    return 0;
+}
+
+# The Q tables are non-decreasing along b (a monotonicity sanity check that
+# would trip on any swapped/duplicated pair inside a row).
+fn test_q_monotonic() {
+    var di = 0;
+    while (di < 3) {
+        var bd = 8 + (di * 2);
+        var b = 1;
+        while (b < 256) {
+            assert_eq(av1_dc_q(bd, b) >= av1_dc_q(bd, b - 1), 1, "dc_q monotonic");
+            assert_eq(av1_ac_q(bd, b) >= av1_ac_q(bd, b - 1), 1, "ac_q monotonic");
+            b = b + 1;
+        }
+        di = di + 1;
+    }
+    return 0;
+}
+
+# get_qindex (7.12.2) — the six branches.
+fn test_get_qindex() {
+    # No segment ALT_Q, no delta-q: return base_q_idx.
+    assert_eq(av1_get_qindex(0, 100, 50, 0, 0, 0), 100, "qidx base");
+    # No seg, delta present, ignore=0: return CurrentQIndex.
+    assert_eq(av1_get_qindex(0, 100, 50, 1, 0, 0), 50, "qidx current (delta)");
+    # No seg, delta present, ignore=1: return base_q_idx.
+    assert_eq(av1_get_qindex(1, 100, 50, 1, 0, 0), 100, "qidx base (ignore delta)");
+    # Seg active, no delta: Clip3(0,255, base + data).
+    assert_eq(av1_get_qindex(0, 100, 50, 0, 1, 20), 120, "qidx seg base+data");
+    assert_eq(av1_get_qindex(0, 100, 50, 0, 1, 200), 255, "qidx seg clip high");
+    assert_eq(av1_get_qindex(0, 100, 50, 0, 1, 0 - 150), 0, "qidx seg clip low");
+    # Seg active, delta present, ignore=0: Clip3(0,255, current + data).
+    assert_eq(av1_get_qindex(0, 100, 50, 1, 1, 20), 70, "qidx seg current+data");
+    # Seg active, delta present, ignore=1: step 3 skipped -> base + data.
+    assert_eq(av1_get_qindex(1, 100, 50, 1, 1, 20), 120, "qidx seg base+data (ignore)");
+    return 0;
+}
+
+# get_dc_quant / get_ac_quant: qindex + plane delta, then the table lookup.
+fn test_get_quant() {
+    assert_eq(av1_get_dc_quant(8, 128, 0), 140, "get_dc_quant no delta");
+    assert_eq(av1_get_dc_quant(8, 100, 28), 140, "get_dc_quant +delta -> 128");
+    assert_eq(av1_get_dc_quant(8, 128, 0 - 128), 4, "get_dc_quant -delta -> 0");
+    assert_eq(av1_get_dc_quant(8, 250, 10), 1336, "get_dc_quant delta past 255 clips");
+    assert_eq(av1_get_ac_quant(8, 128, 0), 176, "get_ac_quant no delta");
+    assert_eq(av1_get_ac_quant(8, 100, 28), 176, "get_ac_quant +delta -> 128");
+    assert_eq(av1_get_ac_quant(12, 255, 0), 29247, "get_ac_quant 12b [255]");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("dequant lookups");
+    test_q_lookup_anchors();
+    test_q_clip();
+    test_q_checksum();
+    test_q_monotonic();
+    test_group("qindex + get_quant");
+    test_get_qindex();
+    test_get_quant();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

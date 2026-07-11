@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-07-10
+
+Opens the AV1 **reconstruction** milestone with the dequantization layer
+(spec 7.12.2) in a new `src/av1_quant.cyr` module — the first step from
+parsed coefficients toward first pixels. The `Dc_Qlookup`/`Ac_Qlookup`
+tables were extracted directly from the spec and cross-checked against
+libaom `quant_common.c`; a 5-agent adversarial review (per-value Dc/Ac
+table diffs, 7.12.2 logic, libaom multi-source, edge cases) confirmed
+every value and returned no defects. **5,649 suite assertions + 1,140
+fuzz assertions, all green.**
+
+### Added
+- **AV1 dequantization** (`src/av1_quant.cyr`, new flat module): the
+  `Dc_Qlookup[3][256]` / `Ac_Qlookup[3][256]` quantizer tables (all three
+  8/10/12-bit rows, lazy-init) + `av1_dc_q` / `av1_ac_q` (the
+  `Q_lookup[(BitDepth-8)>>1][Clip3(0,255,b)]` lookups), `av1_get_qindex`
+  (7.12.2 — the base / delta-q / segment-ALT_Q selection), and
+  `av1_get_dc_quant` / `av1_get_ac_quant` (adding the plane's
+  `DeltaQ*Dc`/`DeltaQ*Ac`). The per-block qindex/segment/delta state are
+  caller inputs until block decode lands. The depth index is clamped to
+  0..2 as an out-of-bounds backstop. 1,569 assertions: spec-value anchors
+  across all three bit-depths, a **full-table checksum** (every one of the
+  2×768 entries summed through the real lookup path), per-row
+  monotonicity, the `get_qindex` branch matrix, and the delta/clip cases.
+
+### Notes
+- `drishti_version()` → 711. Next: the reconstruct glue (7.12.3) —
+  dequant → inverse transform → residual add — which turns a coefficient
+  array into reconstructed pixels; then the `coeffs()` entropy decode.
+
 ## [0.7.10] - 2026-07-10
 
 Adds AV1 chroma-from-luma (CfL) prediction — the sixth (and final)
