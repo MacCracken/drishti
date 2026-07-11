@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.25] - 2026-07-11
+
+**MILESTONE — the first fully decoded AV1 keyframe.** Bite 7 closes the AV1
+**block/partition decode** arc (and the intra still-picture decode milestone):
+a new `src/av1_tile.cyr` implements `decode_tile` (spec 5.11.2) + the
+tile_group_obu CDF/symbol wiring, driving `decode_partition` over every 64x64
+superblock of a tile into a `DrFrame`. Every 0.7.x AV1 primitive now composes —
+entropy coder, adaptive CDF contexts, the partition tree, mode-info, tx-size,
+and the residual driver (predict → coeffs → reconstruct) — so a keyframe tile
+decodes **end-to-end to pixels**. A 4-agent adversarial spec review (SB loop,
+CDF/symbol/qbucket wiring, clear-context, encode-symmetry + safety) confirmed it
+with **no findings**. **20,039 suite assertions + 1,140 fuzz assertions, all
+green.**
+
+### Added
+- **AV1 tile / frame loop** (`src/av1_tile.cyr`, new flat module): `av1_decode_tile`
+  runs `clear_above_context`, then per superblock row `clear_left_context` and per
+  superblock `clear_block_decoded_flags` + `decode_partition(BLOCK_64X64)`.
+  `av1_decode_intra_tile` is the keyframe entry point — it builds the per-tile
+  adaptive CDF contexts (`init_non_coeff_cdfs` / `init_coeff_cdfs` with the
+  `base_q_idx` quantizer bucket via `av1_coeff_cdf_qbucket`) and the symbol
+  decoder (`init_symbol`), runs `decode_tile`, and exits. The paired
+  `av1_encode_tile` / `av1_encode_intra_tile` drive the encode lane so a keyframe
+  tile round-trips.
+- **Tests** (`tests/av1_tile.tcyr`, 20 assertions): `qbucket` + `clear_above/left`
+  known-answers, and a **multi-superblock keyframe round-trip** — a 128x64 mono
+  frame (2 superblocks; SB0 SPLIT into four 32x32, SB1 one 64x64; all skip DC)
+  encoded then decoded through `decode_tile`, verifying the `MiSizes` grid matches
+  the partition, the pixels, and encoder/decoder grid agreement, in **both**
+  `disable_cdf_update` modes (proving frame-wide CDF adaptation in lockstep).
+
+### Notes
+- `drishti_version()` → 725. The **intra still-picture decode milestone is
+  complete**: profile-0 keyframes decode to pixels. The block/partition decode
+  arc (0.7.19-0.7.25) is closed. Next in 0.7.x: the inter + in-loop-filter layer
+  (motion compensation, deblocking, CDEF, loop restoration, film grain) and the
+  conformance / 10-bit / encode-lane completion toward AV1 100%.
+
 ## [0.7.24] - 2026-07-11
 
 Bite 6 of the AV1 **block/partition decode** arc: the **partition tree**. A new

@@ -143,7 +143,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   pixels; 0.7.24 `src/av1_partition.cyr` the partition tree
   (`decode_partition` / `decode_block`, all 10 partition types + the block
   orchestration + MI grids + encode lane) — a full partition tree round-trips;
-  then the tile/frame loop = decoded keyframe)**.
+  0.7.25 `src/av1_tile.cyr` the tile/frame loop (`decode_tile` + the
+  CDF/symbol wiring) driving decode_partition over a tile into a DrFrame = the
+  **first fully decoded keyframe** — the intra still-picture decode MILESTONE
+  is complete)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

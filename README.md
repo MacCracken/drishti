@@ -18,20 +18,19 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.24 (AV1 decode arc in progress)
+## Status — 0.7.25 (AV1 intra keyframe decode — **milestone complete**)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,019 suite assertions + 1,140 fuzz
-assertions, all green). The 0.7.x AV1 arc is underway — the frame
-header, the entropy substrate, the shared YUV frame buffer, the
+derived, and adversarially tested (20,039 suite assertions + 1,140 fuzz
+assertions, all green). The 0.7.x AV1 arc has reached its first
+milestone — **profile-0 AV1 keyframes now decode end-to-end to pixels**.
+The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
-the reconstruct glue (**first pixels** from a coefficient array), the
-**coefficient reading loop** (a transform block decodes end-to-end, with
-adaptive CDFs), the block-decode CDF tables, the intra **mode-info
-reads**, the intra **transform-size read**, the **transform-type
-derivation**, the **residual driver** (a transform block decodes to
-pixels end-to-end), and the **partition tree** (a full superblock
-partition round-trips) are in:
+the reconstruct glue, the **coefficient reading loop** (with adaptive
+CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
+**transform-size read**, the **transform-type derivation**, the
+**residual driver**, the **partition tree**, and the **tile/frame loop**
+(`decode_tile` driving a whole keyframe into a `DrFrame`) are in:
 
 - **AV1** — OBU framing (parse / walk / write) + full-fidelity
   sequence-header parse + the complete uncompressed frame header
@@ -63,7 +62,9 @@ partition round-trips) are in:
   block now decodes to pixels end-to-end — + the partition tree (spec 5.11.4/5
   `decode_partition` / `decode_block`: the recursive superblock partition + the
   per-block mode-info → tx-size → residual orchestration + MI grids, with a
-  paired encode lane)
+  paired encode lane) + the tile/frame loop (spec 5.11.2 `decode_tile`: the
+  superblock loop + CDF-context / symbol init, driving a whole keyframe into a
+  `DrFrame`) — **a profile-0 AV1 keyframe decodes end-to-end to pixels**
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,
@@ -72,10 +73,13 @@ partition round-trips) are in:
   encoder, bounds-hardened), VP8 frame framing + byte-exact writer,
   VP9 uncompressed header
 
-A transform block already reconstructs to pixels end-to-end; the
-remaining piece for a **decoded keyframe** is the block/partition decode
-that orchestrates the primitives (mode-info + tx-type + partition-tree +
-tile/frame loop). The road to 1.0 is **one minor arc per codec** —
+A profile-0 AV1 **keyframe** now decodes end-to-end to pixels — the
+block/partition decode composes every primitive (mode-info → tx-size →
+transform-type → residual, driven by the partition tree + tile loop). The
+remaining AV1 work toward 100% is the inter + in-loop-filter layer
+(motion compensation, deblocking, CDEF, loop restoration, film grain),
+conformance / 10-bit, and the encode lane. The road to 1.0 is **one minor
+arc per codec** —
 **0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
 **0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
 **freeze/documentation** arc (0.12.x) before the 1.0.0 close-out.
