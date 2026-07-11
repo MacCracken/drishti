@@ -78,6 +78,18 @@ Not its own arc; these land inside whichever codec arc first needs them:
 - **Container scope** — IVF is the test-bench container; MP4/WebM demux
   is out of scope for drishti (a future container lib's job).
 
+## Upstream workaround watch (remove when the toolchain fix lands)
+
+- **`dr_ashr` arithmetic-shift shim** (`src/bits.cyr`, added 0.7.5) —
+  cyrius runtime `>>` is a LOGICAL shift, so every signed right-shift
+  (inverse-transform `Round2`/WHT, `av1_read_global_param`) routes through
+  `dr_ashr`. Filed upstream as
+  `cyrius/docs/development/issues/2026-07-10-drishti-runtime-shift-logical-not-arithmetic.md`.
+  **When cyrius makes `>>` arithmetic (or adds an arithmetic-shift
+  operator), delete `dr_ashr` and its callers' indirection and use the
+  native operator** — verify against the `dr_ashr` negative-value tests
+  and re-run the transform/gm known-answers, which must be unchanged.
+
 ---
 
 ## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e)
@@ -98,8 +110,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   prediction modes, inverse transforms, reconstruction (profile-0
   keyframes: first pixels out). Sub-bites: YUV frame buffer **(done
   0.7.3)** → inverse transforms **(done 0.7.4)**: DCT 4-64 / ADST 4-16 /
-  identity / WHT + the 2D driver (`src/av1_itx.cyr`) → intra prediction →
-  coefficient decode (+ default CDFs) → reconstruction glue (first pixels).
+  identity / WHT + the 2D driver (`src/av1_itx.cyr`) → intra prediction
+  **(0.7.6: `src/av1_intra.cyr` — non-directional DC/PAETH/SMOOTH×3 +
+  V/H; angled-directional + intra edge filter/upsample, filter-intra,
+  and chroma-from-luma still to come)** → coefficient decode (+ default
+  CDFs) → reconstruction glue (first pixels).
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,

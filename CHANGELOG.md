@@ -4,6 +4,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-07-10
+
+The third sub-bite of the AV1 intra still-picture decode milestone: intra
+prediction — the non-directional modes and the exact vertical/horizontal
+directional cases. Derived from spec 7.11.2, pinned by hand-computed
+known-answers, and cross-checked by a 4-agent adversarial spec review
+(clean). **3,927 suite assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 intra prediction** (`src/av1_intra.cyr`, prefix `av1_`): the
+  `predict_intra` driver (7.11.2.1) — reference-sample (AboveRow/LeftCol)
+  construction from the reconstructed `DrFrame` with the availability /
+  subsampling / edge-clamp rules and the corner sample — dispatching to
+  DC (7.11.2.5), PAETH (basic, 7.11.2.2), SMOOTH / SMOOTH_V / SMOOTH_H
+  (7.11.2.6, with the `Sm_Weights` tables), and the pAngle 90° / 180°
+  vertical / horizontal directional copies, then writing the prediction
+  back into the frame. 48 assertions.
+- Deferred to later 0.7.x sub-bites (return `DR_ERR_UNSUPPORTED`): the
+  angled directional modes + intra edge filter/upsample (7.11.2.7-12),
+  the recursive filter-intra (7.11.2.3), and chroma-from-luma (7.11.5).
+
+### Notes
+- `drishti_version()` → 706; toolchain pin unchanged (`6.4.43`).
+
 ## [0.7.5] - 2026-07-10
 
 A focused correctness fix. Cyrius's runtime `>>` is a LOGICAL (unsigned)

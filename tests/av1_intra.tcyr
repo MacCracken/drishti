@@ -1,0 +1,227 @@
+# tests/av1_intra.tcyr — AV1 intra prediction (spec 7.11.2), the
+# non-directional modes + V/H. Mode kernels are pinned by hand-computed
+# known-answers on constructed AboveRow/LeftCol arrays; the predict_intra
+# driver is exercised end-to-end against a DrFrame (reference-sample
+# construction + writeback), including the default-fill and the
+# not-yet-implemented (UNSUPPORTED) directional/filter-intra paths.
+include "src/main.cyr"
+include "src/av1_intra.cyr"
+
+# A reference array of n samples supporting index -1: alloc n+1 i64,
+# return the ORIGIN (element 0); ref[-1] is the slot before it.
+fn mk_ref(n): i64 {
+    var buf = alloc((n + 1) * 8);
+    return buf + 8;
+}
+fn set_ref4(r, m1, a0, a1, a2, a3): i64 {
+    store64(r + (0 - 8), m1);   # [-1]
+    store64(r + 0, a0); store64(r + 8, a1); store64(r + 16, a2); store64(r + 24, a3);
+    return 0;
+}
+fn fill_ref(r, n, v): i64 {
+    store64(r + (0 - 8), v);
+    var i = 0;
+    while (i < n) { store64(r + (i * 8), v); i = i + 1; }
+    return 0;
+}
+
+# ================================================================
+# Helpers / tables
+# ================================================================
+fn test_intra_helpers() {
+    assert_eq(av1_is_directional_mode(AV1_DC_PRED), 0, "DC not directional");
+    assert_eq(av1_is_directional_mode(AV1_V_PRED), 1, "V directional");
+    assert_eq(av1_is_directional_mode(AV1_D67_PRED), 1, "D67 directional");
+    assert_eq(av1_is_directional_mode(AV1_SMOOTH_PRED), 0, "SMOOTH not directional");
+    assert_eq(av1_is_directional_mode(AV1_PAETH_PRED), 0, "PAETH not directional");
+    assert_eq(av1_mode_to_angle(AV1_V_PRED), 90, "V -> 90");
+    assert_eq(av1_mode_to_angle(AV1_H_PRED), 180, "H -> 180");
+    assert_eq(av1_mode_to_angle(AV1_D45_PRED), 45, "D45 -> 45");
+    # Sm_Weights spot-checks against the spec tables.
+    assert_eq(av1_sm_weight(2, 0), 255, "Sm 4x4[0]");
+    assert_eq(av1_sm_weight(2, 3), 64, "Sm 4x4[3]");
+    assert_eq(av1_sm_weight(3, 1), 197, "Sm 8x8[1]");
+    assert_eq(av1_sm_weight(4, 15), 16, "Sm 16x16[15]");
+    assert_eq(av1_sm_weight(5, 31), 8, "Sm 32x32[31]");
+    assert_eq(av1_sm_weight(6, 63), 4, "Sm 64x64[63]");
+    return 0;
+}
+
+# ================================================================
+# DC — 7.11.2.5
+# ================================================================
+fn test_intra_dc() {
+    var above = mk_ref(4);
+    var left = mk_ref(4);
+    set_ref4(above, 0, 10, 20, 30, 40);
+    set_ref4(left, 0, 50, 60, 70, 80);
+    var pred = alloc(16 * 8);
+    # both: sum=360, +((4+4)>>1)=+4 -> 364, /8 = 45.
+    av1_intra_dc(above, left, 1, 1, 2, 2, 4, 4, 8, pred);
+    assert_eq(load64(pred + 0), 45, "DC both = 45");
+    assert_eq(load64(pred + (15 * 8)), 45, "DC both flat");
+    # left only: sum=260, +(4>>1)=+2 -> 262, >>2 = 65.
+    av1_intra_dc(above, left, 1, 0, 2, 2, 4, 4, 8, pred);
+    assert_eq(load64(pred + 0), 65, "DC left-only = 65");
+    # above only: sum=100, +2 -> 102, >>2 = 25.
+    av1_intra_dc(above, left, 0, 1, 2, 2, 4, 4, 8, pred);
+    assert_eq(load64(pred + 0), 25, "DC above-only = 25");
+    # neither: 1<<(bd-1) = 128.
+    av1_intra_dc(above, left, 0, 0, 2, 2, 4, 4, 8, pred);
+    assert_eq(load64(pred + 0), 128, "DC neither = 128");
+    return 0;
+}
+
+# ================================================================
+# PAETH — 7.11.2.2 (each of the three branches)
+# ================================================================
+fn test_intra_paeth() {
+    var above = mk_ref(2);
+    var left = mk_ref(2);
+    var pred = alloc(4 * 8);
+    # above == corner -> pLeft 0 -> LeftCol wins.
+    set_ref4(above, 100, 100, 100, 0, 0);   # [-1]=100, [0]=[1]=100
+    set_ref4(left, 100, 20, 20, 0, 0);       # [-1] unused for left here; [0]=[1]=20
+    av1_intra_paeth(above, left, 2, 2, pred);
+    assert_eq(load64(pred + 0), 20, "PAETH left branch");
+    # left == corner -> pTop 0 -> AboveRow wins.
+    set_ref4(above, 100, 30, 30, 0, 0);
+    set_ref4(left, 100, 100, 100, 0, 0);
+    av1_intra_paeth(above, left, 2, 2, pred);
+    assert_eq(load64(pred + 0), 30, "PAETH top branch");
+    # corner between -> pTopLeft smallest -> corner wins.
+    set_ref4(above, 100, 200, 200, 0, 0);
+    set_ref4(left, 100, 10, 10, 0, 0);
+    av1_intra_paeth(above, left, 2, 2, pred);
+    assert_eq(load64(pred + 0), 100, "PAETH topleft branch");
+    return 0;
+}
+
+# ================================================================
+# SMOOTH / SMOOTH_V — 7.11.2.6
+# ================================================================
+fn test_intra_smooth() {
+    var above = mk_ref(4);
+    var left = mk_ref(4);
+    var pred = alloc(16 * 8);
+    set_ref4(above, 0, 100, 100, 100, 100);
+    set_ref4(left, 0, 0, 0, 0, 0);
+    # SMOOTH: below=LeftCol[3]=0, right=AboveRow[3]=100.
+    # [0][0]: wy=wx=255 -> 255*100 + 1*0 + 255*0 + 1*100 = 25600 -> Round2(_,9)=50.
+    av1_intra_smooth(above, left, AV1_SMOOTH_PRED, 2, 2, 4, 4, pred);
+    assert_eq(load64(pred + 0), 50, "SMOOTH [0][0] = 50");
+    # [0][3]: wy=255, wx=64 -> 255*100 + 1*0 + 64*0 + 192*100 = 44700 -> Round2(_,9)=87.
+    assert_eq(load64(pred + (3 * 8)), 87, "SMOOTH [0][3] = 87");
+    # SMOOTH_V: sp = smw(log2h,i)*Above[j] + (256-smw)*below.
+    # [0][0]: 255*100 + 1*0 = 25500 -> Round2(_,8)=100.
+    av1_intra_smooth(above, left, AV1_SMOOTH_V_PRED, 2, 2, 4, 4, pred);
+    assert_eq(load64(pred + 0), 100, "SMOOTH_V [0][0] = 100");
+    # [3][0]: smw(2,3)=64 -> 64*100 + 192*0 = 6400 -> Round2(_,8)=25.
+    assert_eq(load64(pred + (12 * 8)), 25, "SMOOTH_V [3][0] = 25");
+    return 0;
+}
+
+# ================================================================
+# V / H copies
+# ================================================================
+fn test_intra_vh() {
+    var above = mk_ref(4);
+    var left = mk_ref(4);
+    var pred = alloc(16 * 8);
+    set_ref4(above, 0, 11, 22, 33, 44);
+    set_ref4(left, 0, 55, 66, 77, 88);
+    av1_intra_vertical(above, 4, 4, pred);
+    assert_eq(load64(pred + 0), 11, "V [0][0] = Above[0]");
+    assert_eq(load64(pred + (3 * 8)), 44, "V [0][3] = Above[3]");
+    assert_eq(load64(pred + (12 * 8)), 11, "V [3][0] = Above[0] (row copy)");
+    av1_intra_horizontal(left, 4, 4, pred);
+    assert_eq(load64(pred + 0), 55, "H [0][0] = Left[0]");
+    assert_eq(load64(pred + (3 * 8)), 55, "H [0][3] = Left[0] (col copy)");
+    assert_eq(load64(pred + (12 * 8)), 88, "H [3][0] = Left[3]");
+    return 0;
+}
+
+# ================================================================
+# predict_intra driver — end to end against a DrFrame
+# ================================================================
+fn test_intra_driver_dc() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);   # 8x8 mono, 8-bit
+    # Reconstructed neighbours for a 4x4 block at (4,4): above row 3 and
+    # left col 3 (and corner (3,3)) all = 40.
+    var c = 0; while (c < 8) { dr_frame_set(f, 0, c, 3, 40); c = c + 1; }   # row 3
+    var r = 0; while (r < 8) { dr_frame_set(f, 0, 3, r, 40); r = r + 1; }   # col 3
+    # mi_cols = mi_rows = 2 for an 8x8 frame (2*ceil(8/8)).
+    var rc = av1_intra_predict(f, 0, 4, 4, 1, 1, 0, 0, AV1_DC_PRED, 0, 0, 2, 2, 2, 2);
+    assert_eq(rc, DR_OK, "DC driver ok");
+    # DC of all-40 neighbours = 40, written across the block.
+    assert_eq(dr_frame_get(f, 0, 4, 4), 40, "block (4,4) = 40");
+    assert_eq(dr_frame_get(f, 0, 7, 7), 40, "block (7,7) = 40");
+    assert_eq(dr_frame_get(f, 0, 5, 6), 40, "block (5,6) = 40");
+    # A pixel outside the block is untouched.
+    assert_eq(dr_frame_get(f, 0, 0, 0), 0, "outside block untouched");
+    return 0;
+}
+
+fn test_intra_driver_default() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    # Top-left 4x4 block: no neighbours -> DC default 1<<(bd-1) = 128.
+    var rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 2, 2, 2, 2);
+    assert_eq(rc, DR_OK, "default DC ok");
+    assert_eq(dr_frame_get(f, 0, 0, 0), 128, "no-neighbour DC = 128");
+    assert_eq(dr_frame_get(f, 0, 3, 3), 128, "flat default fill");
+    return 0;
+}
+
+fn test_intra_driver_vertical() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    # Above row 3 = distinct values; V_PRED copies AboveRow down each row.
+    dr_frame_set(f, 0, 4, 3, 71); dr_frame_set(f, 0, 5, 3, 72);
+    dr_frame_set(f, 0, 6, 3, 73); dr_frame_set(f, 0, 7, 3, 74);
+    var rc = av1_intra_predict(f, 0, 4, 4, 0, 1, 0, 0, AV1_V_PRED, 0, 0, 2, 2, 2, 2);
+    assert_eq(rc, DR_OK, "V driver ok");
+    assert_eq(dr_frame_get(f, 0, 4, 4), 71, "V (4,4) = Above col4");
+    assert_eq(dr_frame_get(f, 0, 7, 4), 74, "V (7,4) = Above col7");
+    assert_eq(dr_frame_get(f, 0, 4, 7), 71, "V (4,7) = Above col4 (row copy)");
+    return 0;
+}
+
+fn test_intra_driver_unsupported() {
+    var e = 0;
+    var f = dr_frame_new(8, 8, 1, 1, 1, 8, 0, &e);
+    # Angled directional (D45, pAngle 45) — deferred.
+    var rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_D45_PRED, 0, 0, 2, 2, 2, 2);
+    assert_eq(rc, DR_ERR_UNSUPPORTED, "angled directional unsupported");
+    # V_PRED with a non-zero angle delta -> pAngle != 90 -> deferred.
+    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_V_PRED, 1, 0, 2, 2, 2, 2);
+    assert_eq(rc, DR_ERR_UNSUPPORTED, "angled V (delta != 0) unsupported");
+    # filter-intra on plane 0 -> deferred.
+    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 1, 2, 2, 2, 2);
+    assert_eq(rc, DR_ERR_UNSUPPORTED, "filter-intra unsupported");
+    # Bad block size.
+    rc = av1_intra_predict(f, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 1, 2, 2, 2);
+    assert_eq(rc, DR_ERR_BOUNDS, "log2w < 2 rejected");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("intra helpers / tables");
+    test_intra_helpers();
+    test_group("intra mode kernels");
+    test_intra_dc();
+    test_intra_paeth();
+    test_intra_smooth();
+    test_intra_vh();
+    test_group("intra predict_intra driver");
+    test_intra_driver_dc();
+    test_intra_driver_default();
+    test_intra_driver_vertical();
+    test_intra_driver_unsupported();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
