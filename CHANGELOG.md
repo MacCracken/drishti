@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-07-10
+
+A focused correctness fix. Cyrius's runtime `>>` is a LOGICAL (unsigned)
+shift, so shifting a negative value logically corrupts it — surfaced
+while building the inverse transform. **3,879 suite assertions + 1,140
+fuzz assertions, all green.**
+
+### Fixed
+- **AV1 global-motion param decode** (`av1_read_global_param`, spec
+  5.9.25): `PrevGmParams[ref][idx] >> precDiff` was a logical shift, but
+  the reference value can be negative (the spec intends an arithmetic
+  shift). This corrupted the decoded warp params for inter frames whose
+  primary reference carries negative saved global-motion params — latent
+  since 0.7.1 (dormant until inter global-motion compensation lands, but
+  a real value bug). Now shifts through `dr_ashr`. Regression-tested: a
+  zero subexp delta must recover a negative `PrevGmParams` exactly.
+
+### Added
+- **Core `dr_ashr`** (`src/bits.cyr`): arithmetic (sign-preserving) right
+  shift = floor(x / 2^n), the shared helper for shifting signed values.
+  `av1_itx`'s `Round2` / WHT and `av1_read_global_param` now route through
+  it. An audit of every `>>` in the tree confirmed no other negative-
+  operand shift is wrong (the rest are non-negative, or byte/bit
+  extractions with `& mask` that make the shift kind irrelevant).
+
+### Notes
+- `drishti_version()` → 705; toolchain pin unchanged (`6.4.43`).
+
 ## [0.7.4] - 2026-07-10
 
 The second sub-bite of the AV1 intra still-picture decode milestone: the

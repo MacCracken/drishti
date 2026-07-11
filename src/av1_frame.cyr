@@ -1165,7 +1165,9 @@ fn av1_read_global_param(br, fh, refs, type, ref, idx): i64 {
         sub = 1 << prec_bits;
     }
     var mx = 1 << abs_bits;
-    var r = (av1_prev_gm_param(fh, refs, ref, idx) >> prec_diff) - sub;
+    # PrevGmParams can be negative — the spec's `>>` here is an arithmetic
+    # shift, so use dr_ashr (cyrius `>>` is logical and would corrupt it).
+    var r = dr_ashr(av1_prev_gm_param(fh, refs, ref, idx), prec_diff) - sub;
     var decoded = 0;
     var rc = av1_decode_signed_subexp_with_ref(br, 0 - mx, mx + 1, r, &decoded);
     if (rc != DR_OK) { return rc; }

@@ -619,6 +619,36 @@ fn test_av1_fh_tile_bomb() {
     return 0;
 }
 
+# Regression (0.7.5): av1_read_global_param must shift PrevGmParams
+# arithmetically. A subexp delta of 0 recovers PrevGmParams exactly; with
+# the old logical `>>` a NEGATIVE PrevGmParams produced a wildly wrong
+# gm_param. White-box: seed a saved gm param via the ref state, point the
+# primary ref at it, and decode a zero delta (bitstream 0x00).
+fn fx_gm_recover(prev): i64 {
+    var refs = av1_ref_state_new();
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, 3);           # primary_ref = 3
+    store64(fh + AV1FH_REF_FRAME_IDX + (3 * 8), 5);     # ref_frame_idx[3] = slot 5
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 0);
+    # SavedGmParams[slot 5][LAST_FRAME][idx 0] = prev.
+    store64(refs + AV1REF_SAVED_GM + ((((5 * 7) + (AV1_LAST_FRAME - 1)) * 6 + 0) * 8), prev);
+    var buf = alloc(1);
+    store8(buf, 0x00);                                  # subexp more_bits 0, bits 000 -> v = 0
+    var br = dr_br_init(buf, 1);
+    var rc = av1_read_global_param(br, fh, refs, AV1_GM_TRANSLATION, AV1_LAST_FRAME, 0);
+    assert_eq(rc, DR_OK, "read_global_param ok");
+    return av1_fh_gm_param(fh, AV1_LAST_FRAME, 0);
+}
+fn test_av1_fh_gm_arith_shift() {
+    # Negative PrevGmParams (the regression): -2^20 must round-trip.
+    assert_eq(fx_gm_recover(0 - 1048576), 0 - 1048576, "negative gm param recovered (arithmetic shift)");
+    # Positive still works (both shift kinds agree).
+    assert_eq(fx_gm_recover(1048576), 1048576, "positive gm param recovered");
+    assert_eq(fx_gm_recover(0), 0, "zero gm param recovered");
+    return 0;
+}
+
 # Adversarial: a truncated header latches DR_ERR_TRUNCATED and yields 0.
 fn test_av1_fh_truncation() {
     var s = fx_seq_reduced(64, 64, 0, 0, 0, 0, 0);
@@ -658,6 +688,8 @@ fn main() {
     test_group("av1 frame header — reference state machine");
     test_av1_fh_inter_refstate();
     test_av1_fh_show_existing();
+    test_group("av1 frame header — global motion / arithmetic shift");
+    test_av1_fh_gm_arith_shift();
     test_group("av1 frame header — adversarial");
     test_av1_fh_tile_bomb();
     test_av1_fh_truncation();

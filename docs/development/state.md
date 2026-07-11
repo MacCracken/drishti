@@ -6,14 +6,15 @@
 
 ## Version
 
-**0.7.4** — cut 2026-07-10, not yet tagged (user's git). The **0.7.x
-AV1 arc** continues through the intra still-picture decode milestone:
-the inverse transform block (`av1_itx.cyr`: DCT 4-64 / ADST 4-16 /
-identity / WHT + the 2D driver) on top of the 0.7.3 frame buffer, 0.7.2
-symbol coder, 0.7.1 frame header, and 0.7.0 baseline. The remaining
-distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
-→ 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
-[`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
+**0.7.5** — cut 2026-07-10, not yet tagged (user's git). A correctness
+fix on top of the 0.7.4 inverse transforms: cyrius's runtime `>>` is a
+LOGICAL shift, so signed values now round through the core `dr_ashr`
+(this fixed a latent global-motion-param decode bug, 0.7.1-era). The
+**0.7.x AV1 arc** remains inside the intra still-picture decode
+milestone. The remaining distance to 1.0 is the rest of the per-codec
+completion arcs (0.7.x AV1 → 0.10.x VP8/VP9) + audit (0.11.x) +
+freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
+[`roadmap.md`](roadmap.md).
 
 ## Toolchain
 
@@ -25,8 +26,8 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 703, format sniff |
-| `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 705, format sniff |
+| `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, arithmetic-shift (dr_ashr), bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
 | `src/av1_obu.cyr` | `av1_` | OBU parse/walk/write |
@@ -47,8 +48,8 @@ distance to 1.0 is the rest of the per-codec completion arcs (0.7.x AV1
 ## Gates (all green, 2026-07-10)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 11 suites / **3,862 assertions**: drishti 51 · bits 1,201
-  · ivf 889 · frame 73 · av1 185 · av1_frame 134 · av1_symbol 280 ·
+- `make test` — 11 suites / **3,879 assertions**: drishti 51 · bits 1,212
+  · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
   av1_itx 160 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG

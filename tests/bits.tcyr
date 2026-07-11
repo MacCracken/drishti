@@ -554,6 +554,28 @@ fn test_endian_helpers() {
 # ================================================================
 # FloorLog2 + su(n) / ns(n) — AV1 bit descriptors (spec 4.10.6/4.10.7)
 # ================================================================
+# dr_ashr — arithmetic (sign-preserving) right shift = floor(x / 2^n).
+# Cyrius `>>` is logical at runtime, so this is what signed values shift
+# through. The negative cases are the whole point.
+fn test_ashr() {
+    # Non-negative: identical to a plain shift.
+    assert_eq(dr_ashr(16, 2), 4, "ashr(16,2) = 4");
+    assert_eq(dr_ashr(7, 1), 3, "ashr(7,1) = 3");
+    assert_eq(dr_ashr(0, 5), 0, "ashr(0,n) = 0");
+    assert_eq(dr_ashr(5, 0), 5, "ashr(x,0) = x");
+    # Negative: floor toward -inf (matches a true arithmetic shift).
+    assert_eq(dr_ashr(0 - 8, 1), 0 - 4, "ashr(-8,1) = -4");
+    assert_eq(dr_ashr(0 - 7, 1), 0 - 4, "ashr(-7,1) = floor(-3.5) = -4");
+    assert_eq(dr_ashr(0 - 8, 2), 0 - 2, "ashr(-8,2) = -2");
+    assert_eq(dr_ashr(0 - 9, 2), 0 - 3, "ashr(-9,2) = floor(-2.25) = -3");
+    assert_eq(dr_ashr(0 - 1, 4), 0 - 1, "ashr(-1,4) = -1 (stays -1)");
+    assert_eq(dr_ashr(0 - 1048576, 14), 0 - 64, "ashr(-2^20,14) = -64");
+    # Distinguishing property: a logical shift of -8 would be a huge
+    # positive; arithmetic keeps it negative.
+    assert(dr_ashr(0 - 8, 1) < 0, "arithmetic shift keeps sign");
+    return 0;
+}
+
 fn test_floor_log2() {
     assert_eq(dr_floor_log2(1), 0, "FloorLog2(1) = 0");
     assert_eq(dr_floor_log2(2), 1, "FloorLog2(2) = 1");
@@ -673,6 +695,7 @@ fn main() {
     test_group("endian helpers");
     test_endian_helpers();
     test_group("su/ns descriptors");
+    test_ashr();
     test_floor_log2();
     test_su_read();
     test_su_roundtrip();
