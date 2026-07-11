@@ -1,0 +1,121 @@
+# tests/av1_tile.tcyr — AV1 tile / frame loop (spec 5.11.2 decode_tile): the
+# superblock loop that drives decode_partition over a frame into a DrFrame — the
+# FIRST FULLY DECODED KEYFRAME. qbucket / clear_above/left by known-answers; the
+# whole keyframe decode by a multi-superblock round-trip (a 128x64 mono frame =
+# 2 superblocks, SB0 SPLIT into four 32x32 + SB1 one 64x64, all skip DC) through
+# the encode/decode drivers — verifying the MiSizes grid matches the partition,
+# the pixels, and enc==dec grids, in both disable_cdf modes.
+include "src/main.cyr"
+include "src/av1_tile.cyr"
+
+fn test_qbucket() {
+    assert_eq(av1_coeff_cdf_qbucket(0), 0, "q 0 -> 0");
+    assert_eq(av1_coeff_cdf_qbucket(20), 0, "q 20 -> 0");
+    assert_eq(av1_coeff_cdf_qbucket(21), 1, "q 21 -> 1");
+    assert_eq(av1_coeff_cdf_qbucket(60), 1, "q 60 -> 1");
+    assert_eq(av1_coeff_cdf_qbucket(61), 2, "q 61 -> 2");
+    assert_eq(av1_coeff_cdf_qbucket(120), 2, "q 120 -> 2");
+    assert_eq(av1_coeff_cdf_qbucket(121), 3, "q 121 -> 3");
+    assert_eq(av1_coeff_cdf_qbucket(255), 3, "q 255 -> 3");
+    return 0;
+}
+fn test_clear_context() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    # dirty the above/left strips, then clear.
+    store64(load64(tile + AV1TILE_ALVL) + 0, 7);
+    store64(load64(tile + AV1TILE_ADC) + (5 * 8), 9);
+    store64(load64(tile + AV1TILE_LLVL) + (3 * 8), 4);
+    store64(load64(tile + AV1TILE_LDC) + 0, 2);
+    av1_clear_above_context(tile, 1);
+    av1_clear_left_context(tile, 1);
+    assert_eq(load64(load64(tile + AV1TILE_ALVL) + 0), 0, "above lvl cleared");
+    assert_eq(load64(load64(tile + AV1TILE_ADC) + (5 * 8)), 0, "above dc cleared");
+    assert_eq(load64(load64(tile + AV1TILE_LLVL) + (3 * 8)), 0, "left lvl cleared");
+    assert_eq(load64(load64(tile + AV1TILE_LDC) + 0), 0, "left dc cleared");
+    return 0;
+}
+
+# Full keyframe round-trip on a 2-superblock (128x64) mono frame. SB0 (cols
+# 0..15) SPLIT into four 32x32; SB1 (cols 16..31) one 64x64; all skip DC. The
+# pre-order plan feeds the encode lane; decode_tile drives the whole frame.
+fn keyframe_rt(disable): i64 {
+    var base_q = 40;
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    # pre-order partition plan: SB0 SPLIT + 4x NONE, SB1 NONE.
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    # 5 blocks: four 32x32 (TX_32X32=3) then one 64x64 (TX_64X64=4).
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    # ENCODE.
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, base_q, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    var olen = 0;
+    var out = av1_encode_intra_tile(etile, pp, pm, pt, disable, &olen);
+    assert_eq(olen > 0, 1, "encoded a keyframe tile");
+    # DECODE.
+    var doe = alloc(8);
+    var dframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, doe);
+    var dtile = av1_tile_new(dframe, 32, 16, base_q, 1, 0, 1);
+    av1_tile_grids_new(dtile);
+    assert_eq(av1_decode_intra_tile(dtile, out, olen, disable), DR_OK, "decode_tile ok");
+    # grids: SB0 (cols 0..15) BLOCK_32X32=9, SB1 (cols 16..31) BLOCK_64X64=12.
+    var bad = 0;
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 32) {
+            var exp = 9;
+            if (c >= 16) { exp = 12; }
+            if (av1_grid_get(dtile, AV1TILE_MISIZES, r, c) != exp) { bad = 1; }
+            if (av1_grid_get(dtile, AV1TILE_YMODES, r, c) != AV1_DC_PRED) { bad = 1; }
+            if (av1_grid_get(dtile, AV1TILE_SKIPS, r, c) != 1) { bad = 1; }
+            if (av1_grid_get(dtile, AV1TILE_MISIZES, r, c) != av1_grid_get(etile, AV1TILE_MISIZES, r, c)) { bad = 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(bad, 0, "keyframe MiSizes match partition + enc==dec grids");
+    # pixels: all 128 (flat DC prediction, skip -> no residual).
+    var bad2 = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 128) { if (dr_frame_get(dframe, 0, x, y) != 128) { bad2 = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad2, 0, "keyframe pixels all 128");
+    return 0;
+}
+fn test_keyframe_roundtrip() {
+    keyframe_rt(1);        # read-only CDFs
+    keyframe_rt(0);        # adaptive CDFs (frame-wide lockstep)
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("qbucket / clear context");
+    test_qbucket();
+    test_clear_context();
+    test_group("keyframe decode_tile round-trip");
+    test_keyframe_roundtrip();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

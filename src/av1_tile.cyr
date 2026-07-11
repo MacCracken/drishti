@@ -1,0 +1,153 @@
+# src/av1_tile.cyr — AV1 tile / frame loop (spec 5.11.2 decode_tile + the
+# tile_group_obu CDF/symbol wiring). Bite 7 — the CLOSE of the block/partition
+# decode arc: this drives decode_partition over every superblock of a tile into
+# a DrFrame, producing the FIRST FULLY DECODED KEYFRAME. It ties together every
+# 0.7.x AV1 primitive: the entropy coder, the CDF contexts, the partition tree,
+# mode-info, tx-size, the residual driver (predict/coeffs/reconstruct).
+#
+# decode_tile: clear_above_context, then per superblock row clear_left_context
+# and per superblock clear_block_decoded_flags + decode_partition(BLOCK_64X64).
+# av1_decode_intra_tile is the entry point — it builds the per-tile adaptive CDF
+# contexts (init_non_coeff_cdfs / init_coeff_cdfs with the base_q_idx quantizer
+# bucket) and the symbol decoder (init_symbol), runs decode_tile, and exits.
+# The paired av1_encode_intra_tile drives the encode lane so a keyframe tile
+# round-trips.
+#
+# SCOPE (intra keyframe baseline): a SINGLE tile spanning the frame
+# (MiRowStart/ColStart = 0, MiRowEnd/ColEnd = MiRows/MiCols), 64x64 superblocks
+# (no 128x128). CDEF / loop-restoration / delta-q per-SB reads, multi-tile, and
+# the frame-end CDF save/average + decode_frame_wrapup are deferred (roadmap.md).
+# The encode-lane round-trip drives skip blocks (the non-skip coeffs-encode in
+# residual order — encode_residual — is the encoder arc, roadmap.md); the decode
+# path handles non-skip blocks (validated by av1_partition / av1_residual).
+#
+# FLAT module — wiring in src/main.cyr after av1_partition.cyr. Family av1_.
+# Depends on: av1_partition (decode/encode_partition), av1_residual (Av1Tile +
+# grids + BlockDecoded), av1_coeffs (av1_ccdf_new), av1_noncoeffcdf (av1_ncdf_new),
+# av1_symbol, frame (DrFrame), drishti (DR_OK).
+
+# init_coeff_cdfs quantizer bucket (7.x): idx by base_q_idx thresholds 20/60/120.
+fn av1_coeff_cdf_qbucket(base_q_idx): i64 {
+    if (base_q_idx <= 20) { return 0; }
+    if (base_q_idx <= 60) { return 1; }
+    if (base_q_idx <= 120) { return 2; }
+    return 3;
+}
+
+# clear_above_context (5.11.2): zero AboveLevelContext / AboveDcContext per plane
+# (the whole allocated strip, covering the tile's plane 4x4 columns + padding).
+fn av1_clear_above_context(tile, num_planes): i64 {
+    var n = load64(tile + AV1TILE_MI_COLS) + 32;
+    var plane = 0;
+    while (plane < num_planes) {
+        var al = load64(tile + AV1TILE_ALVL + (plane * 8));
+        var ad = load64(tile + AV1TILE_ADC + (plane * 8));
+        var i = 0;
+        while (i < n) {
+            store64(al + (i * 8), 0);
+            store64(ad + (i * 8), 0);
+            i = i + 1;
+        }
+        plane = plane + 1;
+    }
+    return 0;
+}
+# clear_left_context (5.11.2): zero LeftLevelContext / LeftDcContext per plane.
+fn av1_clear_left_context(tile, num_planes): i64 {
+    var n = load64(tile + AV1TILE_MI_ROWS) + 32;
+    var plane = 0;
+    while (plane < num_planes) {
+        var ll = load64(tile + AV1TILE_LLVL + (plane * 8));
+        var ld = load64(tile + AV1TILE_LDC + (plane * 8));
+        var i = 0;
+        while (i < n) {
+            store64(ll + (i * 8), 0);
+            store64(ld + (i * 8), 0);
+            i = i + 1;
+        }
+        plane = plane + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# decode_tile (5.11.2) — the superblock loop. sd/cc/ncc must be set on the tile.
+# ================================================================
+fn av1_decode_tile(tile): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var num_planes = dr_frame_num_planes(frame);
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    av1_clear_above_context(tile, num_planes);
+    var r = 0;
+    while (r < mi_rows) {
+        av1_clear_left_context(tile, num_planes);
+        var c = 0;
+        while (c < mi_cols) {
+            av1_bd_clear(tile, r, c, AV1_SB4, num_planes);
+            av1_decode_partition(tile, r, c, 12);        # BLOCK_64X64
+            c = c + AV1_SB4;
+        }
+        r = r + AV1_SB4;
+    }
+    return av1_sym_dec_err(load64(tile + AV1TILE_SD));
+}
+
+# encode_tile — the paired superblock loop for the encode lane (plan-driven).
+fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var num_planes = dr_frame_num_planes(frame);
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    av1_clear_above_context(tile, num_planes);
+    var pc = alloc(8);
+    var bc = alloc(8);
+    store64(pc, 0);
+    store64(bc, 0);
+    var r = 0;
+    while (r < mi_rows) {
+        av1_clear_left_context(tile, num_planes);
+        var c = 0;
+        while (c < mi_cols) {
+            av1_encode_partition(tile, r, c, 12, plan_part, pc, plan_mi, plan_tx, bc);
+            c = c + AV1_SB4;
+        }
+        r = r + AV1_SB4;
+    }
+    return av1_sym_enc_err(load64(tile + AV1TILE_ENC));
+}
+
+# ================================================================
+# av1_decode_intra_tile — the keyframe tile decode entry point. tile is a
+# pre-built Av1Tile (av1_tile_new + av1_tile_grids_new, with TX_MODE / ENABLE_FI
+# set). Builds the adaptive CDF contexts + the symbol decoder over buf[0..sz),
+# runs decode_tile, and exits the symbol coder. Returns DR_OK / a sticky error.
+# ================================================================
+fn av1_decode_intra_tile(tile, buf, sz, disable_cdf): i64 {
+    var ncc = av1_ncdf_new();
+    var cc = av1_ccdf_new(av1_coeff_cdf_qbucket(load64(tile + AV1TILE_BASE_Q)));
+    var sd = av1_sym_dec_init(buf, sz, disable_cdf);
+    if ((ncc == 0) || (cc == 0) || (sd == 0)) { return DR_ERR_OOM; }
+    store64(tile + AV1TILE_SD, sd);
+    store64(tile + AV1TILE_CC, cc);
+    store64(tile + AV1TILE_NCC, ncc);
+    av1_decode_tile(tile);
+    av1_sym_dec_exit(sd);
+    return av1_sym_dec_err(sd);
+}
+
+# av1_encode_intra_tile — the paired encode entry point. Builds matching CDF
+# contexts + the symbol encoder, drives encode_tile over the plan, and flushes.
+# Returns the encoded byte buffer with the length stored at *out_len (0 on OOM).
+fn av1_encode_intra_tile(tile, plan_part, plan_mi, plan_tx, disable_cdf, out_len): i64 {
+    store64(out_len, 0);
+    var ncc = av1_ncdf_new();
+    var cc = av1_ccdf_new(av1_coeff_cdf_qbucket(load64(tile + AV1TILE_BASE_Q)));
+    var enc = av1_sym_enc_init(256, disable_cdf);
+    if ((ncc == 0) || (cc == 0) || (enc == 0)) { return 0; }
+    store64(tile + AV1TILE_ENC, enc);
+    store64(tile + AV1TILE_CC, cc);
+    store64(tile + AV1TILE_NCC, ncc);
+    av1_encode_tile(tile, plan_part, plan_mi, plan_tx);
+    return av1_sym_enc_finish(enc, out_len);
+}

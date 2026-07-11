@@ -42,6 +42,7 @@ modules = [
     "src/av1_coeffs.cyr",
     "src/av1_residual.cyr",
     "src/av1_partition.cyr",
+    "src/av1_tile.cyr",
     "src/h264_nal.cyr",
     "src/h264_ps.cyr",
     "src/h265_nal.cyr",
