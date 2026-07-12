@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.28] - 2026-07-11
+
+Completes the AV1 **deblocking loop filter**: the edge loop + main driver (spec
+7.14.1/7.14.2) that walk a reconstructed frame's 4x4 boundaries and apply the
+0.7.27 kernels, plus the `LoopfilterTxSizes` grid they consume. A whole
+keyframe's block/transform boundaries are now deblocked in place. A 2-agent
+adversarial spec review (edge-loop/driver fidelity, LoopfilterTxSizes write +
+hostile-frame safety) confirmed it with **no findings**. **20,102 suite
+assertions + 1,140 fuzz assertions, all green.**
+
+### Added
+- **AV1 deblocking edge loop + driver** (`src/av1_deblock.cyr`): `av1_lf_edge`
+  (7.14.2) derives the edge geometry (dx/dy, onScreen, the `row|subY`/`col|subX`
+  adjustment, xP/yP, prevRow/prevCol), the `isBlockEdge`/`isTxEdge`/`applyFilter`
+  decision, the filter size + strength, and applies the sample filter to the
+  edge's `MI_SIZE` samples; `av1_deblock` (7.14.1) is the main loop (all vertical
+  boundaries then all horizontal, per plane) that modifies the `DrFrame` in place.
+- **LoopfilterTxSizes grid** (`src/av1_residual.cyr`): 3 per-plane grids on the
+  `Av1Tile` (allocated by `av1_tile_grids_new`, `av1_lftx_get/set`), written per
+  tx block in `transform_block` (clamped to the plane extent) — the transform-size
+  record the deblocker reads for the tx-edge / filter-size decisions.
+- **Tests** (`tests/av1_deblock.tcyr`, +8 → 54 assertions): a whole-frame deblock —
+  a vertical block boundary (100/140 step) is wide-filtered to the known result
+  (125 / 105) across every row, with samples away from the edge and the frame-left
+  boundary untouched; and a `loop_filter_level = 0 → no-op` case.
+
+### Notes
+- `drishti_version()` → 728. The deblocking filter is complete (kernels 0.7.27 +
+  loop 0.7.28). Next in the in-loop filter layer: CDEF (7.15), then loop
+  restoration (7.17); after that, inter prediction and conformance.
+
 ## [0.7.27] - 2026-07-11
 
 Starts the AV1 **in-loop filter** layer (the first item toward AV1 100% after

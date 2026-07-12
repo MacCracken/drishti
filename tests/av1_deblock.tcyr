@@ -148,6 +148,83 @@ fn test_sample_dispatch() {
     return 0;
 }
 
+# ---- whole-frame deblock (7.14.1/2): a vertical block boundary is smoothed. ----
+fn test_whole_frame() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 4, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    # a decoded frame: BLOCK_8X8 blocks, TX_8X8, not skipped; left half 100 / right 140.
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 4) {
+            av1_grid_set(tile, AV1TILE_MISIZES, r, c, 3);   # BLOCK_8X8
+            av1_grid_set(tile, AV1TILE_SKIPS, r, c, 0);
+            av1_lftx_set(tile, 0, r, c, 1);                 # TX_8X8
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 16) {
+            var v = 100;
+            if (x >= 8) { v = 140; }
+            dr_frame_set(frame, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    # loop_filter_level 40 -> the x=8 tx/block boundary gets the wide (log2 3) filter.
+    var fh = mk_fh(40, 40, 0, 0, 0, 0, 0);
+    av1_deblock(tile, fh);
+    # the boundary column is smoothed to the wide-filter result (F[0]=125, F[-3]=105),
+    # for every row; samples away from the edge are untouched.
+    assert_eq(dr_frame_get(frame, 0, 8, 4), 125, "deblock boundary x=8 y=4");
+    assert_eq(dr_frame_get(frame, 0, 5, 4), 105, "deblock x=5 y=4");
+    assert_eq(dr_frame_get(frame, 0, 8, 12), 125, "deblock boundary whole column");
+    assert_eq(dr_frame_get(frame, 0, 2, 4), 100, "deblock far-left unchanged");
+    assert_eq(dr_frame_get(frame, 0, 13, 4), 140, "deblock far-right unchanged");
+    # x=0 (frame edge) and x=4/12 (not tx edges for TX_8X8) are NOT filtered.
+    assert_eq(dr_frame_get(frame, 0, 0, 4), 100, "frame-left edge not filtered");
+    return 0;
+}
+# level 0 -> no filtering at all.
+fn test_deblock_level0() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 4, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 4) {
+            av1_grid_set(tile, AV1TILE_MISIZES, r, c, 3);
+            av1_lftx_set(tile, 0, r, c, 1);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 16) {
+            var v = 100;
+            if (x >= 8) { v = 140; }
+            dr_frame_set(frame, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var fh = mk_fh(0, 0, 0, 0, 0, 0, 0);
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 8, 4), 140, "level 0 -> boundary untouched");
+    assert_eq(dr_frame_get(frame, 0, 7, 4), 100, "level 0 -> p side untouched");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("deblock strength / size / limits");
@@ -159,6 +236,9 @@ fn main() {
     test_wide();
     test_mask();
     test_sample_dispatch();
+    test_group("deblock edge loop + whole-frame driver");
+    test_whole_frame();
+    test_deblock_level0();
     return assert_summary();
 }
 

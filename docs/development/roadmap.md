@@ -148,10 +148,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   **first fully decoded keyframe** — the intra still-picture decode MILESTONE
   is complete)**.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
-  restoration, film-grain synthesis. **In progress**: the deblocking
-  loop-filter kernels (7.14.3-6 — mask / narrow / wide / strength) landed in
-  0.7.27 (`src/av1_deblock.cyr`); the edge loop + driver + LoopfilterTxSizes,
-  then CDEF and loop restoration, follow.
+  restoration, film-grain synthesis. **In progress**: the deblocking loop
+  filter is complete (`src/av1_deblock.cyr` — kernels in 0.7.27, the edge loop
+  + main driver + LoopfilterTxSizes in 0.7.28); CDEF (7.15) and loop
+  restoration (7.17) follow, then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

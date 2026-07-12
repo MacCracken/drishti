@@ -215,3 +215,114 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
     }
     return av1_lf_wide(frame, plane, x, y, dx, dy, 4);
 }
+
+# ================================================================
+# edge loop filter process (7.14.2) — filter one 4x4 boundary at MI (row, col)
+# for a plane/pass. tile carries the frame + the MI grids + LoopfilterTxSizes;
+# fh the loop-filter params. Intra keyframe: RefFrames <= INTRA_FRAME (isIntra=1),
+# ref=INTRA_FRAME, mode_type=0 (per-block delta_lf / inter mode-type deferred, roadmap.md).
+# ================================================================
+fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var subx = 0;
+    var suby = 0;
+    if (plane > 0) {
+        subx = load64(tile + AV1TILE_SUBX);
+        suby = load64(tile + AV1TILE_SUBY);
+    }
+    var dx = 1;
+    var dy = 0;
+    if (pass != 0) { dx = 0; dy = 1; }
+    var x = col * AV1_MI_SIZE;
+    var y = row * AV1_MI_SIZE;
+    # onScreen (off-frame edges + the top/left frame boundary are not filtered).
+    if (x >= dr_frame_width(frame)) { return 0; }
+    if (y >= dr_frame_height(frame)) { return 0; }
+    if ((pass == 0) && (x == 0)) { return 0; }
+    if ((pass == 1) && (y == 0)) { return 0; }
+    var arow = row | suby;                 # adjusted to the plane's MI grain
+    var acol = col | subx;
+    var xp = x >> subx;
+    var yp = y >> suby;
+    var prev_row = arow - (dy << suby);
+    var prev_col = acol - (dx << subx);
+    var mi_size = av1_grid_get(tile, AV1TILE_MISIZES, arow, acol);
+    var tx_sz = av1_lftx_get(tile, plane, arow >> suby, acol >> subx);
+    var prev_tx_sz = av1_lftx_get(tile, plane, prev_row >> suby, prev_col >> subx);
+    var plane_size = av1_get_plane_residual_size(mi_size, plane, subx, suby);
+    var skip = av1_grid_get(tile, AV1TILE_SKIPS, arow, acol);
+    # isBlockEdge / isTxEdge / applyFilter.
+    var is_block_edge = 0;
+    var is_tx_edge = 0;
+    if (pass == 0) {
+        if ((xp % av1_block_width(plane_size)) == 0) { is_block_edge = 1; }
+        if ((xp % av1_tx_width(tx_sz)) == 0) { is_tx_edge = 1; }
+    } else {
+        if ((yp % av1_block_height(plane_size)) == 0) { is_block_edge = 1; }
+        if ((yp % av1_tx_height(tx_sz)) == 0) { is_tx_edge = 1; }
+    }
+    # applyFilter = isTxEdge && (isBlockEdge || skip==0 || isIntra). For an intra
+    # keyframe isIntra is always 1 (RefFrames <= INTRA_FRAME), so this reduces to
+    # isTxEdge; is_block_edge / skip matter once inter blocks (isIntra 0) land.
+    var is_intra = 1;
+    var apply = 0;
+    if ((is_tx_edge != 0) && (is_block_edge || (skip == 0) || is_intra)) { apply = 1; }
+    var filter_size = av1_lf_filter_size(tx_sz, prev_tx_sz, pass, plane);
+    # adaptive strength: intra keyframe -> uniform ref=INTRA/mode_type=0; if lvl
+    # were 0 the spec recomputes with the prev block, identical here.
+    var lvl = av1_lf_strength(fh, plane, pass, AV1_INTRA_FRAME, 0, 0);
+    var lim = alloc(3 * 8);
+    av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);
+    if ((apply != 0) && (lvl > 0)) {
+        var i = 0;
+        while (i < AV1_MI_SIZE) {
+            av1_lf_sample(frame, plane, xp + (dy * i), yp + (dx * i),
+            load64(lim + 0), load64(lim + 8), load64(lim + 16), dx, dy, filter_size);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# ================================================================
+# loop filter process (7.14.1) — the main driver: all vertical boundaries, then
+# all horizontal boundaries, per plane. Modifies the reconstructed DrFrame in
+# place. Call only when loop_filter_level[0] or [1] is non-zero (7.13.5).
+# ================================================================
+fn av1_deblock(tile, fh): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var num_planes = dr_frame_num_planes(frame);
+    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var plane = 0;
+    while (plane < num_planes) {
+        var run = 0;
+        if (plane == 0) { run = 1; }
+        else { if (av1_fh_loop_filter_level(fh, 1 + plane)) { run = 1; } }
+        if (run) {
+            var pass = 0;
+            while (pass < 2) {
+                var row_step = 1;
+                var col_step = 1;
+                if (plane > 0) {
+                    row_step = 1 << suby;
+                    col_step = 1 << subx;
+                }
+                var row = 0;
+                while (row < mi_rows) {
+                    var col = 0;
+                    while (col < mi_cols) {
+                        av1_lf_edge(tile, fh, plane, pass, row, col);
+                        col = col + col_step;
+                    }
+                    row = row + row_step;
+                }
+                pass = pass + 1;
+            }
+        }
+        plane = plane + 1;
+    }
+    return 0;
+}
