@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.30 (AV1 intra keyframe decode complete; deblocking + CDEF done)
+## Status — 0.7.31 (AV1 intra keyframe decode complete; deblocking + CDEF done, cdef_idx syntax in)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,144 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,170 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is

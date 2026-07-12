@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.31] - 2026-07-11
+
+Adds the AV1 **CDEF-index syntax** primitives — `read_cdef` (spec 5.11.56) +
+`clear_cdef` + the paired `write_cdef` — the per-64x64 `cdef_idx` bitstream read
+that feeds the 0.7.30 CDEF driver's `CdefIdx` grid. Standalone and round-trip
+tested this bite; the decode-path wiring (into `intra_frame_mode_info` + the
+`decode_tile` superblock loop) is the next bite, mirroring the 0.7.29 (kernels) ->
+0.7.30 (driver) split. A 1-agent adversarial review (6 points vs spec 5.11.56 +
+`clear_cdef`) confirmed **all match, no conformance bugs, encode/decode symmetric**
+(its two suggestions — a comment-accuracy fix and a 128x128 round-trip test —
+are both applied). **20,170 suite assertions + 1,140 fuzz assertions, all green;
+`make lint` green.**
+
+### Added
+- **CDEF-index syntax** (`src/av1_modeinfo.cyr`): `av1_read_cdef` (5.11.56) reads
+  `cdef_idx` once per 64x64 (guarded by `cdef_idx[r1][c1] == -1`; gated off on
+  skip / CodedLossless / !enable_cdef / allow_intrabc) via `L(cdef_bits)` and
+  fills the block's 4x4 extent (`r1 = MiRow & ~15`, step `cdefSize4 = 16`);
+  `av1_write_cdef` is the byte-identical encode mirror (emits `plan[r1][c1]`);
+  `av1_clear_cdef` resets a superblock's anchor(s) to -1 (one for 64x64, four for
+  128x128). Pointer-based (grid + stride) so they sit in an early module the
+  decode-path wiring can reach.
+- **Tests** (`tests/av1_modeinfo.tcyr`, +26 -> 336 assertions): a two-unit
+  `write_cdef`->`read_cdef` round-trip, the once-per-64x64 guard (with a proof
+  that non-anchor cells stay -1), the single-`BLOCK_128X128` four-anchor fill
+  round-trip, all four disabling gates (`read_cdef` consumes nothing), and
+  `clear_cdef` (64x64 + 128x128).
+
+### Notes
+- `drishti_version()` -> 731. **Next (0.7.32): wire `read_cdef`/`clear_cdef` into
+  the decode path** — thread the CDEF read context (grid + `enable_cdef` /
+  `cdef_bits` / `CodedLossless` / `allow_intrabc` / `use_128x128`) into
+  `intra_frame_mode_info` after `read_skip`, and `clear_cdef` into the
+  `decode_tile` SB loop — so a real profile-0 keyframe populates `CdefIdx` for the
+  0.7.30 driver. Then loop restoration (7.17).
+
 ## [0.7.30] - 2026-07-11
 
 Completes the AV1 **CDEF driver** — the process (spec 7.15) + block process
