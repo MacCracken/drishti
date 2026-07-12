@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.36] - 2026-07-11
+
+Adds the AV1 **symbol-coder subexponential primitives** (`src/av1_symbol.cyr`) —
+the entropy substrate `read_lr` needs to read loop-restoration unit params. These
+are the arithmetic-coded ("_bool") counterparts of the frame-header f/ns subexp
+coder: `NS(n)` over the symbol coder, `decode_subexp_bool(numSyms, k)`, and the
+unsigned/signed with-reference variants, each with a matching encoder + the forward
+`av1_recenter` (the exact inverse of the existing `av1_inverse_recenter`). A 1-agent
+adversarial review brute-forced **bit-pattern equality** (not just round-trip)
+against the spec and cross-checked the decode side against the production
+frame-header `av1_decode_subexp` — **all match, no conformance bugs**. **20,324
+suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **Subexp-bool primitives** (`src/av1_symbol.cyr`): `av1_sym_read_ns` /
+  `av1_sym_encode_ns` (NS(n) via the arithmetic coder's literal reads, matching
+  `dr_ns_read`/`dr_ns_write`); `av1_decode_subexp_bool` / `av1_encode_subexp_bool`
+  (subexponential value in `[0, numSyms)` with parameter `k`); the
+  `unsigned`/`signed_subexp_with_ref_bool` decode+encode pairs; and `av1_recenter`
+  (`src/av1_frame.cyr`, the forward inverse of `av1_inverse_recenter`).
+- **Tests** (`tests/av1_symbol.tcyr`, +82): full-range round-trips for `NS`
+  (n = 1/5/16), `subexp_bool` (all values, k = 1/2/3), and
+  `signed_subexp_with_ref_bool` across the real Wiener-tap (`[-5,10]` …) and
+  SGR-xqd (`[-32,95]`) ranges with negative references — cross-checked against a
+  Python model — plus the encoder-bounds guards below.
+
+### Fixed / hardened
+- **Encoder range validation (review note):** `av1_sym_encode_ns` and
+  `av1_encode_subexp_bool` now reject out-of-range `value` with `DR_ERR_BOUNDS`,
+  matching the sibling `dr_ns_write` (the decoders were already spec-exact; this
+  closes an encoder-side defensive asymmetry the review flagged). Regression tested.
+
+### Notes
+- `drishti_version()` -> 736. `read_lr` is split (it is bigger than `read_cdef`):
+  these entropy primitives this bite; next the restoration-type CDFs + `read_lr_unit`
+  (the per-unit type + Wiener-coeff / SGR-set-xqd reads), then the `read_lr`
+  per-superblock geometry + `decode_tile` wiring.
+
 ## [0.7.35] - 2026-07-11
 
 Completes the AV1 **loop-restoration driver** (spec 7.17.1 process + 7.17.2

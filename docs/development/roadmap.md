@@ -170,10 +170,13 @@ Baseline (0.7.0): OBU layer + sequence header.
   **Wiener** separable 7-tap (0.7.33) and the **self-guided / SGR** box filter
   (7.17.2/7.17.3, 0.7.34) — plus the stripe-loop process/loop_restore_block driver
   (7.17.1/2, 0.7.35). **The in-loop filter layer's pixel processes are done**
-  (deblocking + CDEF + loop restoration all have kernels + drivers). Remaining:
-  `read_lr` (5.11.57) to populate the LR unit params from the bitstream, and a
-  frame-level driver that runs deblock -> CDEF -> LR end-to-end (also activating the
-  wired-but-inert CDEF `set_cdef_ctx`). Then inter prediction.
+  (deblocking + CDEF + loop restoration all have kernels + drivers). `read_lr`
+  (5.11.57) is split (bigger than `read_cdef`): the symbol-coder subexp-bool
+  primitives (`NS`/`decode_subexp_bool`/signed-with-ref + `av1_recenter`) landed in
+  0.7.36; next the restoration-type CDFs + `read_lr_unit` (per-unit type + Wiener /
+  SGR-xqd reads), then the `read_lr` per-superblock geometry + `decode_tile` wiring.
+  Then a frame-level driver that runs deblock -> CDEF -> LR end-to-end (also
+  activating the wired-but-inert CDEF `set_cdef_ctx`), then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

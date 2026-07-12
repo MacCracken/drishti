@@ -374,3 +374,99 @@ fn av1_sym_enc_finish(enc, out_len): i64 {
     store64(out_len, len);
     return out;
 }
+
+# ================================================================
+# Subexponential coding over the symbol coder's literal reads (the "_bool" family,
+# so named in the spec because the bits are arithmetic-coded rather than read
+# directly). Used by read_lr (loop-restoration unit params, a later bite). Mirrors
+# the frame-header f/ns subexp (av1_frame.cyr av1_decode_subexp) but with L(n)/NS(n)
+# symbol-coder reads and `k` as a parameter. Depends on av1_inverse_recenter /
+# av1_recenter (av1_frame.cyr, included earlier) + dr_floor_log2 (bits.cyr).
+# ================================================================
+
+# NS(n) over the symbol coder — a uniform value in [0, n) via w-1 (+maybe 1) L bits.
+fn av1_sym_read_ns(sd, n): i64 {
+    if (n < 1) { return 0; }
+    var w = dr_floor_log2(n) + 1;
+    var m = (1 << w) - n;
+    var v = av1_sym_read_literal(sd, w - 1);
+    if (v < m) { return v; }
+    var extra = av1_sym_read_literal(sd, 1);
+    return ((v << 1) - m) + extra;
+}
+fn av1_sym_encode_ns(enc, value, n): i64 {
+    if (n < 1) { return DR_OK; }
+    if ((value < 0) || (value > (n - 1))) { return DR_ERR_BOUNDS; }   # match dr_ns_write
+    var w = dr_floor_log2(n) + 1;
+    var m = (1 << w) - n;
+    if (value < m) { return av1_sym_encode_literal(enc, value, w - 1); }
+    var t = value + m;
+    var rc = av1_sym_encode_literal(enc, t >> 1, w - 1);
+    if (rc != DR_OK) { return rc; }
+    return av1_sym_encode_literal(enc, t & 1, 1);
+}
+
+# decode_subexp_bool(numSyms, k) — the subexponential value in [0, numSyms).
+fn av1_decode_subexp_bool(sd, num_syms, k): i64 {
+    var i = 0;
+    var mk = 0;
+    while (1) {
+        var b2 = k;
+        if (i != 0) { b2 = (k + i) - 1; }
+        var a = 1 << b2;
+        if (num_syms <= (mk + (3 * a))) {
+            return av1_sym_read_ns(sd, num_syms - mk) + mk;
+        }
+        if (av1_sym_read_literal(sd, 1)) {          # subexp_more_bools
+            i = i + 1;
+            mk = mk + a;
+        } else {
+            return av1_sym_read_literal(sd, b2) + mk;
+        }
+    }
+    return 0;
+}
+fn av1_encode_subexp_bool(enc, value, num_syms, k): i64 {
+    if ((value < 0) || (value >= num_syms)) { return DR_ERR_BOUNDS; }
+    var i = 0;
+    var mk = 0;
+    while (1) {
+        var b2 = k;
+        if (i != 0) { b2 = (k + i) - 1; }
+        var a = 1 << b2;
+        if (num_syms <= (mk + (3 * a))) {
+            return av1_sym_encode_ns(enc, value - mk, num_syms - mk);
+        }
+        if (value < (mk + a)) {
+            var rc = av1_sym_encode_literal(enc, 0, 1);
+            if (rc != DR_OK) { return rc; }
+            return av1_sym_encode_literal(enc, value - mk, b2);
+        }
+        var rc2 = av1_sym_encode_literal(enc, 1, 1);
+        if (rc2 != DR_OK) { return rc2; }
+        i = i + 1;
+        mk = mk + a;
+    }
+    return DR_OK;
+}
+
+# decode_unsigned_subexp_with_ref_bool(mx, k, r): a value in [0, mx) coded relative
+# to reference r via the recenter mapping.
+fn av1_decode_unsigned_subexp_with_ref_bool(sd, mx, k, r): i64 {
+    var v = av1_decode_subexp_bool(sd, mx, k);
+    if ((r << 1) <= mx) { return av1_inverse_recenter(r, v); }
+    return (mx - 1) - av1_inverse_recenter((mx - 1) - r, v);
+}
+fn av1_encode_unsigned_subexp_with_ref_bool(enc, value, mx, k, r): i64 {
+    var v = 0;
+    if ((r << 1) <= mx) { v = av1_recenter(r, value); }
+    if ((r << 1) > mx) { v = av1_recenter((mx - 1) - r, (mx - 1) - value); }
+    return av1_encode_subexp_bool(enc, v, mx, k);
+}
+# decode_signed_subexp_with_ref_bool(low, high, k, r): a value in [low, high).
+fn av1_decode_signed_subexp_with_ref_bool(sd, low, high, k, r): i64 {
+    return av1_decode_unsigned_subexp_with_ref_bool(sd, high - low, k, r - low) + low;
+}
+fn av1_encode_signed_subexp_with_ref_bool(enc, value, low, high, k, r): i64 {
+    return av1_encode_unsigned_subexp_with_ref_bool(enc, value - low, high - low, k, r - low);
+}

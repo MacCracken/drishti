@@ -6,22 +6,20 @@
 
 ## Version
 
-**0.7.35** — cut 2026-07-11, not yet tagged (user's git). Completes the AV1 **loop-
-restoration driver** (spec 7.17.1 process + 7.17.2 loop_restore_block, `av1_lr.cyr`):
-the stripe-based loop that copies `UpscaledCdefFrame` -> `LrFrame` then per 4x4
-block dispatches the Wiener or SGR kernel by restoration-unit type, via the
-`Av1LrParams` structure (per-unit `LrType`/`LrWiener`/`LrSgrSet`/`LrSgrXqd` grids).
-**This closes the in-loop filter layer's pixel processes** — deblocking, CDEF, and
-loop restoration all now have both kernels and drivers. A 1-agent review verified
-all 7 driver geometry points (esp. the negative-`StripeStartY` arithmetic shift +
-the `unitRow`/`unitCol` +8 asymmetry) with no dispatch bugs, and found one
-low-severity OOM-ordering bug (fixed: allocate/validate before writing the dispatch
-gate). On top of both LR filter kernels (Wiener 0.7.33 + SGR 0.7.34), the complete
-CDEF filter (0.7.29/0.7.30 + wiring 0.7.31/0.7.32), the deblocking loop filter
-(0.7.27/0.7.28), and the **first fully decoded keyframe** (0.7.25). Next: `read_lr`
-(5.11.57) to populate `Av1LrParams` from the bitstream, then the frame-level driver
-that runs deblock -> CDEF -> LR end-to-end (which also activates the wired-but-inert
-CDEF `set_cdef_ctx`). The remaining distance to 1.0 is the
+**0.7.36** — cut 2026-07-11, not yet tagged (user's git). Adds the AV1 **symbol-coder
+subexponential primitives** (`av1_symbol.cyr`) — the entropy substrate `read_lr`
+needs: `NS(n)` over the arithmetic coder, `decode_subexp_bool(numSyms, k)`, and the
+unsigned/signed with-reference variants (each with a matching encoder) + the forward
+`av1_recenter`. A 1-agent review brute-forced bit-pattern equality against the spec
+and cross-checked the decode side against the production frame-header
+`av1_decode_subexp` — all match, no conformance bugs; encoder range-validation added
+to match `dr_ns_write`. On top of the complete in-loop filter layer's pixel processes
+(deblocking 0.7.27/0.7.28 + CDEF 0.7.29/0.7.30 + loop restoration 0.7.33-0.7.35) and
+the **first fully decoded keyframe** (0.7.25). Next: the restoration-type CDFs +
+`read_lr_unit` (per-unit type + Wiener-coeff / SGR-set-xqd reads), then the `read_lr`
+per-superblock geometry + `decode_tile` wiring, then the frame-level driver that runs
+deblock -> CDEF -> LR end-to-end (also activating the wired-but-inert CDEF
+`set_cdef_ctx`). The remaining distance to 1.0 is the
 rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
 VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -49,14 +47,14 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 735, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 736, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
 | `src/av1_obu.cyr` | `av1_` | OBU parse/walk/write |
 | `src/av1_seq.cyr` | `av1_` | sequence_header_obu → full-fidelity Av1Seq |
 | `src/av1_frame.cyr` | `av1_` | uncompressed frame header (5.9.2, all frame types) + ref-frame state machine (Av1FrameHeader / Av1RefState) |
-| `src/av1_symbol.cyr` | `av1_` | multi-symbol adaptive-CDF arithmetic coder (spec 8.2) — decoder + encoder (Av1SymDec / Av1SymEnc) |
+| `src/av1_symbol.cyr` | `av1_` | multi-symbol adaptive-CDF arithmetic coder (spec 8.2) — decoder + encoder (Av1SymDec / Av1SymEnc) + subexp-bool primitives (NS / decode_subexp_bool / signed-with-ref, for read_lr) |
 | `src/av1_itx.cyr` | `av1_` | inverse transform block (spec 7.13) — DCT 4-64 / ADST 4-16 / identity / WHT + 2D driver |
 | `src/av1_intra.cyr` | `av1_` | intra prediction (spec 7.11.2 + 7.11.5) — predict_intra + DC/PAETH/SMOOTH×3 + full directional (edge filter/upsample) + recursive filter-intra (7.11.2.3) + chroma-from-luma (7.11.5) |
 | `src/av1_quant.cyr` | `av1_` | dequantization (spec 7.12.2) — Dc/Ac Qlookup tables (8/10/12-bit) + dc_q/ac_q/get_qindex/get_dc_quant/get_ac_quant |

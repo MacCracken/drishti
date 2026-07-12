@@ -262,6 +262,14 @@ fn av1_inverse_recenter(r, v): i64 {
     if (v & 1) { return r - ((v + 1) >> 1); }
     return r + (v >> 1);
 }
+# recenter(r, x) — the exact inverse of av1_inverse_recenter (maps an actual value
+# x back to its coded delta v), used by the subexp encode mirrors.
+fn av1_recenter(r, x): i64 {
+    if (x > (2 * r)) { return x; }
+    if (x > r) { return 2 * (x - r); }
+    if (x < r) { return (2 * (r - x)) - 1; }
+    return 0;
+}
 
 # get_relative_dist(a, b) — 5.9.4. Needs the sequence header for
 # enable_order_hint / OrderHintBits.
