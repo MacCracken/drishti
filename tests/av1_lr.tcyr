@@ -340,6 +340,74 @@ fn test_lr_unit_switchable_none() {
     return 0;
 }
 
+# ---- read_lr per-superblock geometry (5.11.57) ----
+# 128x64, unit_size 64 -> unit_rows 1, unit_cols 2. unit (0,0) coeffs A, (0,1) B.
+fn mk_lr_2units(): i64 {
+    var pe = av1_lr_params_new(128, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pe, 0, AV1_RESTORE_WIENER, 64);
+    av1_lr_type_set(pe, 0, 0, 0, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(pe, 0, 0, 0, 0, 3, 0 - 7, 15);
+    av1_lr_wiener_set(pe, 0, 0, 0, 1, 3, 0 - 7, 15);
+    av1_lr_type_set(pe, 0, 0, 1, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(pe, 0, 0, 1, 0, 0 - 2, 5, 20);
+    av1_lr_wiener_set(pe, 0, 0, 1, 1, 0 - 2, 5, 20);
+    return pe;
+}
+fn mk_lr_dec(): i64 {
+    var pd = av1_lr_params_new(128, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pd, 0, AV1_RESTORE_WIENER, 64);
+    return pd;
+}
+# two 64x64 superblocks (c=0, c=16): each reads exactly one unit (0,0) / (0,1).
+fn test_read_lr_two_sbs() {
+    var pe = mk_lr_2units();
+    av1_lr_ref_reset(pe);
+    var enc = av1_sym_enc_init(256, 1);
+    var nce = av1_ncdf_new();
+    av1_write_lr(enc, nce, pe, 0, 0, 12, 0, 0, 8);        # SB (0,0),  BLOCK_64X64
+    av1_write_lr(enc, nce, pe, 0, 16, 12, 0, 0, 8);       # SB (0,16)
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var pd = mk_lr_dec();
+    av1_lr_ref_reset(pd);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var ncd = av1_ncdf_new();
+    av1_read_lr(sd, ncd, pd, 0, 0, 12, 0, 0, 8);
+    av1_read_lr(sd, ncd, pd, 0, 16, 12, 0, 0, 8);
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 0, 2), 15, "SB(0,0) -> unit(0,0) coeff 15");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 1, 0, 2), 20, "SB(0,16) -> unit(0,1) coeff 20");
+    return 0;
+}
+# one 128x128 superblock reads BOTH units (the col loop runs 2 iterations).
+fn test_read_lr_sb_spans() {
+    var pe = mk_lr_2units();
+    av1_lr_ref_reset(pe);
+    var enc = av1_sym_enc_init(256, 1);
+    var nce = av1_ncdf_new();
+    av1_write_lr(enc, nce, pe, 0, 0, 15, 0, 0, 8);        # BLOCK_128X128 spans units 0 + 1
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var pd = mk_lr_dec();
+    av1_lr_ref_reset(pd);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var ncd = av1_ncdf_new();
+    av1_read_lr(sd, ncd, pd, 0, 0, 15, 0, 0, 8);
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 0, 2), 15, "spanning SB -> unit(0,0)");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 1, 0, 2), 20, "spanning SB -> unit(0,1)");
+    return 0;
+}
+# allow_intrabc: read_lr returns immediately, reading nothing.
+fn test_read_lr_intrabc() {
+    var pd = mk_lr_dec();
+    var buf = alloc(4);
+    store64(buf, 0);
+    var sd = av1_sym_dec_init(buf, 4, 1);
+    var ncd = av1_ncdf_new();
+    av1_read_lr(sd, ncd, pd, 0, 0, 12, 1, 0, 8);          # allow_intrabc = 1
+    assert_eq(av1_lr_type_get(pd, 0, 0, 0), AV1_RESTORE_NONE, "intrabc -> no read (type stays NONE)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("lr wiener coefficient (7.17.6)");
@@ -369,6 +437,10 @@ fn main() {
     test_lr_unit_sgr();
     test_lr_unit_sgr_radius0();
     test_lr_unit_switchable_none();
+    test_group("lr read_lr per-superblock geometry (5.11.57)");
+    test_read_lr_two_sbs();
+    test_read_lr_sb_spans();
+    test_read_lr_intrabc();
     return assert_summary();
 }
 

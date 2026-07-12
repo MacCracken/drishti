@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.38] - 2026-07-11
+
+Adds the AV1 **`read_lr`** per-superblock geometry (spec 5.11.57, `src/av1_lr.cyr`)
+— for a superblock at MI (r, c) of size bSize, it computes the restoration-unit
+range the superblock overlaps (`unitRowStart/End`, `unitColStart/End`, with the
+`use_superres` `SuperresDenom`/`SUPERRES_NUM` horizontal scaling) per plane and
+dispatches `read_lr_unit`. This completes the `read_lr` bitstream-parsing logic;
+only the `decode_tile` wiring remains. A 1-agent adversarial review verified **all
+8 geometry checks** against the spec — the division grouping, the superres branch,
+the half-open loop bounds, the `Min` clamps (no OOB), and read/write parity — with
+**no bugs**. **20,347 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` green.**
+
+### Added
+- **`av1_read_lr` / `av1_write_lr`** (`src/av1_lr.cyr`): the §5.11.57 per-SB loop
+  — `allow_intrabc` early-return; per plane with `FrameRestorationType != NONE`,
+  `unitRowStart = (r*(MI_SIZE>>subY) + unitSize-1)/unitSize`,
+  `unitRowEnd = Min(unitRows, ((r+h)*(MI_SIZE>>subY) + unitSize-1)/unitSize)`, the
+  `numerator`/`denominator` (superres-scaled) column range, then the half-open
+  `unitRow`x`unitCol` double loop dispatching `read_lr_unit` / `write_lr_unit`.
+- **Tests** (`tests/av1_lr.tcyr`, +5 -> 80): two 64x64 superblocks reading one unit
+  each (SB(0,0) -> unit(0,0), SB(0,16) -> unit(0,1)), a 128x128 superblock spanning
+  **both** units (the col loop runs twice), and the `allow_intrabc` early-return —
+  all round-tripped through `write_lr` -> `read_lr`.
+
+### Notes
+- `drishti_version()` -> 738. Loop-restoration bitstream parsing is complete
+  (`read_lr` -> `read_lr_unit` -> the subexp/CDF reads). The last LR integration
+  piece is wiring `read_lr` + the per-tile `av1_lr_ref_reset` into `decode_tile`
+  (alongside the existing `clear_cdef`), plus attaching the `Av1LrParams` to the
+  tile — the same wiring pattern CDEF used. Then the frame-level deblock -> CDEF ->
+  LR driver, then inter prediction.
+
 ## [0.7.37] - 2026-07-11
 
 Adds AV1 **`read_lr_unit`** (spec 5.11.57) — the per-restoration-unit bitstream
