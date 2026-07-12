@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.35] - 2026-07-11
+
+Completes the AV1 **loop-restoration driver** (spec 7.17.1 process + 7.17.2
+loop_restore_block, `src/av1_lr.cyr`): the stripe-based loop that copies
+`UpscaledCdefFrame` -> `LrFrame`, then per 4x4 block dispatches the Wiener or SGR
+kernel by restoration-unit type. **This closes the in-loop filter layer's pixel
+processes** — all three filters (deblocking, CDEF, loop restoration) now have both
+kernels and drivers. A 1-agent adversarial review verified all 7 driver geometry
+points (count_units, the copy/UsesLr gate, the **negative-`StripeStartY`
+arithmetic shift**, the `unitRow`(+8)/`unitCol` index asymmetry, block extent, the
+pass->vfilter/hfilter dispatch mapping, and grid memory) with **no geometry/dispatch
+bugs**, and found one low-severity ordering bug (**fixed**, see below). **20,242
+suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **AV1 loop-restoration driver** (`src/av1_lr.cyr`): `av1_lr_process` (7.17.1 —
+  `LrFrame = copy(UpscaledCdefFrame)`; return on `UsesLr == 0`; else per 4x4 block
+  per plane with `FrameRestorationType != RESTORE_NONE`, invoke loop_restore_block);
+  `av1_lr_restore_block` (7.17.2 — `stripeNum = (lumaY+8)/64`, `StripeStartY =
+  (stripeNum*64 - 8) >>> subY` (arithmetic: negative for stripe 0), the unit-index
+  `Min` clamps, the block extent `x/y/w/h`, then the Wiener (vfilter=coeff[0],
+  hfilter=coeff[1]) or SGR (set + xqd) dispatch); `av1_lr_count_units`; and the
+  `Av1LrParams` structure + accessors holding the per-restoration-unit `LrType` /
+  `LrWiener` / `LrSgrSet` / `LrSgrXqd` grids.
+- **Tests** (`tests/av1_lr.tcyr`, +13 -> 57): `count_units`, and the full process
+  on an impulse frame where the output **discriminates the dispatched filter**
+  (WIENER -> 169, SGRPROJ -> 199, RESTORE_NONE -> 200 copy, `UsesLr == 0` -> copy)
+  plus the flat DC-passthrough — all cross-checked against a Python model of
+  7.17.1/2.
+
+### Fixed
+- **`av1_lr_params_set_plane` state-before-validation (review finding):** it wrote
+  `FrameRestorationType[plane]` (the dispatch gate) before validating the grid
+  allocations, so on OOM it returned `DR_ERR_OOM` but left the plane dispatchable
+  with null grids -> a caller ignoring the error would near-null OOB-read. Reordered
+  to allocate + validate first and write `RTYPE` last, so on OOM the plane stays
+  `RESTORE_NONE` and is never dispatched (never-crash contract).
+
+### Notes
+- `drishti_version()` -> 735. The in-loop filter pixel processes are complete;
+  remaining LR integration is `read_lr` (5.11.57) to populate `Av1LrParams` from
+  the bitstream. Then the frame-level driver that runs deblock -> CDEF -> LR
+  end-to-end (which also activates the wired-but-inert CDEF `set_cdef_ctx`), then
+  inter prediction.
+
 ## [0.7.34] - 2026-07-11
 
 Adds the AV1 loop-restoration **self-guided / SGR** filter kernels (spec 7.17.2 +

@@ -6,21 +6,22 @@
 
 ## Version
 
-**0.7.34** — cut 2026-07-11, not yet tagged (user's git). Adds the AV1 loop-
-restoration **self-guided / SGR** filter kernels (spec 7.17.2 + 7.17.3,
-`av1_lr.cyr`): the `Sgr_Params` table, the **box filter** (A/B box statistics with
-the integer reciprocal/mtable divisions + the 3x3 two-pass weighted output), and
-the **self-guided projection** (two box passes combined into `LrFrame`). Both loop-
-restoration filter paths now have kernels (Wiener 0.7.33 + SGR 0.7.34).
-Cross-checked against an independent Python model; a 1-agent review of the box
-filter (LR's most intricate kernel) confirmed all match with no bugs — the z==255
-a2 boundary, raw-b-vs-d in b2, negative parity, and every shift all correct. On
-top of the complete CDEF filter (kernels 0.7.29 + driver 0.7.30) + wiring
-(0.7.31/0.7.32), the deblocking loop filter (0.7.27/0.7.28), and the **first fully
-decoded keyframe** (0.7.25). Next: the loop-restoration stripe-loop driver
-(7.17.1/2) + `read_lr` (5.11.57) unit-param read + `LrFrame`. Also still open: the
-frame-level driver that activates CDEF (calls `set_cdef_ctx`) for real streams.
-The remaining distance to 1.0 is the
+**0.7.35** — cut 2026-07-11, not yet tagged (user's git). Completes the AV1 **loop-
+restoration driver** (spec 7.17.1 process + 7.17.2 loop_restore_block, `av1_lr.cyr`):
+the stripe-based loop that copies `UpscaledCdefFrame` -> `LrFrame` then per 4x4
+block dispatches the Wiener or SGR kernel by restoration-unit type, via the
+`Av1LrParams` structure (per-unit `LrType`/`LrWiener`/`LrSgrSet`/`LrSgrXqd` grids).
+**This closes the in-loop filter layer's pixel processes** — deblocking, CDEF, and
+loop restoration all now have both kernels and drivers. A 1-agent review verified
+all 7 driver geometry points (esp. the negative-`StripeStartY` arithmetic shift +
+the `unitRow`/`unitCol` +8 asymmetry) with no dispatch bugs, and found one
+low-severity OOM-ordering bug (fixed: allocate/validate before writing the dispatch
+gate). On top of both LR filter kernels (Wiener 0.7.33 + SGR 0.7.34), the complete
+CDEF filter (0.7.29/0.7.30 + wiring 0.7.31/0.7.32), the deblocking loop filter
+(0.7.27/0.7.28), and the **first fully decoded keyframe** (0.7.25). Next: `read_lr`
+(5.11.57) to populate `Av1LrParams` from the bitstream, then the frame-level driver
+that runs deblock -> CDEF -> LR end-to-end (which also activates the wired-but-inert
+CDEF `set_cdef_ctx`). The remaining distance to 1.0 is the
 rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
 VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -48,7 +49,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 734, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 735, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -73,7 +74,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: all vertical then horizontal boundaries, in place) |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
-| `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) filter kernels — Wiener (av1_lr_wiener_coeff 7.17.6 + av1_lr_get_source_sample 7.17.7 + av1_lr_wiener_filter 7.17.5) and self-guided/SGR (Sgr_Params + av1_lr_box_filter 7.17.3 + av1_lr_self_guided 7.17.2). The stripe-loop driver + read_lr are later bites |
+| `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd). read_lr is a later bite |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |

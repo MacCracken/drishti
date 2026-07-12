@@ -166,10 +166,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   `set_cdef_ctx` yet (it needs the parsed frame header), so the splice is inert for
   real bitstreams until that frame-level CDEF activation lands — the natural next
   step, alongside threading the frame header into the tile assembly. Loop
-  restoration (7.17) is underway: both filter kernels (`src/av1_lr.cyr`) are in —
-  the **Wiener** separable 7-tap (0.7.33) and the **self-guided / SGR** box filter
-  (7.17.2/7.17.3, 0.7.34); the stripe-loop driver (7.17.1/2) + `read_lr` (5.11.57)
-  unit-param read + `LrFrame` follow. Then inter prediction.
+  restoration (7.17) is **complete** (`src/av1_lr.cyr`): both filter kernels — the
+  **Wiener** separable 7-tap (0.7.33) and the **self-guided / SGR** box filter
+  (7.17.2/7.17.3, 0.7.34) — plus the stripe-loop process/loop_restore_block driver
+  (7.17.1/2, 0.7.35). **The in-loop filter layer's pixel processes are done**
+  (deblocking + CDEF + loop restoration all have kernels + drivers). Remaining:
+  `read_lr` (5.11.57) to populate the LR unit params from the bitstream, and a
+  frame-level driver that runs deblock -> CDEF -> LR end-to-end (also activating the
+  wired-but-inert CDEF `set_cdef_ctx`). Then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

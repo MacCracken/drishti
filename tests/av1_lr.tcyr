@@ -191,6 +191,80 @@ fn test_self_guided_impulse() {
     return 0;
 }
 
+# ---- LR driver: process (7.17.1) + loop_restore_block (7.17.2) ----
+fn test_lr_count_units() {
+    assert_eq(av1_lr_count_units(64, 64), 1, "64/64 -> 1 unit");
+    assert_eq(av1_lr_count_units(64, 128), 2, "128 -> 2 units");
+    assert_eq(av1_lr_count_units(64, 96), 2, "(96+32)/64 -> 2");
+    assert_eq(av1_lr_count_units(256, 100), 1, "tiny frame -> min 1 unit");
+    return 0;
+}
+# 64x64, flat 100 + impulse 200 at (32,32). rtype/uses_lr per args; single unit
+# (unit_size 64) using Wiener coeffs [3,-7,15] and SGR set 0 xqd (32,32).
+fn mk_lr(rtype, uses_lr): i64 {
+    var params = av1_lr_params_new(64, 64, 1, 0, 0, uses_lr);
+    av1_lr_params_set_plane(params, 0, rtype, 64);
+    av1_lr_type_set(params, 0, 0, 0, rtype);
+    av1_lr_wiener_set(params, 0, 0, 0, 0, 3, 0 - 7, 15);
+    av1_lr_wiener_set(params, 0, 0, 0, 1, 3, 0 - 7, 15);
+    av1_lr_sgrset_set(params, 0, 0, 0, 0);
+    av1_lr_sgrxqd_set(params, 0, 0, 0, 32, 32);
+    return params;
+}
+fn mk_impulse_frame(): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    lr_fill(f, 64, 64, 100);
+    dr_frame_set(f, 0, 32, 32, 200);
+    return f;
+}
+fn run_lr(rtype, uses_lr): i64 {
+    var cdef = mk_impulse_frame();
+    var oe = alloc(8);
+    var lr = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_lr_process(cdef, cdef, lr, mk_lr(rtype, uses_lr));   # curr = cdef for the test
+    return lr;
+}
+# RESTORE_NONE plane -> the block loop skips it -> LrFrame is just the copy.
+fn test_lr_process_none() {
+    var lr = run_lr(AV1_RESTORE_NONE, 1);
+    assert_eq(dr_frame_get(lr, 0, 32, 32), 200, "NONE -> impulse copied (200)");
+    assert_eq(dr_frame_get(lr, 0, 8, 8), 100, "NONE -> flat copied (100)");
+    return 0;
+}
+# UsesLr == 0 -> process returns right after the copy, no filtering.
+fn test_lr_process_uses0() {
+    var lr = run_lr(AV1_RESTORE_WIENER, 0);
+    assert_eq(dr_frame_get(lr, 0, 32, 32), 200, "UsesLr 0 -> copy only (200)");
+    return 0;
+}
+# WIENER unit: the impulse is Wiener-filtered (spec-matched 169).
+fn test_lr_process_wiener() {
+    var lr = run_lr(AV1_RESTORE_WIENER, 1);
+    assert_eq(dr_frame_get(lr, 0, 32, 32), 169, "WIENER process impulse (32,32) -> 169");
+    assert_eq(dr_frame_get(lr, 0, 33, 32), 110, "WIENER process (33,32) -> 110");
+    assert_eq(dr_frame_get(lr, 0, 8, 8), 100, "WIENER flat region unchanged (100)");
+    return 0;
+}
+# SGRPROJ unit: the impulse is self-guided-filtered (199) — proves the dispatch
+# picks SGR (not Wiener/none) with the unit's set + xqd.
+fn test_lr_process_sgr() {
+    var lr = run_lr(AV1_RESTORE_SGRPROJ, 1);
+    assert_eq(dr_frame_get(lr, 0, 32, 32), 199, "SGRPROJ process impulse (32,32) -> 199");
+    return 0;
+}
+# Full-process DC passthrough: a flat frame is unchanged through copy+dispatch+filter.
+fn test_lr_process_flat() {
+    var oe = alloc(8);
+    var cdef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var lr = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    lr_fill(cdef, 64, 64, 100);
+    av1_lr_process(cdef, cdef, lr, mk_lr(AV1_RESTORE_WIENER, 1));
+    assert_eq(dr_frame_get(lr, 0, 32, 32), 100, "WIENER flat process (32,32) -> 100");
+    assert_eq(dr_frame_get(lr, 0, 60, 60), 100, "WIENER flat process (60,60) -> 100");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("lr wiener coefficient (7.17.6)");
@@ -207,6 +281,13 @@ fn main() {
     test_self_guided_dc();
     test_self_guided_ramp();
     test_self_guided_impulse();
+    test_group("lr driver — process (7.17.1) + loop_restore_block (7.17.2)");
+    test_lr_count_units();
+    test_lr_process_none();
+    test_lr_process_uses0();
+    test_lr_process_wiener();
+    test_lr_process_sgr();
+    test_lr_process_flat();
     return assert_summary();
 }
 
