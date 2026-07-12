@@ -179,10 +179,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   `decode_tile` wiring (`read_lr` + the per-tile `av1_lr_ref_reset`, guarded by
   `AV1TILE_LRPARAMS`) landed in 0.7.39 — **loop restoration is complete through the
   decode-tile layer** and round-trip-tested end-to-end (unlike CDEF, verified only at
-  the mode-info level). The remaining piece (shared with CDEF): a frame-level driver
-  that assembles OBU -> seq/fh -> tile, decodes, and runs deblock -> CDEF -> LR,
-  attaching the LR params + CDEF context to activate everything for real streams.
-  Then inter prediction.
+  the mode-info level). The three filters are now **chained** by the in-loop filter
+  pipeline (`src/av1_decode.cyr`, `av1_apply_loop_filters`, 0.7.40 — deblock -> CDEF
+  -> LR in spec-7.4 order). The remaining piece: grow `av1_decode.cyr` into the full
+  frame driver (OBU walk -> seq/fh -> tile assembly setting the CDEF context + LR
+  params from the frame header -> decode -> the filter pipeline), activating the whole
+  in-loop filter layer for real streams. Then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

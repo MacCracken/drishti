@@ -1,0 +1,137 @@
+# tests/av1_decode.tcyr — AV1 in-loop filter pipeline (av1_apply_loop_filters):
+# deblock -> CDEF -> LR chaining + the CurrFrame/CdefFrame/LrFrame management.
+# The individual filters are tested in their own suites; here we verify the
+# orchestration (which filters run, which frame is returned) against known-answer
+# single-filter cases.
+include "src/main.cyr"
+include "src/av1_decode.cyr"
+
+fn dec_fill(f, w, h, v): i64 {
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) { dr_frame_set(f, 0, x, y, v); x = x + 1; }
+        y = y + 1;
+    }
+    return 0;
+}
+# a frame header carrying the loop-filter level, CDEF params, and UsesLr.
+fn mk_dec_fh(lf_level, damping, y_pri, y_sec, uses_lr): i64 {
+    var fh = alloc(1200);
+    store64(fh + AV1FH_LF_LEVEL + 0, lf_level);
+    store64(fh + AV1FH_LF_LEVEL + 8, lf_level);
+    store64(fh + AV1FH_LF_LEVEL + 16, lf_level);
+    store64(fh + AV1FH_LF_LEVEL + 24, lf_level);
+    store64(fh + AV1FH_CDEF_DAMPING, damping);
+    store64(fh + AV1FH_CDEF_Y_PRI, y_pri);
+    store64(fh + AV1FH_CDEF_Y_SEC, y_sec);
+    store64(fh + AV1FH_USES_LR, uses_lr);
+    return fh;
+}
+fn mk_dec_seq(enable_cdef): i64 {
+    var s = alloc(256);
+    store64(s + AV1_SEQ_ENABLE_CDEF, enable_cdef);
+    return s;
+}
+# 32x32 border-8 tile (mi 8x8): flat 128 + a spike 140 at (11,11); CdefIdx 0, no skip.
+fn mk_dec_tile(): i64 {
+    var oe = alloc(8);
+    var frame = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    dec_fill(frame, 32, 32, 128);
+    dr_frame_set(frame, 0, 11, 11, 140);
+    var tile = av1_tile_new(frame, 8, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    av1_cdefidx_set(tile, 0, 0, 0);
+    var r = 0;
+    while (r < 8) {
+        var c = 0;
+        while (c < 8) { av1_grid_set(tile, AV1TILE_SKIPS, r, c, 0); c = c + 1; }
+        r = r + 1;
+    }
+    return tile;
+}
+
+# No filters enabled: deblock is a no-op (level 0), CDEF off, no LR -> the pipeline
+# returns the input frame unchanged.
+fn test_pipeline_none() {
+    var tile = mk_dec_tile();
+    var frame = load64(tile + AV1TILE_FRAME);
+    var oe = alloc(8);
+    var result = av1_apply_loop_filters(tile, mk_dec_fh(0, 4, 8, 4, 0), mk_dec_seq(0), 0, oe);
+    assert_eq(result, frame, "no filters -> result is the input frame");
+    assert_eq(dr_frame_get(result, 0, 11, 11), 140, "no filters -> spike unchanged (140)");
+    assert_eq(load64(oe), DR_OK, "no filters -> DR_OK");
+    return 0;
+}
+# CDEF enabled -> the pipeline returns a NEW CdefFrame with the spike deringed
+# (matching the standalone CDEF driver: 140 -> 138), input frame untouched.
+fn test_pipeline_cdef() {
+    var tile = mk_dec_tile();
+    var frame = load64(tile + AV1TILE_FRAME);
+    var oe = alloc(8);
+    var result = av1_apply_loop_filters(tile, mk_dec_fh(0, 4, 8, 4, 0), mk_dec_seq(1), 0, oe);
+    assert_eq(load64(oe), DR_OK, "cdef -> DR_OK");
+    assert_eq(result != frame, 1, "cdef -> result is a new CdefFrame");
+    assert_eq(dr_frame_get(result, 0, 11, 11), 138, "cdef -> spike deringed to 138");
+    assert_eq(dr_frame_get(frame, 0, 11, 11), 140, "input frame untouched by CDEF");
+    return 0;
+}
+# CDEF + LR (UsesLr, all-NONE units) -> LR chains after CDEF, returning a fresh
+# LrFrame that copies the CDEF result through (138 carries).
+fn test_pipeline_cdef_lr() {
+    var tile = mk_dec_tile();
+    var frame = load64(tile + AV1TILE_FRAME);
+    var lrp = av1_lr_params_new(32, 32, 1, 0, 0, 1);
+    var oe = alloc(8);
+    var result = av1_apply_loop_filters(tile, mk_dec_fh(0, 4, 8, 4, 1), mk_dec_seq(1), lrp, oe);
+    assert_eq(load64(oe), DR_OK, "cdef+lr -> DR_OK");
+    assert_eq(result != frame, 1, "cdef+lr -> result is the LrFrame");
+    assert_eq(dr_frame_get(result, 0, 11, 11), 138, "cdef+lr -> LR carries the CDEF result (138)");
+    return 0;
+}
+# Deblocking only (level 40, a vertical block edge) -> in place on the input frame.
+fn test_pipeline_deblock() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 4, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 4) {
+            av1_grid_set(tile, AV1TILE_MISIZES, r, c, 3);   # BLOCK_8X8
+            av1_grid_set(tile, AV1TILE_SKIPS, r, c, 0);
+            av1_lftx_set(tile, 0, r, c, 1);                 # TX_8X8
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 16) {
+            var v = 100;
+            if (x >= 8) { v = 140; }
+            dr_frame_set(frame, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var result = av1_apply_loop_filters(tile, mk_dec_fh(40, 4, 0, 0, 0), mk_dec_seq(0), 0, oe);
+    assert_eq(result, frame, "deblock-only -> result is the in-place deblocked input frame");
+    assert_eq(dr_frame_get(result, 0, 8, 4), 125, "deblock smoothed the x=8 edge (125)");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
+    test_pipeline_none();
+    test_pipeline_cdef();
+    test_pipeline_cdef_lr();
+    test_pipeline_deblock();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

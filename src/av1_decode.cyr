@@ -1,0 +1,49 @@
+# src/av1_decode.cyr — AV1 frame-level decode driver (the top of the decode
+# pipeline). This bite is the IN-LOOP FILTER PIPELINE (spec 7.4 order): given a
+# reconstructed tile frame, run deblocking (7.14) -> CDEF (7.15) -> loop
+# restoration (7.17) in sequence, managing the intermediate CurrFrame/CdefFrame/
+# LrFrame buffers. The full OBU -> seq/fh -> tile-assembly -> decode driver
+# (which sets the CDEF context + LR params from the frame header, activating the
+# decode-time reads) grows here in later bites (roadmap.md).
+#
+# FLAT module — wired last in src/main.cyr (after av1_cdef.cyr), so it can call
+# every filter + tile function. Family av1_. Depends on: av1_deblock (av1_deblock),
+# av1_cdef (av1_cdef_process / av1_cdef_frame_new), av1_lr (av1_lr_process),
+# av1_seq (av1_seq_enable_cdef), av1_frame (av1_fh_uses_lr), frame, drishti.
+
+# ================================================================
+# apply_loop_filters: run the three in-loop filters over the tile's reconstructed
+# frame in spec order and return the final filtered frame (writes *out_err).
+#   1. Deblocking runs in place on the tile frame (no-op at loop_filter_level 0).
+#   2. CDEF (if the sequence enables it) reads the deblocked frame and writes a
+#      fresh CdefFrame; the tile's CdefIdx grid + fh strengths drive it.
+#   3. Loop restoration (if the frame UsesLr) reads the deblocked frame (as
+#      UpscaledCurrFrame) + the CdefFrame and writes a fresh LrFrame, per lr_params.
+# CDEF requires the frames to cover the MI grid (border >= 8 / MI-aligned); the
+# CdefFrame from av1_cdef_frame_new does, and the caller's decoded frame must too
+# (av1_cdef_process rejects with DR_ERR_BOUNDS otherwise — never OOB).
+# ================================================================
+fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
+    store64(out_err, DR_OK);
+    var frame = load64(tile + AV1TILE_FRAME);
+    # 1. deblocking (in place).
+    av1_deblock(tile, fh);
+    var result = frame;
+    # 2. CDEF.
+    var cdef_frame = frame;
+    if (av1_seq_enable_cdef(seq) != 0) {
+        cdef_frame = av1_cdef_frame_new(frame, out_err);
+        if (cdef_frame == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        var rc = av1_cdef_process(frame, cdef_frame, fh, tile);
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        result = cdef_frame;
+    }
+    # 3. loop restoration.
+    if ((av1_fh_uses_lr(fh) != 0) && (lr_params != 0)) {
+        var lr_frame = av1_cdef_frame_new(frame, out_err);
+        if (lr_frame == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        av1_lr_process(frame, cdef_frame, lr_frame, lr_params);
+        result = lr_frame;
+    }
+    return result;
+}

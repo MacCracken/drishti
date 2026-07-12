@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.40] - 2026-07-11
+
+Adds the AV1 **in-loop filter pipeline** (`src/av1_decode.cyr`, a new module — the
+seed of the frame-level decode driver): `av1_apply_loop_filters` chains
+deblocking (7.14) -> CDEF (7.15) -> loop restoration (7.17) in spec-7.4 order over a
+reconstructed tile frame, managing the `CurrFrame`/`CdefFrame`/`LrFrame` buffers and
+returning the final filtered frame. **This is the first time all three in-loop
+filters run chained together.** A 3-dimension adversarial review **workflow**
+(spec-order / frame-management / memory-error, each finding independently verified)
+**found + confirmed a real conformance bug** — a **latent `av1_deblock` defect since
+0.7.28** the pipeline exposed — now fixed. **20,367 suite assertions + 1,140 fuzz
+assertions, all green; `make lint` green.**
+
+### Added
+- **In-loop filter pipeline** (`src/av1_decode.cyr`): `av1_apply_loop_filters(tile,
+  fh, seq, lr_params, out_err)` — deblock in place (7.14.1), then CDEF (gated on
+  `av1_seq_enable_cdef`, into a fresh `CdefFrame` via `av1_cdef_frame_new`), then LR
+  (gated on `av1_fh_uses_lr` && `lr_params`, into a fresh `LrFrame`), returning the
+  final frame with OOM + CDEF coverage-guard (`DR_ERR_BOUNDS`) error propagation.
+- **Tests** (`tests/av1_decode.tcyr`, +12): no-filter passthrough (result == input
+  frame), CDEF (new frame, spike deringed 140 -> 138), CDEF+LR chaining (LR carries
+  138 through), deblock-in-place (edge -> 125) — each matching the standalone
+  filters' known answers.
+
+### Fixed
+- **`av1_deblock` missing the 7.14.1 frame-level gate (review finding, latent since
+  0.7.28):** `av1_deblock` forced `run=1` for luma and relied on the caller to gate
+  on `loop_filter_level`. With **both base luma levels 0 but `loop_filter_delta_enabled`
+  set** (a legal header; `ref_deltas[INTRA]` defaults to +1), the per-edge strength
+  became +1 and it filtered where spec 7.14.1 forbids ALL filtering — corrupting
+  pixels that then feed CDEF/LR. Fixed at the source: `av1_deblock` now self-gates
+  (`if loop_filter_level[0]==0 && [1]==0: return`). Regression test added
+  (`test_deblock_level0_delta`). Not reachable before (av1_deblock had no production
+  caller); the pipeline is the first.
+
+### Notes
+- `drishti_version()` -> 740. Next: grow `av1_decode.cyr` into the full frame driver
+  — OBU walk -> seq/fh -> tile assembly (setting the CDEF context + LR params from
+  the frame header, activating the decode-time reads) -> `decode_intra_tile` -> this
+  pipeline — which activates the whole in-loop filter layer for real streams.
+
 ## [0.7.39] - 2026-07-11
 
 Wires **`read_lr` into `decode_tile`** (spec 5.11.2) — the loop-restoration unit

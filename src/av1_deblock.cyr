@@ -287,9 +287,16 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
 # ================================================================
 # loop filter process (7.14.1) — the main driver: all vertical boundaries, then
 # all horizontal boundaries, per plane. Modifies the reconstructed DrFrame in
-# place. Call only when loop_filter_level[0] or [1] is non-zero (7.13.5).
+# place. Self-gates on the 7.14.1 frame-level check: if BOTH base luma levels
+# (loop_filter_level[0] and [1]) are 0, no filtering is applied — even when
+# loop_filter_delta_enabled would otherwise make the per-edge ref/mode-delta
+# strength non-zero (the delta strength process 7.14.5 is never reached).
 # ================================================================
 fn av1_deblock(tile, fh): i64 {
+    # 7.14.1 frame-level gate: both luma base levels 0 -> no loop filtering.
+    if ((av1_fh_loop_filter_level(fh, 0) == 0) && (av1_fh_loop_filter_level(fh, 1) == 0)) {
+        return 0;
+    }
     var frame = load64(tile + AV1TILE_FRAME);
     var num_planes = dr_frame_num_planes(frame);
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);

@@ -224,6 +224,41 @@ fn test_deblock_level0() {
     assert_eq(dr_frame_get(frame, 0, 7, 4), 100, "level 0 -> p side untouched");
     return 0;
 }
+# 7.14.1 frame-level gate: both base luma levels 0 but loop_filter_delta_enabled=1
+# with a +1 intra ref delta (a legal header). Without the gate, the per-edge lvl
+# would become +1 and filter — the spec forbids ALL filtering here.
+fn test_deblock_level0_delta() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 4, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 4) {
+            av1_grid_set(tile, AV1TILE_MISIZES, r, c, 3);
+            av1_lftx_set(tile, 0, r, c, 1);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 16) {
+            var v = 100;
+            if (x >= 8) { v = 140; }
+            dr_frame_set(frame, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var fh = mk_fh(0, 0, 0, 0, 0, 1, 1);        # levels 0, delta_enabled, intra_ref_delta +1
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 8, 4), 140, "level0+delta -> gate blocks all filtering");
+    assert_eq(dr_frame_get(frame, 0, 7, 4), 100, "level0+delta -> p side untouched");
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -239,6 +274,7 @@ fn main() {
     test_group("deblock edge loop + whole-frame driver");
     test_whole_frame();
     test_deblock_level0();
+    test_deblock_level0_delta();
     return assert_summary();
 }
 

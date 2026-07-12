@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.39 (AV1 intra keyframe decode complete; in-loop filter layer in; loop restoration wired into decode_tile)
+## Status — 0.7.40 (AV1 intra keyframe decode complete; the in-loop filter pipeline — deblock → CDEF → LR — is chained)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,353 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,367 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
@@ -30,9 +30,11 @@ the **CDEF** filter is complete (`av1_cdef.cyr` — kernels + driver + the wired
 `cdef_idx` read), and **loop restoration** (`av1_lr.cyr`, spec 7.17) is complete through the
 decode-tile layer — both filter kernels (**Wiener** + **self-guided/SGR**), the
 stripe-loop driver, the full `read_lr` bitstream parse, and the `decode_tile`
-wiring (round-trip-tested end-to-end). A frame-level driver that assembles
-OBU -> headers -> tile, decodes, and runs deblock -> CDEF -> LR (activating the
-LR params + CDEF context for real streams) is next.
+wiring (round-trip-tested end-to-end). The three filters are now
+**chained** by the in-loop filter pipeline (`av1_decode.cyr`,
+`av1_apply_loop_filters`). A frame-level driver that assembles OBU -> headers ->
+tile, decodes, and runs that pipeline (activating the LR params + CDEF context for
+real streams) is next.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive
