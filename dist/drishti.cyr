@@ -14285,7 +14285,10 @@ fn av1_decode_frame(seq, fh, buf, sz, out_err): i64 {
     var frame = dr_frame_new(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
     num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),
     av1_seq_bitdepth(seq), 8, out_err);
-    if (frame == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    # dr_frame_new already wrote the precise cause to *out_err (DR_ERR_BOUNDS for bad
+    # dims, DR_ERR_OVERSIZE for a dimension bomb, DR_ERR_OOM for alloc) — preserve it
+    # (a bare return; clobbering with DR_ERR_OOM would mask an oversize/bounds reject).
+    if (frame == 0) { return 0; }
     # 2. tile group (5.11.1).
     var num_tiles = av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh);
     var tg = av1_tile_group_new(av1_max(1, num_tiles));

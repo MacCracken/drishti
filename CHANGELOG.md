@@ -17,9 +17,11 @@ returning the final frame. **This is the first end-to-end headers-to-pixels deco
 Scoped to single-tile 8-bit keyframes; multi-tile, superres, and non-8-bit are
 rejected cleanly (`DR_ERR_UNSUPPORTED`) rather than mis-decoded. A 3-dimension
 adversarial review **workflow** (field-mapping / error-geometry / scope-integration,
-each finding refute-by-default verified) **confirmed a real gap** — a 10/12-bit
-sequence was being reconstructed at 8-bit (silent mis-decode) — now guarded + tested.
-**20,468 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+each finding refute-by-default verified) **confirmed two real gaps** (both fixed +
+tested): a 10/12-bit sequence was reconstructed at 8-bit (silent mis-decode), and the
+frame-alloc failure path masked `dr_frame_new`'s precise error code (a dimension bomb
+reported as `OOM` instead of `OVERSIZE`). **20,470 suite assertions + 1,140 fuzz
+assertions, all green; `make lint` green.**
 
 ### Added
 - **Frame-level decode driver** (`src/av1_decode.cyr`): `av1_decode_frame(seq, fh,
@@ -36,12 +38,21 @@ sequence was being reconstructed at 8-bit (silent mis-decode) — now guarded + 
     emit a non-upscaled, wrong-size frame); the decode path (intra pred / inverse
     transform / recon) is 8-bit only (a 10/12-bit sequence would reconstruct at the
     wrong depth — this one caught by the adversarial review's `error-geometry` pass).
-- **Tests** (`tests/av1_decode.tcyr`, +17): encode a keyframe tile → decode it
+### Fixed
+- **Frame-alloc error path masked the precise cause** (review finding): on
+  `dr_frame_new` failure `av1_decode_frame` overwrote `*out_err` with `DR_ERR_OOM`,
+  hiding the `DR_ERR_OVERSIZE` (dimension bomb) / `DR_ERR_BOUNDS` codes `dr_frame_new`
+  had already written. Now a bare `return 0` preserves the precise code so a hostile
+  oversize is distinguishable from a transient resource failure.
+
+### Added (tests)
+- **Tests** (`tests/av1_decode.tcyr`, +19): encode a keyframe tile → decode it
   through `av1_decode_frame` from hand-built matching headers → verify the frame
   dims + flat-DC (128) pixels (headers → pixels); a CDEF-enabled variant (drives
-  the seq/fh → activate → filter path); multi-tile / `use_superres` / non-8-bit
-  rejection; and a truncated-payload case (the driver surfaces the symbol decoder's
-  sticky error, proving it genuinely runs the decode).
+  the seq/fh → activate → filter path); multi-tile / `use_superres` / non-8-bit /
+  dimension-bomb (`DR_ERR_OVERSIZE`, not masked) rejection; and a truncated-payload
+  case (the driver surfaces the symbol decoder's sticky error, proving it genuinely
+  runs the decode).
 
 ## [0.7.42] - 2026-07-12
 

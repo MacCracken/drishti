@@ -503,6 +503,20 @@ fn test_frame_decode_highbd_rejected() {
     assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "10-bit seq -> DR_ERR_UNSUPPORTED");
     return 0;
 }
+# A dimension-bomb FrameWidth is rejected with dr_frame_new's precise code
+# (DR_ERR_OVERSIZE), NOT masked as a generic OOM — the caller can tell a hostile
+# oversize from a transient resource failure.
+fn test_frame_decode_dimbomb() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_FRAME_WIDTH, 20000);   # > DR_FRAME_MAX_DIM (16384)
+    var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
+    assert_eq(frame, 0, "dimension bomb -> no frame");
+    assert_eq(load64(oe), DR_ERR_OVERSIZE, "oversize dims -> DR_ERR_OVERSIZE (not masked as OOM)");
+    return 0;
+}
 # The driver genuinely runs the symbol decode over the payload: a truncated tile
 # surfaces the decoder's sticky error (not a silently-returned default frame).
 fn test_frame_decode_truncated() {
@@ -540,6 +554,7 @@ fn main() {
     test_frame_decode_multitile_rejected();
     test_frame_decode_superres_rejected();
     test_frame_decode_highbd_rejected();
+    test_frame_decode_dimbomb();
     test_frame_decode_truncated();
     return assert_summary();
 }
