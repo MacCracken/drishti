@@ -83,7 +83,8 @@ enum Av1TileOff {
     AV1TILE_SKIPS     = 312;  # Skips grid
     AV1TILE_INTERTX   = 320;  # InterTxSizes grid
     AV1TILE_LFTX      = 328;  # LoopfilterTxSizes: 3 per-plane grids (stride MiCols)
-    AV1TILE_SIZE      = 352;  # LFTX occupies 328/336/344
+    AV1TILE_CDEFIDX   = 352;  # CdefIdx grid (per-64x64, MI-indexed; init -1)
+    AV1TILE_SIZE      = 360;  # LFTX occupies 328/336/344; CDEFIDX at 352
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -132,6 +133,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_LFTX + 0, 0);
     store64(tile + AV1TILE_LFTX + 8, 0);
     store64(tile + AV1TILE_LFTX + 16, 0);
+    store64(tile + AV1TILE_CDEFIDX, 0);
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
@@ -194,6 +196,12 @@ fn av1_tile_grids_new(tile): i64 {
         store64(tile + load64(offs + (g * 8)), arr);
         g = g + 1;
     }
+    # CdefIdx grid — init to -1 (clear_cdef: no filtering until read_cdef sets it).
+    var cix = alloc(n * 8);
+    if (cix == 0) { return DR_ERR_OOM; }
+    var ci = 0;
+    while (ci < n) { store64(cix + (ci * 8), 0 - 1); ci = ci + 1; }
+    store64(tile + AV1TILE_CDEFIDX, cix);
     return DR_OK;
 }
 # MI-grid accessors: grid[r][c] flat as r*MiCols + c. base is the AV1TILE_* off.
@@ -212,6 +220,15 @@ fn av1_lftx_get(tile, plane, r, c): i64 {
 fn av1_lftx_set(tile, plane, r, c, v): i64 {
     store64(load64(tile + AV1TILE_LFTX + (plane * 8))
     + (((r * load64(tile + AV1TILE_MI_COLS)) + c) * 8), v);
+    return 0;
+}
+# CdefIdx[r][c] — per-64x64 CDEF parameter index (or -1 = no filter), MI-indexed,
+# stride MiCols. Only the 64x64-aligned (baseR, baseC) entries are meaningful.
+fn av1_cdefidx_get(tile, r, c): i64 {
+    return load64(load64(tile + AV1TILE_CDEFIDX) + (((r * load64(tile + AV1TILE_MI_COLS)) + c) * 8));
+}
+fn av1_cdefidx_set(tile, r, c, v): i64 {
+    store64(load64(tile + AV1TILE_CDEFIDX) + (((r * load64(tile + AV1TILE_MI_COLS)) + c) * 8), v);
     return 0;
 }
 

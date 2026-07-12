@@ -124,6 +124,149 @@ fn test_filter_flat() {
     return 0;
 }
 
+# ---- driver: CDEF process (7.15) + block process (7.15.1) ----
+# A fake frame header carrying just the CDEF fields the block process reads.
+fn mk_cdef_fh(damping, ypri0, ysec0, uvpri0, uvsec0): i64 {
+    var fh = alloc(1200);
+    store64(fh + AV1FH_CDEF_DAMPING, damping);
+    store64(fh + AV1FH_CDEF_Y_PRI, ypri0);
+    store64(fh + AV1FH_CDEF_Y_SEC, ysec0);
+    store64(fh + AV1FH_CDEF_UV_PRI, uvpri0);
+    store64(fh + AV1FH_CDEF_UV_SEC, uvsec0);
+    return fh;
+}
+fn cdef_fill(f, p, w, h, v): i64 {
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) { dr_frame_set(f, p, x, y, v); x = x + 1; }
+        y = y + 1;
+    }
+    return 0;
+}
+# 32x32 (MiCols=MiRows=8) tile: CdefIdx[0][0]=idx, every Skips entry = skip_all.
+fn mk_cdef_tile(frame, num_planes, idx, skip_all): i64 {
+    var tile = av1_tile_new(frame, 8, 8, 40, 1, 0, num_planes);
+    av1_tile_grids_new(tile);
+    av1_cdefidx_set(tile, 0, 0, idx);
+    var r = 0;
+    while (r < 8) {
+        var c = 0;
+        while (c < 8) { av1_grid_set(tile, AV1TILE_SKIPS, r, c, skip_all); c = c + 1; }
+        r = r + 1;
+    }
+    return tile;
+}
+# idx>=0, not skipped: the block process runs direction + var-scaled luma filter.
+fn test_process_luma_filter() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    cdef_fill(curr, 0, 32, 32, 128);
+    dr_frame_set(curr, 0, 11, 11, 140);          # spike in the 8x8 block at MI (2,2)
+    var cdef = av1_cdef_frame_new(curr, oe);
+    var tile = mk_cdef_tile(curr, 1, 0, 0);       # idx 0, no skip
+    var fh = mk_cdef_fh(4, 8, 4, 0, 0);           # damping 4, y_pri 8, y_sec 4
+    assert_eq(av1_cdef_process(curr, cdef, fh, tile), DR_OK, "process returns DR_OK");
+    # var=2 -> varStr 0 -> pri 8 scaled to 2; the spike is pulled 140 -> 138.
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 138, "spike 140 var-scaled-filtered to 138");
+    assert_eq(dr_frame_get(cdef, 0, 11, 10), 128, "spike left neighbor 128");
+    assert_eq(dr_frame_get(cdef, 0, 10, 11), 128, "spike up neighbor 128");
+    assert_eq(dr_frame_get(cdef, 0, 0, 0), 128, "flat block copied through 128");
+    assert_eq(dr_frame_get(cdef, 0, 20, 20), 128, "flat elsewhere 128");
+    return 0;
+}
+# idx == -1: copy-through only, no filtering.
+fn test_process_copy_through() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    cdef_fill(curr, 0, 32, 32, 128);
+    dr_frame_set(curr, 0, 11, 11, 140);
+    var cdef = av1_cdef_frame_new(curr, oe);
+    var tile = mk_cdef_tile(curr, 1, 0 - 1, 0);   # idx -1
+    var fh = mk_cdef_fh(4, 8, 4, 0, 0);
+    assert_eq(av1_cdef_process(curr, cdef, fh, tile), DR_OK, "process DR_OK");
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 140, "idx -1 -> spike copied through 140");
+    assert_eq(dr_frame_get(cdef, 0, 12, 12), 128, "idx -1 -> flat copied 128");
+    return 0;
+}
+# all four 4x4 sub-blocks skipped: copy-through, no filtering.
+fn test_process_all_skip() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    cdef_fill(curr, 0, 32, 32, 128);
+    dr_frame_set(curr, 0, 11, 11, 140);
+    var cdef = av1_cdef_frame_new(curr, oe);
+    var tile = mk_cdef_tile(curr, 1, 0, 1);       # idx 0 but every Skips = 1
+    var fh = mk_cdef_fh(4, 8, 4, 0, 0);
+    assert_eq(av1_cdef_process(curr, cdef, fh, tile), DR_OK, "process DR_OK");
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 140, "all-skip -> spike copied, no filter");
+    return 0;
+}
+# the Finding-1 coverage guard: an undersized (non-MI-covering) frame is rejected,
+# never OOB; a bordered frame that covers the MI grid is accepted.
+fn test_coverage_guard() {
+    var oe = alloc(8);
+    var fh = mk_cdef_fh(4, 8, 4, 0, 0);
+    # 30x30, MiCols=MiRows=8 -> needs MiCols*4=32; border 0 -> cover 30 < 32 -> reject.
+    var small = dr_frame_new(30, 30, 1, 0, 0, 8, 0, oe);
+    cdef_fill(small, 0, 30, 30, 128);
+    var cdef0 = dr_frame_new(30, 30, 1, 0, 0, 8, 0, oe);
+    var t0 = mk_cdef_tile(small, 1, 0, 0);
+    assert_eq(av1_cdef_process(small, cdef0, fh, t0), DR_ERR_BOUNDS, "undersized frame rejected");
+    # border 8 -> cover 38 >= 32 -> accepted.
+    var big = dr_frame_new(30, 30, 1, 0, 0, 8, 8, oe);
+    cdef_fill(big, 0, 30, 30, 128);
+    var cdefb = av1_cdef_frame_new(big, oe);
+    var t1 = mk_cdef_tile(big, 1, 0, 0);
+    assert_eq(av1_cdef_process(big, cdefb, fh, t1), DR_OK, "bordered frame accepted");
+    return 0;
+}
+# chroma path: flat luma (yDir 0) + a chroma-U spike filtered with the uv strengths,
+# uv-remapped direction, and damping-1; luma stays flat (y_pri/y_sec 0).
+fn test_process_chroma() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 3, 0, 0, 8, 8, oe);   # 4:4:4 3-plane
+    cdef_fill(curr, 0, 32, 32, 128);
+    cdef_fill(curr, 1, 32, 32, 128);
+    cdef_fill(curr, 2, 32, 32, 128);
+    dr_frame_set(curr, 1, 11, 11, 132);          # gentle chroma-U spike
+    var cdef = av1_cdef_frame_new(curr, oe);
+    var tile = mk_cdef_tile(curr, 3, 0, 0);
+    var fh = mk_cdef_fh(6, 0, 0, 15, 8);          # damping 6, uv_pri 15, uv_sec 8
+    assert_eq(av1_cdef_process(curr, cdef, fh, tile), DR_OK, "process DR_OK (3-plane)");
+    assert_eq(dr_frame_get(cdef, 1, 11, 11), 128, "chroma-U spike 132 filtered to 128");
+    assert_eq(dr_frame_get(cdef, 1, 11, 10), 129, "chroma-U left neighbor 129");
+    assert_eq(dr_frame_get(cdef, 1, 10, 11), 129, "chroma-U up neighbor 129");
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 128, "flat luma untouched (var 0 -> pri 0)");
+    return 0;
+}
+
+# a garbage/out-of-range CdefIdx must NOT index the fh strength arrays (would
+# OOB-read the frame header) — it degrades to copy-through, no filter, no crash.
+fn test_process_garbage_idx() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    cdef_fill(curr, 0, 32, 32, 128);
+    dr_frame_set(curr, 0, 11, 11, 140);
+    var cdef = av1_cdef_frame_new(curr, oe);
+    var tile = mk_cdef_tile(curr, 1, 100, 0);     # idx 100 >> 8-entry arrays
+    var fh = mk_cdef_fh(4, 8, 4, 0, 0);
+    assert_eq(av1_cdef_process(curr, cdef, fh, tile), DR_OK, "garbage idx -> DR_OK (no OOB)");
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 140, "garbage idx -> copy-through, no filter");
+    return 0;
+}
+# a null output frame (e.g. CdefFrame OOM) is rejected, not dereferenced.
+fn test_process_null_frame() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    cdef_fill(curr, 0, 32, 32, 128);
+    var tile = mk_cdef_tile(curr, 1, 0, 0);
+    var fh = mk_cdef_fh(4, 8, 4, 0, 0);
+    assert_eq(av1_cdef_process(curr, 0, fh, tile), DR_ERR_BOUNDS, "null cdef frame rejected");
+    assert_eq(av1_cdef_process(0, curr, fh, tile), DR_ERR_BOUNDS, "null curr frame rejected");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("cdef constrain");
@@ -136,6 +279,14 @@ fn main() {
     test_group("cdef filter");
     test_filter_dering();
     test_filter_flat();
+    test_group("cdef process / block driver");
+    test_process_luma_filter();
+    test_process_copy_through();
+    test_process_all_skip();
+    test_coverage_guard();
+    test_process_chroma();
+    test_process_garbage_idx();
+    test_process_null_frame();
     return assert_summary();
 }
 

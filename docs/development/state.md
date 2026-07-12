@@ -6,22 +6,24 @@
 
 ## Version
 
-**0.7.29** — cut 2026-07-11, not yet tagged (user's git). Starts AV1 **CDEF**
-(the second in-loop filter) with the pixel-math kernels (`av1_cdef.cyr`, spec
-7.15.2 direction/variance search + 7.15.3 `constrain` + primary/secondary tap
-filter), cross-checked against an independent Python model and a 3-agent
-adversarial review (tables + math spec-exact, no correctness findings; two
-non-correctness findings tracked — see CHANGELOG). On top of the complete
-deblocking loop filter (kernels 0.7.27 + edge loop/driver + `LoopfilterTxSizes`
-0.7.28), the intra keyframe prediction completion (`get_filter_type`, 0.7.26),
-and the **first fully decoded keyframe** (0.7.25). Next: the CDEF block process +
-outer loop (7.15.1) + `CdefFrame`/`cdef_idx` wiring (0.7.30) — which must satisfy
-the CDEF frame contract (MI-aligned planes or border >= 7; see roadmap.md). The
-remaining distance to 1.0 is the rest of the in-loop filters (finish CDEF, loop
-restoration) + inter + conformance/10-bit + the encode-lane completion (finishing
-0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit
-(0.11.x) + freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
-[`roadmap.md`](roadmap.md).
+**0.7.30** — cut 2026-07-11, not yet tagged (user's git). Completes the AV1
+**CDEF driver**: the process (`av1_cdef.cyr`, spec 7.15) + block process (7.15.1)
+that walk every 8x8 block, copy `CurrFrame`->`CdefFrame`, and — per the per-64x64
+`CdefIdx` grid + `Skips` — run the direction search, the var-scaled luma strength
+derivation, and the per-plane filter over the 0.7.29 kernels; a whole deblocked
+frame now derings into a fresh `CdefFrame`. Enforces the 0.7.29 CDEF frame
+contract: the process rejects (never OOBs) a frame that doesn't cover the MI grid.
+A 2-agent adversarial review (7.15/7.15.1 conformance; coverage guard + memory
+safety) confirmed the spec logic with no conformance findings and surfaced one
+latent OOB (unbounded `CdefIdx` indexing the fh strength arrays) — **fixed +
+regression-tested**. On top of the CDEF kernels (0.7.29), the complete deblocking
+loop filter (0.7.27/0.7.28), and the **first fully decoded keyframe** (0.7.25).
+Next: `read_cdef` (5.11.56) to populate `CdefIdx` from the bitstream during
+`decode_block`, then loop restoration (7.17). The remaining distance to 1.0 is the
+rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
+completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
+VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+[`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 > **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
 > reported by its actual exit code — never folded into "green" while red. A
@@ -45,7 +47,7 @@ restoration) + inter + conformance/10-bit + the encode-lane completion (finishin
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 729, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 730, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -65,11 +67,11 @@ restoration) + inter + conformance/10-bit + the encode-lane completion (finishin
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
-| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids + LoopfilterTxSizes) + Av1Block decode contexts |
+| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids + LoopfilterTxSizes + CdefIdx) + Av1Block decode contexts |
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: all vertical then horizontal boundaries, in place) |
-| `src/av1_cdef.cyr` | `av1_` | CDEF kernels (7.15.2/7.15.3) — direction/variance search (av1_cdef_direction) + constrain non-linearity (av1_cdef_constrain) + primary/secondary tap filter (av1_cdef_filter) + Div/Pri/Sec/Directions/Uv_Dir tables. Precondition: caller supplies MI-grid-covering planes (0.7.30 driver, roadmap.md) |
+| `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |

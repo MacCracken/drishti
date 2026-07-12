@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.30] - 2026-07-11
+
+Completes the AV1 **CDEF driver** — the process (spec 7.15) + block process
+(7.15.1) that walk every 8x8 block, copy `CurrFrame`->`CdefFrame`, and (per the
+64x64 `CdefIdx` + the `Skips` grid) run the direction search, the var-scaled luma
+strength derivation, and the per-plane filter over the 0.7.29 kernels. A whole
+deblocked frame now derings into a fresh `CdefFrame`. This bite also **enforces
+the CDEF frame contract** flagged at 0.7.29 (review finding 1): the process
+rejects (never OOBs) any frame that doesn't cover the MI grid. A 2-agent
+adversarial review (7.15/7.15.1 spec conformance; coverage guard + memory safety)
+confirmed the spec logic with **no conformance findings** and surfaced **one
+latent OOB (fixed)** — an unbounded `CdefIdx` could index past the frame-header
+strength arrays. **20,144 suite assertions + 1,140 fuzz assertions, all green;
+`make lint` green.**
+
+### Added
+- **AV1 CDEF process + block process** (`src/av1_cdef.cyr`): `av1_cdef_process`
+  (7.15) — the outer loop over 8x8 blocks (step 2 MI units), reading each block's
+  64x64-aligned `CdefIdx`; `av1_cdef_block` (7.15.1) — copies the block (luma +
+  chroma) to `CdefFrame`, returns on `idx == -1` / all-skip, else runs the
+  direction search, the luma strength derivation (`dir` from the pre-var-scaled
+  `priStr`; `priStr = var ? (priStr*(4+varStr)+8)>>4 : 0`; damping = CdefDamping +
+  coeffShift) and filter, then the chroma path (uv strengths, `Cdef_Uv_Dir`
+  remap, damping-1); `av1_cdef_frame_new` allocates a `CdefFrame` (border >= 8, so
+  it always covers the MI grid); `av1_cdef_coverage_ok` is the MI-grid coverage
+  guard.
+- **`CdefIdx` grid** (`src/av1_residual.cyr`): a per-64x64, MI-indexed grid on the
+  `Av1Tile` (`AV1TILE_CDEFIDX`), allocated by `av1_tile_grids_new` **initialized
+  to -1** (clear_cdef: no filtering until `read_cdef` sets it), with
+  `av1_cdefidx_get/set`.
+- **Tests** (`tests/av1_cdef.tcyr`, +22 -> 42 assertions): the block process on a
+  32x32 frame — a var-scaled luma spike (140 -> 138), `idx == -1` copy-through,
+  all-skip passthrough, the coverage guard (undersized frame -> `DR_ERR_BOUNDS`,
+  bordered frame -> `DR_OK`), the chroma path (uv spike 132 -> 128), and the two
+  hardening regressions below. All cross-checked against a Python model of 7.15.1.
+
+### Fixed / hardened
+- **Latent OOB read of the frame header (review finding, fixed):** `av1_cdef_block`
+  now bounds `idx` to the 8-entry CDEF strength arrays (`idx >= 8` degrades to
+  copy-through) — a garbage/fuzzed `CdefIdx` can no longer index past the frame
+  header (trust-no-input; the future `read_cdef` will also bound it to
+  `[0, 2^cdef_bits)`). Regression test added.
+- **Null-frame guard:** `av1_cdef_process` rejects a null `curr`/`cdef` (e.g. an
+  OOM'd `CdefFrame`) with `DR_ERR_BOUNDS` instead of dereferencing near-null.
+  Regression test added.
+
+### Notes
+- `drishti_version()` -> 730. Two by-contract preconditions are documented (not
+  guarded, as they are unreachable from the decode path): even `mi_cols/mi_rows`
+  (they are `2*ceil(dim/8)`) and grids-allocated-before-process. **Review finding
+  2 (systemic per-block bump-allocator scratch) is unchanged — deferred to the
+  audit arc.** Next: `read_cdef` (5.11.56) to populate `CdefIdx` from the
+  bitstream during `decode_block`, then loop restoration (7.17).
+
 ## [0.7.29] - 2026-07-11
 
 Starts AV1 **CDEF** (Constrained Directional Enhancement Filter, the second
