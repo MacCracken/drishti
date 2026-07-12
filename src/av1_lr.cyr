@@ -260,7 +260,7 @@ fn av1_lr_self_guided(curr, cdef, lr, plane, x, y, w, h, set, xqd0, xqd1, pex, p
 # Loop restoration DRIVER (spec 7.17.1 process + 7.17.2 loop_restore_block).
 # Av1LrParams bundles the frame geometry + per-plane restoration params + the
 # per-restoration-unit grids (LrType / LrWiener / LrSgrSet / LrSgrXqd) that the
-# read_lr syntax (5.11.57, a later bite) populates. The process copies
+# read_lr_unit syntax (5.11.57) populates. The process copies
 # UpscaledCdefFrame -> LrFrame, then per 4x4 block dispatches the Wiener or SGR
 # kernel by unit type. All sample fetches clamp to the plane extent (via
 # get_source_sample / clamped w,h), so the driver is OOB-safe without a border.
@@ -280,7 +280,9 @@ enum Av1LrpOff {
     AV1LRP_WIEN  = 168;   # LrWiener grid ptr[3]   (*6: 2 passes x 3 coeffs)
     AV1LRP_SSET  = 192;   # LrSgrSet grid ptr[3]
     AV1LRP_SXQD  = 216;   # LrSgrXqd grid ptr[3]   (*2)
-    AV1LRP_SIZE  = 240;
+    AV1LRP_REFW  = 240;   # RefLrWiener[3][2][3] (plane, pass, tap) = 18 i64
+    AV1LRP_REFX  = 384;   # RefSgrXqd[3][2] (plane, i) = 6 i64
+    AV1LRP_SIZE  = 432;
 }
 
 # count_units_in_frame (5.11.57): units of `unit_size` spanning `frame_size`.
@@ -467,6 +469,199 @@ fn av1_lr_process(curr, cdef, lr, params): i64 {
             x = x + 4;
         }
         y = y + 4;
+    }
+    return 0;
+}
+
+# ================================================================
+# read_lr_unit (spec 5.11.57): the per-restoration-unit bitstream read of the
+# restoration type + Wiener coeffs / SGR set+xqd, into Av1LrParams, plus the paired
+# write. Uses the LR type CDFs (av1_noncoeffcdf) + the subexp-bool primitives
+# (av1_symbol) + the RefLrWiener/RefSgrXqd predictor state (reset per tile). The
+# read_lr per-superblock geometry + decode_tile wiring are the next bite (roadmap).
+# ================================================================
+# Wiener/SGR tap tables (5.11.57): Min/Max/K/Mid for the 3 Wiener taps + Min/Max/Mid
+# for the 2 SGR xqd weights. Blob: WMin@0 WMax@3 WK@6 WMid@9 XMin@12 XMax@14 XMid@16.
+var Av1_LrTaps = 0;
+fn av1_lr_taps(): i64 {
+    if (Av1_LrTaps != 0) { return Av1_LrTaps; }
+    var t = alloc(18 * 8);
+    if (t == 0) { return 0; }
+    store64(t + 0, 0 - 5);  store64(t + 8, 0 - 23); store64(t + 16, 0 - 17);   # Wiener_Taps_Min
+    store64(t + 24, 10);    store64(t + 32, 8);     store64(t + 40, 46);       # Wiener_Taps_Max
+    store64(t + 48, 1);     store64(t + 56, 2);     store64(t + 64, 3);        # Wiener_Taps_K
+    store64(t + 72, 3);     store64(t + 80, 0 - 7); store64(t + 88, 15);       # Wiener_Taps_Mid
+    store64(t + 96, 0 - 96); store64(t + 104, 0 - 32);                         # Sgrproj_Xqd_Min
+    store64(t + 112, 31);   store64(t + 120, 95);                              # Sgrproj_Xqd_Max
+    store64(t + 128, 0 - 32); store64(t + 136, 31);                            # Sgrproj_Xqd_Mid
+    Av1_LrTaps = t;
+    return t;
+}
+fn av1_lr_wtap_min(j): i64 { return load64(av1_lr_taps() + (j * 8)); }
+fn av1_lr_wtap_max(j): i64 { return load64(av1_lr_taps() + ((3 + j) * 8)); }
+fn av1_lr_wtap_k(j): i64 { return load64(av1_lr_taps() + ((6 + j) * 8)); }
+fn av1_lr_wtap_mid(j): i64 { return load64(av1_lr_taps() + ((9 + j) * 8)); }
+fn av1_lr_xqd_min(i): i64 { return load64(av1_lr_taps() + ((12 + i) * 8)); }
+fn av1_lr_xqd_max(i): i64 { return load64(av1_lr_taps() + ((14 + i) * 8)); }
+fn av1_lr_xqd_mid(i): i64 { return load64(av1_lr_taps() + ((16 + i) * 8)); }
+
+# RefLrWiener[plane][pass][j] / RefSgrXqd[plane][i] predictor state accessors.
+fn av1_lr_refw_get(params, plane, pass, j): i64 {
+    return load64(params + AV1LRP_REFW + ((((plane * 6) + (pass * 3)) + j) * 8));
+}
+fn av1_lr_refw_set(params, plane, pass, j, v): i64 {
+    store64(params + AV1LRP_REFW + ((((plane * 6) + (pass * 3)) + j) * 8), v);
+    return 0;
+}
+fn av1_lr_refx_get(params, plane, i): i64 {
+    return load64(params + AV1LRP_REFX + (((plane * 2) + i) * 8));
+}
+fn av1_lr_refx_set(params, plane, i, v): i64 {
+    store64(params + AV1LRP_REFX + (((plane * 2) + i) * 8), v);
+    return 0;
+}
+# reset the predictor state to the Mid tables (decode_tile, per tile, 5.11.57).
+fn av1_lr_ref_reset(params): i64 {
+    var plane = 0;
+    while (plane < 3) {
+        var pass = 0;
+        while (pass < 2) {
+            av1_lr_refx_set(params, plane, pass, av1_lr_xqd_mid(pass));
+            var j = 0;
+            while (j < 3) { av1_lr_refw_set(params, plane, pass, j, av1_lr_wtap_mid(j)); j = j + 1; }
+            pass = pass + 1;
+        }
+        plane = plane + 1;
+    }
+    return 0;
+}
+# single-entry grid setters/getters (read_lr_unit fills one tap / one xqd at a time).
+fn av1_lr_wiener_set_one(params, plane, ur, uc, pass, j, v): i64 {
+    store64(av1_lr_wiener_ptr(params, plane, ur, uc, pass) + (j * 8), v);
+    return 0;
+}
+fn av1_lr_wiener_get_one(params, plane, ur, uc, pass, j): i64 {
+    return load64(av1_lr_wiener_ptr(params, plane, ur, uc, pass) + (j * 8));
+}
+fn av1_lr_sgrxqd_set_one(params, plane, ur, uc, i, v): i64 {
+    store64(av1_lr_sgrxqd_ptr(params, plane, ur, uc) + (i * 8), v);
+    return 0;
+}
+fn av1_lr_sgrxqd_get_one(params, plane, ur, uc, i): i64 {
+    return load64(av1_lr_sgrxqd_ptr(params, plane, ur, uc) + (i * 8));
+}
+
+# read_lr_unit (5.11.57): read the restoration type (via the frame-type-gated CDF),
+# then the Wiener coeffs (per pass, per tap, subexp with the Ref predictor) or the
+# SGR set + xqd weights, into the unit's Av1LrParams grids; updates the Ref state.
+fn av1_read_lr_unit(sd, ncc, params, plane, unit_row, unit_col): i64 {
+    var frt = load64(params + AV1LRP_RTYPE + (plane * 8));
+    var rtype = AV1_RESTORE_NONE;
+    if (frt == AV1_RESTORE_WIENER) {
+        if (av1_sym_read_symbol(sd, av1_ncdf_use_wiener(ncc), 2)) { rtype = AV1_RESTORE_WIENER; }
+    }
+    if (frt == AV1_RESTORE_SGRPROJ) {
+        if (av1_sym_read_symbol(sd, av1_ncdf_use_sgrproj(ncc), 2)) { rtype = AV1_RESTORE_SGRPROJ; }
+    }
+    if (frt == AV1_RESTORE_SWITCHABLE) {
+        rtype = av1_sym_read_symbol(sd, av1_ncdf_restoration_type(ncc), 3);
+    }
+    av1_lr_type_set(params, plane, unit_row, unit_col, rtype);
+    if (rtype == AV1_RESTORE_WIENER) {
+        var pass = 0;
+        while (pass < 2) {
+            var first = 0;
+            if (plane != 0) { first = 1; av1_lr_wiener_set_one(params, plane, unit_row, unit_col, pass, 0, 0); }
+            var j = first;
+            while (j < 3) {
+                var mn = av1_lr_wtap_min(j);
+                var rf = av1_lr_refw_get(params, plane, pass, j);
+                var v = av1_decode_signed_subexp_with_ref_bool(sd, mn, av1_lr_wtap_max(j) + 1, av1_lr_wtap_k(j), rf);
+                av1_lr_wiener_set_one(params, plane, unit_row, unit_col, pass, j, v);
+                av1_lr_refw_set(params, plane, pass, j, v);
+                j = j + 1;
+            }
+            pass = pass + 1;
+        }
+    }
+    if (rtype == AV1_RESTORE_SGRPROJ) {
+        var set = av1_sym_read_literal(sd, 4);            # L(SGRPROJ_PARAMS_BITS)
+        av1_lr_sgrset_set(params, plane, unit_row, unit_col, set);
+        var i = 0;
+        while (i < 2) {
+            var radius = av1_lr_sgr_params(set, i * 2);
+            var mn = av1_lr_xqd_min(i);
+            var mx = av1_lr_xqd_max(i);
+            var v = 0;
+            if (radius != 0) {
+                v = av1_decode_signed_subexp_with_ref_bool(sd, mn, mx + 1, 4, av1_lr_refx_get(params, plane, i));
+            }
+            if ((radius == 0) && (i == 1)) {
+                v = av1_clip3(mn, mx, (1 << 7) - av1_lr_refx_get(params, plane, 0));   # SGRPROJ_PRJ_BITS
+            }
+            av1_lr_sgrxqd_set_one(params, plane, unit_row, unit_col, i, v);
+            av1_lr_refx_set(params, plane, i, v);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+# write_lr_unit: the paired encode of one unit's restoration params (mirrors the
+# read exactly, including the Ref update, so an encode->decode round-trips).
+fn av1_write_lr_unit(enc, ncc, params, plane, unit_row, unit_col): i64 {
+    var frt = load64(params + AV1LRP_RTYPE + (plane * 8));
+    var rtype = av1_lr_type_get(params, plane, unit_row, unit_col);
+    if (frt == AV1_RESTORE_WIENER) {
+        var uw = 0;
+        if (rtype == AV1_RESTORE_WIENER) { uw = 1; }
+        av1_sym_encode_symbol(enc, av1_ncdf_use_wiener(ncc), 2, uw);
+    }
+    if (frt == AV1_RESTORE_SGRPROJ) {
+        var us = 0;
+        if (rtype == AV1_RESTORE_SGRPROJ) { us = 1; }
+        av1_sym_encode_symbol(enc, av1_ncdf_use_sgrproj(ncc), 2, us);
+    }
+    if (frt == AV1_RESTORE_SWITCHABLE) {
+        av1_sym_encode_symbol(enc, av1_ncdf_restoration_type(ncc), 3, rtype);
+    }
+    if (rtype == AV1_RESTORE_WIENER) {
+        var pass = 0;
+        while (pass < 2) {
+            var first = 0;
+            if (plane != 0) { first = 1; }
+            var j = first;
+            while (j < 3) {
+                var mn = av1_lr_wtap_min(j);
+                var v = av1_lr_wiener_get_one(params, plane, unit_row, unit_col, pass, j);
+                var rf = av1_lr_refw_get(params, plane, pass, j);
+                av1_encode_signed_subexp_with_ref_bool(enc, v, mn, av1_lr_wtap_max(j) + 1, av1_lr_wtap_k(j), rf);
+                av1_lr_refw_set(params, plane, pass, j, v);
+                j = j + 1;
+            }
+            pass = pass + 1;
+        }
+    }
+    if (rtype == AV1_RESTORE_SGRPROJ) {
+        var set = av1_lr_sgrset_get(params, plane, unit_row, unit_col);
+        av1_sym_encode_literal(enc, set, 4);
+        var i = 0;
+        while (i < 2) {
+            var radius = av1_lr_sgr_params(set, i * 2);
+            var v = av1_lr_sgrxqd_get_one(params, plane, unit_row, unit_col, i);
+            if (radius != 0) {
+                av1_encode_signed_subexp_with_ref_bool(enc, v, av1_lr_xqd_min(i), av1_lr_xqd_max(i) + 1, 4,
+                av1_lr_refx_get(params, plane, i));
+            } else {
+                # radius==0 emits no bits; the decoder recomputes v, so mirror it to
+                # keep the Ref predictor in sync (0, or the clip when i==1).
+                v = 0;
+                if (i == 1) {
+                    v = av1_clip3(av1_lr_xqd_min(i), av1_lr_xqd_max(i), (1 << 7) - av1_lr_refx_get(params, plane, 0));
+                }
+            }
+            av1_lr_refx_set(params, plane, i, v);
+            i = i + 1;
+        }
     }
     return 0;
 }

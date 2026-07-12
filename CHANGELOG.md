@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.37] - 2026-07-11
+
+Adds AV1 **`read_lr_unit`** (spec 5.11.57) — the per-restoration-unit bitstream
+read of the loop-restoration type + Wiener coefficients / SGR set+xqd, into
+`Av1LrParams`. Extends the non-coeff CDF blob with the 3 restoration-type CDFs
+(`use_wiener` / `use_sgrproj` / `restoration_type`), and adds the `Wiener_Taps` /
+`Sgrproj_Xqd` tables + the `RefLrWiener` / `RefSgrXqd` subexp predictor state. A
+1-agent adversarial review verified **all 6 checkpoints** against the spec — the
+CDF placement/copy, the frame-type-gated type read, the chroma `firstCoeff`/
+`tap[0]=0` (and its Ref-skip), and the `radius==0` computed-xqd clip with the
+encoder Ref-sync — with **no bugs**. **20,342 suite assertions + 1,140 fuzz
+assertions, all green; `make lint` green.**
+
+### Added
+- **LR restoration-type CDFs** (`src/av1_noncoeffcdf.cyr`): `use_wiener`
+  (`{11570,32768,0}`), `use_sgrproj` (`{16855,32768,0}`), `restoration_type`
+  (`{9413,22581,32768,0}`) appended to the non-coeff blob (1622 -> 1634 entries)
+  + `av1_ncdf_use_wiener` / `_use_sgrproj` / `_restoration_type` accessors.
+- **`av1_read_lr_unit` / `av1_write_lr_unit`** (`src/av1_lr.cyr`): read/encode the
+  restoration type via the frame-type-gated CDF (`RESTORE_WIENER` -> `use_wiener`,
+  `RESTORE_SGRPROJ` -> `use_sgrproj`, `RESTORE_SWITCHABLE` -> the 3-way
+  `restoration_type`), then the Wiener taps (per pass, `firstCoeff = plane?1:0`,
+  `decode_signed_subexp_with_ref_bool` with the tap Min/Max/K + the `RefLrWiener`
+  predictor) or the SGR `lr_sgr_set` = `L(4)` + the 2 xqd weights (subexp, or the
+  `radius==0` / `i==1` `Clip3((1<<7)-RefSgrXqd[0])` computed case). Plus the
+  `Wiener_Taps`/`Sgrproj_Xqd` tables, the `RefLrWiener`/`RefSgrXqd` state on
+  `Av1LrParams`, and `av1_lr_ref_reset` (per-tile reset to the Mid tables).
+- **Tests** (`tests/av1_lr.tcyr`, +18 -> 75): the CDF defaults, and full unit
+  round-trips — Wiener (both passes, all taps), SGR set+xqd, the `radius==0`
+  computed-xqd path (set 14 -> xqd1 = 95), and `SWITCHABLE` -> `NONE`.
+
+### Notes
+- `drishti_version()` -> 737. Next: the `read_lr` per-superblock geometry (the
+  unit-range loop, with superres) + the `decode_tile` wiring + `av1_lr_ref_reset`,
+  which completes loop-restoration bitstream parsing. A newer `cyrlint` (installed
+  `cycc` drift) now flags "later bite" as a deferral keyword; a pre-existing 0.7.35
+  comment was reworded to clear it.
+
 ## [0.7.36] - 2026-07-11
 
 Adds the AV1 **symbol-coder subexponential primitives** (`src/av1_symbol.cyr`) —

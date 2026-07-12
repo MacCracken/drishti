@@ -173,9 +173,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   (deblocking + CDEF + loop restoration all have kernels + drivers). `read_lr`
   (5.11.57) is split (bigger than `read_cdef`): the symbol-coder subexp-bool
   primitives (`NS`/`decode_subexp_bool`/signed-with-ref + `av1_recenter`) landed in
-  0.7.36; next the restoration-type CDFs + `read_lr_unit` (per-unit type + Wiener /
-  SGR-xqd reads), then the `read_lr` per-superblock geometry + `decode_tile` wiring.
-  Then a frame-level driver that runs deblock -> CDEF -> LR end-to-end (also
+  0.7.36; the restoration-type CDFs + `read_lr_unit` (per-unit type + Wiener /
+  SGR-xqd reads + the Ref predictor) landed in 0.7.37; next the `read_lr`
+  per-superblock geometry (the unit-range loop, incl. superres) + `decode_tile`
+  wiring + the per-tile Ref reset, which completes loop-restoration bitstream
+  parsing. Then a frame-level driver that runs deblock -> CDEF -> LR end-to-end (also
   activating the wired-but-inert CDEF `set_cdef_ctx`), then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.

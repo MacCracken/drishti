@@ -265,6 +265,81 @@ fn test_lr_process_flat() {
     return 0;
 }
 
+# ---- read_lr_unit / write_lr_unit round-trip (5.11.57) ----
+# encode unit (0,0) of pre-planned `pe`, decode into a fresh `pd`, return pd.
+fn lr_unit_rt(pe, frt): i64 {
+    av1_lr_ref_reset(pe);
+    var enc = av1_sym_enc_init(128, 1);
+    var nce = av1_ncdf_new();
+    av1_write_lr_unit(enc, nce, pe, 0, 0, 0);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var pd = av1_lr_params_new(64, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pd, 0, frt, 64);
+    av1_lr_ref_reset(pd);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var ncd = av1_ncdf_new();
+    av1_read_lr_unit(sd, ncd, pd, 0, 0, 0);
+    return pd;
+}
+fn test_lr_cdf_defaults() {
+    var cc = av1_ncdf_new();
+    assert_eq(load64(av1_ncdf_use_wiener(cc) + 0), 11570, "use_wiener cdf[0] = 11570");
+    assert_eq(load64(av1_ncdf_use_sgrproj(cc) + 0), 16855, "use_sgrproj cdf[0] = 16855");
+    assert_eq(load64(av1_ncdf_restoration_type(cc) + 0), 9413, "restoration_type cdf[0] = 9413");
+    assert_eq(load64(av1_ncdf_restoration_type(cc) + 8), 22581, "restoration_type cdf[1] = 22581");
+    return 0;
+}
+fn test_lr_unit_wiener() {
+    var pe = av1_lr_params_new(64, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pe, 0, AV1_RESTORE_WIENER, 64);
+    av1_lr_type_set(pe, 0, 0, 0, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(pe, 0, 0, 0, 0, 3, 0 - 7, 15);       # pass 0 taps (in-range)
+    av1_lr_wiener_set(pe, 0, 0, 0, 1, 0 - 2, 5, 20);       # pass 1 taps
+    var pd = lr_unit_rt(pe, AV1_RESTORE_WIENER);
+    assert_eq(av1_lr_type_get(pd, 0, 0, 0), AV1_RESTORE_WIENER, "wiener type round-trips");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 0, 0), 3, "p0 t0");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 0, 1), 0 - 7, "p0 t1");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 0, 2), 15, "p0 t2");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 1, 0), 0 - 2, "p1 t0");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 1, 1), 5, "p1 t1");
+    assert_eq(av1_lr_wiener_get_one(pd, 0, 0, 0, 1, 2), 20, "p1 t2");
+    return 0;
+}
+fn test_lr_unit_sgr() {
+    var pe = av1_lr_params_new(64, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pe, 0, AV1_RESTORE_SGRPROJ, 64);
+    av1_lr_type_set(pe, 0, 0, 0, AV1_RESTORE_SGRPROJ);
+    av1_lr_sgrset_set(pe, 0, 0, 0, 5);                     # set 5 = {2,29,1,11}: both radii != 0
+    av1_lr_sgrxqd_set(pe, 0, 0, 0, 10, 0 - 20);
+    var pd = lr_unit_rt(pe, AV1_RESTORE_SGRPROJ);
+    assert_eq(av1_lr_type_get(pd, 0, 0, 0), AV1_RESTORE_SGRPROJ, "sgr type round-trips");
+    assert_eq(av1_lr_sgrset_get(pd, 0, 0, 0), 5, "sgr set 5");
+    assert_eq(av1_lr_sgrxqd_get_one(pd, 0, 0, 0, 0), 10, "xqd0 = 10");
+    assert_eq(av1_lr_sgrxqd_get_one(pd, 0, 0, 0, 1), 0 - 20, "xqd1 = -20");
+    return 0;
+}
+fn test_lr_unit_sgr_radius0() {
+    # set 14 = {2,30,0,0}: radius1 == 0 -> xqd1 is COMPUTED (not coded).
+    var pe = av1_lr_params_new(64, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pe, 0, AV1_RESTORE_SGRPROJ, 64);
+    av1_lr_type_set(pe, 0, 0, 0, AV1_RESTORE_SGRPROJ);
+    av1_lr_sgrset_set(pe, 0, 0, 0, 14);
+    av1_lr_sgrxqd_set(pe, 0, 0, 0, 10, 0);
+    var pd = lr_unit_rt(pe, AV1_RESTORE_SGRPROJ);
+    assert_eq(av1_lr_sgrxqd_get_one(pd, 0, 0, 0, 0), 10, "set14 xqd0 coded = 10");
+    assert_eq(av1_lr_sgrxqd_get_one(pd, 0, 0, 0, 1), 95, "set14 xqd1 = Clip3(-32,95,128-10) = 95");
+    return 0;
+}
+fn test_lr_unit_switchable_none() {
+    var pe = av1_lr_params_new(64, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(pe, 0, AV1_RESTORE_SWITCHABLE, 64);
+    av1_lr_type_set(pe, 0, 0, 0, AV1_RESTORE_NONE);
+    var pd = lr_unit_rt(pe, AV1_RESTORE_SWITCHABLE);
+    assert_eq(av1_lr_type_get(pd, 0, 0, 0), AV1_RESTORE_NONE, "switchable -> NONE round-trips");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("lr wiener coefficient (7.17.6)");
@@ -288,6 +363,12 @@ fn main() {
     test_lr_process_wiener();
     test_lr_process_sgr();
     test_lr_process_flat();
+    test_group("lr read_lr_unit / write_lr_unit round-trip (5.11.57)");
+    test_lr_cdf_defaults();
+    test_lr_unit_wiener();
+    test_lr_unit_sgr();
+    test_lr_unit_sgr_radius0();
+    test_lr_unit_switchable_none();
     return assert_summary();
 }
 

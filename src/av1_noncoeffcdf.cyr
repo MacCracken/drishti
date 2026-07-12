@@ -5,7 +5,8 @@
 # intra tx-type reads. Unlike the coeff CDFs there is NO quantizer bucket, so
 # init_non_coeff_cdfs copies the whole default blob into one mutable per-tile
 # context. Format matches the symbol coder: an N-symbol cdf is N+1 i64 (N
-# cumulative freqs ending 32768, then a 0 adaptation count). 1622 entries.
+# cumulative freqs ending 32768, then a 0 adaptation count). 1634 entries
+# (1622 intra keyframe CDFs + the 3 loop-restoration type CDFs at 1624..1633).
 #
 # Extracted from the spec and validated (every cdf non-decreasing, ends
 # 32768, count 0). The mode-info / tx-size / tx-type / partition reads that
@@ -24,7 +25,7 @@ fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1624 * 8);
+    var t = alloc(1636 * 8);   # 1634 entries (+ LR restoration CDFs at 1624..1633) + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -229,17 +230,22 @@ fn av1_noncoeff_cdf_blob(): i64 {
     av1_ncdffill8(t, 1600, 12576, 21499, 32768, 0, 269, 6076, 11258, 23115);
     av1_ncdffill8(t, 1608, 32768, 0, 83, 5615, 12001, 17228, 32768, 0);
     av1_ncdffill8(t, 1616, 1968, 5556, 12023, 18547, 32768, 0, 0, 0);
+    # loop-restoration type CDFs (10.md): use_wiener / use_sgrproj / restoration_type.
+    store64(t + (1624 * 8), 11570); store64(t + (1625 * 8), 32768); store64(t + (1626 * 8), 0);
+    store64(t + (1627 * 8), 16855); store64(t + (1628 * 8), 32768); store64(t + (1629 * 8), 0);
+    store64(t + (1630 * 8), 9413); store64(t + (1631 * 8), 22581);
+    store64(t + (1632 * 8), 32768); store64(t + (1633 * 8), 0);
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1622 * 8);
+    var cc = alloc(1634 * 8);
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1622) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < 1634) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -264,3 +270,7 @@ fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }
 fn av1_ncdf_tx64(cc, ctx): i64 { return cc + ((1168 + ctx * 4) * 8); }
 fn av1_ncdf_intra_tx_set1(cc, sqr, dir): i64 { return cc + ((1180 + ((sqr * 13) + dir) * 8) * 8); }
 fn av1_ncdf_intra_tx_set2(cc, sqr, dir): i64 { return cc + ((1388 + ((sqr * 13) + dir) * 6) * 8); }
+# loop-restoration type CDFs: use_wiener / use_sgrproj (2-symbol), restoration_type (3-symbol).
+fn av1_ncdf_use_wiener(cc): i64 { return cc + (1624 * 8); }
+fn av1_ncdf_use_sgrproj(cc): i64 { return cc + (1627 * 8); }
+fn av1_ncdf_restoration_type(cc): i64 { return cc + (1630 * 8); }
