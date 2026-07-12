@@ -186,12 +186,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   0.7.41 (`av1_lr_params_from_fh` builds the `Av1LrParams` from the header;
   `av1_activate_intra_filters` attaches it + the CDEF context to a decode tile —
   end-to-end tested by decoding a keyframe tile with header-derived LR params), and
-  **tile-group OBU parsing** (`av1_tile_group_parse`, spec 5.11.1) landed in 0.7.42 —
-  the per-tile byte-range extraction (bounds-checked against hostile sizes) that
-  feeds `decode_tile`. The remaining piece of the frame driver is the OBU walk that
-  strips the sequence/frame headers and drives seq/fh -> this tile-group parse ->
-  tile-assembly + the activation helpers -> decode -> the filter pipeline. Then inter
-  prediction.
+  **tile-group OBU parsing** (`av1_tile_group_parse`, spec 5.11.1) landed in 0.7.42.
+  The **frame-level driver** `av1_decode_frame` landed in 0.7.43 — it assembles +
+  decodes + filters a single-tile keyframe from parsed headers **all the way to
+  pixels** (the first end-to-end headers-to-pixels decode; multi-tile + superres
+  rejected as `DR_ERR_UNSUPPORTED`). The remaining piece is the OBU walk
+  (`av1_obu_next` dispatch) that parses the seq (`av1_seq_parse`) + fh
+  (`av1_frame_parse_uncompressed_header`) from raw OBU bytes and drives
+  `av1_decode_frame` — closing the raw-bitstream-to-pixels loop. Then multi-tile +
+  superres upscaling, then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

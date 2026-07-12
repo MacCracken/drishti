@@ -6,28 +6,29 @@
 
 ## Version
 
-**0.7.42** — cut 2026-07-12, not yet tagged (user's git). Adds **tile-group OBU
-parsing** (`av1_tile_group_parse`, spec 5.11.1) to `av1_decode.cyr` — the
-frame-driver prerequisite that extracts each tile's byte range from a tile-group
-payload so the driver can hand `(buf + offset, size)` to `decode_intra_tile`. Parses
-the group header (`tile_start_and_end_present_flag` + `tg_start`/`tg_end`) then, per
-tile, the non-last `le(TileSizeBytes)` size prefix / last-tile-remaining rule, into
-an `Av1TileGroup` (per-`TileNum` offset+size; absent tiles keep offset -1). Trust no
-input byte: `NumTiles`/`TileSizeBytes`/`tg_start`/`tg_end` all validated **before**
-any array index, and every extent bounds-checked against `sz` (lying/truncated sizes
-rejected, never OOB). A 3-dimension adversarial review **workflow** (spec-conformance
-/ input-safety / offset-arithmetic, each refute-by-default verified) cleared it. This
-builds on 0.7.41's **frame-header filter activation** (`av1_lr_params_from_fh` +
-`av1_activate_intra_filters` — CDEF/LR reads now live from a header), the complete
-in-loop filter layer (deblocking 0.7.27/0.7.28 + CDEF 0.7.29/0.7.30 + loop
-restoration 0.7.33-0.7.39) chained into the filter pipeline (0.7.40), and the
-**first fully decoded keyframe** (0.7.25). Next: assemble the frame driver
-(OBU walk -> seq/fh -> this tile-group parse -> tile assembly + the activation
-helpers -> decode -> the filter pipeline) — the glue that decodes a real keyframe
-bitstream end-to-end with the in-loop filters live. The remaining distance to 1.0 is
-the rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
-completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
-VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.43** — cut 2026-07-12, not yet tagged (user's git). Adds the **frame-level
+decode driver** `av1_decode_frame` to `av1_decode.cyr` — the integration that
+decodes a whole keyframe **from parsed headers to filtered pixels**, tying together
+every stage built across 0.7.23-0.7.42 (tile group 5.11.1 → tile assembly +
+decode_tile 5.11.2 → in-loop filter pipeline 7.4). Given a parsed sequence + frame
+header + the tile-group payload it creates the reconstruction frame, parses the tile
+group, assembles + activates + decodes the tile (every param header-driven:
+mi dims/base_q/tx_mode/reduced_tx from fh, enable_intra_edge/enable_filter_intra/
+planes/subsampling from seq, disable_cdf from disable_cdf_update), and runs deblock →
+CDEF → LR — returning the final frame. **This is the first end-to-end
+headers-to-pixels decode.** Scoped to single-tile 8-bit keyframes; multi-tile and
+use_superres are **rejected cleanly (`DR_ERR_UNSUPPORTED`)** rather than mis-decoded.
+A 3-dimension adversarial review **workflow** (field-mapping / error-geometry /
+scope-integration, each refute-by-default verified) cleared it. This builds on
+0.7.42's **tile-group OBU parsing** (`av1_tile_group_parse`), 0.7.41's **frame-header
+filter activation**, the complete in-loop filter layer (0.7.27-0.7.39) chained into
+the filter pipeline (0.7.40), and the **first decoded keyframe tile** (0.7.25). Next:
+the **OBU walk** (`av1_obu_next` dispatch) that parses seq (`av1_seq_parse`) + fh
+(`av1_frame_parse_uncompressed_header`) from raw OBU bytes and drives this
+`av1_decode_frame` — closing the raw-bitstream-to-pixels loop. The remaining distance
+to 1.0 is the rest of the in-loop filters + inter + conformance/10-bit + the
+encode-lane completion (finishing 0.7.x), then the other per-codec arcs (0.8.x
+H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 > **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
@@ -76,7 +77,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
-| `src/av1_decode.cyr` | `av1_` | frame-level decode driver (seed) — av1_apply_loop_filters: the in-loop filter pipeline (deblock 7.14 → CDEF 7.15 → LR 7.17, spec-7.4 order) with CurrFrame/CdefFrame/LrFrame management; **frame-header filter activation** (av1_lr_params_from_fh builds Av1LrParams from the header 5.9.20/7.17, av1_activate_intra_filters attaches the CDEF ctx + LR params to a decode tile — makes read_cdef/read_lr live); **tile-group OBU parse** (av1_tile_group_parse 5.11.1 — per-tile byte-range extraction into Av1TileGroup + av1_read_le 4.10.4, trust-no-input bounds). Grows into the OBU→pixels driver |
+| `src/av1_decode.cyr` | `av1_` | frame-level decode driver — **av1_decode_frame**: decode a single-tile keyframe from parsed headers → filtered pixels (create frame → tile-group parse → header-driven tile assembly + activation → decode_intra_tile → filter pipeline; multi-tile/superres → DR_ERR_UNSUPPORTED). av1_apply_loop_filters: the in-loop filter pipeline (deblock 7.14 → CDEF 7.15 → LR 7.17, spec-7.4 order); **frame-header filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters — makes read_cdef/read_lr live); **tile-group OBU parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4, trust-no-input). Next: the OBU walk that feeds it |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry) + the decode_tile wiring (AV1TILE_LRPARAMS, 0.7.39). Inert until a frame-level driver attaches the params |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
@@ -92,13 +93,13 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 29 suites / **20,451 assertions**: drishti 51 · bits
+- `make test` — 29 suites / **20,466 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 35 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_lr 80 · av1_decode 89 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_lr 80 · av1_decode 104 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.

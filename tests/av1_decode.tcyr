@@ -359,6 +359,163 @@ fn test_tg_adversarial() {
     return 0;
 }
 
+# ================================================================
+# Frame-level driver (av1_decode_frame): decode a single-tile keyframe from
+# parsed headers + the tile-group payload, end-to-end (encode a tile -> wrap as a
+# 1-tile group -> av1_decode_frame -> pixels + grids).
+# ================================================================
+# Encode a 128x64 keyframe tile (mi 32x16, base_q 40, all-skip DC): SB0 32x32,
+# SB1 64x64 — the same plan as av1_tile.tcyr's keyframe round-trip. Returns the
+# tile byte buffer, length at *out_len. For NumTiles==1 this buffer IS the
+# tile-group payload (no group header bits).
+fn frame_enc_keyframe(out_len): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, 40, 1, 0, 1);   # enable_ef=1, reduced_tx=0, 1 plane
+    av1_tile_grids_new(etile);
+    return av1_encode_intra_tile(etile, pp, pm, pt, 1, out_len);   # disable_cdf=1
+}
+# a sequence header carrying the fields av1_decode_frame reads (zeroed first —
+# alloc is not zero-init).
+fn frame_mk_seq(enable_cdef): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_BITDEPTH, 8);
+    store64(s + AV1_SEQ_NUM_PLANES, 1);
+    store64(s + AV1_SEQ_SUBX, 0);
+    store64(s + AV1_SEQ_SUBY, 0);
+    store64(s + AV1_SEQ_ENABLE_CDEF, enable_cdef);
+    store64(s + AV1_SEQ_ENABLE_RESTORATION, 0);
+    store64(s + AV1_SEQ_ENABLE_FILTER_INTRA, 0);     # matches the encode tile (ENABLE_FI=0)
+    store64(s + AV1_SEQ_ENABLE_INTRA_EDGE, 1);       # matches the encode tile (enable_ef=1)
+    return s;
+}
+# a frame header for the 128x64 keyframe (tile_cols/rows configurable for the
+# multi-tile-rejection test). base_q 40, TX_MODE_SELECT, disable_cdf_update=1 —
+# all matching the encode tile; loop_filter_level/uses_lr/superres stay 0 (zeroed).
+fn frame_mk_fh(tile_cols, tile_rows, tile_cols_log2, tile_rows_log2): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_FRAME_HEIGHT, 64);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_ROWS, 16);
+    store64(fh + AV1FH_BASE_Q_IDX, 40);
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_SELECT);
+    store64(fh + AV1FH_REDUCED_TX_SET, 0);
+    store64(fh + AV1FH_TILE_COLS, tile_cols);
+    store64(fh + AV1FH_TILE_ROWS, tile_rows);
+    store64(fh + AV1FH_TILE_COLS_LOG2, tile_cols_log2);
+    store64(fh + AV1FH_TILE_ROWS_LOG2, tile_rows_log2);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);        # matches encode disable_cdf=1
+    return fh;
+}
+# no filters (enable_cdef=0, uses_lr=0, lf_level=0): decode the keyframe end-to-end
+# to a flat DC (128) frame; the pipeline returns the reconstruction unchanged.
+fn test_frame_decode_plain() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    assert_eq(olen > 0, 1, "encoded a keyframe tile");
+    var oe = alloc(8);
+    var frame = av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe);
+    assert_eq(load64(oe), DR_OK, "decode_frame ok");
+    assert_eq(frame != 0, 1, "decode_frame returns a frame");
+    assert_eq(dr_frame_width(frame), 128, "frame width 128");
+    assert_eq(dr_frame_height(frame), 64, "frame height 64");
+    # flat DC prediction, skip -> no residual: every luma sample is 128.
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 128) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "keyframe pixels all 128 (headers -> pixels)");
+    return 0;
+}
+# CDEF enabled: the pipeline runs the CDEF stage (into a fresh CdefFrame) and
+# returns it. All-skip blocks -> cdef_idx never read -> CDEF is a no-op, so the
+# pixels stay 128 — but the decode drove the full seq/fh -> activate -> filter path.
+fn test_frame_decode_cdef() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var frame = av1_decode_frame(frame_mk_seq(1), frame_mk_fh(1, 1, 0, 0), out, olen, oe);
+    assert_eq(load64(oe), DR_OK, "decode_frame (CDEF) ok");
+    assert_eq(frame != 0, 1, "decode_frame (CDEF) returns a frame");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 128, "CDEF-path pixels still 128 (skip -> no dering)");
+    return 0;
+}
+# Multi-tile frames are unsupported here -> rejected cleanly (never a wrong
+# decode). Uses a valid 2-tile group payload so the parse succeeds first.
+fn test_frame_decode_multitile_rejected() {
+    var oe = alloc(8);
+    var buf = alloc(8);
+    store8(buf + 0, 0x00);                 # present=0 -> tg covers both tiles
+    store8(buf + 1, 0x01);                 # tile0 size_minus_1=1 -> size 2
+    store8(buf + 2, 0xAA); store8(buf + 3, 0xBB);   # tile0 data
+    store8(buf + 4, 0xCC); store8(buf + 5, 0xDD);   # tile1 (last) data
+    var frame = av1_decode_frame(frame_mk_seq(0), frame_mk_fh(2, 1, 1, 0), buf, 6, oe);
+    assert_eq(frame, 0, "multi-tile -> no frame");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "multi-tile -> DR_ERR_UNSUPPORTED (not a wrong decode)");
+    return 0;
+}
+# use_superres reconstructs downscaled then upscales (7.16); upscaling is not
+# implemented, so it is rejected rather than emitting a wrong-size frame.
+fn test_frame_decode_superres_rejected() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_USE_SUPERRES, 1);
+    var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
+    assert_eq(frame, 0, "superres -> no frame");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "use_superres -> DR_ERR_UNSUPPORTED");
+    return 0;
+}
+# The 8-bit-only decode path rejects a 10-bit sequence rather than reconstructing
+# at the wrong depth.
+fn test_frame_decode_highbd_rejected() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var seq = frame_mk_seq(0);
+    store64(seq + AV1_SEQ_BITDEPTH, 10);
+    var frame = av1_decode_frame(seq, frame_mk_fh(1, 1, 0, 0), out, olen, oe);
+    assert_eq(frame, 0, "10-bit -> no frame");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "10-bit seq -> DR_ERR_UNSUPPORTED");
+    return 0;
+}
+# The driver genuinely runs the symbol decode over the payload: a truncated tile
+# surfaces the decoder's sticky error (not a silently-returned default frame).
+fn test_frame_decode_truncated() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    # 1 byte cannot carry the tile's symbols -> the symbol decoder faults.
+    var frame = av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, 1, oe);
+    assert_eq(frame, 0, "truncated tile -> no frame");
+    assert_eq(load64(oe) != DR_OK, 1, "truncated tile -> decode error surfaced");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
@@ -377,6 +534,13 @@ fn main() {
     test_tg_tsbytes2();
     test_tg_single_nonzero_index();
     test_tg_adversarial();
+    test_group("frame-level driver (av1_decode_frame)");
+    test_frame_decode_plain();
+    test_frame_decode_cdef();
+    test_frame_decode_multitile_rejected();
+    test_frame_decode_superres_rejected();
+    test_frame_decode_highbd_rejected();
+    test_frame_decode_truncated();
     return assert_summary();
 }
 

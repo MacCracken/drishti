@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.43] - 2026-07-12
+
+Adds the **frame-level decode driver** `av1_decode_frame` to `src/av1_decode.cyr`
+— the integration that decodes a **whole keyframe from parsed headers to filtered
+pixels**, tying together every stage built across 0.7.23-0.7.42 (tile group 5.11.1
+→ tile assembly + decode_tile 5.11.2 → in-loop filter pipeline 7.4). Given an
+already-parsed sequence + frame header and the tile-group payload, it creates the
+reconstruction frame, parses the tile group, assembles + activates + decodes the
+tile (all params header-driven), and runs the deblock → CDEF → LR pipeline —
+returning the final frame. **This is the first end-to-end headers-to-pixels decode.**
+Scoped to single-tile 8-bit keyframes; multi-tile, superres, and non-8-bit are
+rejected cleanly (`DR_ERR_UNSUPPORTED`) rather than mis-decoded. A 3-dimension
+adversarial review **workflow** (field-mapping / error-geometry / scope-integration,
+each finding refute-by-default verified) **confirmed a real gap** — a 10/12-bit
+sequence was being reconstructed at 8-bit (silent mis-decode) — now guarded + tested.
+**20,468 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **Frame-level decode driver** (`src/av1_decode.cyr`): `av1_decode_frame(seq, fh,
+  buf, sz, out_err)` — decode one single-tile intra frame from its parsed headers +
+  the tile-group payload to the final in-loop-filtered frame. Header-driven tile
+  assembly: `mi_cols`/`mi_rows`/`base_q`/`reduced_tx`/`tx_mode` ← fh,
+  `enable_intra_edge_filter`/`enable_filter_intra`/`num_planes`/subsampling ← seq,
+  `disable_cdf` ← `disable_cdf_update`; then `av1_activate_intra_filters` (CDEF ctx
+  + LR params) and `av1_apply_loop_filters`. Every fallible step's error is
+  propagated via `*out_err` (returns 0 on failure).
+  - **Scope guards** (never a wrong decode): `NumTiles != 1`, `use_superres`, and
+    non-8-bit `BitDepth` all return `DR_ERR_UNSUPPORTED` — multi-tile needs per-tile
+    MI origins; superres upscaling (7.16) is not implemented (a superres frame would
+    emit a non-upscaled, wrong-size frame); the decode path (intra pred / inverse
+    transform / recon) is 8-bit only (a 10/12-bit sequence would reconstruct at the
+    wrong depth — this one caught by the adversarial review's `error-geometry` pass).
+- **Tests** (`tests/av1_decode.tcyr`, +17): encode a keyframe tile → decode it
+  through `av1_decode_frame` from hand-built matching headers → verify the frame
+  dims + flat-DC (128) pixels (headers → pixels); a CDEF-enabled variant (drives
+  the seq/fh → activate → filter path); multi-tile / `use_superres` / non-8-bit
+  rejection; and a truncated-payload case (the driver surfaces the symbol decoder's
+  sticky error, proving it genuinely runs the decode).
+
 ## [0.7.42] - 2026-07-12
 
 Adds **tile-group OBU parsing** (`av1_tile_group_parse`, spec 5.11.1) to
