@@ -704,6 +704,66 @@ fn test_obus_tilegroup_no_headers() {
     return 0;
 }
 
+# A malformed OBU (forbidden bit set) makes av1_obu_next fault; the walk propagates
+# the parser's PRECISE sticky code, not a generic BAD_HEADER.
+fn test_obus_forbidden_bit() {
+    var oe = alloc(8);
+    var buf = alloc(4);
+    store8(buf + 0, 0x80);                 # obu_forbidden_bit = 1 (6.2.2 violation)
+    store8(buf + 1, 0x00); store8(buf + 2, 0x00); store8(buf + 3, 0x00);
+    var frame = av1_decode_obus(buf, 4, oe);
+    assert_eq(frame, 0, "forbidden-bit OBU -> no frame");
+    assert_eq(load64(oe), DR_ERR_FORBIDDEN_BIT, "sticky parse fault propagated (not masked as BAD_HEADER)");
+    return 0;
+}
+# A malformed SEQUENCE_HEADER payload surfaces a parse error (the walk does not
+# silently continue past a failed seq_parse).
+fn test_obus_bad_seq_payload() {
+    var oe = alloc(8);
+    var pay = alloc(2);
+    store8(pay + 0, 0xFF); store8(pay + 1, 0xFF);   # seq_profile = 7 (invalid) etc.
+    var bw = dr_bw_init(16);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, pay, 2);
+    var n = dr_bw_flush(bw);
+    var frame = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    assert_eq(frame, 0, "bad seq payload -> no frame");
+    assert_eq(load64(oe) != DR_OK, 1, "bad seq payload -> error surfaced");
+    return 0;
+}
+# metadata + padding OBUs interspersed are skipped without disturbing the decode.
+# This also stresses the per-OBU byte-offset slicing (buf+off): interspersed OBUs
+# shift every payload offset, so a mis-sliced tile group would desync -> wrong
+# pixels. A correct flat-128 decode here is a much stronger witness than the plain
+# end-to-end stream.
+fn test_obus_metadata_padding_skipped() {
+    var tlen = 0;
+    var tile = frame_enc_keyframe(&tlen);
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var flen = 0;
+    var fh = frame_build_fh(&flen);
+    var meta = alloc(3);
+    store8(meta + 0, 0x01); store8(meta + 1, 0x02); store8(meta + 2, 0x03);
+    var pad = alloc(4);
+    var i = 0;
+    while (i < 4) { store8(pad + i, 0); i = i + 1; }
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_METADATA, meta, 3);           # skipped (shifts offsets)
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_PADDING, pad, 4);             # skipped (shifts offsets)
+    obus_wrap(bw, AV1_OBU_FRAME_HEADER, fh, flen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n = dr_bw_flush(bw);
+    var oe = alloc(8);
+    var frame = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    assert_eq(load64(oe), DR_OK, "metadata/padding interspersed -> still decodes");
+    assert_eq(frame != 0, 1, "-> returns a frame");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 128, "-> correct pixels (slicing robust to offset shifts)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
@@ -737,6 +797,9 @@ fn main() {
     test_obus_tilegroup_no_headers();
     test_obus_header_sanity();
     test_obus_end_to_end();
+    test_obus_forbidden_bit();
+    test_obus_bad_seq_payload();
+    test_obus_metadata_padding_skipped();
     return assert_summary();
 }
 

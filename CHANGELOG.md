@@ -15,8 +15,9 @@ skipping temporal delimiters / metadata / padding. **A complete keyframe bitstre
 (TD + SEQUENCE_HEADER + FRAME_HEADER + TILE_GROUP OBUs) now decodes end-to-end to
 pixels** — the raw-bitstream-to-pixels loop is closed. A 3-dimension adversarial
 review **workflow** (dispatch-state / error-safety / spec-and-test, each finding
-refute-by-default verified) cleared it. **20,497 suite assertions + 1,140 fuzz
-assertions, all green; `make lint` green.**
+refute-by-default verified) confirmed the walk with **no correctness defects**; its
+four test-coverage findings were all closed with new tests. **20,504 suite
+assertions + 1,140 fuzz assertions, all green; `make lint` green.**
 
 ### Added
 - **OBU-stream walk** (`src/av1_decode.cyr`): `av1_decode_obus(buf, sz, out_err)` —
@@ -31,13 +32,17 @@ assertions, all green; `make lint` green.**
     frame_header + tile_group in one, needing the fh/tile-group byte split) is
     rejected `DR_ERR_UNSUPPORTED` (a later bite); a stream with no tile group
     returns `DR_ERR_BAD_HEADER`.
-- **Tests** (`tests/av1_decode.tcyr`, +27): the **end-to-end milestone** — build a
+- **Tests** (`tests/av1_decode.tcyr`, +34): the **end-to-end milestone** — build a
   real `TD + SEQUENCE_HEADER + FRAME_HEADER + TILE_GROUP` OBU stream (custom mono
   128×64 seq + reduced-key frame header hand-built to match an encoded keyframe
   tile) and decode it through `av1_decode_obus` to flat-DC (128) pixels; a
   header-construction sanity check (the hand-built seq/fh parse to the exact
-  expected fields); and dispatch/error paths (bad args, TD-only, FRAME-OBU
-  rejection, tile-group-without-headers).
+  expected fields); dispatch/error paths (bad args, TD-only, FRAME-OBU rejection,
+  tile-group-without-headers); and the review's coverage gaps — a forbidden-bit OBU
+  (sticky `DR_ERR_FORBIDDEN_BIT` propagated, not masked), a malformed
+  SEQUENCE_HEADER payload (parse error surfaced), and metadata + padding OBUs
+  interspersed through the stream (skipped, and the decode stays correct despite the
+  shifted byte offsets — a strong witness for the per-OBU slicing).
 
 ## [0.7.43] - 2026-07-12
 

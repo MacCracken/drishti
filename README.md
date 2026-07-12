@@ -21,7 +21,7 @@ test-bench container.
 ## Status — 0.7.44 (AV1 keyframe decodes raw OBU bytes → pixels end-to-end)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,497 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,504 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
