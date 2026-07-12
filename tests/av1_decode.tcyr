@@ -566,9 +566,9 @@ fn test_obus_td_only() {
     assert_eq(load64(oe), DR_ERR_BAD_HEADER, "TD skipped, no tile group -> BAD_HEADER");
     return 0;
 }
-# A combined FRAME OBU (type 6) is unsupported -> DR_ERR_UNSUPPORTED (rejected,
-# not silently skipped).
-fn test_obus_frame_obu_rejected() {
+# A FRAME OBU (type 6) before any SEQUENCE_HEADER -> DR_ERR_BAD_HEADER (no context
+# to parse the embedded frame header against).
+fn test_obus_frame_obu_no_seq() {
     var oe = alloc(8);
     var pay = alloc(2);
     store8(pay + 0, 0x00); store8(pay + 1, 0x00);
@@ -576,8 +576,44 @@ fn test_obus_frame_obu_rejected() {
     obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
     obus_wrap(bw, AV1_OBU_FRAME, pay, 2);
     var n = dr_bw_flush(bw);
-    assert_eq(av1_decode_obus(dr_bw_buf(bw), n, oe), 0, "FRAME OBU -> no frame");
-    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "combined FRAME OBU -> DR_ERR_UNSUPPORTED");
+    assert_eq(av1_decode_obus(dr_bw_buf(bw), n, oe), 0, "FRAME OBU w/o seq -> no frame");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "FRAME OBU before seq -> BAD_HEADER");
+    return 0;
+}
+# A FRAME OBU with a garbage frame-header payload surfaces the parser's error
+# (not a wrong decode).
+fn test_obus_frame_obu_malformed() {
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var oe = alloc(8);
+    var pay = alloc(4);
+    store8(pay + 0, 0xFF); store8(pay + 1, 0xFF); store8(pay + 2, 0xFF); store8(pay + 3, 0xFF);
+    var bw = dr_bw_init(64);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME, pay, 4);
+    var n = dr_bw_flush(bw);
+    assert_eq(av1_decode_obus(dr_bw_buf(bw), n, oe), 0, "malformed FRAME OBU -> no frame");
+    assert_eq(load64(oe) != DR_OK, 1, "malformed FRAME OBU -> parse error surfaced");
+    return 0;
+}
+# A FRAME OBU whose payload is EXACTLY the frame header (no tile-group bytes):
+# hbytes == osize, so the split leaves a 0-byte tile group -> a clean error
+# downstream (not a crash / garbage frame). Exercises the hbytes == osize boundary.
+fn test_obus_frame_obu_empty_tg() {
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var flen = 0;
+    var fh = frame_build_fh(&flen);
+    var oe = alloc(8);
+    var bw = dr_bw_init(64);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME, fh, flen);       # payload = frame header only
+    var n = dr_bw_flush(bw);
+    var frame = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    assert_eq(frame, 0, "FRAME OBU with 0-byte tile group -> no frame");
+    assert_eq(load64(oe) != DR_OK, 1, "empty tile group -> clean error (no crash/garbage)");
     return 0;
 }
 # Custom mono reduced-still-picture seq matching frame_enc_keyframe: profile 0,
@@ -691,6 +727,43 @@ fn test_obus_end_to_end() {
     assert_eq(bad, 0, "raw OBU bytes -> flat-DC keyframe pixels (all 128)");
     return 0;
 }
+# THE common real-stream form: a combined FRAME OBU (type 6) carrying the frame
+# header + tile group in one OBU. The walk parses the fh, byte-splits off the tile
+# group (5.10), and decodes it — end-to-end to pixels.
+fn test_obus_frame_obu() {
+    var tlen = 0;
+    var tile = frame_enc_keyframe(&tlen);
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var flen = 0;
+    var fh = frame_build_fh(&flen);
+    # FRAME OBU payload = frame-header bytes (byte-aligned) ++ tile-group bytes.
+    var fpay_bw = dr_bw_init(256);
+    obus_append(fpay_bw, fh, flen);
+    obus_append(fpay_bw, tile, tlen);
+    var fpay_len = dr_bw_flush(fpay_bw);
+    var fpay = dr_bw_buf(fpay_bw);
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME, fpay, fpay_len);
+    var stream_len = dr_bw_flush(bw);
+    var stream = dr_bw_buf(bw);
+    var oe = alloc(8);
+    var frame = av1_decode_obus(stream, stream_len, oe);
+    assert_eq(load64(oe), DR_OK, "FRAME OBU decode ok (raw bytes -> frame)");
+    assert_eq(frame != 0, 1, "FRAME OBU -> a frame");
+    assert_eq(dr_frame_width(frame), 128, "FRAME OBU -> width 128");
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 128) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "FRAME OBU -> flat-DC keyframe pixels (fh/tile split correct)");
+    return 0;
+}
 # A tile group before any sequence/frame header -> DR_ERR_BAD_HEADER (no context).
 fn test_obus_tilegroup_no_headers() {
     var oe = alloc(8);
@@ -793,10 +866,13 @@ fn main() {
     test_group("OBU-stream walk (av1_decode_obus)");
     test_obus_bad_args();
     test_obus_td_only();
-    test_obus_frame_obu_rejected();
+    test_obus_frame_obu_no_seq();
+    test_obus_frame_obu_malformed();
+    test_obus_frame_obu_empty_tg();
     test_obus_tilegroup_no_headers();
     test_obus_header_sanity();
     test_obus_end_to_end();
+    test_obus_frame_obu();
     test_obus_forbidden_bit();
     test_obus_bad_seq_payload();
     test_obus_metadata_padding_skipped();

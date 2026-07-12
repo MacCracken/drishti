@@ -6,24 +6,20 @@
 
 ## Version
 
-**0.7.44** — cut 2026-07-12, not yet tagged (user's git). Adds the **OBU-stream
-walk** `av1_decode_obus` to `av1_decode.cyr` — the outermost decode layer that takes
-**raw AV1 OBU bytes to pixels**. It walks the OBUs (`av1_obu_next`), dispatching by
-type (SEQUENCE_HEADER → `av1_seq_parse`, FRAME_HEADER →
-`av1_frame_parse_uncompressed_header`, TILE_GROUP → `av1_decode_frame`), threading
-the active seq + fh and skipping temporal delimiters / metadata / padding. **A
-complete keyframe bitstream (TD + SEQUENCE_HEADER + FRAME_HEADER + TILE_GROUP OBUs)
-now decodes end-to-end to pixels** — the raw-bitstream-to-pixels loop is closed,
-proven by an end-to-end test that builds a real OBU stream from a custom mono 128×64
-seq + reduced-key frame header (matching an encoded keyframe tile) and decodes it to
-flat-DC pixels. Scope: separate-OBU keyframe streams, single-tile 8-bit; the combined
-FRAME OBU (type 6) is rejected `DR_ERR_UNSUPPORTED` (a later bite). A 3-dimension
-adversarial review **workflow** (dispatch-state / error-safety / spec-and-test, each
-refute-by-default verified) cleared it. This completes the decode spine: **0.7.43**
-frame driver (`av1_decode_frame`, parsed headers → pixels), **0.7.42** tile-group
-parse (`av1_tile_group_parse`), **0.7.41** filter activation, the in-loop filter
-layer (0.7.27-0.7.40), and the intra keyframe tile decode (0.7.25). Next: the
-combined FRAME OBU (type 6), then multi-tile + superres, then inter prediction. The
+**0.7.45** — cut 2026-07-12, not yet tagged (user's git). Teaches `av1_decode_obus`
+the **combined FRAME OBU (type 6)** — the common real-stream form that packs the
+frame header + tile group into one OBU (spec 5.10 `frame_obu`), previously rejected
+`DR_ERR_UNSUPPORTED`. The walk now parses the embedded frame header, splits off the
+tile group at the byte-aligned header end (`headerBytes = ceil(bits_consumed / 8)`),
+and decodes it — so **both** the separate-OBU form and the combined FRAME OBU decode
+end-to-end to pixels (an end-to-end test builds a real FRAME OBU = frame-header bytes
+++ tile-group bytes and decodes to flat-DC pixels, proving the byte-split lands
+exactly at the tile start). A 3-dimension adversarial review **workflow** (byte-split
+/ error-integration / test-adequacy, each refute-by-default verified) cleared it.
+This builds on the decode spine completed across 0.7.44 (the OBU-stream walk), 0.7.43
+(the frame driver, parsed headers → pixels), 0.7.42 (tile-group parse), 0.7.41
+(filter activation), the in-loop filter layer (0.7.27-0.7.40), and the intra keyframe
+tile decode (0.7.25). Next: multi-tile + superres, then inter prediction. The
 remaining distance to 1.0 is inter + conformance/10-bit + the encode-lane completion
 (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) +
 audit (0.11.x) + freeze/docs (0.12.x). See
@@ -39,7 +35,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 
 - **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
   version for the arithmetic-shift operator `>>>`. The pin is the
-  *minimum*; a newer installed `cycc` (currently **6.4.52**) compiles
+  *minimum*; a newer installed `cycc` (currently **6.4.58**) compiles
   clean and only emits a harmless drift note. **Set
   `CYRIUS_NO_WARN_PIN_DRIFT=1`** in the env for clean build/test/lint
   output. Bump the pin only when a new toolchain feature is actually used
@@ -51,7 +47,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 740, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 745, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -75,7 +71,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
-| `src/av1_decode.cyr` | `av1_` | AV1 decode spine (raw bytes → pixels) — **av1_decode_obus**: OBU-stream walk (av1_obu_next dispatch: SEQUENCE_HEADER→av1_seq_parse, FRAME_HEADER→uncompressed_header, TILE_GROUP→av1_decode_frame; FRAME OBU→UNSUPPORTED). **av1_decode_frame**: single-tile keyframe from parsed headers → filtered pixels (create frame → tile-group parse → header-driven assembly + activation → decode_intra_tile → filter pipeline; multi-tile/superres/non-8-bit → DR_ERR_UNSUPPORTED). av1_apply_loop_filters: in-loop pipeline (deblock 7.14 → CDEF 7.15 → LR 7.17); **filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters); **tile-group parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4) |
+| `src/av1_decode.cyr` | `av1_` | AV1 decode spine (raw bytes → pixels) — **av1_decode_obus**: OBU-stream walk (av1_obu_next dispatch: SEQUENCE_HEADER→av1_seq_parse, FRAME_HEADER→uncompressed_header, FRAME OBU type 6→parse fh + byte-split tile group 5.10, TILE_GROUP→av1_decode_frame). **av1_decode_frame**: single-tile keyframe from parsed headers → filtered pixels (create frame → tile-group parse → header-driven assembly + activation → decode_intra_tile → filter pipeline; multi-tile/superres/non-8-bit → DR_ERR_UNSUPPORTED). av1_apply_loop_filters: in-loop pipeline (deblock 7.14 → CDEF 7.15 → LR 7.17); **filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters); **tile-group parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4) |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry) + the decode_tile wiring (AV1TILE_LRPARAMS, 0.7.39). Inert until a frame-level driver attaches the params |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
@@ -91,13 +87,13 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 29 suites / **20,504 assertions**: drishti 51 · bits
+- `make test` — 29 suites / **20,512 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 35 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_lr 80 · av1_decode 142 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_lr 80 · av1_decode 150 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.

@@ -336,15 +336,16 @@ fn av1_decode_frame(seq, fh, buf, sz, out_err): i64 {
 #   SEQUENCE_HEADER -> av1_seq_parse (the active sequence),
 #   FRAME_HEADER    -> av1_frame_parse_uncompressed_header (the active fh; tid/sid
 #                      from the OBU extension header),
+#   FRAME (type 6)  -> parse the embedded frame_header, split off the tile group at
+#                      the byte-aligned header end (5.10), and decode it,
 #   TILE_GROUP      -> av1_decode_frame (returns the decoded + filtered frame),
 # and skips temporal_delimiter / metadata / padding / redundant_frame_header /
-# tile_list. Returns at the first tile group.
+# tile_list. Returns at the first tile group (embedded or standalone).
 #
-# SCOPE: separate-OBU keyframe streams (TD / SEQUENCE_HEADER / FRAME_HEADER /
-# TILE_GROUP as distinct OBUs), single-tile 8-bit (av1_decode_frame's scope). The
-# combined FRAME OBU (type 6: frame_header + tile_group in one, needing the
-# fh/tile-group byte split) is rejected DR_ERR_UNSUPPORTED (grows next; roadmap.md).
-# A stream with no tile group returns DR_ERR_BAD_HEADER.
+# SCOPE: single-frame keyframe streams, both the separate-OBU form (SEQUENCE_HEADER
+# / FRAME_HEADER / TILE_GROUP as distinct OBUs) and the combined FRAME OBU (the
+# common real-stream form); single-tile 8-bit (av1_decode_frame's scope). A stream
+# with no tile group returns DR_ERR_BAD_HEADER.
 # ================================================================
 fn av1_decode_obus(buf, sz, out_err): i64 {
     store64(out_err, DR_OK);
@@ -375,9 +376,30 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
             if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
             if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
         }
-        # combined frame_header + tile_group in one OBU needs the fh/tile-group byte
-        # split (a later bite; roadmap.md) — reject rather than silently skip.
-        if (otype == AV1_OBU_FRAME) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+        # combined FRAME OBU (spec 5.10 frame_obu): frame_header_obu() then
+        # byte_alignment() then tile_group_obu(). Parse the fh, split at the
+        # byte-aligned header end (headerBytes = ceil(bits_consumed / 8)), and decode
+        # the embedded tile group at buf+ooff+headerBytes.
+        if (otype == AV1_OBU_FRAME) {
+            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var of = av1_obu_iter_obu(it);
+            var frr = 0;
+            var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
+            av1_obu_sid(of), buf + ooff, osize, &frr);
+            if (frr != DR_OK) { store64(out_err, frr); return 0; }
+            if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            # headerBytes = ceil(bits_consumed / 8): the byte_alignment() after the
+            # frame_header rounds the pre-alignment bit position UP to the next byte
+            # boundary. (bits + 7) >> 3 is that ceiling — NOT (bits >> 3) + 1, which
+            # would over-round a header ending on an exact byte and shift the tile
+            # start a byte late.
+            var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
+            # Defensive: a successful parse cannot consume past the payload (the
+            # bounded reader caps at osize*8), so hbytes <= osize always — but guard
+            # anyway rather than pass a negative size downstream.
+            if (hbytes > osize) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+            return av1_decode_frame(seq, ffh, buf + ooff + hbytes, osize - hbytes, out_err);
+        }
         if (otype == AV1_OBU_TILE_GROUP) {
             if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
             return av1_decode_frame(seq, fh, buf + ooff, osize, out_err);

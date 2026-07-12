@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.45] - 2026-07-12
+
+Teaches `av1_decode_obus` the **combined FRAME OBU (type 6)** — the common real-stream
+form that carries the frame header + tile group in a single OBU (spec 5.10
+`frame_obu`), previously rejected `DR_ERR_UNSUPPORTED`. The walk now parses the
+embedded frame header, splits off the tile group at the **byte-aligned header end**
+(`headerBytes = ceil(bits_consumed / 8)`), and decodes it — so both the separate-OBU
+form and the combined FRAME OBU decode end-to-end to pixels. A 3-dimension
+adversarial review **workflow** (byte-split / error-integration / test-adequacy, each
+finding refute-by-default verified) confirmed the split with **no correctness
+defects** (it also proved the `hbytes > osize` guard is unreachable — kept as
+defensive); its reachable coverage gap (the 0-byte tile-group boundary) was closed
+with a test. **20,512 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` green.**
+
+### Added
+- **FRAME OBU (type 6) handling** (`src/av1_decode.cyr`, `av1_decode_obus`): parse
+  the embedded `frame_header_obu`, compute `hbytes = (av1_fh_bits_consumed(fh) + 7)
+  >> 3` (the `byte_alignment()` after the header, spec 5.10), bounds-check
+  `hbytes > osize` → `DR_ERR_TRUNCATED`, then decode the tile group at
+  `buf + off + hbytes` (size `osize - hbytes`) via `av1_decode_frame`. A
+  `FRAME` OBU before any `SEQUENCE_HEADER`, or a malformed embedded header, is
+  rejected with the precise error (no wrong decode).
+- **Tests** (`tests/av1_decode.tcyr`, +8, net): `test_obus_frame_obu` — build a real
+  FRAME OBU (`frame-header bytes ++ tile-group bytes`) and decode it end-to-end to
+  flat-DC pixels (proving the byte-split lands exactly at the tile start; an
+  off-by-one would desync); a no-sequence-header FRAME OBU and a malformed embedded
+  header (both surfacing the precise error); and a FRAME OBU whose payload is exactly
+  the frame header (0-byte tile group → clean error, no crash). (The old
+  `test_obus_frame_obu_rejected`, which asserted `DR_ERR_UNSUPPORTED`, is retired.)
+  A known coverage limitation: the happy-path fh is 35 bits, which cannot distinguish
+  `ceil` from `floor+1` in the split (both give 5) — constructing an exact-multiple-
+  of-8-bit header without changing the decode is impractical, so the ceil intent is
+  documented inline instead.
+
 ## [0.7.44] - 2026-07-12
 
 Adds the **OBU-stream walk** `av1_decode_obus` to `src/av1_decode.cyr` — the

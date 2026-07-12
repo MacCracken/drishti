@@ -191,10 +191,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   pixels), and the **OBU-stream walk** `av1_decode_obus` landed in 0.7.44 — it parses
   the seq (`av1_seq_parse`) + fh (`av1_frame_parse_uncompressed_header`) from raw OBU
   bytes and drives `av1_decode_frame`, so a full `TD + SEQUENCE_HEADER + FRAME_HEADER
-  + TILE_GROUP` stream **decodes from raw bytes to pixels end-to-end** (verified;
-  the combined FRAME OBU type 6 is rejected `DR_ERR_UNSUPPORTED`). **The
-  raw-bitstream-to-pixels loop is closed.** Next: the combined FRAME OBU (type 6),
-  then multi-tile + superres upscaling, then inter prediction.
+  + TILE_GROUP` stream **decodes from raw bytes to pixels end-to-end**. 0.7.45 added
+  the **combined FRAME OBU (type 6)** — the common real-stream form (frame header +
+  tile group in one OBU); the walk byte-splits off the tile group (spec 5.10) and
+  decodes it, so both OBU forms decode end-to-end. **The raw-bitstream-to-pixels loop
+  is closed.** Next: multi-tile + superres upscaling, then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

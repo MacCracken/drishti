@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.44 (AV1 keyframe decodes raw OBU bytes → pixels end-to-end)
+## Status — 0.7.45 (AV1 keyframe decodes raw OBU bytes → pixels, both separate-OBU and combined FRAME OBU)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,504 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,512 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
@@ -42,10 +42,12 @@ driver** (`av1_decode_frame`) ties it all together: from a parsed sequence + fra
 header + the tile-group payload it assembles, decodes, and filters a single-tile
 keyframe **all the way to pixels** (multi-tile and superres are rejected cleanly for
 now). The **OBU-stream walk** (`av1_decode_obus`) closes the loop: it parses the
-sequence + frame headers from raw OBU bytes and drives `av1_decode_frame`, so a
-complete keyframe bitstream (TD + sequence-header + frame-header + tile-group OBUs)
-now decodes **from raw bytes all the way to pixels** — verified end-to-end. The
-combined FRAME OBU (type 6) and multi-frame streams are the next step.
+sequence + frame headers from raw OBU bytes and drives `av1_decode_frame`, handling
+**both** the separate-OBU form (TD + sequence-header + frame-header + tile-group OBUs)
+**and** the combined FRAME OBU (type 6, frame header + tile group in one — the common
+real-stream form; it byte-splits off the tile group per spec 5.10). A complete
+keyframe bitstream now decodes **from raw bytes all the way to pixels** — both forms
+verified end-to-end. Multi-tile + multi-frame streams are the next step.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive
