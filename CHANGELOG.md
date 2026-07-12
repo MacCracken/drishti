@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.34] - 2026-07-11
+
+Adds the AV1 loop-restoration **self-guided / SGR** filter kernels (spec 7.17.2 +
+7.17.3), the second loop-restoration filter path (`src/av1_lr.cyr`): the
+`Sgr_Params` table (16 sets), the **box filter** (7.17.3 — the A/B box statistics
+with the integer reciprocal/mtable divisions, then the 3x3 two-pass weighted
+output), and the **self-guided projection** (7.17.2 — two box-filter passes
+combined by the projection weights into `LrFrame`). All cross-checked against an
+independent Python model of 7.17.2/7.17.3. A 1-agent adversarial review of the
+box filter — AV1 LR's most numerically intricate kernel — confirmed **all match,
+no bugs**, specifically clearing the four trap sites: the `z == 255` a2 boundary,
+the raw-`b` (not rounded `d`) usage in `b2`, the negative-`i+dy` parity, and every
+shift/round amount. **20,229 suite assertions + 1,140 fuzz assertions, all green;
+`make lint` green.**
+
+### Added
+- **AV1 loop-restoration SGR kernels** (`src/av1_lr.cyr`): `av1_lr_sgr_params`
+  (the 16-set `Sgr_Params` table), `av1_lr_box_filter` (7.17.3 — builds `A`/`B`
+  over a 1-sample boundary: `n=(2r+1)^2`, the `s`/`oneOverN` division constants,
+  `a2` via the `z`-indexed reciprocal with the 256/1/formula three-way branch, then
+  the pass-dependent 3x3 weighted output into `F`; returns 0 without writing when
+  the pass radius `r == 0`); `av1_lr_self_guided` (7.17.2 — pass 0 -> `flt0`,
+  pass 1 -> `flt1`, then `Round2(w1*u + w0*{flt0|u} + w2*{flt1|u}, RST_BITS+PRJ_BITS)`
+  -> `Clip1`, with `w2 = (1<<PRJ_BITS) - w0 - w1`). SGRPROJ constants inline
+  (MTABLE 20 / SGR 8 / RECIP 12 / RST 4 / PRJ 7).
+- **Tests** (`tests/av1_lr.tcyr`, +21 -> 44): the `Sgr_Params` values, the box
+  filter on a flat block (set-0 pass-0 -> 1602, pass-1 -> 1600) + the `r == 0` skip
+  path, and the self-guided **DC-preservation** passthrough / vertical ramp /
+  impulse (200 -> 199) / `r0 == 0` set (uses the source) — all matching the model.
+
+### Notes
+- `drishti_version()` -> 734. Loop restoration now has both filter kernels
+  (Wiener 0.7.33 + SGR 0.7.34); next is the stripe-loop driver (7.17.1/2) + the
+  `read_lr` (5.11.57) unit-param read + `LrFrame`. **Review robustness note
+  (systemic, not an SGR bug):** the box-filter scratch `alloc`s are unchecked
+  before use — the codebase-wide bump-allocator pattern (bounded by the
+  restoration-unit size, not a dimension-bomb vector), tracked with the audit-arc
+  arena-strategy item, not silently patched here.
+
 ## [0.7.33] - 2026-07-11
 
 Starts the AV1 **loop restoration** filter (spec 7.17, the third and last in-loop
