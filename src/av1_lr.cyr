@@ -282,7 +282,10 @@ enum Av1LrpOff {
     AV1LRP_SXQD  = 216;   # LrSgrXqd grid ptr[3]   (*2)
     AV1LRP_REFW  = 240;   # RefLrWiener[3][2][3] (plane, pass, tap) = 18 i64
     AV1LRP_REFX  = 384;   # RefSgrXqd[3][2] (plane, i) = 6 i64
-    AV1LRP_SIZE  = 432;
+    AV1LRP_INTRABC  = 432;  # allow_intrabc (read_lr early-return gate)
+    AV1LRP_SUPERRES = 440;  # use_superres
+    AV1LRP_SRDENOM  = 448;  # SuperresDenom
+    AV1LRP_SIZE     = 456;
 }
 
 # count_units_in_frame (5.11.57): units of `unit_size` spanning `frame_size`.
@@ -302,6 +305,9 @@ fn av1_lr_params_new(uw, fh_h, np, subx, suby, uses_lr): i64 {
     store64(p + AV1LRP_SUBX, subx);
     store64(p + AV1LRP_SUBY, suby);
     store64(p + AV1LRP_USES, uses_lr);
+    store64(p + AV1LRP_INTRABC, 0);
+    store64(p + AV1LRP_SUPERRES, 0);
+    store64(p + AV1LRP_SRDENOM, AV1_SUPERRES_NUM);   # default denom (no superres)
     var i = 0;
     while (i < 3) {
         store64(p + AV1LRP_RTYPE + (i * 8), AV1_RESTORE_NONE);
@@ -316,6 +322,16 @@ fn av1_lr_params_new(uw, fh_h, np, subx, suby, uses_lr): i64 {
     }
     return p;
 }
+# read_lr frame-level flags (set from the frame header by the decode driver).
+fn av1_lr_params_set_frame_flags(params, allow_intrabc, use_superres, superres_denom): i64 {
+    store64(params + AV1LRP_INTRABC, allow_intrabc);
+    store64(params + AV1LRP_SUPERRES, use_superres);
+    store64(params + AV1LRP_SRDENOM, superres_denom);
+    return 0;
+}
+fn av1_lr_intrabc(params): i64 { return load64(params + AV1LRP_INTRABC); }
+fn av1_lr_superres(params): i64 { return load64(params + AV1LRP_SUPERRES); }
+fn av1_lr_srdenom(params): i64 { return load64(params + AV1LRP_SRDENOM); }
 # Configure one plane: its restoration type + unit size, derive unit_rows/cols
 # (count_units over the subsampled plane extent), and allocate the per-unit grids
 # (LrType init RESTORE_NONE; Wiener/Sgr grids zeroed).

@@ -73,7 +73,7 @@ fn test_dr_err_name() {
 # drishti_version() — MAJOR*10000 + MINOR*100 + PATCH
 # ================================================================
 fn test_drishti_version() {
-    assert_eq(drishti_version(), 738, "version 0.7.38 packs to 738");
+    assert_eq(drishti_version(), 739, "version 0.7.39 packs to 739");
     return 0;
 }
 

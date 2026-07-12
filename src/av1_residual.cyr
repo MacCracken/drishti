@@ -85,7 +85,8 @@ enum Av1TileOff {
     AV1TILE_LFTX      = 328;  # LoopfilterTxSizes: 3 per-plane grids (stride MiCols)
     AV1TILE_CDEFIDX   = 352;  # CdefIdx grid (per-64x64, MI-indexed; init -1)
     AV1TILE_CDEF_CTX  = 360;  # CDEF read context (7 i64) for read_cdef/write_cdef; 0 = off
-    AV1TILE_SIZE      = 368;  # LFTX 328/336/344; CDEFIDX 352; CDEF_CTX 360
+    AV1TILE_LRPARAMS  = 368;  # Av1LrParams ptr for read_lr in the SB loop; 0 = off
+    AV1TILE_SIZE      = 376;  # LFTX 328/336/344; CDEFIDX 352; CDEF_CTX 360; LRPARAMS 368
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -136,6 +137,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_LFTX + 16, 0);
     store64(tile + AV1TILE_CDEFIDX, 0);
     store64(tile + AV1TILE_CDEF_CTX, 0);
+    store64(tile + AV1TILE_LRPARAMS, 0);
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
@@ -252,6 +254,11 @@ fn av1_tile_set_cdef_ctx(tile, enable_cdef, cdef_bits, coded_lossless, allow_int
     store64(ctx + 48, plan);
     store64(tile + AV1TILE_CDEF_CTX, ctx);
     return DR_OK;
+}
+# Attach an Av1LrParams (or 0) for read_lr in the decode/encode_tile SB loop.
+fn av1_tile_set_lr_params(tile, lr_params): i64 {
+    store64(tile + AV1TILE_LRPARAMS, lr_params);
+    return 0;
 }
 
 # clear_block_decoded_flags (5.11.3) for one superblock at MI (r, c). Seeds the

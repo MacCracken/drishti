@@ -18,20 +18,21 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.38 (AV1 intra keyframe decode complete; in-loop filter layer in; loop-restoration bitstream parsing complete)
+## Status — 0.7.39 (AV1 intra keyframe decode complete; in-loop filter layer in; loop restoration wired into decode_tile)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,347 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,353 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
 complete (`av1_deblock.cyr` — kernels + the whole-frame edge loop/driver), and
 the **CDEF** filter is complete (`av1_cdef.cyr` — kernels + driver + the wired
-`cdef_idx` read), and **loop restoration** (`av1_lr.cyr`, spec 7.17) is complete (both filter
-kernels — **Wiener** + **self-guided/SGR** — plus the stripe-loop process/
-loop_restore_block driver). The in-loop filter pixel processes are done; the
-`read_cdef`/`read_lr` bitstream activation + a frame-level driver that runs
-deblock -> CDEF -> LR end-to-end are next.
+`cdef_idx` read), and **loop restoration** (`av1_lr.cyr`, spec 7.17) is complete through the
+decode-tile layer — both filter kernels (**Wiener** + **self-guided/SGR**), the
+stripe-loop driver, the full `read_lr` bitstream parse, and the `decode_tile`
+wiring (round-trip-tested end-to-end). A frame-level driver that assembles
+OBU -> headers -> tile, decodes, and runs deblock -> CDEF -> LR (activating the
+LR params + CDEF context for real streams) is next.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive

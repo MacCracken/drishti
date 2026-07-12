@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.39] - 2026-07-11
+
+Wires **`read_lr` into `decode_tile`** (spec 5.11.2) — the loop-restoration unit
+params are now read from the bitstream per superblock during tile decode, and
+mirrored on encode. This completes the loop-restoration decode-tile integration:
+`decode_tile` resets the `RefLrWiener`/`RefSgrXqd` predictor per tile, then per SB
+(after `clear_cdef` + `clear_block_decoded`, before `decode_partition`) calls
+`read_lr`. A 1-agent adversarial review verified all 6 points — the module reorder
+legality, the spec order, encode/decode parity, backward-compat, the struct
+offsets, and activation honesty — with **no functional bugs**. **Unlike the CDEF
+wiring, this is activated + round-trip-tested end-to-end through `decode_tile`.**
+**20,353 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **`read_lr` in `decode_tile` / `encode_tile`** (`src/av1_tile.cyr`): guarded by
+  the new `AV1TILE_LRPARAMS` tile field (`av1_tile_set_lr_params`; 0 = off, so
+  non-LR streams are byte-identical), `av1_lr_ref_reset` runs per tile and
+  `av1_read_lr`/`av1_write_lr` per SB. `Av1LrParams` gains the read_lr frame flags
+  (`allow_intrabc` / `use_superres` / `SuperresDenom`) via
+  `av1_lr_params_set_frame_flags`.
+- **Module reorder**: `src/av1_lr.cyr` moved before `src/av1_tile.cyr` in the
+  include chain (it is self-contained — no `av1_tile`/`av1_deblock`/`av1_cdef`
+  deps) so `decode_tile` can call the read_lr functions.
+- **Tests** (`tests/av1_tile.tcyr`, +6): a full keyframe `encode_tile` ->
+  `decode_tile` round-trip with 2 Wiener restoration units attached — **`read_lr`
+  fires through `decode_tile`**, populating SB0 -> unit(0,0) and SB1 -> unit(0,1)
+  from the interleaved bitstream, with the partition tree still round-tripping.
+
+### Notes
+- `drishti_version()` -> 739. **Loop-restoration is now complete through the
+  decode-tile layer** (pixel processes + bitstream parsing + decode_tile wiring),
+  and — unlike CDEF, which was verified only at the mode-info level — is exercised
+  end-to-end via a tile round-trip. The remaining gap (shared with CDEF): no
+  production frame-level driver attaches the LR params / CDEF context yet, so both
+  are inert for real streams until that driver. That frame-level driver
+  (OBU -> seq/fh -> tile assembly -> decode -> deblock -> CDEF -> LR), which
+  activates everything, is next. Also fixed a stale `av1_tile.cyr` header comment
+  that under-claimed loop-restoration as "deferred".
+
 ## [0.7.38] - 2026-07-11
 
 Adds the AV1 **`read_lr`** per-superblock geometry (spec 5.11.57, `src/av1_lr.cyr`)

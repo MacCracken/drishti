@@ -15,8 +15,10 @@
 #
 # SCOPE (intra keyframe baseline): a SINGLE tile spanning the frame
 # (MiRowStart/ColStart = 0, MiRowEnd/ColEnd = MiRows/MiCols), 64x64 superblocks
-# (no 128x128). CDEF / loop-restoration / delta-q per-SB reads, multi-tile, and
-# the frame-end CDF save/average + decode_frame_wrapup are deferred (roadmap.md).
+# (no 128x128). The per-SB clear_cdef + read_lr are wired here (guarded by the
+# tile's CdefIdx / LrParams — inert until a frame-level driver attaches them);
+# delta-q per-SB reads, multi-tile, and the frame-end CDF save/average +
+# decode_frame_wrapup are deferred (roadmap.md).
 # The encode-lane round-trip drives skip blocks (the non-skip coeffs-encode in
 # residual order — encode_residual — is the encoder arc, roadmap.md); the decode
 # path handles non-skip blocks (validated by av1_partition / av1_residual).
@@ -80,6 +82,8 @@ fn av1_decode_tile(tile): i64 {
     var mi_cols = load64(tile + AV1TILE_MI_COLS);
     av1_clear_above_context(tile, num_planes);
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
+    var lrp = load64(tile + AV1TILE_LRPARAMS);
+    if (lrp != 0) { av1_lr_ref_reset(lrp); }         # RefLrWiener/RefSgrXqd = Mid, per tile
     var r = 0;
     while (r < mi_rows) {
         av1_clear_left_context(tile, num_planes);
@@ -89,6 +93,10 @@ fn av1_decode_tile(tile): i64 {
             # SB loop steps by AV1_SB4 = 64x64). Guarded: grid may be unallocated.
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, mi_cols, r, c, 0); }
             av1_bd_clear(tile, r, c, AV1_SB4, num_planes);
+            if (lrp != 0) {                              # read_lr (5.11.2) before decode_partition
+                av1_read_lr(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_NCC), lrp, r, c, 12,
+                av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
+            }
             av1_decode_partition(tile, r, c, 12);        # BLOCK_64X64
             c = c + AV1_SB4;
         }
@@ -109,12 +117,18 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     store64(pc, 0);
     store64(bc, 0);
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
+    var lrp = load64(tile + AV1TILE_LRPARAMS);
+    if (lrp != 0) { av1_lr_ref_reset(lrp); }
     var r = 0;
     while (r < mi_rows) {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, mi_cols, r, c, 0); }
+            if (lrp != 0) {
+                av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, 12,
+                av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
+            }
             av1_encode_partition(tile, r, c, 12, plan_part, pc, plan_mi, plan_tx, bc);
             c = c + AV1_SB4;
         }

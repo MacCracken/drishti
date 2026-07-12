@@ -6,21 +6,24 @@
 
 ## Version
 
-**0.7.38** — cut 2026-07-11, not yet tagged (user's git). Adds the AV1 **`read_lr`**
-per-superblock geometry (spec 5.11.57, `av1_lr.cyr`) — for a superblock it computes
-the restoration-unit range it overlaps (`unitRowStart/End`, `unitColStart/End`, with
-the `use_superres` horizontal scaling) per plane and dispatches `read_lr_unit`. **This
-completes loop-restoration bitstream parsing** (`read_lr` -> `read_lr_unit` -> the
-subexp/CDF reads); only the `decode_tile` wiring remains. A 1-agent review verified
-all 8 geometry checks against the spec (division grouping, superres branch, half-open
-bounds, Min clamps / no OOB, read/write parity) with no bugs. On top of `read_lr_unit`
-(0.7.37) + the subexp-bool primitives (0.7.36), the complete in-loop filter pixel
-processes (deblocking 0.7.27/0.7.28 + CDEF 0.7.29/0.7.30 + loop restoration
-0.7.33-0.7.35), and the **first fully decoded keyframe** (0.7.25). Next: wire `read_lr`
-+ the per-tile `av1_lr_ref_reset` into `decode_tile` + attach `Av1LrParams` to the tile
-(the CDEF wiring pattern), then the frame-level driver that runs deblock -> CDEF -> LR
-end-to-end (also activating the wired-but-inert CDEF `set_cdef_ctx`). The remaining
-distance to 1.0 is the
+**0.7.39** — cut 2026-07-11, not yet tagged (user's git). Wires **`read_lr` into
+`decode_tile`** (spec 5.11.2, `av1_tile.cyr`) — the loop-restoration unit params are
+read from the bitstream per superblock during tile decode (`decode_tile` resets the
+`RefLrWiener`/`RefSgrXqd` predictor per tile, then per SB after `clear_cdef` +
+`clear_block_decoded` calls `read_lr`), mirrored on encode; guarded by the new
+`AV1TILE_LRPARAMS` tile field so non-LR streams are byte-identical. `av1_lr.cyr` was
+moved before `av1_tile.cyr` in the include chain (it is self-contained). A 1-agent
+review verified all 6 points (module-reorder legality, spec order, encode/decode
+parity, backward-compat, struct offsets, activation honesty) with no bugs. **Unlike
+the CDEF wiring, this is activated + round-trip-tested end-to-end through
+`decode_tile`** (a full keyframe tile round-trip with 2 Wiener units: SB0 ->
+unit(0,0), SB1 -> unit(0,1)). **Loop restoration is now complete through the
+decode-tile layer** (pixel processes 0.7.33-0.7.35 + bitstream parsing 0.7.36-0.7.38
++ this wiring). On top of the complete in-loop filter pixel processes (deblocking
+0.7.27/0.7.28 + CDEF 0.7.29/0.7.30) and the **first fully decoded keyframe** (0.7.25).
+Next: the frame-level driver (OBU -> seq/fh -> tile assembly -> decode -> deblock ->
+CDEF -> LR) that attaches the LR params + CDEF context, activating everything for
+real streams. The remaining distance to 1.0 is the
 rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
 VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -48,7 +51,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 738, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 739, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -70,10 +73,10 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
 | `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids + LoopfilterTxSizes + CdefIdx + CDEF read context via av1_tile_set_cdef_ctx) + Av1Block decode contexts |
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
-| `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
+| `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: all vertical then horizontal boundaries, in place) |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
-| `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry). Only the decode_tile wiring remains |
+| `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry) + the decode_tile wiring (AV1TILE_LRPARAMS, 0.7.39). Inert until a frame-level driver attaches the params |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |

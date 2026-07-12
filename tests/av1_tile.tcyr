@@ -106,6 +106,58 @@ fn test_keyframe_roundtrip() {
     keyframe_rt(0);        # adaptive CDFs (frame-wide lockstep)
     return 0;
 }
+# read_lr wiring: with Av1LrParams attached, decode_tile reads a WIENER unit per SB
+# (interleaved before decode_partition). 128x64, unit_size 64 -> 2 units; SB0
+# reads unit(0,0), SB1 reads unit(0,1). Proves read_lr fires through decode_tile.
+fn test_lr_tile_wiring() {
+    var base_q = 40;
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    # ENCODE tile + LR params (2 WIENER units with distinct coeffs).
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, base_q, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    var elrp = av1_lr_params_new(128, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(elrp, 0, AV1_RESTORE_WIENER, 64);
+    av1_lr_type_set(elrp, 0, 0, 0, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(elrp, 0, 0, 0, 0, 3, 0 - 7, 15);
+    av1_lr_wiener_set(elrp, 0, 0, 0, 1, 3, 0 - 7, 15);
+    av1_lr_type_set(elrp, 0, 0, 1, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(elrp, 0, 0, 1, 0, 0 - 2, 5, 20);
+    av1_lr_wiener_set(elrp, 0, 0, 1, 1, 0 - 2, 5, 20);
+    av1_tile_set_lr_params(etile, elrp);
+    var olen = 0;
+    var out = av1_encode_intra_tile(etile, pp, pm, pt, 1, &olen);
+    assert_eq(olen > 0, 1, "encoded keyframe tile with LR bits");
+    # DECODE tile + LR params (empty, populated through decode_tile).
+    var doe = alloc(8);
+    var dframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, doe);
+    var dtile = av1_tile_new(dframe, 32, 16, base_q, 1, 0, 1);
+    av1_tile_grids_new(dtile);
+    var dlrp = av1_lr_params_new(128, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(dlrp, 0, AV1_RESTORE_WIENER, 64);
+    av1_tile_set_lr_params(dtile, dlrp);
+    assert_eq(av1_decode_intra_tile(dtile, out, olen, 1), DR_OK, "decode_tile ok (LR active)");
+    assert_eq(av1_lr_wiener_get_one(dlrp, 0, 0, 0, 0, 2), 15, "SB0 -> read unit(0,0) coeff 15");
+    assert_eq(av1_lr_wiener_get_one(dlrp, 0, 0, 1, 0, 2), 20, "SB1 -> read unit(0,1) coeff 20");
+    assert_eq(av1_grid_get(dtile, AV1TILE_MISIZES, 0, 0), 9, "partition still round-trips (SB0 32x32)");
+    assert_eq(av1_grid_get(dtile, AV1TILE_MISIZES, 0, 16), 12, "partition still round-trips (SB1 64x64)");
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -114,6 +166,8 @@ fn main() {
     test_clear_context();
     test_group("keyframe decode_tile round-trip");
     test_keyframe_roundtrip();
+    test_group("read_lr wiring in decode_tile");
+    test_lr_tile_wiring();
     return assert_summary();
 }
 
