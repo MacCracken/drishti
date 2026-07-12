@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.41] - 2026-07-12
+
+Grows `src/av1_decode.cyr` toward the frame-level driver with the **frame-header
+filter activation** step — the piece that turns the CDEF/LR decode-time reads
+(wired-but-inert since 0.7.32/0.7.39) **live for a real bitstream**.
+`av1_lr_params_from_fh` builds an `Av1LrParams` straight from the parsed frame
+header (per-plane `FrameRestorationType`/`LoopRestorationSize` + the `read_lr`
+frame flags); `av1_activate_intra_filters` attaches the CDEF read context (when the
+sequence enables CDEF) + the LR params to a decode tile. An end-to-end test now
+decodes a keyframe tile whose LR params were **derived from a header** (the
+production path), reading back the exact Wiener coeffs the encoder wrote — the
+activation-gap closure. A 3-dimension adversarial review **workflow**
+(spec-conformance / error-memory / activation-correctness, each finding
+independently refute-by-default verified) cleared the change. **20,391 suite
+assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **Frame-header filter activation** (`src/av1_decode.cyr`):
+  - `av1_lr_params_from_fh(fh, seq, uw, fh_h, np, out_err)` — build the
+    `Av1LrParams` for a frame from its header (spec 5.9.20 `lr_params` + 7.17):
+    returns 0 when `UsesLr == 0` (frame uses no LR, not an error) or on OOM;
+    otherwise a fresh params with each non-`NONE` plane's restoration type + unit
+    size and the `allow_intrabc`/`use_superres`/`SuperresDenom` flags `read_lr`
+    consumes, subsampling from the sequence.
+  - `av1_activate_intra_filters(tile, seq, fh, lr_params)` — attach the CDEF read
+    context (5.11.56 `read_cdef`, only when `av1_seq_enable_cdef`; carries
+    `cdef_bits` + the `coded_lossless`/`allow_intrabc` gates) and the LR params
+    (5.11.57 `read_lr`; 0 leaves `read_lr` inert). After this, `decode_intra_tile`
+    populates `CdefIdx` + the LR unit grids that `av1_apply_loop_filters` consumes.
+    Returns the `set_cdef_ctx` `DrErr` (may OOM / bounds-fault on a null grid).
+- **Tests**: `tests/av1_decode.tcyr` (+ unit: `from_fh` maps header → params incl.
+  the no-LR → null / not-an-error path, `activate` sets the ctx only when CDEF is
+  enabled + always attaches LR); `tests/av1_tile.tcyr` `test_lr_activation_from_fh`
+  (end-to-end: decode a keyframe tile with **header-derived** LR params, read back
+  the encoder's Wiener coeffs 15/20 per SB — proves the header → params →
+  `decode_tile` chain).
+
 ## [0.7.40] - 2026-07-11
 
 Adds the AV1 **in-loop filter pipeline** (`src/av1_decode.cyr`, a new module — the

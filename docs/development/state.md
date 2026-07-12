@@ -6,24 +6,24 @@
 
 ## Version
 
-**0.7.40** — cut 2026-07-11, not yet tagged (user's git). Adds the AV1 **in-loop
-filter pipeline** (`av1_decode.cyr`, new module — the seed of the frame-level decode
-driver): `av1_apply_loop_filters` chains deblock (7.14) -> CDEF (7.15) -> loop
-restoration (7.17) in spec-7.4 order over a reconstructed tile frame, managing the
-`CurrFrame`/`CdefFrame`/`LrFrame` buffers. **This is the first time all three in-loop
-filters run chained together.** A 3-dimension adversarial review **workflow**
-(spec-order / frame-management / memory-error, each finding independently verified)
-found + confirmed a real conformance bug — a **latent `av1_deblock` defect since
-0.7.28** (missing the 7.14.1 frame-level gate: with both luma levels 0 but
-delta-enabled, it filtered where the spec forbids it) — fixed at the source
-(`av1_deblock` self-gates now) + regression-tested. On top of the complete in-loop
-filter layer (deblocking 0.7.27/0.7.28 + CDEF 0.7.29/0.7.30 + loop restoration
-0.7.33-0.7.39, wired through decode_tile) and the **first fully decoded keyframe**
-(0.7.25). Next: grow `av1_decode.cyr` into the full frame driver (OBU -> seq/fh ->
-tile assembly -> decode -> this pipeline) that attaches the LR params + CDEF context,
-activating everything for
-real streams. The remaining distance to 1.0 is the
-rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
+**0.7.41** — cut 2026-07-12, not yet tagged (user's git). Grows `av1_decode.cyr`
+toward the frame-level driver with the **frame-header filter activation** step —
+the piece that turns the CDEF/LR decode-time reads (wired-but-inert since
+0.7.32/0.7.39) **live for a real bitstream**. `av1_lr_params_from_fh` builds an
+`Av1LrParams` from the parsed frame header (per-plane restoration type/size + the
+`read_lr` frame flags); `av1_activate_intra_filters` attaches the CDEF read context
+(when the sequence enables CDEF) + the LR params to a decode tile. An **end-to-end
+test now decodes a keyframe tile whose LR params were derived from a header** (the
+production path), reading back the exact Wiener coeffs the encoder wrote — closing
+the activation gap tracked honestly since 0.7.32/0.7.39. A 3-dimension adversarial
+review **workflow** (spec-conformance / error-memory / activation-correctness, each
+finding refute-by-default verified) cleared the change. On top of the complete
+in-loop filter layer (deblocking 0.7.27/0.7.28 + CDEF 0.7.29/0.7.30 + loop
+restoration 0.7.33-0.7.39) chained into the filter pipeline (0.7.40) and the **first
+fully decoded keyframe** (0.7.25). Next: complete the frame driver (OBU -> seq/fh ->
+tile assembly using these activation helpers -> decode -> the pipeline) — the last
+gap is `tile_group_obu` parsing to extract the tile bytes. The remaining distance to
+1.0 is the rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
 VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
@@ -74,7 +74,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
-| `src/av1_decode.cyr` | `av1_` | frame-level decode driver (seed) — av1_apply_loop_filters: the in-loop filter pipeline (deblock 7.14 → CDEF 7.15 → LR 7.17, spec-7.4 order) with CurrFrame/CdefFrame/LrFrame management. Grows into the OBU→pixels driver |
+| `src/av1_decode.cyr` | `av1_` | frame-level decode driver (seed) — av1_apply_loop_filters: the in-loop filter pipeline (deblock 7.14 → CDEF 7.15 → LR 7.17, spec-7.4 order) with CurrFrame/CdefFrame/LrFrame management; **frame-header filter activation** (av1_lr_params_from_fh builds Av1LrParams from the header 5.9.20/7.17, av1_activate_intra_filters attaches the CDEF ctx + LR params to a decode tile — makes read_cdef/read_lr live). Grows into the OBU→pixels driver |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry) + the decode_tile wiring (AV1TILE_LRPARAMS, 0.7.39). Inert until a frame-level driver attaches the params |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
@@ -90,13 +90,13 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 26 suites / **20,102 assertions**: drishti 51 · bits
-  1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 280 ·
+- `make test` — 29 suites / **20,391 assertions**: drishti 51 · bits
+  1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
-  av1_noncoeffcdf 1,820 · av1_modeinfo 310 · av1_txsize 169 · av1_txtype
-  142 · av1_residual 28 · av1_partition 216 · av1_tile 20 · av1_deblock 54 ·
-  h264 326 · h265 276 · vpx 287
+  av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
+  142 · av1_residual 35 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
+  av1_cdef 42 · av1_lr 80 · av1_decode 29 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.

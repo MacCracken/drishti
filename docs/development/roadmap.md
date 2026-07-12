@@ -162,10 +162,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   bitstream read) landed in 0.7.31 (`av1_modeinfo.cyr`, round-trip tested), and
   0.7.32 wired them into `intra_frame_mode_info` (after `read_skip`) + the
   `decode_tile`/`encode_tile` SB loop, guarded by a per-tile CDEF context
-  (`av1_tile_set_cdef_ctx`). **Still open**: no production frame-level driver calls
-  `set_cdef_ctx` yet (it needs the parsed frame header), so the splice is inert for
-  real bitstreams until that frame-level CDEF activation lands — the natural next
-  step, alongside threading the frame header into the tile assembly. Loop
+  (`av1_tile_set_cdef_ctx`). The **frame-header activation** helper
+  (`av1_activate_intra_filters`, 0.7.41) now calls `set_cdef_ctx` straight from the
+  parsed header; **still open**: no OBU / `tile_group_obu` walk feeds real tile bytes
+  into it yet, so the splice is exercised only in tests until that driver stage lands
+  (0.7.4x). Loop
   restoration (7.17) is **complete** (`src/av1_lr.cyr`): both filter kernels — the
   **Wiener** separable 7-tap (0.7.33) and the **self-guided / SGR** box filter
   (7.17.2/7.17.3, 0.7.34) — plus the stripe-loop process/loop_restore_block driver
@@ -181,10 +182,13 @@ Baseline (0.7.0): OBU layer + sequence header.
   decode-tile layer** and round-trip-tested end-to-end (unlike CDEF, verified only at
   the mode-info level). The three filters are now **chained** by the in-loop filter
   pipeline (`src/av1_decode.cyr`, `av1_apply_loop_filters`, 0.7.40 — deblock -> CDEF
-  -> LR in spec-7.4 order). The remaining piece: grow `av1_decode.cyr` into the full
-  frame driver (OBU walk -> seq/fh -> tile assembly setting the CDEF context + LR
-  params from the frame header -> decode -> the filter pipeline), activating the whole
-  in-loop filter layer for real streams. Then inter prediction.
+  -> LR in spec-7.4 order), and the **frame-header filter activation** step landed in
+  0.7.41 (`av1_lr_params_from_fh` builds the `Av1LrParams` from the header;
+  `av1_activate_intra_filters` attaches it + the CDEF context to a decode tile —
+  end-to-end tested by decoding a keyframe tile with header-derived LR params). The
+  remaining piece of the frame driver is the OBU walk -> seq/fh -> `tile_group_obu`
+  that extracts real tile bytes and calls tile-assembly + these activation helpers ->
+  decode -> the filter pipeline. Then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

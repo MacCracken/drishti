@@ -158,6 +158,72 @@ fn test_lr_tile_wiring() {
     assert_eq(av1_grid_get(dtile, AV1TILE_MISIZES, 0, 16), 12, "partition still round-trips (SB1 64x64)");
     return 0;
 }
+# Frame-header-driven activation end-to-end: the decode side builds its LR params
+# from a parsed frame header (av1_lr_params_from_fh) and attaches them via
+# av1_activate_intra_filters — the production path — instead of hand-wiring the
+# params. Proves the header -> params -> decode_tile chain reads the same WIENER
+# coeffs the encoder wrote (the activation-gap closure for a real bitstream).
+fn test_lr_activation_from_fh() {
+    var base_q = 40;
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    # ENCODE tile: manual LR params (2 WIENER units with distinct coeffs).
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, base_q, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    var elrp = av1_lr_params_new(128, 64, 1, 0, 0, 1);
+    av1_lr_params_set_plane(elrp, 0, AV1_RESTORE_WIENER, 64);
+    av1_lr_type_set(elrp, 0, 0, 0, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(elrp, 0, 0, 0, 0, 3, 0 - 7, 15);
+    av1_lr_wiener_set(elrp, 0, 0, 0, 1, 3, 0 - 7, 15);
+    av1_lr_type_set(elrp, 0, 0, 1, AV1_RESTORE_WIENER);
+    av1_lr_wiener_set(elrp, 0, 0, 1, 0, 0 - 2, 5, 20);
+    av1_lr_wiener_set(elrp, 0, 0, 1, 1, 0 - 2, 5, 20);
+    av1_tile_set_lr_params(etile, elrp);
+    var olen = 0;
+    var out = av1_encode_intra_tile(etile, pp, pm, pt, 1, &olen);
+    assert_eq(olen > 0, 1, "encoded keyframe tile with LR bits");
+    # DECODE tile: build a frame header (UsesLr, WIENER luma, unit 64) + sequence,
+    # derive the LR params FROM the header, and activate — the production wiring.
+    var fh = alloc(1200);
+    store64(fh + AV1FH_USES_LR, 1);
+    store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 0, AV1_RESTORE_WIENER);
+    store64(fh + AV1FH_LR_SIZE + 0, 64);
+    # read_lr frame flags must match the encoder's defaults (alloc is not zeroed):
+    # a garbage allow_intrabc would make read_lr skip the units and desync.
+    store64(fh + AV1FH_ALLOW_INTRABC, 0);
+    store64(fh + AV1FH_USE_SUPERRES, 0);
+    store64(fh + AV1FH_SUPERRES_DENOM, 8);
+    var seq = alloc(256);
+    store64(seq + AV1_SEQ_ENABLE_CDEF, 0);   # CDEF off: focus on LR activation
+    var doe = alloc(8);
+    var dframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, doe);
+    var dtile = av1_tile_new(dframe, 32, 16, base_q, 1, 0, 1);
+    av1_tile_grids_new(dtile);
+    var foe = alloc(8);
+    var dlrp = av1_lr_params_from_fh(fh, seq, 128, 64, 1, foe);
+    assert_eq(load64(foe), DR_OK, "lr_params_from_fh ok");
+    assert_eq(dlrp != 0, 1, "header UsesLr -> params built");
+    assert_eq(av1_activate_intra_filters(dtile, seq, fh, dlrp), DR_OK, "activate ok");
+    assert_eq(av1_decode_intra_tile(dtile, out, olen, 1), DR_OK, "decode_tile ok (LR active from header)");
+    assert_eq(av1_lr_wiener_get_one(dlrp, 0, 0, 0, 0, 2), 15, "SB0 -> read unit(0,0) coeff 15");
+    assert_eq(av1_lr_wiener_get_one(dlrp, 0, 0, 1, 0, 2), 20, "SB1 -> read unit(0,1) coeff 20");
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -168,6 +234,8 @@ fn main() {
     test_keyframe_roundtrip();
     test_group("read_lr wiring in decode_tile");
     test_lr_tile_wiring();
+    test_group("frame-header LR activation end-to-end");
+    test_lr_activation_from_fh();
     return assert_summary();
 }
 

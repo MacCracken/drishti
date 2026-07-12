@@ -123,6 +123,74 @@ fn test_pipeline_deblock() {
     return 0;
 }
 
+# ================================================================
+# Frame-header filter activation: av1_lr_params_from_fh builds the LR params from
+# the parsed header, av1_activate_intra_filters attaches CDEF ctx + LR params to a
+# tile — the step that turns the wired-but-inert CDEF/LR reads live.
+# ================================================================
+# fh carrying the LR + CDEF header fields the activation helpers read.
+fn mk_act_fh(uses_lr, rtype0, usize0, cdef_bits, allow_intrabc): i64 {
+    var fh = alloc(1200);
+    store64(fh + AV1FH_USES_LR, uses_lr);
+    store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 0, rtype0);
+    store64(fh + AV1FH_LR_SIZE + 0, usize0);
+    store64(fh + AV1FH_CDEF_BITS, cdef_bits);
+    store64(fh + AV1FH_ALLOW_INTRABC, allow_intrabc);
+    store64(fh + AV1FH_CODED_LOSSLESS, 0);
+    store64(fh + AV1FH_USE_SUPERRES, 0);
+    store64(fh + AV1FH_SUPERRES_DENOM, 8);
+    return fh;
+}
+# seq carrying subsampling + enable_cdef.
+fn mk_act_seq(enable_cdef): i64 {
+    var s = alloc(256);
+    store64(s + AV1_SEQ_ENABLE_CDEF, enable_cdef);
+    store64(s + AV1_SEQ_SUBX, 0);
+    store64(s + AV1_SEQ_SUBY, 0);
+    return s;
+}
+# from_fh maps the header's per-plane restoration type/size + frame flags into a
+# fresh Av1LrParams (UsesLr) or 0 (no LR), never an error on the no-LR path.
+fn test_lr_params_from_fh() {
+    var oe = alloc(8);
+    var fh = mk_act_fh(1, AV1_RESTORE_WIENER, 64, 3, 0);
+    var seq = mk_act_seq(1);
+    var p = av1_lr_params_from_fh(fh, seq, 128, 64, 1, oe);
+    assert_eq(load64(oe), DR_OK, "from_fh -> DR_OK");
+    assert_eq(p != 0, 1, "UsesLr -> non-null params");
+    assert_eq(load64(p + AV1LRP_USES), 1, "UsesLr propagated");
+    assert_eq(load64(p + AV1LRP_RTYPE), AV1_RESTORE_WIENER, "plane0 rtype WIENER (from header)");
+    assert_eq(load64(p + AV1LRP_USIZE), 64, "plane0 unit size 64 (from header)");
+    assert_eq(av1_lr_ucols_of(p, 0), 2, "128/64 -> 2 unit cols");
+    assert_eq(av1_lr_srdenom(p), 8, "SuperresDenom 8 (from header flags)");
+    assert_eq(av1_lr_intrabc(p), 0, "allow_intrabc 0 (from header flags)");
+    # UsesLr == 0 -> null params, and NOT an error (frame simply uses no LR).
+    var p0 = av1_lr_params_from_fh(mk_act_fh(0, AV1_RESTORE_NONE, 0, 3, 0), seq, 128, 64, 1, oe);
+    assert_eq(p0, 0, "no UsesLr -> null params");
+    assert_eq(load64(oe), DR_OK, "no UsesLr -> not an error");
+    return 0;
+}
+# activate attaches the CDEF ctx (only when the sequence enables CDEF) + LR params
+# (always) to a decode tile from the header.
+fn test_activate_intra_filters() {
+    var tile = mk_dec_tile();
+    var fh = mk_act_fh(1, AV1_RESTORE_WIENER, 64, 2, 0);
+    var lrp = av1_lr_params_new(32, 32, 1, 0, 0, 1);
+    var rc = av1_activate_intra_filters(tile, mk_act_seq(1), fh, lrp);
+    assert_eq(rc, DR_OK, "activate -> DR_OK");
+    assert_eq(load64(tile + AV1TILE_LRPARAMS), lrp, "LR params attached");
+    var ctx = load64(tile + AV1TILE_CDEF_CTX);
+    assert_eq(ctx != 0, 1, "CDEF enabled -> ctx attached");
+    assert_eq(load64(ctx + 8), 2, "ctx carries cdef_bits=2 (from header)");
+    # CDEF disabled -> ctx stays null (read_cdef inert), LR still attached.
+    var tile2 = mk_dec_tile();
+    var lrp2 = av1_lr_params_new(32, 32, 1, 0, 0, 1);
+    assert_eq(av1_activate_intra_filters(tile2, mk_act_seq(0), fh, lrp2), DR_OK, "activate (no CDEF) -> DR_OK");
+    assert_eq(load64(tile2 + AV1TILE_CDEF_CTX), 0, "CDEF off -> ctx stays null");
+    assert_eq(load64(tile2 + AV1TILE_LRPARAMS), lrp2, "LR still attached with CDEF off");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
@@ -130,6 +198,9 @@ fn main() {
     test_pipeline_cdef();
     test_pipeline_cdef_lr();
     test_pipeline_deblock();
+    test_group("frame-header filter activation");
+    test_lr_params_from_fh();
+    test_activate_intra_filters();
     return assert_summary();
 }
 
