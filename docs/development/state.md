@@ -6,23 +6,34 @@
 
 ## Version
 
-**0.7.28** — cut 2026-07-11, not yet tagged (user's git). Completes the AV1
-**deblocking loop filter**: the edge loop + main driver (`av1_deblock.cyr`,
-spec 7.14.1/2) that walk a reconstructed frame's 4x4 boundaries and apply the
-0.7.27 kernels, + the `LoopfilterTxSizes` grid they consume — a whole keyframe
-is deblocked in place. On top of the deblock kernels (0.7.27), the intra
-keyframe prediction completion (`get_filter_type`, 0.7.26), and the **first
-fully decoded keyframe** (0.7.25). The remaining distance to 1.0 is the rest of
-the in-loop filters (CDEF, loop restoration) + inter + conformance/10-bit + the
-encode-lane completion (finishing 0.7.x), then the other per-codec arcs (0.8.x
-H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
-[`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
+**0.7.29** — cut 2026-07-11, not yet tagged (user's git). Starts AV1 **CDEF**
+(the second in-loop filter) with the pixel-math kernels (`av1_cdef.cyr`, spec
+7.15.2 direction/variance search + 7.15.3 `constrain` + primary/secondary tap
+filter), cross-checked against an independent Python model and a 3-agent
+adversarial review (tables + math spec-exact, no correctness findings; two
+non-correctness findings tracked — see CHANGELOG). On top of the complete
+deblocking loop filter (kernels 0.7.27 + edge loop/driver + `LoopfilterTxSizes`
+0.7.28), the intra keyframe prediction completion (`get_filter_type`, 0.7.26),
+and the **first fully decoded keyframe** (0.7.25). Next: the CDEF block process +
+outer loop (7.15.1) + `CdefFrame`/`cdef_idx` wiring (0.7.30) — which must satisfy
+the CDEF frame contract (MI-aligned planes or border >= 7; see roadmap.md). The
+remaining distance to 1.0 is the rest of the in-loop filters (finish CDEF, loop
+restoration) + inter + conformance/10-bit + the encode-lane completion (finishing
+0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit
+(0.11.x) + freeze/docs (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) +
+[`roadmap.md`](roadmap.md).
+
+> **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
+> reported by its actual exit code — never folded into "green" while red. A
+> >120-char line had silently failed it since the entropy-decoder work; fixed in
+> 0.7.29. A full doc-claim audit + deferral squash is scheduled for the 0.7.x
+> close-out (see roadmap.md / memory).
 
 ## Toolchain
 
 - **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
   version for the arithmetic-shift operator `>>>`. The pin is the
-  *minimum*; a newer installed `cycc` (currently **6.4.49**) compiles
+  *minimum*; a newer installed `cycc` (currently **6.4.52**) compiles
   clean and only emits a harmless drift note. **Set
   `CYRIUS_NO_WARN_PIN_DRIFT=1`** in the env for clean build/test/lint
   output. Bump the pin only when a new toolchain feature is actually used
@@ -30,11 +41,11 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (31 `[lib]` modules, dependency order)
+## Source (32 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 719, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 729, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -58,6 +69,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: all vertical then horizontal boundaries, in place) |
+| `src/av1_cdef.cyr` | `av1_` | CDEF kernels (7.15.2/7.15.3) — direction/variance search (av1_cdef_direction) + constrain non-linearity (av1_cdef_constrain) + primary/secondary tap filter (av1_cdef_filter) + Div/Pri/Sec/Directions/Uv_Dir tables. Precondition: caller supplies MI-grid-covering planes (0.7.30 driver, roadmap.md) |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |

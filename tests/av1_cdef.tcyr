@@ -1,0 +1,143 @@
+# tests/av1_cdef.tcyr — AV1 CDEF kernels (spec 7.15.2 direction + 7.15.3 filter).
+# The `constrain` non-linearity + direction/variance search by arithmetic
+# known-answers, and the tap filter by a hand-computed deringing case. The
+# direction/filter references were computed by an independent Python model of
+# 7.15.2/7.15.3 (kept in the commit notes), cross-checked field-by-field.
+include "src/main.cyr"
+include "src/av1_cdef.cyr"
+
+# ---- constrain (7.15.3) ----
+fn test_constrain() {
+    # thr=8, dampingAdj = max(0, 3 - floorlog2(8)=3) = 0: 8-(10>>0) = -2 -> clip 0.
+    assert_eq(av1_cdef_constrain(10, 8, 3), 0, "constrain 10,8,3 saturates to 0");
+    assert_eq(av1_cdef_constrain(0 - 10, 8, 3), 0, "constrain -10,8,3 -> 0 (sign*0)");
+    # threshold 0 -> always 0.
+    assert_eq(av1_cdef_constrain(5, 0, 3), 0, "constrain thr=0 -> 0");
+    # thr=16, dampingAdj=0: 16-(3>>0)=13, clip3(0,3,13)=3, sign +.
+    assert_eq(av1_cdef_constrain(3, 16, 4), 3, "constrain 3,16,4 -> 3");
+    assert_eq(av1_cdef_constrain(0 - 3, 16, 4), 0 - 3, "constrain -3,16,4 -> -3");
+    return 0;
+}
+
+# ---- direction search (7.15.2) ----
+# Fill the 8x8 luma block at MI (0,0) via a per-pixel value function, then read
+# out[0]=yDir, out[1]=var.
+fn test_direction_flat() {
+    var oe = alloc(8);
+    var f = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) { dr_frame_set(f, 0, x, y, 128); x = x + 1; }
+        y = y + 1;
+    }
+    var out = alloc(2 * 8);
+    av1_cdef_direction(f, 0, 0, out);
+    assert_eq(load64(out + 0), 0, "flat block yDir 0");
+    assert_eq(load64(out + 8), 0, "flat block var 0");
+    return 0;
+}
+fn test_direction_hgrad() {
+    # sample = 128 + x*4 (columns increase) -> vertical edges -> yDir 6, var 4410.
+    var oe = alloc(8);
+    var f = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) { dr_frame_set(f, 0, x, y, 128 + (x * 4)); x = x + 1; }
+        y = y + 1;
+    }
+    var out = alloc(2 * 8);
+    av1_cdef_direction(f, 0, 0, out);
+    assert_eq(load64(out + 0), 6, "hgrad yDir 6");
+    assert_eq(load64(out + 8), 4410, "hgrad var 4410");
+    return 0;
+}
+fn test_direction_vgrad() {
+    # sample = 128 + y*4 (rows increase) -> horizontal edges -> yDir 2, var 4410.
+    var oe = alloc(8);
+    var f = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) { dr_frame_set(f, 0, x, y, 128 + (y * 4)); x = x + 1; }
+        y = y + 1;
+    }
+    var out = alloc(2 * 8);
+    av1_cdef_direction(f, 0, 0, out);
+    assert_eq(load64(out + 0), 2, "vgrad yDir 2");
+    assert_eq(load64(out + 8), 4410, "vgrad var 4410");
+    return 0;
+}
+fn test_direction_diag() {
+    # sample = 128 + (x+y)*3 (main diagonal) -> yDir 0, var 4961.
+    var oe = alloc(8);
+    var f = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) { dr_frame_set(f, 0, x, y, 128 + ((x + y) * 3)); x = x + 1; }
+        y = y + 1;
+    }
+    var out = alloc(2 * 8);
+    av1_cdef_direction(f, 0, 0, out);
+    assert_eq(load64(out + 0), 0, "diag yDir 0");
+    assert_eq(load64(out + 8), 4961, "diag var 4961");
+    return 0;
+}
+
+# ---- filter (7.15.3): a gentle spike (132 amid flat 128) at the block center is
+# deringed. Block at MI (2,2) in a 32x32 (mi 8x8) frame so every tap is inside.
+# pri_str=16 (tapIdx=(16>>0)&1=0), sec_str=8, damping=5, dir=0. ----
+fn fill_frame(f, w, h, v): i64 {
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) { dr_frame_set(f, 0, x, y, v); x = x + 1; }
+        y = y + 1;
+    }
+    return 0;
+}
+fn test_filter_dering() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var cdef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    fill_frame(curr, 32, 32, 128);
+    dr_frame_set(curr, 0, 11, 11, 132);        # spike at block-relative (i=3,j=3)
+    av1_cdef_filter(curr, cdef, 0, 2, 2, 16, 8, 5, 0, 8, 8);
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 128, "spike 132 deringed to 128");
+    assert_eq(dr_frame_get(cdef, 0, 11, 10), 129, "left neighbor pulled to 129");
+    assert_eq(dr_frame_get(cdef, 0, 10, 11), 129, "up neighbor pulled to 129");
+    assert_eq(dr_frame_get(cdef, 0, 8, 8), 128, "block corner untouched 128");
+    return 0;
+}
+# a perfectly flat block: no direction, constrain always 0 -> output == input.
+fn test_filter_flat() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var cdef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    fill_frame(curr, 32, 32, 128);
+    av1_cdef_filter(curr, cdef, 0, 2, 2, 16, 8, 5, 0, 8, 8);
+    assert_eq(dr_frame_get(cdef, 0, 11, 11), 128, "flat block center unchanged");
+    assert_eq(dr_frame_get(cdef, 0, 8, 8), 128, "flat block corner unchanged");
+    assert_eq(dr_frame_get(cdef, 0, 15, 15), 128, "flat block far corner unchanged");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("cdef constrain");
+    test_constrain();
+    test_group("cdef direction search");
+    test_direction_flat();
+    test_direction_hgrad();
+    test_direction_vgrad();
+    test_direction_diag();
+    test_group("cdef filter");
+    test_filter_dering();
+    test_filter_flat();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

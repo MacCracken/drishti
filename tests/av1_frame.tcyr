@@ -21,7 +21,7 @@ include "src/av1_frame.cyr"
 # ================================================================
 
 # Reduced still-picture header, profile 0, 8-bit 4:2:0 (non-mono).
-fn fx_seq_reduced(w, h, sb128, en_superres, en_cdef, en_restoration, film_grain): i64 {
+fn fx_seq_reduced(w, h, sb128, en_superres, en_cdef, en_lr, film_grain): i64 {
     var bw = dr_bw_init(16);
     dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
     dr_bw_put_bit(bw, 1);            # still_picture = 1
@@ -36,7 +36,7 @@ fn fx_seq_reduced(w, h, sb128, en_superres, en_cdef, en_restoration, film_grain)
     dr_bw_put_bit(bw, 0);            # enable_intra_edge_filter
     dr_bw_put_bit(bw, en_superres);  # enable_superres
     dr_bw_put_bit(bw, en_cdef);      # enable_cdef
-    dr_bw_put_bit(bw, en_restoration); # enable_restoration
+    dr_bw_put_bit(bw, en_lr); # enable_restoration
     dr_bw_put_bit(bw, 0);            # high_bitdepth = 0 -> 8-bit
     dr_bw_put_bit(bw, 0);            # mono_chrome = 0
     dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
@@ -52,7 +52,7 @@ fn fx_seq_reduced(w, h, sb128, en_superres, en_cdef, en_restoration, film_grain)
 # Full (non-reduced) header, profile 0, 8-bit 4:2:0, one operating point,
 # no timing / decoder-model / frame-id. seq_force_screen_content_tools = 0
 # (so frame headers code no allow_screen_content_tools bit).
-fn fx_seq_full(w, h, en_order_hint, ohb_m1, en_superres, en_cdef, en_restoration, en_warped, en_ref_mvs, film_grain): i64 {
+fn fx_seq_full(w, h, en_order_hint, ohb_m1, en_superres, en_cdef, en_lr, en_warped, en_ref_mvs, film_grain): i64 {
     var bw = dr_bw_init(32);
     dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
     dr_bw_put_bit(bw, 0);            # still_picture = 0
@@ -87,7 +87,7 @@ fn fx_seq_full(w, h, en_order_hint, ohb_m1, en_superres, en_cdef, en_restoration
     }
     dr_bw_put_bit(bw, en_superres);  # enable_superres
     dr_bw_put_bit(bw, en_cdef);      # enable_cdef
-    dr_bw_put_bit(bw, en_restoration); # enable_restoration
+    dr_bw_put_bit(bw, en_lr); # enable_restoration
     dr_bw_put_bit(bw, 0);            # high_bitdepth -> 8-bit
     dr_bw_put_bit(bw, 0);            # mono_chrome = 0
     dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0

@@ -1,0 +1,254 @@
+# src/av1_cdef.cyr — AV1 CDEF (Constrained Directional Enhancement Filter)
+# kernels (spec 7.15.2 direction search + 7.15.3 filter). The second in-loop
+# filter (runs after deblocking): it derings each 8x8 block by detecting an edge
+# direction and applying a constrained primary (along-direction) + secondary
+# (off-direction) tap filter. This bite is the pixel math — the direction/
+# variance search, the `constrain` non-linearity, and the tap filter that reads
+# CurrFrame and writes CdefFrame. The block process (7.15.1) + the 8x8 driver +
+# the CdefFrame/cdef_idx wiring are the next bite (roadmap.md).
+#
+# FRAME CONTRACT (enforced by the 0.7.30 driver bite, roadmap.md): these kernels
+# index the full MI grid — samples up to (MiCols*4 - 1, MiRows*4 - 1), which can
+# exceed FrameWidth/Height by up to 7 when a dim is not a multiple of 8. dr_frame
+# get/set are unchecked (frame.cyr), so the caller MUST supply source/CdefFrame
+# planes that cover the MI grid: MI-aligned plane dims OR border >= 7 (luma) with
+# the edge padding populated. The tests here use MI-aligned frames; the driver
+# must make this hold for real (non-mult-of-8) frames.
+#
+# FLAT module — wiring in src/main.cyr after av1_deblock.cyr. Family av1_.
+# Depends on: frame (DrFrame get/set/bit_depth/subx/suby), av1_frame
+# (av1_min/max/clip3), av1_intra (av1_iabs), bits (dr_floor_log2), drishti.
+
+# ================================================================
+# Tables — one lazily-built blob (81 i64):
+#   [0..8]    Div_Table[9]
+#   [9..12]   Cdef_Pri_Taps[2][2]  (strength-parity, k)
+#   [13..16]  Cdef_Sec_Taps[2][2]
+#   [17..48]  Cdef_Directions[8][2][2]  (dir, k, {dy,dx})
+#   [49..80]  Cdef_Uv_Dir[2][2][8]      (subx, suby, yDir)
+# ================================================================
+var Av1_Cdef = 0;
+fn av1_cdef_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
+fn av1_cdef_tables(): i64 {
+    if (Av1_Cdef != 0) { return Av1_Cdef; }
+    var t = alloc(81 * 8);
+    if (t == 0) { return 0; }
+    # Div_Table[9].
+    av1_cdef_store(t, 0, 0);    av1_cdef_store(t, 1, 840);  av1_cdef_store(t, 2, 420);
+    av1_cdef_store(t, 3, 280);  av1_cdef_store(t, 4, 210);  av1_cdef_store(t, 5, 168);
+    av1_cdef_store(t, 6, 140);  av1_cdef_store(t, 7, 120);  av1_cdef_store(t, 8, 105);
+    # Cdef_Pri_Taps[2][2] = {{4,2},{3,3}}.
+    av1_cdef_store(t, 9, 4);   av1_cdef_store(t, 10, 2);  av1_cdef_store(t, 11, 3);  av1_cdef_store(t, 12, 3);
+    # Cdef_Sec_Taps[2][2] = {{2,1},{2,1}}.
+    av1_cdef_store(t, 13, 2);  av1_cdef_store(t, 14, 1);  av1_cdef_store(t, 15, 2);  av1_cdef_store(t, 16, 1);
+    # Cdef_Directions[8][2][2] (each entry {dy, dx}).
+    av1_cdef_store(t, 17, 0 - 1); av1_cdef_store(t, 18, 1);     av1_cdef_store(t, 19, 0 - 2); av1_cdef_store(t, 20, 2);
+    av1_cdef_store(t, 21, 0);     av1_cdef_store(t, 22, 1);     av1_cdef_store(t, 23, 0 - 1); av1_cdef_store(t, 24, 2);
+    av1_cdef_store(t, 25, 0);     av1_cdef_store(t, 26, 1);     av1_cdef_store(t, 27, 0);     av1_cdef_store(t, 28, 2);
+    av1_cdef_store(t, 29, 0);     av1_cdef_store(t, 30, 1);     av1_cdef_store(t, 31, 1);     av1_cdef_store(t, 32, 2);
+    av1_cdef_store(t, 33, 1);     av1_cdef_store(t, 34, 1);     av1_cdef_store(t, 35, 2);     av1_cdef_store(t, 36, 2);
+    av1_cdef_store(t, 37, 1);     av1_cdef_store(t, 38, 0);     av1_cdef_store(t, 39, 2);     av1_cdef_store(t, 40, 1);
+    av1_cdef_store(t, 41, 1);     av1_cdef_store(t, 42, 0);     av1_cdef_store(t, 43, 2);     av1_cdef_store(t, 44, 0);
+    av1_cdef_store(t, 45, 1);     av1_cdef_store(t, 46, 0);
+    av1_cdef_store(t, 47, 2);     av1_cdef_store(t, 48, 0 - 1);
+    # Cdef_Uv_Dir[2][2][8].
+    av1_cdef_store(t, 49, 0); av1_cdef_store(t, 50, 1); av1_cdef_store(t, 51, 2); av1_cdef_store(t, 52, 3);
+    av1_cdef_store(t, 53, 4); av1_cdef_store(t, 54, 5); av1_cdef_store(t, 55, 6); av1_cdef_store(t, 56, 7);
+    av1_cdef_store(t, 57, 1); av1_cdef_store(t, 58, 2); av1_cdef_store(t, 59, 2); av1_cdef_store(t, 60, 2);
+    av1_cdef_store(t, 61, 3); av1_cdef_store(t, 62, 4); av1_cdef_store(t, 63, 6); av1_cdef_store(t, 64, 0);
+    av1_cdef_store(t, 65, 7); av1_cdef_store(t, 66, 0); av1_cdef_store(t, 67, 2); av1_cdef_store(t, 68, 4);
+    av1_cdef_store(t, 69, 5); av1_cdef_store(t, 70, 6); av1_cdef_store(t, 71, 6); av1_cdef_store(t, 72, 6);
+    av1_cdef_store(t, 73, 0); av1_cdef_store(t, 74, 1); av1_cdef_store(t, 75, 2); av1_cdef_store(t, 76, 3);
+    av1_cdef_store(t, 77, 4); av1_cdef_store(t, 78, 5); av1_cdef_store(t, 79, 6); av1_cdef_store(t, 80, 7);
+    Av1_Cdef = t;
+    return t;
+}
+fn av1_cdef_div(i): i64 { return load64(av1_cdef_tables() + (i * 8)); }
+fn av1_cdef_pri_tap(s, k): i64 { return load64(av1_cdef_tables() + ((9 + (s * 2) + k) * 8)); }
+fn av1_cdef_sec_tap(s, k): i64 { return load64(av1_cdef_tables() + ((13 + (s * 2) + k) * 8)); }
+fn av1_cdef_dir_dy(dir, k): i64 { return load64(av1_cdef_tables() + ((17 + (dir * 4) + (k * 2)) * 8)); }
+fn av1_cdef_dir_dx(dir, k): i64 { return load64(av1_cdef_tables() + ((17 + (dir * 4) + (k * 2) + 1) * 8)); }
+fn av1_cdef_uv_dir(subx, suby, ydir): i64 {
+    return load64(av1_cdef_tables() + ((49 + (((subx * 2) + suby) * 8) + ydir) * 8));
+}
+
+# constrain (7.15.3): the CDEF non-linearity — clamp the tap difference toward 0
+# by the threshold, damped by dampingAdj.
+fn av1_cdef_constrain(diff, threshold, damping): i64 {
+    if (threshold == 0) { return 0; }
+    var damping_adj = av1_max(0, damping - dr_floor_log2(threshold));
+    var sign = 1;
+    if (diff < 0) { sign = 0 - 1; }
+    var ad = av1_iabs(diff);
+    return sign * av1_clip3(0, ad, threshold - (ad >> damping_adj));
+}
+
+# ================================================================
+# CDEF direction process (7.15.2) — measure the edge direction + variance of the
+# 8x8 luma block at MI (r, c). out[0] = yDir (0..7), out[1] = var.
+# ================================================================
+fn av1_cdef_direction(frame, r, c, out): i64 {
+    var bd = dr_frame_bit_depth(frame);
+    var partial = alloc(8 * 15 * 8);        # partial[8][15]
+    var cost = alloc(8 * 8);
+    var p = 0;
+    while (p < (8 * 15)) { store64(partial + (p * 8), 0); p = p + 1; }
+    var ci = 0;
+    while (ci < 8) { store64(cost + (ci * 8), 0); ci = ci + 1; }
+    var x0 = c << 2;
+    var y0 = r << 2;
+    var i = 0;
+    while (i < 8) {
+        var j = 0;
+        while (j < 8) {
+            var x = (dr_frame_get(frame, 0, x0 + j, y0 + i) >> (bd - 8)) - 128;
+            store64(partial + ((0 * 15 + (i + j)) * 8), load64(partial + ((0 * 15 + (i + j)) * 8)) + x);
+            store64(partial + ((1 * 15 + (i + (j / 2))) * 8), load64(partial + ((1 * 15 + (i + (j / 2))) * 8)) + x);
+            store64(partial + ((2 * 15 + i) * 8), load64(partial + ((2 * 15 + i) * 8)) + x);
+            var o3 = (3 * 15 + (3 + i - (j / 2))) * 8;
+            store64(partial + o3, load64(partial + o3) + x);
+            store64(partial + ((4 * 15 + (7 + i - j)) * 8), load64(partial + ((4 * 15 + (7 + i - j)) * 8)) + x);
+            var o5 = (5 * 15 + (3 - (i / 2) + j)) * 8;
+            store64(partial + o5, load64(partial + o5) + x);
+            store64(partial + ((6 * 15 + j) * 8), load64(partial + ((6 * 15 + j) * 8)) + x);
+            store64(partial + ((7 * 15 + ((i / 2) + j)) * 8), load64(partial + ((7 * 15 + ((i / 2) + j)) * 8)) + x);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    var pv = 0;
+    i = 0;
+    while (i < 8) {
+        pv = load64(partial + ((2 * 15 + i) * 8));
+        store64(cost + (2 * 8), load64(cost + (2 * 8)) + (pv * pv));
+        pv = load64(partial + ((6 * 15 + i) * 8));
+        store64(cost + (6 * 8), load64(cost + (6 * 8)) + (pv * pv));
+        i = i + 1;
+    }
+    store64(cost + (2 * 8), load64(cost + (2 * 8)) * av1_cdef_div(8));
+    store64(cost + (6 * 8), load64(cost + (6 * 8)) * av1_cdef_div(8));
+    i = 0;
+    while (i < 7) {
+        var a0 = load64(partial + ((0 * 15 + i) * 8));
+        var b0 = load64(partial + ((0 * 15 + (14 - i)) * 8));
+        store64(cost + 0, load64(cost + 0) + (((a0 * a0) + (b0 * b0)) * av1_cdef_div(i + 1)));
+        var a4 = load64(partial + ((4 * 15 + i) * 8));
+        var b4 = load64(partial + ((4 * 15 + (14 - i)) * 8));
+        store64(cost + (4 * 8), load64(cost + (4 * 8)) + (((a4 * a4) + (b4 * b4)) * av1_cdef_div(i + 1)));
+        i = i + 1;
+    }
+    var c07 = load64(partial + ((0 * 15 + 7) * 8));
+    store64(cost + 0, load64(cost + 0) + ((c07 * c07) * av1_cdef_div(8)));
+    var c47 = load64(partial + ((4 * 15 + 7) * 8));
+    store64(cost + (4 * 8), load64(cost + (4 * 8)) + ((c47 * c47) * av1_cdef_div(8)));
+    i = 1;
+    while (i < 8) {
+        var j2 = 0;
+        while (j2 < 5) {
+            var pj = load64(partial + ((i * 15 + (3 + j2)) * 8));
+            store64(cost + (i * 8), load64(cost + (i * 8)) + (pj * pj));
+            j2 = j2 + 1;
+        }
+        store64(cost + (i * 8), load64(cost + (i * 8)) * av1_cdef_div(8));
+        j2 = 0;
+        while (j2 < 3) {
+            var lo = load64(partial + ((i * 15 + j2) * 8));
+            var hi = load64(partial + ((i * 15 + (10 - j2)) * 8));
+            store64(cost + (i * 8), load64(cost + (i * 8)) + (((lo * lo) + (hi * hi)) * av1_cdef_div((2 * j2) + 2)));
+            j2 = j2 + 1;
+        }
+        i = i + 2;
+    }
+    var best = 0;
+    var ydir = 0;
+    i = 0;
+    while (i < 8) {
+        if (load64(cost + (i * 8)) > best) { best = load64(cost + (i * 8)); ydir = i; }
+        i = i + 1;
+    }
+    store64(out + 0, ydir);
+    store64(out + 8, (best - load64(cost + (((ydir + 4) & 7) * 8))) >> 10);
+    return 0;
+}
+
+# cdef_get_at (7.15.3): fetch a sample from CurrFrame along direction dir at tap
+# k with the given sign; sets *out_avail per is_inside_filter_region (single
+# tile: candidateR in [0,MiRows), candidateC in [0,MiCols)). `g` bundles the
+# per-block geometry {x0, y0, subx, suby, mi_cols, mi_rows} (6 i64) so the two
+# call sites stay legible.
+fn av1_cdef_geom(g, x0, y0, subx, suby, mi_cols, mi_rows): i64 {
+    store64(g + 0, x0);   store64(g + 8, y0);   store64(g + 16, subx);
+    store64(g + 24, suby); store64(g + 32, mi_cols); store64(g + 40, mi_rows);
+    return 0;
+}
+fn av1_cdef_get_at(frame, plane, g, i, j, dir, k, sign, out_avail): i64 {
+    var y = load64(g + 8) + i + (sign * av1_cdef_dir_dy(dir, k));
+    var x = load64(g + 0) + j + (sign * av1_cdef_dir_dx(dir, k));
+    var cand_r = (y << load64(g + 24)) >> 2;
+    var cand_c = (x << load64(g + 16)) >> 2;
+    if ((cand_r >= 0) && (cand_r < load64(g + 40)) && (cand_c >= 0) && (cand_c < load64(g + 32))) {
+        store64(out_avail, 1);
+        return dr_frame_get(frame, plane, x, y);
+    }
+    store64(out_avail, 0);
+    return 0;
+}
+
+# CDEF filter process (7.15.3): filter the 8x8 (plane-scaled) block at MI (r, c),
+# reading curr and writing cdef. tapIdx = (pri_str >> coeffShift) & 1.
+fn av1_cdef_filter(curr, cdef, plane, r, c, pri_str, sec_str, damping, dir, mi_cols, mi_rows): i64 {
+    var bd = dr_frame_bit_depth(curr);
+    var coeff_shift = bd - 8;
+    var tap = (pri_str >> coeff_shift) & 1;
+    var subx = 0;
+    var suby = 0;
+    if (plane > 0) { subx = dr_frame_subx(curr); suby = dr_frame_suby(curr); }
+    var x0 = (c * 4) >> subx;
+    var y0 = (r * 4) >> suby;
+    var w = 8 >> subx;
+    var h = 8 >> suby;
+    var av = alloc(8);
+    var g = alloc(6 * 8);
+    av1_cdef_geom(g, x0, y0, subx, suby, mi_cols, mi_rows);
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            var sum = 0;
+            var x = dr_frame_get(curr, plane, x0 + j, y0 + i);
+            var mx = x;
+            var mn = x;
+            var k = 0;
+            while (k < 2) {
+                var sign = 0 - 1;
+                while (sign <= 1) {
+                    var pp = av1_cdef_get_at(curr, plane, g, i, j, dir, k, sign, av);
+                    if (load64(av)) {
+                        sum = sum + (av1_cdef_pri_tap(tap, k) * av1_cdef_constrain(pp - x, pri_str, damping));
+                        mx = av1_max(pp, mx);
+                        mn = av1_min(pp, mn);
+                    }
+                    var doff = 0 - 2;
+                    while (doff <= 2) {
+                        var sdir = (dir + doff) & 7;
+                        var ss = av1_cdef_get_at(curr, plane, g, i, j, sdir, k, sign, av);
+                        if (load64(av)) {
+                            sum = sum + (av1_cdef_sec_tap(tap, k) * av1_cdef_constrain(ss - x, sec_str, damping));
+                            mx = av1_max(ss, mx);
+                            mn = av1_min(ss, mn);
+                        }
+                        doff = doff + 4;
+                    }
+                    sign = sign + 2;
+                }
+                k = k + 1;
+            }
+            var neg = 0;
+            if (sum < 0) { neg = 1; }
+            dr_frame_set(cdef, plane, x0 + j, y0 + i, av1_clip3(mn, mx, x + ((8 + sum - neg) >>> 4)));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}

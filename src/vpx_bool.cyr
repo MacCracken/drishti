@@ -101,7 +101,7 @@ fn vbool_dec_init(buf, len): i64 {
     store64(d + 16, pos);
     store64(d + 24, value);
     store64(d + 32, 255);   # "initial range is full"  (7.3)
-    store64(d + 40, 0);     # "have not yet shifted out any bits"
+    store64(d + 40, 0);     # bit_count = 0 (RFC 6386: no bits emitted at init)
     store64(d + 48, err);
     return d;
 }

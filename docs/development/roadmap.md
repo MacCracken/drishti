@@ -150,8 +150,15 @@ Baseline (0.7.0): OBU layer + sequence header.
 - **inter + filters** — motion compensation, deblocking, CDEF, loop
   restoration, film-grain synthesis. **In progress**: the deblocking loop
   filter is complete (`src/av1_deblock.cyr` — kernels in 0.7.27, the edge loop
-  + main driver + LoopfilterTxSizes in 0.7.28); CDEF (7.15) and loop
-  restoration (7.17) follow, then inter prediction.
+  + main driver + LoopfilterTxSizes in 0.7.28). CDEF (7.15) is underway: the
+  kernels (`src/av1_cdef.cyr` — 7.15.2 direction search + 7.15.3 constrain/
+  filter) landed in 0.7.29; the block process + outer loop (7.15.1) + the
+  `CdefFrame`/`cdef_idx` wiring are **0.7.30**. The 0.7.30 driver MUST satisfy
+  the CDEF frame contract (the kernels index the full MI grid, up to
+  `MiCols*4 x MiRows*4`): allocate the source/`CdefFrame` at MI-aligned dims
+  **or** give the planes a border >= 7 (luma) with the edge padding populated,
+  otherwise edge blocks on non-mult-of-8 frames read/write past the plane.
+  Loop restoration (7.17) follows, then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
