@@ -84,7 +84,8 @@ enum Av1TileOff {
     AV1TILE_INTERTX   = 320;  # InterTxSizes grid
     AV1TILE_LFTX      = 328;  # LoopfilterTxSizes: 3 per-plane grids (stride MiCols)
     AV1TILE_CDEFIDX   = 352;  # CdefIdx grid (per-64x64, MI-indexed; init -1)
-    AV1TILE_SIZE      = 360;  # LFTX occupies 328/336/344; CDEFIDX at 352
+    AV1TILE_CDEF_CTX  = 360;  # CDEF read context (7 i64) for read_cdef/write_cdef; 0 = off
+    AV1TILE_SIZE      = 368;  # LFTX 328/336/344; CDEFIDX 352; CDEF_CTX 360
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -134,6 +135,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_LFTX + 8, 0);
     store64(tile + AV1TILE_LFTX + 16, 0);
     store64(tile + AV1TILE_CDEFIDX, 0);
+    store64(tile + AV1TILE_CDEF_CTX, 0);
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
@@ -230,6 +232,26 @@ fn av1_cdefidx_get(tile, r, c): i64 {
 fn av1_cdefidx_set(tile, r, c, v): i64 {
     store64(load64(tile + AV1TILE_CDEFIDX) + (((r * load64(tile + AV1TILE_MI_COLS)) + c) * 8), v);
     return 0;
+}
+# Build the CDEF read context (7 i64) the mode-info splice consumes: the frame-
+# level flags + the CdefIdx grid pointer/stride + a `plan` grid (encode source of
+# cdef_idx; 0 on decode). Call after av1_tile_grids_new. Layout: [0]enable_cdef
+# [1]cdef_bits [2]coded_lossless [3]allow_intrabc [4]grid [5]stride [6]plan.
+fn av1_tile_set_cdef_ctx(tile, enable_cdef, cdef_bits, coded_lossless, allow_intrabc, plan): i64 {
+    # Must run after av1_tile_grids_new: we capture the CdefIdx grid pointer, so a
+    # null grid here would give read_cdef a null deref. Fail fast instead.
+    if (load64(tile + AV1TILE_CDEFIDX) == 0) { return DR_ERR_BOUNDS; }
+    var ctx = alloc(7 * 8);
+    if (ctx == 0) { return DR_ERR_OOM; }
+    store64(ctx + 0, enable_cdef);
+    store64(ctx + 8, cdef_bits);
+    store64(ctx + 16, coded_lossless);
+    store64(ctx + 24, allow_intrabc);
+    store64(ctx + 32, load64(tile + AV1TILE_CDEFIDX));
+    store64(ctx + 40, load64(tile + AV1TILE_MI_COLS));
+    store64(ctx + 48, plan);
+    store64(tile + AV1TILE_CDEF_CTX, ctx);
+    return DR_OK;
 }
 
 # clear_block_decoded_flags (5.11.3) for one superblock at MI (r, c). Seeds the

@@ -79,11 +79,15 @@ fn av1_decode_tile(tile): i64 {
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);
     var mi_cols = load64(tile + AV1TILE_MI_COLS);
     av1_clear_above_context(tile, num_planes);
+    var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var r = 0;
     while (r < mi_rows) {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
+            # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. use_128 = 0 (the
+            # SB loop steps by AV1_SB4 = 64x64). Guarded: grid may be unallocated.
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, mi_cols, r, c, 0); }
             av1_bd_clear(tile, r, c, AV1_SB4, num_planes);
             av1_decode_partition(tile, r, c, 12);        # BLOCK_64X64
             c = c + AV1_SB4;
@@ -104,11 +108,13 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var bc = alloc(8);
     store64(pc, 0);
     store64(bc, 0);
+    var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var r = 0;
     while (r < mi_rows) {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, mi_cols, r, c, 0); }
             av1_encode_partition(tile, r, c, 12, plan_part, pc, plan_mi, plan_tx, bc);
             c = c + AV1_SB4;
         }
@@ -122,6 +128,12 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
 # pre-built Av1Tile (av1_tile_new + av1_tile_grids_new, with TX_MODE / ENABLE_FI
 # set). Builds the adaptive CDF contexts + the symbol decoder over buf[0..sz),
 # runs decode_tile, and exits the symbol coder. Returns DR_OK / a sticky error.
+# CDEF activation: to read cdef_idx from the bitstream, the caller sets the CDEF
+# context (av1_tile_set_cdef_ctx with the frame-header enable_cdef / cdef_bits /
+# CodedLossless / allow_intrabc) before this call — same as base_q / TX_MODE /
+# ENABLE_FI. Absent that (AV1TILE_CDEF_CTX == 0), the read_cdef splice is inert;
+# wiring the frame-level driver that supplies those params is a later bite
+# (roadmap.md).
 # ================================================================
 fn av1_decode_intra_tile(tile, buf, sz, disable_cdf): i64 {
     var ncc = av1_ncdf_new();

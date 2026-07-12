@@ -279,7 +279,7 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     var mi = av1_modeinfo_new();
     av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
     avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
-    lossless, subx, suby, enable_fi);
+    lossless, subx, suby, enable_fi, load64(tile + AV1TILE_CDEF_CTX), r, c);
 
     var max_rect = av1_max_tx_size_rect(sub_size);
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40), max_rect);
@@ -330,7 +330,7 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
 
     av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
     avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
-    lossless, subx, suby, load64(tile + AV1TILE_ENABLE_FI));
+    lossless, subx, suby, load64(tile + AV1TILE_ENABLE_FI), load64(tile + AV1TILE_CDEF_CTX), r, c);
 
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40),
     av1_max_tx_size_rect(sub_size));

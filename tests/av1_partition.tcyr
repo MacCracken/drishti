@@ -151,7 +151,7 @@ fn test_decode_block() {
     az(al, 64); az(ll, 64); az(ad, 64); az(ce, 64);
     # encode the block stream in decode_block order: mode_info, tx_size, coeffs.
     var enc = av1_sym_enc_init(128, 1);
-    av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     av1_write_tx_size(enc, ncc, 3, 0, 2, 1, 0, 1);            # TX_MODE_SELECT, ctx 0, TX_8X8
     av1_coeffs_encode(enc, av1_ccdf_new(0), ncc, 0, 1, ttx, AV1_DCT_DCT, 0, 0, 4, 4, 8, 8, al, ll, ad, ce, qsrc, 1);
     var olen = 0;

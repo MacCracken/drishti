@@ -6,21 +6,22 @@
 
 ## Version
 
-**0.7.31** — cut 2026-07-11, not yet tagged (user's git). Adds the AV1 **CDEF-index
-syntax** primitives (`av1_modeinfo.cyr`, spec 5.11.56): `av1_read_cdef` reads the
-per-64x64 `cdef_idx` (once, gated on skip / CodedLossless / !enable_cdef /
-allow_intrabc) via `L(cdef_bits)` and fills the block's 4x4 extent;
-`av1_write_cdef` is the byte-identical encode mirror; `av1_clear_cdef` resets a
-superblock's anchor(s). Pointer-based (grid + stride) so the future decode-path
-wiring can reach them. Round-trip tested; a 1-agent review (6 points vs spec)
-confirmed all match, no conformance bugs, encode/decode symmetric. This is the
-`cdef_idx` producer for the 0.7.30 CDEF driver's `CdefIdx` grid — the standalone
-primitives this bite, the decode-path wiring next (0.7.32). On top of the complete
-CDEF filter (kernels 0.7.29 + driver 0.7.30), the deblocking loop filter
-(0.7.27/0.7.28), and the **first fully decoded keyframe** (0.7.25). Next (0.7.32):
-wire `read_cdef`/`clear_cdef` into `intra_frame_mode_info` + the `decode_tile` SB
-loop so a real keyframe populates `CdefIdx`; then loop restoration (7.17). The
-remaining distance to 1.0 is the
+**0.7.32** — cut 2026-07-11, not yet tagged (user's git). Wires the CDEF-index
+syntax into the decode/encode path: `read_cdef` is spliced into
+`intra_frame_mode_info` (after `read_skip`), `write_cdef` mirrors it, and
+`clear_cdef` runs per superblock in `decode_tile`/`encode_tile`. A tile carries a
+CDEF read context (`av1_tile_set_cdef_ctx`, `av1_residual.cyr`); the splice is
+guarded by `cdef_ctx != 0` so existing non-CDEF streams stay byte-identical. A
+1-agent review confirmed all 6 wiring points (ctx offsets, splice placement, arg
+threading, `clear_cdef`, backward-compat, spec-order) with no wiring bugs.
+**Honest scope: the mechanism is wired + round-trip tested (at the mode-info
+level), but no production frame-level driver calls `set_cdef_ctx` yet**, so the
+splice is inert for real bitstreams until that driver lands (a later bite); a full
+tile-level CDEF round-trip is also blocked by the deferred non-skip encode lane.
+On top of the complete CDEF filter (kernels 0.7.29 + driver 0.7.30) + the
+`cdef_idx` primitives (0.7.31), the deblocking loop filter (0.7.27/0.7.28), and the
+**first fully decoded keyframe** (0.7.25). Next: the frame-level CDEF activation,
+then loop restoration (7.17). The remaining distance to 1.0 is the
 rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
 VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -48,7 +49,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 731, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 732, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -64,11 +65,11 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_coeff.cyr` | `av1_` | coefficient level contexts (spec 8.3.2) — get_tx_class / get_coeff_base_ctx / get_br_ctx + offset tables |
 | `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — all 7 families: txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br + accessors |
 | `src/av1_noncoeffcdf.cyr` | `av1_` | default non-coeff CDF tables (intra keyframe) — partition/skip/y-mode/uv-mode/cfl/angle/filter-intra/tx-size/tx-type (1,622) + accessors + av1_ncdf_new |
-| `src/av1_modeinfo.cyr` | `av1_` | intra `intra_frame_mode_info` reads (5.11.16) — skip/y-mode/angle/uv-mode/CfL/filter-intra decode + inverse encode + orchestrator (Av1ModeInfo); block-size conversion tables (Mi/Block/Size_Group/Intra_Mode_Context/Subsampled_Size); CDEF-index syntax (5.11.56 av1_read_cdef / av1_write_cdef / av1_clear_cdef — cdef_idx, not yet wired into the decode path) |
+| `src/av1_modeinfo.cyr` | `av1_` | intra `intra_frame_mode_info` reads (5.11.16) — skip/y-mode/angle/uv-mode/CfL/filter-intra decode + inverse encode + orchestrator (Av1ModeInfo); block-size conversion tables (Mi/Block/Size_Group/Intra_Mode_Context/Subsampled_Size); CDEF-index syntax (5.11.56 av1_read_cdef / av1_write_cdef / av1_clear_cdef — cdef_idx, spliced into intra_frame_mode_info + decode_tile SB loop in 0.7.32, guarded by the tile CDEF context) |
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
-| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids + LoopfilterTxSizes + CdefIdx) + Av1Block decode contexts |
+| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids + LoopfilterTxSizes + CdefIdx + CDEF read context via av1_tile_set_cdef_ctx) + Av1Block decode contexts |
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: all vertical then horizontal boundaries, in place) |

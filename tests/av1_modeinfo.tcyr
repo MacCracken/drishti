@@ -127,14 +127,14 @@ fn mi_rt(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, su
     if (disable == 0) { nce = av1_ncdf_new(); ncd = av1_ncdf_new(); }
     var enc = av1_sym_enc_init(64, disable);
     av1_intra_frame_mode_info_encode(enc, nce, mi, mi_size, has_chroma,
-    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi);
+    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, disable);
     av1_intra_frame_mode_info_decode(sd, ncd, dmi, mi_size, has_chroma,
-    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi);
+    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
     mi_assert(mi, dmi, tag);
     return 0;
@@ -207,15 +207,15 @@ fn test_rt_adaptive_multiblock() {
     var mA = mk_mi(0, 0, 13, 0, 0, 3, 0 - 2, 1, 4);       # 8x8 DC/CFL/FI
     var mB = mk_mi(1, 1, 2, 2, 0 - 1, 0, 0, 0, 0);        # 16x16 directional
     var enc = av1_sym_enc_init(128, 0);
-    av1_intra_frame_mode_info_encode(enc, nce, mA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1);
-    av1_intra_frame_mode_info_encode(enc, nce, mB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1);
+    av1_intra_frame_mode_info_encode(enc, nce, mA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0);
+    av1_intra_frame_mode_info_encode(enc, nce, mB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1, 0, 0, 0);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dA = av1_modeinfo_new();
     var dB = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, 0);
-    av1_intra_frame_mode_info_decode(sd, ncd, dA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1);
-    av1_intra_frame_mode_info_decode(sd, ncd, dB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1);
+    av1_intra_frame_mode_info_decode(sd, ncd, dA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0);
+    av1_intra_frame_mode_info_decode(sd, ncd, dB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1, 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "adaptive dec ok");
     mi_assert(mA, dA, "adaptive block A");
     mi_assert(mB, dB, "adaptive block B");
@@ -305,6 +305,74 @@ fn test_cdef_rt_128() {
     assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
     return 0;
 }
+# WIRED path: with a cdef context set, intra_frame_mode_info emits/reads cdef_idx
+# between skip and y_mode. A correct splice round-trips BOTH the mode-info AND the
+# cdef_idx; a misplaced/absent splice would misalign y_mode and fail mi round-trip.
+fn mk_cdef_ctx(enable_cdef, cdef_bits, grid, stride, plan): i64 {
+    var ctx = alloc(7 * 8);
+    store64(ctx + 0, enable_cdef);
+    store64(ctx + 8, cdef_bits);
+    store64(ctx + 16, 0);           # coded_lossless
+    store64(ctx + 24, 0);           # allow_intrabc
+    store64(ctx + 32, grid);
+    store64(ctx + 40, stride);
+    store64(ctx + 48, plan);
+    return ctx;
+}
+fn test_cdef_wired_rt() {
+    var stride = 8;
+    var plan = alloc(stride * 8 * 8);
+    cdef_gfill(plan, stride * 8, 0);
+    store64(plan + 0, 5);                            # intended cdef_idx at (0,0)
+    var eg = alloc(stride * 8 * 8);
+    cdef_gfill(eg, stride * 8, 0 - 1);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 0);                     # non-skip -> cdef IS read
+    store64(mi + AV1MI_YMODE, 0);                    # DC_PRED
+    var enc = av1_sym_enc_init(64, 1);
+    av1_intra_frame_mode_info_encode(enc, av1_noncoeff_cdf_blob(), mi, 3, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
+    assert_eq(load64(eg + 0), 5, "encode filled the tracking grid anchor");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dg = alloc(stride * 8 * 8);
+    cdef_gfill(dg, stride * 8, 0 - 1);
+    var dmi = av1_modeinfo_new();
+    var sd = av1_sym_dec_init(out, olen, 1);
+    av1_intra_frame_mode_info_decode(sd, av1_noncoeff_cdf_blob(), dmi, 3, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
+    assert_eq(load64(dmi + AV1MI_YMODE), 0, "y_mode round-trips (cdef bits aligned)");
+    assert_eq(load64(dg + 0), 5, "cdef_idx read into the grid at the right position");
+    return 0;
+}
+# WIRED path, skip block: skip gates cdef off — no bits, grid stays -1, mi still RTs.
+fn test_cdef_wired_skip() {
+    var stride = 8;
+    var eg = alloc(stride * 8 * 8);
+    cdef_gfill(eg, stride * 8, 0 - 1);
+    var plan = alloc(stride * 8 * 8);
+    cdef_gfill(plan, stride * 8, 0);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);                     # skip -> cdef gated off
+    store64(mi + AV1MI_YMODE, 0);
+    var enc = av1_sym_enc_init(64, 1);
+    av1_intra_frame_mode_info_encode(enc, av1_noncoeff_cdf_blob(), mi, 3, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0);
+    assert_eq(load64(eg + 0), 0 - 1, "skip -> no cdef emitted, grid stays -1");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dg = alloc(stride * 8 * 8);
+    cdef_gfill(dg, stride * 8, 0 - 1);
+    var dmi = av1_modeinfo_new();
+    var sd = av1_sym_dec_init(out, olen, 1);
+    av1_intra_frame_mode_info_decode(sd, av1_noncoeff_cdf_blob(), dmi, 3, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0);
+    assert_eq(load64(dmi + AV1MI_SKIP), 1, "skip round-trips");
+    assert_eq(load64(dg + 0), 0 - 1, "skip -> no cdef read, grid stays -1");
+    return 0;
+}
 # each disabling gate makes read_cdef consume nothing (grid stays -1).
 fn test_cdef_gates() {
     var stride = 32;
@@ -363,6 +431,8 @@ fn main() {
     test_cdef_rt_two_units();
     test_cdef_rt_once_per_unit();
     test_cdef_rt_128();
+    test_cdef_wired_rt();
+    test_cdef_wired_skip();
     test_cdef_gates();
     test_clear_cdef();
     return assert_summary();

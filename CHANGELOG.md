@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.32] - 2026-07-11
+
+Wires the CDEF-index syntax into the decode/encode path: `read_cdef` is spliced
+into `intra_frame_mode_info` (after `read_skip`, spec 5.11.16 order), `write_cdef`
+mirrors it, and `clear_cdef` runs per superblock in the `decode_tile`/`encode_tile`
+loops. A tile carries a CDEF read context (`av1_tile_set_cdef_ctx`) bundling the
+frame-header flags + the `CdefIdx` grid; the splice is guarded by `cdef_ctx != 0`
+so existing non-CDEF streams stay **byte-identical** (every prior test unchanged).
+A 1-agent adversarial review verified all 6 wiring points (ctx offset agreement,
+splice placement, 18-arg threading, `clear_cdef` placement, backward-compat,
+spec-order) with **no wiring bugs**. **Scope honesty: the mechanism is wired and
+round-trip tested, but no production frame-level driver calls `set_cdef_ctx` yet**
+— so in the current build the splice is inert for real streams (see Notes). **20,185
+suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **CDEF-index decode/encode wiring**: `read_cdef` / `write_cdef` spliced into
+  `av1_intra_frame_mode_info_decode` / `_encode` (`av1_modeinfo.cyr`) after skip,
+  guarded by the tile's CDEF context; `clear_cdef` in the `decode_tile` /
+  `encode_tile` superblock loops (`av1_tile.cyr`, `use_128 = 0` for 64x64 SBs).
+- **Tile CDEF read context** (`av1_residual.cyr`): `AV1TILE_CDEF_CTX` + the
+  `av1_tile_set_cdef_ctx(enable_cdef, cdef_bits, coded_lossless, allow_intrabc,
+  plan)` setter (7-i64 bundle: flags + `CdefIdx` grid ptr + stride + encode plan).
+  Fails `DR_ERR_BOUNDS` if called before `av1_tile_grids_new` (would capture a
+  null grid — enforces the ordering the review flagged).
+- **Tests** (+15): a cdef-enabled mode-info round-trip proving `cdef_idx` reads at
+  the correct bit position **and** `y_mode` stays aligned (a misplaced/absent
+  splice would misalign it), a skip-gated variant (no cdef bits, grid stays -1),
+  and the `set_cdef_ctx` grid-guard + layout. All 9 pre-existing
+  `intra_frame_mode_info` call sites updated for the 3 new trailing args.
+
+### Notes
+- `drishti_version()` -> 732. **Activation gap (tracked, honest):** `set_cdef_ctx`
+  has no production caller yet, so `AV1TILE_CDEF_CTX == 0` on every current path
+  and the splice is inert for real bitstreams — the wiring activates when the
+  frame-level decode driver (which parses the frame header and assembles the tile)
+  calls `set_cdef_ctx`, a later bite (roadmap.md). A full tile-level CDEF round-trip
+  is additionally blocked by the deferred non-skip encode lane (cdef only reads on
+  non-skip blocks), so the wiring is validated at the mode-info level for now. Next:
+  the frame-level CDEF activation, then loop restoration (7.17).
+
 ## [0.7.31] - 2026-07-11
 
 Adds the AV1 **CDEF-index syntax** primitives — `read_cdef` (spec 5.11.56) +

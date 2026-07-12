@@ -159,10 +159,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   frame that doesn't cover the MI grid (`MiCols*4 x MiRows*4`), and
   `av1_cdef_frame_new` allocates the `CdefFrame` with border >= 8 so it always
   does. The `read_cdef` (5.11.56) / `clear_cdef` syntax primitives (the `cdef_idx`
-  bitstream read) landed in 0.7.31 (`av1_modeinfo.cyr`, round-trip tested); wiring
-  them into `intra_frame_mode_info` + the `decode_tile` SB loop so a real keyframe
-  populates `CdefIdx` is **0.7.32**. Loop restoration (7.17) follows, then inter
-  prediction.
+  bitstream read) landed in 0.7.31 (`av1_modeinfo.cyr`, round-trip tested), and
+  0.7.32 wired them into `intra_frame_mode_info` (after `read_skip`) + the
+  `decode_tile`/`encode_tile` SB loop, guarded by a per-tile CDEF context
+  (`av1_tile_set_cdef_ctx`). **Still open**: no production frame-level driver calls
+  `set_cdef_ctx` yet (it needs the parsed frame header), so the splice is inert for
+  real bitstreams until that frame-level CDEF activation lands — the natural next
+  step, alongside threading the frame header into the tile assembly. Loop
+  restoration (7.17) follows, then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

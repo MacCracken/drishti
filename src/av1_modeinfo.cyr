@@ -422,10 +422,21 @@ fn av1_clear_cdef(grid, stride, r, c, use_128): i64 {
 # ================================================================
 fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
 avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-lossless, subx, suby, enable_filter_intra): i64 {
+lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col): i64 {
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
     var skip = av1_read_skip(sd, ncc, sctx);
     store64(mi + AV1MI_SKIP, skip);
+    # read_cdef (5.11.56) is spliced here — after read_skip, before y_mode (delta_q/
+    # lf + segmentation are disabled for a profile-0 keyframe, so nothing between).
+    if (cdef_ctx != 0) {
+        var ce = load64(cdef_ctx + 0);
+        var cb = load64(cdef_ctx + 8);
+        var cl = load64(cdef_ctx + 16);
+        var ci = load64(cdef_ctx + 24);
+        var cg = load64(cdef_ctx + 32);
+        var cs = load64(cdef_ctx + 40);
+        av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
+    }
 
     var ymode = av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode);
     store64(mi + AV1MI_YMODE, ymode);
@@ -452,9 +463,20 @@ lossless, subx, suby, enable_filter_intra): i64 {
 
 fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
 avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-lossless, subx, suby, enable_filter_intra): i64 {
+lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col): i64 {
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
     av1_write_skip(enc, ncc, sctx, load64(mi + AV1MI_SKIP));
+    # write_cdef mirror — same splice point as read_cdef (after skip).
+    if (cdef_ctx != 0) {
+        var ce = load64(cdef_ctx + 0);
+        var cb = load64(cdef_ctx + 8);
+        var cl = load64(cdef_ctx + 16);
+        var ci = load64(cdef_ctx + 24);
+        var cg = load64(cdef_ctx + 32);
+        var cs = load64(cdef_ctx + 40);
+        var cp = load64(cdef_ctx + 48);
+        av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size, load64(mi + AV1MI_SKIP), ce, cb, cl, ci);
+    }
 
     var ymode = load64(mi + AV1MI_YMODE);
     av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode);

@@ -344,6 +344,25 @@ fn test_filter_type_affects_prediction() {
     return 0;
 }
 
+# av1_tile_set_cdef_ctx: rejects if grids not allocated (grid ptr would be null),
+# and on success builds the 7-i64 context the mode-info splice consumes.
+fn test_set_cdef_ctx() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    # before grids_new: CdefIdx grid is null -> reject (no latent null deref).
+    assert_eq(av1_tile_set_cdef_ctx(t, 1, 3, 0, 0, 0), DR_ERR_BOUNDS, "no grids -> rejected");
+    assert_eq(load64(t + AV1TILE_CDEF_CTX), 0, "ctx stays 0 on reject");
+    av1_tile_grids_new(t);
+    assert_eq(av1_tile_set_cdef_ctx(t, 1, 3, 0, 0, 0), DR_OK, "grids present -> DR_OK");
+    var ctx = load64(t + AV1TILE_CDEF_CTX);
+    assert_eq(load64(ctx + 0), 1, "ctx enable_cdef");
+    assert_eq(load64(ctx + 8), 3, "ctx cdef_bits");
+    assert_eq(load64(ctx + 32), load64(t + AV1TILE_CDEFIDX), "ctx captures the CdefIdx grid");
+    assert_eq(load64(ctx + 40), 16, "ctx stride = MiCols");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("get_tx_size");
@@ -360,6 +379,8 @@ fn main() {
     test_get_filter_type();
     test_get_filter_type_chroma();
     test_filter_type_affects_prediction();
+    test_group("cdef read context (av1_tile_set_cdef_ctx)");
+    test_set_cdef_ctx();
     return assert_summary();
 }
 
