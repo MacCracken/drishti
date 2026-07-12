@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.42] - 2026-07-12
+
+Adds **tile-group OBU parsing** (`av1_tile_group_parse`, spec 5.11.1) to
+`src/av1_decode.cyr` — the frame-driver prerequisite that extracts each tile's
+byte range from a tile-group payload so the driver can hand `(buf + offset, size)`
+to `decode_intra_tile`. Parses the group header
+(`tile_start_and_end_present_flag` + `tg_start`/`tg_end`), then per-tile: non-last
+tiles carry a `tile_size_minus_1 = le(TileSizeBytes)` prefix, the last takes the
+remaining bytes. Every size field and tile extent is bounds-checked against the
+payload — a lying or truncated size is rejected with a sticky error, never an OOB
+read. A 3-dimension adversarial review **workflow** (spec-conformance /
+input-safety / offset-arithmetic, each finding refute-by-default verified) cleared
+it. **20,451 suite assertions + 1,140 fuzz assertions, all green; `make lint`
+green.**
+
+### Added
+- **Tile-group OBU parser** (`src/av1_decode.cyr`):
+  - `av1_read_le(buf, n)` — spec 4.10.4 `le(n)` little-endian byte read (used
+    byte-aligned for the `TileSizeBytes` size fields).
+  - `Av1TileGroup` (`av1_tile_group_new` + accessors `av1_tg_start` / `_end` /
+    `_num_tiles` / `_count` / `_tile_offset` / `_tile_size` / `_tile_row` /
+    `_tile_col`) — holds the group's `[tg_start, tg_end]` range and, per whole-frame
+    `TileNum`, the tile data's byte offset + size within the payload (absent tiles
+    keep offset `-1`).
+  - `av1_tile_group_parse(tg, buf, sz, fh, out_err)` — the 5.11.1 parse: header
+    (present flag gated on `NumTiles > 1`, `tg_start`/`tg_end` via
+    `f(TileColsLog2 + TileRowsLog2)`), `byte_alignment`, then the per-tile size walk.
+    Trust-no-input: `NumTiles` capped at `MAX_TILE_COLS*ROWS`, `TileSizeBytes` to
+    1..4, `tg_start`/`tg_end` validated against `NumTiles` **before** any array
+    index, and every extent checked against `sz`
+    (`DR_ERR_TRUNCATED`/`DR_ERR_BAD_HEADER`/`DR_ERR_BOUNDS`).
+- **Tests** (`tests/av1_decode.tcyr`, +60): `le(n)` known-answers; single-tile (no
+  header bits, whole payload is tile 0); 4-tile no-present-flag (per-tile
+  offset/size + row/col mapping, data-byte spot-check); present-flag sub-range
+  (tiles outside `[tg_start, tg_end]` stay `-1`); `TileSizeBytes = 2` size field
+  through the parser; single-tile group at a nonzero index (`tg_start == tg_end`,
+  last-tile branch); adversarial (lying size, truncated size field, inverted
+  `tg_end < tg_start`, undersized capacity).
+
 ## [0.7.41] - 2026-07-12
 
 Grows `src/av1_decode.cyr` toward the frame-level driver with the **frame-header

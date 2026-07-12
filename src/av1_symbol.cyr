@@ -378,7 +378,7 @@ fn av1_sym_enc_finish(enc, out_len): i64 {
 # ================================================================
 # Subexponential coding over the symbol coder's literal reads (the "_bool" family,
 # so named in the spec because the bits are arithmetic-coded rather than read
-# directly). Used by read_lr (loop-restoration unit params, a later bite). Mirrors
+# directly). Used by read_lr (loop-restoration unit params, added 0.7.37). Mirrors
 # the frame-header f/ns subexp (av1_frame.cyr av1_decode_subexp) but with L(n)/NS(n)
 # symbol-coder reads and `k` as a parameter. Depends on av1_inverse_recenter /
 # av1_recenter (av1_frame.cyr, included earlier) + dr_floor_log2 (bits.cyr).

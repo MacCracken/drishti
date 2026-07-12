@@ -191,6 +191,174 @@ fn test_activate_intra_filters() {
     return 0;
 }
 
+# ================================================================
+# Tile-group OBU parsing (spec 5.11.1): the group header (tg_start/tg_end +
+# present flag) + per-tile byte-range extraction. Hand-packed payloads comment
+# every field's bit packing.
+# ================================================================
+# a frame header carrying only the tile-info fields the tile-group parser reads.
+fn mk_tg_fh(tile_cols, tile_rows, cols_log2, rows_log2, tsbytes): i64 {
+    var fh = alloc(1200);
+    store64(fh + AV1FH_TILE_COLS, tile_cols);
+    store64(fh + AV1FH_TILE_ROWS, tile_rows);
+    store64(fh + AV1FH_TILE_COLS_LOG2, cols_log2);
+    store64(fh + AV1FH_TILE_ROWS_LOG2, rows_log2);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, tsbytes);
+    return fh;
+}
+# le(n) little-endian byte read (spec 4.10.4).
+fn test_tg_read_le() {
+    var b = alloc(4);
+    store8(b + 0, 0x78); store8(b + 1, 0x56); store8(b + 2, 0x34); store8(b + 3, 0x12);
+    assert_eq(av1_read_le(b, 1), 0x78, "le(1)");
+    assert_eq(av1_read_le(b, 2), 0x5678, "le(2) little-endian");
+    assert_eq(av1_read_le(b, 3), 0x345678, "le(3)");
+    assert_eq(av1_read_le(b, 4), 0x12345678, "le(4)");
+    return 0;
+}
+# Single tile (NumTiles == 1): no group header bits, the whole payload is tile 0.
+fn test_tg_single() {
+    var oe = alloc(8);
+    var tg = av1_tile_group_new(1);
+    var buf = alloc(6);
+    var i = 0;
+    while (i < 6) { store8(buf + i, 0x40 + i); i = i + 1; }
+    var n = av1_tile_group_parse(tg, buf, 6, mk_tg_fh(1, 1, 0, 0, 1), oe);
+    assert_eq(load64(oe), DR_OK, "single-tile parse ok");
+    assert_eq(n, 1, "one tile in group");
+    assert_eq(av1_tg_start(tg), 0, "tg_start 0");
+    assert_eq(av1_tg_end(tg), 0, "tg_end 0");
+    assert_eq(av1_tg_tile_offset(tg, 0), 0, "tile0 offset 0 (no header)");
+    assert_eq(av1_tg_tile_size(tg, 0), 6, "tile0 size = whole payload");
+    return 0;
+}
+# 2x2 = 4 tiles, tile_start_and_end_present_flag = 0 -> whole frame is one group.
+# Non-last tiles carry a le(1) size prefix; the last takes the remainder.
+fn test_tg_multi_no_present() {
+    var oe = alloc(8);
+    var tg = av1_tile_group_new(4);
+    var buf = alloc(18);
+    store8(buf + 0, 0x00);                              # [0] header: present(bit7)=0
+    store8(buf + 1, 0x02);                              # tile0 size_minus_1=2 -> size 3
+    store8(buf + 2, 0xA0); store8(buf + 3, 0xA1); store8(buf + 4, 0xA2);   # tile0 data
+    store8(buf + 5, 0x01);                              # tile1 size_minus_1=1 -> size 2
+    store8(buf + 6, 0xB0); store8(buf + 7, 0xB1);       # tile1 data
+    store8(buf + 8, 0x03);                              # tile2 size_minus_1=3 -> size 4
+    store8(buf + 9, 0xC0); store8(buf + 10, 0xC1); store8(buf + 11, 0xC2); store8(buf + 12, 0xC3);
+    store8(buf + 13, 0xD0); store8(buf + 14, 0xD1);     # tile3 (last) data, 5 bytes
+    store8(buf + 15, 0xD2); store8(buf + 16, 0xD3); store8(buf + 17, 0xD4);
+    var n = av1_tile_group_parse(tg, buf, 18, mk_tg_fh(2, 2, 1, 1, 1), oe);
+    assert_eq(load64(oe), DR_OK, "multi parse ok");
+    assert_eq(n, 4, "4 tiles in group");
+    assert_eq(av1_tg_start(tg), 0, "tg_start 0");
+    assert_eq(av1_tg_end(tg), 3, "tg_end 3 (all tiles)");
+    assert_eq(av1_tg_num_tiles(tg), 4, "NumTiles 4");
+    assert_eq(av1_tg_tile_offset(tg, 0), 2, "tile0 data offset 2");
+    assert_eq(av1_tg_tile_size(tg, 0), 3, "tile0 size 3");
+    assert_eq(av1_tg_tile_offset(tg, 1), 6, "tile1 data offset 6");
+    assert_eq(av1_tg_tile_size(tg, 1), 2, "tile1 size 2");
+    assert_eq(av1_tg_tile_offset(tg, 2), 9, "tile2 data offset 9");
+    assert_eq(av1_tg_tile_size(tg, 2), 4, "tile2 size 4");
+    assert_eq(av1_tg_tile_offset(tg, 3), 13, "tile3 (last) data offset 13");
+    assert_eq(av1_tg_tile_size(tg, 3), 5, "tile3 size 5 (remaining)");
+    assert_eq(load8(buf + av1_tg_tile_offset(tg, 2)), 0xC0, "tile2 offset points at its data");
+    assert_eq(av1_tg_tile_row(3, 2), 1, "tile3 row 1");
+    assert_eq(av1_tg_tile_col(3, 2), 1, "tile3 col 1");
+    assert_eq(av1_tg_tile_col(2, 2), 0, "tile2 col 0");
+    return 0;
+}
+# present flag set with a sub-range: only tiles [1,2] are in this group; tiles 0,3
+# stay absent (offset -1). Header byte = present(1) tg_start(01=1) tg_end(10=2).
+fn test_tg_present_subrange() {
+    var oe = alloc(8);
+    var tg = av1_tile_group_new(4);
+    var buf = alloc(7);
+    store8(buf + 0, 0xB0);                              # 1 01 10 000: present=1, tg_start=1, tg_end=2
+    store8(buf + 1, 0x01);                              # tile1 size_minus_1=1 -> size 2
+    store8(buf + 2, 0xE0); store8(buf + 3, 0xE1);       # tile1 data
+    store8(buf + 4, 0xF0); store8(buf + 5, 0xF1); store8(buf + 6, 0xF2);   # tile2 (last) data
+    var n = av1_tile_group_parse(tg, buf, 7, mk_tg_fh(2, 2, 1, 1, 1), oe);
+    assert_eq(load64(oe), DR_OK, "subrange parse ok");
+    assert_eq(n, 2, "2 tiles in group");
+    assert_eq(av1_tg_start(tg), 1, "tg_start 1");
+    assert_eq(av1_tg_end(tg), 2, "tg_end 2");
+    assert_eq(av1_tg_tile_offset(tg, 0), 0 - 1, "tile0 absent (-1)");
+    assert_eq(av1_tg_tile_offset(tg, 1), 2, "tile1 data offset 2");
+    assert_eq(av1_tg_tile_size(tg, 1), 2, "tile1 size 2");
+    assert_eq(av1_tg_tile_offset(tg, 2), 4, "tile2 data offset 4");
+    assert_eq(av1_tg_tile_size(tg, 2), 3, "tile2 size 3 (remaining)");
+    assert_eq(av1_tg_tile_offset(tg, 3), 0 - 1, "tile3 absent (-1)");
+    return 0;
+}
+# TileSizeBytes = 2: the non-last size field is a 2-byte le() read — exercise the
+# full multi-byte size path through the parser (not just av1_read_le in isolation).
+fn test_tg_tsbytes2() {
+    var oe = alloc(8);
+    var tg = av1_tile_group_new(2);
+    var buf = alloc(9);
+    store8(buf + 0, 0x00);                              # header: present=0
+    store8(buf + 1, 0x03); store8(buf + 2, 0x00);       # tile0 size_minus_1 = le2(0x0003)=3 -> size 4
+    store8(buf + 3, 0x50); store8(buf + 4, 0x51); store8(buf + 5, 0x52); store8(buf + 6, 0x53);  # tile0 data
+    store8(buf + 7, 0x60); store8(buf + 8, 0x61);       # tile1 (last) data
+    var n = av1_tile_group_parse(tg, buf, 9, mk_tg_fh(2, 1, 1, 0, 2), oe);
+    assert_eq(load64(oe), DR_OK, "tsbytes=2 parse ok");
+    assert_eq(n, 2, "2 tiles");
+    assert_eq(av1_tg_tile_offset(tg, 0), 3, "tile0 data offset 3 (past 2-byte size field)");
+    assert_eq(av1_tg_tile_size(tg, 0), 4, "tile0 size 4 (le2 size field)");
+    assert_eq(av1_tg_tile_offset(tg, 1), 7, "tile1 data offset 7");
+    assert_eq(av1_tg_tile_size(tg, 1), 2, "tile1 size 2 (remaining)");
+    return 0;
+}
+# Single-tile group at a nonzero index (tg_start == tg_end != 0): the one in-group
+# tile is also the last, so no size prefix — it takes the whole remaining payload.
+fn test_tg_single_nonzero_index() {
+    var oe = alloc(8);
+    var tg = av1_tile_group_new(4);
+    var buf = alloc(5);
+    store8(buf + 0, 0xD0);                              # 1 10 10 000: present=1, tg_start=2, tg_end=2
+    store8(buf + 1, 0x70); store8(buf + 2, 0x71); store8(buf + 3, 0x72); store8(buf + 4, 0x73);  # tile2 data
+    var n = av1_tile_group_parse(tg, buf, 5, mk_tg_fh(2, 2, 1, 1, 1), oe);
+    assert_eq(load64(oe), DR_OK, "single-nonzero-index parse ok");
+    assert_eq(n, 1, "1 tile in group");
+    assert_eq(av1_tg_start(tg), 2, "tg_start 2");
+    assert_eq(av1_tg_end(tg), 2, "tg_end 2");
+    assert_eq(av1_tg_tile_offset(tg, 2), 1, "tile2 data offset 1 (post-header, last tile)");
+    assert_eq(av1_tg_tile_size(tg, 2), 4, "tile2 size 4 (whole remainder)");
+    assert_eq(av1_tg_tile_offset(tg, 0), 0 - 1, "tile0 absent");
+    assert_eq(av1_tg_tile_offset(tg, 1), 0 - 1, "tile1 absent");
+    assert_eq(av1_tg_tile_offset(tg, 3), 0 - 1, "tile3 absent");
+    return 0;
+}
+# Trust no input byte: lying sizes, truncation, inverted ranges, undersized cap.
+fn test_tg_adversarial() {
+    var oe = alloc(8);
+    # (a) lying tile size: tile0 claims 201 bytes in a 5-byte payload.
+    var tg = av1_tile_group_new(2);
+    var buf = alloc(5);
+    store8(buf + 0, 0x00);                              # present=0
+    store8(buf + 1, 0xC8);                              # size_minus_1=200 -> size 201
+    store8(buf + 2, 0x11); store8(buf + 3, 0x22); store8(buf + 4, 0x33);
+    assert_eq(av1_tile_group_parse(tg, buf, 5, mk_tg_fh(2, 1, 1, 0, 1), oe), 0, "lying size -> 0 tiles");
+    assert_eq(load64(oe), DR_ERR_TRUNCATED, "lying tile size -> truncated");
+    # (b) truncated size field: payload is just the header byte.
+    var tg2 = av1_tile_group_new(2);
+    var buf2 = alloc(1);
+    store8(buf2 + 0, 0x00);
+    assert_eq(av1_tile_group_parse(tg2, buf2, 1, mk_tg_fh(2, 1, 1, 0, 1), oe), 0, "no size field -> 0");
+    assert_eq(load64(oe), DR_ERR_TRUNCATED, "missing size field -> truncated");
+    # (c) inverted range: present=1, tg_start=2(10), tg_end=1(01) -> 1 10 01 000 = 0xC8.
+    var tg3 = av1_tile_group_new(4);
+    var buf3 = alloc(4);
+    store8(buf3 + 0, 0xC8); store8(buf3 + 1, 0x00); store8(buf3 + 2, 0x00); store8(buf3 + 3, 0x00);
+    assert_eq(av1_tile_group_parse(tg3, buf3, 4, mk_tg_fh(2, 2, 1, 1, 1), oe), 0, "tg_end<tg_start -> 0");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "inverted range -> bad header");
+    # (d) cap too small: tg sized for 2, but the frame has 4 tiles.
+    var tgsmall = av1_tile_group_new(2);
+    assert_eq(av1_tile_group_parse(tgsmall, buf3, 4, mk_tg_fh(2, 2, 1, 1, 1), oe), 0, "cap<NumTiles -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "cap too small -> bounds");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
@@ -201,6 +369,14 @@ fn main() {
     test_group("frame-header filter activation");
     test_lr_params_from_fh();
     test_activate_intra_filters();
+    test_group("tile-group OBU parse (5.11.1)");
+    test_tg_read_le();
+    test_tg_single();
+    test_tg_multi_no_present();
+    test_tg_present_subrange();
+    test_tg_tsbytes2();
+    test_tg_single_nonzero_index();
+    test_tg_adversarial();
     return assert_summary();
 }
 

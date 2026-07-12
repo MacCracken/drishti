@@ -185,10 +185,13 @@ Baseline (0.7.0): OBU layer + sequence header.
   -> LR in spec-7.4 order), and the **frame-header filter activation** step landed in
   0.7.41 (`av1_lr_params_from_fh` builds the `Av1LrParams` from the header;
   `av1_activate_intra_filters` attaches it + the CDEF context to a decode tile —
-  end-to-end tested by decoding a keyframe tile with header-derived LR params). The
-  remaining piece of the frame driver is the OBU walk -> seq/fh -> `tile_group_obu`
-  that extracts real tile bytes and calls tile-assembly + these activation helpers ->
-  decode -> the filter pipeline. Then inter prediction.
+  end-to-end tested by decoding a keyframe tile with header-derived LR params), and
+  **tile-group OBU parsing** (`av1_tile_group_parse`, spec 5.11.1) landed in 0.7.42 —
+  the per-tile byte-range extraction (bounds-checked against hostile sizes) that
+  feeds `decode_tile`. The remaining piece of the frame driver is the OBU walk that
+  strips the sequence/frame headers and drives seq/fh -> this tile-group parse ->
+  tile-assembly + the activation helpers -> decode -> the filter pipeline. Then inter
+  prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

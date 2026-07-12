@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.41 (AV1 intra keyframe decode complete; in-loop filter pipeline chained + activated from the frame header)
+## Status — 0.7.42 (AV1 intra keyframe decode complete; in-loop filter pipeline chained + activated; tile-group OBU parsing in)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,391 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,451 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
@@ -36,8 +36,11 @@ wiring (round-trip-tested end-to-end). The three filters are now
 place: `av1_lr_params_from_fh` + `av1_activate_intra_filters` build the LR params
 and attach the CDEF context to a decode tile straight from the parsed header —
 end-to-end tested by decoding a keyframe tile whose LR params were header-derived.
-The remaining piece of the frame-level driver is the OBU / tile-group walk that
-feeds real tile bytes into this path.
+The **tile-group OBU parser** (`av1_tile_group_parse`, spec 5.11.1) now extracts each
+tile's byte range (bounds-checked against hostile sizes) for the driver to feed to
+`decode_tile`. The remaining piece of the frame-level driver is the OBU walk that
+strips the sequence/frame headers and drives this tile-group parse → tile assembly →
+decode → the filter pipeline.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive

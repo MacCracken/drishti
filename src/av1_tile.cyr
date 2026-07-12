@@ -146,8 +146,8 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
 # context (av1_tile_set_cdef_ctx with the frame-header enable_cdef / cdef_bits /
 # CodedLossless / allow_intrabc) before this call — same as base_q / TX_MODE /
 # ENABLE_FI. Absent that (AV1TILE_CDEF_CTX == 0), the read_cdef splice is inert;
-# wiring the frame-level driver that supplies those params is a later bite
-# (roadmap.md).
+# the frame-level driver that supplies those params grows in av1_decode.cyr
+# (0.7.41 activation helpers + 0.7.42 tile-group parse; roadmap.md).
 # ================================================================
 fn av1_decode_intra_tile(tile, buf, sz, disable_cdf): i64 {
     var ncc = av1_ncdf_new();
