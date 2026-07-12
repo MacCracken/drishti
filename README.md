@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.43 (AV1 keyframe decodes headers → pixels end-to-end via the frame-level driver)
+## Status — 0.7.44 (AV1 keyframe decodes raw OBU bytes → pixels end-to-end)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,470 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,497 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
@@ -41,8 +41,11 @@ tile's byte range (bounds-checked against hostile sizes), and the **frame-level
 driver** (`av1_decode_frame`) ties it all together: from a parsed sequence + frame
 header + the tile-group payload it assembles, decodes, and filters a single-tile
 keyframe **all the way to pixels** (multi-tile and superres are rejected cleanly for
-now). The remaining piece is the OBU walk that parses the sequence/frame headers from
-raw bytes and drives `av1_decode_frame` — closing the raw-bitstream-to-pixels loop.
+now). The **OBU-stream walk** (`av1_decode_obus`) closes the loop: it parses the
+sequence + frame headers from raw OBU bytes and drives `av1_decode_frame`, so a
+complete keyframe bitstream (TD + sequence-header + frame-header + tile-group OBUs)
+now decodes **from raw bytes all the way to pixels** — verified end-to-end. The
+combined FRAME OBU (type 6) and multi-frame streams are the next step.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive

@@ -187,14 +187,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   `av1_activate_intra_filters` attaches it + the CDEF context to a decode tile —
   end-to-end tested by decoding a keyframe tile with header-derived LR params), and
   **tile-group OBU parsing** (`av1_tile_group_parse`, spec 5.11.1) landed in 0.7.42.
-  The **frame-level driver** `av1_decode_frame` landed in 0.7.43 — it assembles +
-  decodes + filters a single-tile keyframe from parsed headers **all the way to
-  pixels** (the first end-to-end headers-to-pixels decode; multi-tile + superres
-  rejected as `DR_ERR_UNSUPPORTED`). The remaining piece is the OBU walk
-  (`av1_obu_next` dispatch) that parses the seq (`av1_seq_parse`) + fh
-  (`av1_frame_parse_uncompressed_header`) from raw OBU bytes and drives
-  `av1_decode_frame` — closing the raw-bitstream-to-pixels loop. Then multi-tile +
-  superres upscaling, then inter prediction.
+  The **frame-level driver** `av1_decode_frame` landed in 0.7.43 (parsed headers ->
+  pixels), and the **OBU-stream walk** `av1_decode_obus` landed in 0.7.44 — it parses
+  the seq (`av1_seq_parse`) + fh (`av1_frame_parse_uncompressed_header`) from raw OBU
+  bytes and drives `av1_decode_frame`, so a full `TD + SEQUENCE_HEADER + FRAME_HEADER
+  + TILE_GROUP` stream **decodes from raw bytes to pixels end-to-end** (verified;
+  the combined FRAME OBU type 6 is rejected `DR_ERR_UNSUPPORTED`). **The
+  raw-bitstream-to-pixels loop is closed.** Next: the combined FRAME OBU (type 6),
+  then multi-tile + superres upscaling, then inter prediction.
 - **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
   fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

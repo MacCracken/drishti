@@ -530,6 +530,180 @@ fn test_frame_decode_truncated() {
     return 0;
 }
 
+# ================================================================
+# OBU-stream walk (av1_decode_obus): dispatch + error paths. (The full
+# raw-bytes -> pixels end-to-end test is test_obus_end_to_end below.)
+# ================================================================
+# Append n raw bytes from src into a byte-aligned bit writer.
+fn obus_append(bw, src, n): i64 {
+    var i = 0;
+    while (i < n) { dr_bw_put_bits(bw, load8(src + i), 8); i = i + 1; }
+    return 0;
+}
+# Frame one OBU (header + optional payload) into bw.
+fn obus_wrap(bw, type, payload, plen): i64 {
+    av1_obu_write_header(bw, type, 0, 0, 0, 1, plen);
+    if (plen > 0) { obus_append(bw, payload, plen); }
+    return 0;
+}
+# null buffer / negative size -> DR_ERR_BOUNDS.
+fn test_obus_bad_args() {
+    var oe = alloc(8);
+    assert_eq(av1_decode_obus(0, 8, oe), 0, "null buf -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "null buf -> BOUNDS");
+    assert_eq(av1_decode_obus(alloc(8), 0 - 1, oe), 0, "negative sz -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "negative sz -> BOUNDS");
+    return 0;
+}
+# A temporal-delimiter-only stream is walked (TD skipped) but carries no tile
+# group -> DR_ERR_BAD_HEADER (proves TD is skipped, not errored on).
+fn test_obus_td_only() {
+    var oe = alloc(8);
+    var bw = dr_bw_init(16);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    var n = dr_bw_flush(bw);
+    assert_eq(av1_decode_obus(dr_bw_buf(bw), n, oe), 0, "TD-only -> no frame");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "TD skipped, no tile group -> BAD_HEADER");
+    return 0;
+}
+# A combined FRAME OBU (type 6) is unsupported -> DR_ERR_UNSUPPORTED (rejected,
+# not silently skipped).
+fn test_obus_frame_obu_rejected() {
+    var oe = alloc(8);
+    var pay = alloc(2);
+    store8(pay + 0, 0x00); store8(pay + 1, 0x00);
+    var bw = dr_bw_init(16);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_FRAME, pay, 2);
+    var n = dr_bw_flush(bw);
+    assert_eq(av1_decode_obus(dr_bw_buf(bw), n, oe), 0, "FRAME OBU -> no frame");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "combined FRAME OBU -> DR_ERR_UNSUPPORTED");
+    return 0;
+}
+# Custom mono reduced-still-picture seq matching frame_enc_keyframe: profile 0,
+# 8-bit, mono (1 plane), 128x64, enable_intra_edge_filter=1, enable_filter_intra=0,
+# no cdef/lr/superres. (fx_seq_reduced can't be reused — it hardcodes 3 planes +
+# enable_intra_edge=0.) Bit layout traced against av1_seq_parse / color_config.
+fn frame_build_seq(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 1);            # still_picture = 1
+    dr_bw_put_bit(bw, 1);            # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15 (16-bit dims)
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 127, 16);     # max_frame_width_minus_1 = 127 -> width 128
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63 -> height 64
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0 (64x64 SB)
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra = 0
+    dr_bw_put_bit(bw, 1);            # enable_intra_edge_filter = 1
+    dr_bw_put_bit(bw, 0);            # enable_superres = 0
+    dr_bw_put_bit(bw, 0);            # enable_cdef = 0
+    dr_bw_put_bit(bw, 0);            # enable_restoration = 0
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 1);            # mono_chrome = 1 -> num_planes = 1
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # color_range = 0 (mono path returns here)
+    dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# Reduced-still-picture KEY frame header matching frame_enc_keyframe: dims from the
+# seq (128x64 -> MiCols 32, MiRows 16), base_q_idx 40, single tile, TX_MODE_SELECT,
+# reduced_tx=0, disable_cdf_update=1. The increment_tile_cols_log2 bit is required
+# at 128-wide (sb_cols=2 -> max_log2_tile_cols=1); mono omits the DeltaQU* bits.
+fn frame_build_fh(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1
+    dr_bw_put_bit(bw, 0);            # allow_screen_content_tools = 0
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1
+    dr_bw_put_bit(bw, 0);            # increment_tile_cols_log2 = 0 (single tile col)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0 (mono: no DeltaQU*)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1 -> TX_MODE_SELECT
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# Header-construction sanity: the custom seq + fh parse to exactly the fields the
+# encode assumed (isolates header-layout bugs from the full decode).
+fn test_obus_header_sanity() {
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var se = 0;
+    var s = av1_seq_parse(seq, slen, &se);
+    assert_eq(se, DR_OK, "custom seq parses");
+    assert_eq(av1_seq_num_planes(s), 1, "seq -> 1 plane (mono)");
+    assert_eq(av1_seq_bitdepth(s), 8, "seq -> 8-bit");
+    var flen = 0;
+    var fh_b = frame_build_fh(&flen);
+    var refs = av1_ref_state_new();
+    var fe = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, fh_b, flen, &fe);
+    assert_eq(fe, DR_OK, "custom fh parses");
+    assert_eq(av1_fh_frame_width(fh), 128, "fh FrameWidth 128 (from seq)");
+    assert_eq(av1_fh_frame_height(fh), 64, "fh FrameHeight 64 (from seq)");
+    assert_eq(av1_fh_mi_cols(fh), 32, "fh MiCols 32");
+    assert_eq(av1_fh_mi_rows(fh), 16, "fh MiRows 16");
+    assert_eq(av1_fh_base_q_idx(fh), 40, "fh base_q_idx 40");
+    assert_eq(av1_fh_tx_mode(fh), AV1_TX_MODE_SELECT, "fh tx_mode SELECT");
+    assert_eq(av1_fh_tile_cols(fh), 1, "fh TileCols 1");
+    assert_eq(av1_fh_disable_cdf_update(fh), 1, "fh disable_cdf_update 1");
+    return 0;
+}
+# THE milestone: a raw OBU byte stream (TD + SEQ + FRAME_HEADER + TILE_GROUP)
+# decodes end-to-end to pixels through av1_decode_obus -> av1_decode_frame.
+fn test_obus_end_to_end() {
+    var tlen = 0;
+    var tile = frame_enc_keyframe(&tlen);   # the single-tile group payload
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var flen = 0;
+    var fh = frame_build_fh(&flen);
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME_HEADER, fh, flen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var stream_len = dr_bw_flush(bw);
+    var stream = dr_bw_buf(bw);
+    var oe = alloc(8);
+    var frame = av1_decode_obus(stream, stream_len, oe);
+    assert_eq(load64(oe), DR_OK, "decode_obus ok (raw bytes -> frame)");
+    assert_eq(frame != 0, 1, "decode_obus returns a frame");
+    assert_eq(dr_frame_width(frame), 128, "decoded frame width 128");
+    assert_eq(dr_frame_height(frame), 64, "decoded frame height 64");
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 128) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "raw OBU bytes -> flat-DC keyframe pixels (all 128)");
+    return 0;
+}
+# A tile group before any sequence/frame header -> DR_ERR_BAD_HEADER (no context).
+fn test_obus_tilegroup_no_headers() {
+    var oe = alloc(8);
+    var pay = alloc(2);
+    store8(pay + 0, 0xAA); store8(pay + 1, 0xBB);
+    var bw = dr_bw_init(16);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, pay, 2);
+    var n = dr_bw_flush(bw);
+    assert_eq(av1_decode_obus(dr_bw_buf(bw), n, oe), 0, "tile group w/o headers -> no frame");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "tile group before seq/fh -> BAD_HEADER");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
@@ -556,6 +730,13 @@ fn main() {
     test_frame_decode_highbd_rejected();
     test_frame_decode_dimbomb();
     test_frame_decode_truncated();
+    test_group("OBU-stream walk (av1_decode_obus)");
+    test_obus_bad_args();
+    test_obus_td_only();
+    test_obus_frame_obu_rejected();
+    test_obus_tilegroup_no_headers();
+    test_obus_header_sanity();
+    test_obus_end_to_end();
     return assert_summary();
 }
 

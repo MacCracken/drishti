@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.44] - 2026-07-12
+
+Adds the **OBU-stream walk** `av1_decode_obus` to `src/av1_decode.cyr` — the
+outermost decode layer that **takes raw AV1 OBU bytes to pixels**. It walks an OBU
+stream (`av1_obu_next`), dispatching by type — `SEQUENCE_HEADER` → `av1_seq_parse`,
+`FRAME_HEADER` → `av1_frame_parse_uncompressed_header`, `TILE_GROUP` →
+`av1_decode_frame` — threading the active sequence + frame header through and
+skipping temporal delimiters / metadata / padding. **A complete keyframe bitstream
+(TD + SEQUENCE_HEADER + FRAME_HEADER + TILE_GROUP OBUs) now decodes end-to-end to
+pixels** — the raw-bitstream-to-pixels loop is closed. A 3-dimension adversarial
+review **workflow** (dispatch-state / error-safety / spec-and-test, each finding
+refute-by-default verified) cleared it. **20,497 suite assertions + 1,140 fuzz
+assertions, all green; `make lint` green.**
+
+### Added
+- **OBU-stream walk** (`src/av1_decode.cyr`): `av1_decode_obus(buf, sz, out_err)` —
+  iterate the OBUs and return the first coded frame decoded + filtered to pixels.
+  Dispatch is type-routed with the sequence/frame-header state threaded across
+  OBUs (a `FRAME_HEADER` before any `SEQUENCE_HEADER`, or a `TILE_GROUP` before
+  either, is rejected `DR_ERR_BAD_HEADER`, not a null deref); `av1_obu_next`'s
+  tri-state return (`DR_OK` / `AV1_OBU_END` / sticky error) is handled so a parse
+  fault is never mistaken for a clean "no frame".
+  - **Scope**: separate-OBU keyframe streams, single-tile 8-bit
+    (`av1_decode_frame`'s scope). The combined **FRAME OBU** (type 6:
+    frame_header + tile_group in one, needing the fh/tile-group byte split) is
+    rejected `DR_ERR_UNSUPPORTED` (a later bite); a stream with no tile group
+    returns `DR_ERR_BAD_HEADER`.
+- **Tests** (`tests/av1_decode.tcyr`, +27): the **end-to-end milestone** — build a
+  real `TD + SEQUENCE_HEADER + FRAME_HEADER + TILE_GROUP` OBU stream (custom mono
+  128×64 seq + reduced-key frame header hand-built to match an encoded keyframe
+  tile) and decode it through `av1_decode_obus` to flat-DC (128) pixels; a
+  header-construction sanity check (the hand-built seq/fh parse to the exact
+  expected fields); and dispatch/error paths (bad args, TD-only, FRAME-OBU
+  rejection, tile-group-without-headers).
+
 ## [0.7.43] - 2026-07-12
 
 Adds the **frame-level decode driver** `av1_decode_frame` to `src/av1_decode.cyr`
