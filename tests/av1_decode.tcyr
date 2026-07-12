@@ -490,17 +490,50 @@ fn test_frame_decode_superres_rejected() {
     assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "use_superres -> DR_ERR_UNSUPPORTED");
     return 0;
 }
-# The 8-bit-only decode path rejects a 10-bit sequence rather than reconstructing
-# at the wrong depth.
-fn test_frame_decode_highbd_rejected() {
+# 10-bit decode: the same skip-DC keyframe tile bytes (mode-info/partition are
+# bit-depth independent) reconstruct at 10-bit — the no-neighbor DC prediction is
+# 1 << (BitDepth-1) = 512, and every pixel-pipeline stage threads bit_depth.
+fn test_frame_decode_10bit() {
     var olen = 0;
     var out = frame_enc_keyframe(&olen);
     var oe = alloc(8);
     var seq = frame_mk_seq(0);
     store64(seq + AV1_SEQ_BITDEPTH, 10);
     var frame = av1_decode_frame(seq, frame_mk_fh(1, 1, 0, 0), out, olen, oe);
-    assert_eq(frame, 0, "10-bit -> no frame");
-    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "10-bit seq -> DR_ERR_UNSUPPORTED");
+    assert_eq(load64(oe), DR_OK, "10-bit decode ok");
+    assert_eq(frame != 0, 1, "10-bit -> a frame");
+    assert_eq(dr_frame_bit_depth(frame), 10, "reconstruction frame is 10-bit");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 512, "10-bit keyframe -> flat DC 512 (1<<9)");
+    assert_eq(dr_frame_get(frame, 0, 0, 0), 512, "10-bit corner pixel 512");
+    return 0;
+}
+# 12-bit decode: DC pred = 1 << 11 = 2048 (the dequant Qlookup has a 12-bit table).
+fn test_frame_decode_12bit() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var seq = frame_mk_seq(0);
+    store64(seq + AV1_SEQ_BITDEPTH, 12);
+    var frame = av1_decode_frame(seq, frame_mk_fh(1, 1, 0, 0), out, olen, oe);
+    assert_eq(load64(oe), DR_OK, "12-bit decode ok");
+    assert_eq(dr_frame_bit_depth(frame), 12, "reconstruction frame is 12-bit");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 2048, "12-bit keyframe -> flat DC 2048 (1<<11)");
+    return 0;
+}
+# CDEF at 10-bit: enable_cdef drives the CDEF stage (direction search + strengths
+# scaled by coeff_shift = bit_depth-8 = 2) over a fresh 10-bit CdefFrame. All-skip
+# blocks -> CDEF is a no-op, so the mid-value (512) carries through — but this
+# exercises the CDEF path end-to-end at 10-bit (allocation + driver, depth-safe).
+fn test_frame_decode_10bit_cdef() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var seq = frame_mk_seq(1);                 # enable_cdef = 1
+    store64(seq + AV1_SEQ_BITDEPTH, 10);
+    var frame = av1_decode_frame(seq, frame_mk_fh(1, 1, 0, 0), out, olen, oe);
+    assert_eq(load64(oe), DR_OK, "10-bit + CDEF decode ok");
+    assert_eq(dr_frame_bit_depth(frame), 10, "10-bit CdefFrame");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 512, "10-bit CDEF path -> mid-value 512 carries (skip)");
     return 0;
 }
 # A dimension-bomb FrameWidth is rejected with dr_frame_new's precise code
@@ -860,7 +893,9 @@ fn main() {
     test_frame_decode_cdef();
     test_frame_decode_multitile_rejected();
     test_frame_decode_superres_rejected();
-    test_frame_decode_highbd_rejected();
+    test_frame_decode_10bit();
+    test_frame_decode_12bit();
+    test_frame_decode_10bit_cdef();
     test_frame_decode_dimbomb();
     test_frame_decode_truncated();
     test_group("OBU-stream walk (av1_decode_obus)");

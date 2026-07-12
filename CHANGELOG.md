@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.46] - 2026-07-12
+
+Enables **10/12-bit (high-bit-depth) decode**. `av1_decode_frame` no longer rejects
+a non-8-bit sequence — the whole pixel pipeline already threads `bit_depth`
+(dequant's `1<<(7+bit_depth)` clamp + the 8/10/12-bit Qlookup tables, the inverse
+transform, reconstruct's `Clip1`, every intra mode, and all three in-loop filters'
+`(bit_depth-8)` scaling), so removing the blanket guard was all it took. A 10-bit
+keyframe now reconstructs to the correct mid-value (`1<<(BitDepth-1)` = 512), a
+12-bit one to 2048. First of the four tracked remaining AV1-decode capabilities
+(multi-tile / superres / inter / 10-bit — the user directive is to pursue all;
+superres + inter await their coefficient tables). A 3-dimension adversarial audit
+**workflow** (intra-pred / residual-transform / filters-and-test) swept the pixel
+pipeline for hidden 8-bit assumptions and found **none** — notably, a *major*-flagged
+SGR box-filter candidate (raw box-sum `b` vs bit-depth-rounded `d`) was rigorously
+**refuted** by the verify pass with a flat-region identity proof: the raw `b` is
+correct, and the proposed "fix" would itself have broken 10-bit SGR. **20,521 suite
+assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Changed
+- **10/12-bit decode enabled** (`src/av1_decode.cyr`): dropped the
+  `av1_seq_bitdepth != 8 → DR_ERR_UNSUPPORTED` guard; the reconstruction frame is
+  created at the sequence bit depth (`dr_frame_new` validates `BitDepth ∈ {8,10,12}`).
+  `use_superres` remains rejected (upscaling unimplemented).
+- **Tests** (`tests/av1_decode.tcyr`): `test_frame_decode_10bit` (flat DC 512) +
+  `test_frame_decode_12bit` (flat DC 2048) — the skip-DC keyframe tile bytes are
+  bit-depth independent, so the same encoded tile reconstructs at the higher depth.
+  (`test_frame_decode_highbd_rejected`, which asserted the old rejection, is retired.)
+  `test_frame_decode_10bit_cdef` additionally drives the CDEF stage at 10-bit (fresh
+  10-bit CdefFrame + direction search + `coeff_shift = bit_depth-8` strengths;
+  all-skip → passthrough). Coverage note: the flat tests exercise DC prediction + the
+  CDEF path; the directional-intra, residual/transform, and deblock/LR *active-filter*
+  math at 10/12-bit are covered by the audit workflow (code-inspected) rather than a
+  non-flat high-bit-depth known-answer test — a future hardening (needs a spec model).
+
 ## [0.7.45] - 2026-07-12
 
 Teaches `av1_decode_obus` the **combined FRAME OBU (type 6)** — the common real-stream

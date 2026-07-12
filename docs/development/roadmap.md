@@ -195,9 +195,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   the **combined FRAME OBU (type 6)** — the common real-stream form (frame header +
   tile group in one OBU); the walk byte-splits off the tile group (spec 5.10) and
   decodes it, so both OBU forms decode end-to-end. **The raw-bitstream-to-pixels loop
-  is closed.** Next: multi-tile + superres upscaling, then inter prediction.
-- **conformance + 10-bit** — libaom/Argon vector runs, 10-bit paths,
-  fuzz hardening.
+  is closed.** The four remaining AV1-decode capabilities (user directive: pursue
+  ALL, don't drop any) — **(1) multi-tile** (per-tile MI origins; invasive but
+  table-free), **(2) superres** upscaling (7.16; needs the `Upscale_Filter` table),
+  **(3) inter** prediction (the big arc; needs the interpolation-filter tables), and
+  **(4) 10-bit** (mostly done — the pixel pipeline already threads `bit_depth`). Doing
+  the table-free ones first (10-bit landed 0.7.46, multi-tile next); superres + inter
+  await their coefficient tables. See memory `av1-decode-remaining-tracks`.
+- **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
+  (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
   the `av1_obu_write_header` seed; gate = own-decoder round-trip, then
   cross-decoder (dav1d/libaom).

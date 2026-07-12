@@ -269,25 +269,25 @@ fn av1_tile_group_parse(tg, buf, sz, fh, out_err): i64 {
 #
 # SCOPE: single-tile frames (NumTiles == 1). Multi-tile needs per-tile MI-origin
 # support in the tile/decode/filter path (a later bite; roadmap.md) — a NumTiles>1
-# frame is rejected with DR_ERR_UNSUPPORTED (never a wrong decode). 8-bit profile-0
-# reconstruction (10-bit is a later roadmap item). Returns the filtered frame or 0.
+# frame is rejected with DR_ERR_UNSUPPORTED (never a wrong decode). 8/10/12-bit are
+# all supported (the pixel pipeline threads bit_depth); superres is rejected.
+# Returns the filtered frame or 0.
 # ================================================================
 fn av1_decode_frame(seq, fh, buf, sz, out_err): i64 {
     store64(out_err, DR_OK);
     if ((seq == 0) || (fh == 0) || (buf == 0) || (sz < 0)) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
-    # Scope guards — reject rather than silently mis-decode (never a wrong decode):
-    #  * Superres reconstructs at FrameWidth then upscales to UpscaledWidth (7.16);
-    #    upscaling is not implemented, so a use_superres frame would emit a
-    #    non-upscaled (wrong-size) frame. Rejecting it also keeps UpscaledWidth ==
-    #    FrameWidth, so the frame + LR geometry stay aligned.
-    #  * The decode path (intra pred / inverse transform / recon) is 8-bit only, so a
-    #    10/12-bit sequence would be reconstructed at the wrong depth.
+    # Scope guard — reject rather than silently mis-decode (never a wrong decode):
+    # superres reconstructs at FrameWidth then upscales to UpscaledWidth (7.16);
+    # upscaling is not implemented, so a use_superres frame would emit a non-upscaled
+    # (wrong-size) frame. Rejecting it also keeps UpscaledWidth == FrameWidth, so the
+    # frame + LR geometry stay aligned. (8/10/12-bit are all supported — the whole
+    # pixel pipeline threads bit_depth: dequant/itx/recon/intra + deblock/CDEF/LR.)
     if (av1_fh_use_superres(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
-    if (av1_seq_bitdepth(seq) != 8) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     var num_planes = av1_seq_num_planes(seq);
-    # 1. reconstruction frame at the header dims (border 8 keeps CDEF/LR in-bounds).
+    # 1. reconstruction frame at the header dims + sequence bit depth (border 8 keeps
+    #    CDEF/LR in-bounds); dr_frame_new validates BitDepth in {8, 10, 12}.
     var frame = dr_frame_new(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
     num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),
     av1_seq_bitdepth(seq), 8, out_err);

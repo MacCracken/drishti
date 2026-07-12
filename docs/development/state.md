@@ -6,23 +6,23 @@
 
 ## Version
 
-**0.7.45** — cut 2026-07-12, not yet tagged (user's git). Teaches `av1_decode_obus`
-the **combined FRAME OBU (type 6)** — the common real-stream form that packs the
-frame header + tile group into one OBU (spec 5.10 `frame_obu`), previously rejected
-`DR_ERR_UNSUPPORTED`. The walk now parses the embedded frame header, splits off the
-tile group at the byte-aligned header end (`headerBytes = ceil(bits_consumed / 8)`),
-and decodes it — so **both** the separate-OBU form and the combined FRAME OBU decode
-end-to-end to pixels (an end-to-end test builds a real FRAME OBU = frame-header bytes
-++ tile-group bytes and decodes to flat-DC pixels, proving the byte-split lands
-exactly at the tile start). A 3-dimension adversarial review **workflow** (byte-split
-/ error-integration / test-adequacy, each refute-by-default verified) cleared it.
-This builds on the decode spine completed across 0.7.44 (the OBU-stream walk), 0.7.43
-(the frame driver, parsed headers → pixels), 0.7.42 (tile-group parse), 0.7.41
-(filter activation), the in-loop filter layer (0.7.27-0.7.40), and the intra keyframe
-tile decode (0.7.25). Next: multi-tile + superres, then inter prediction. The
-remaining distance to 1.0 is inter + conformance/10-bit + the encode-lane completion
-(finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) +
-audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.46** — cut 2026-07-12, not yet tagged (user's git). Enables **10/12-bit
+(high-bit-depth) decode** by dropping the `av1_seq_bitdepth != 8` reject guard in
+`av1_decode_frame` — the whole pixel pipeline already threads `bit_depth` (dequant's
+`1<<(7+bit_depth)` clamp + the 8/10/12-bit Qlookup, the inverse transform,
+reconstruct's `Clip1`, every intra mode, and all three in-loop filters' `(bit_depth-8)`
+scaling), so removing the guard was all it took. A 10-bit keyframe reconstructs to the
+correct mid-value (`1<<(BitDepth-1)` = 512), a 12-bit one to 2048. A 3-dimension
+adversarial **audit** workflow (intra-pred / residual-transform / filters-and-test)
+swept the pixel pipeline for hidden 8-bit assumptions. **This is the first of the four
+tracked remaining AV1-decode capabilities** the user directed be pursued (all of:
+**(1) multi-tile**, **(2) superres**, **(3) inter**, **(4) 10-bit** — none dropped;
+superres + inter await coefficient tables; see memory `av1-decode-remaining-tracks`).
+Builds on the complete single-tile decode spine (0.7.25 tile decode → 0.7.45 FRAME
+OBU). Next: multi-tile (the other table-free track). The remaining distance to 1.0 is
+multi-tile + superres + inter + conformance + the encode-lane completion (finishing
+0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x)
++ freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 > **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
@@ -47,7 +47,7 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 745, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 746, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -87,13 +87,13 @@ audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 29 suites / **20,512 assertions**: drishti 51 · bits
+- `make test` — 29 suites / **20,521 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 35 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_lr 80 · av1_decode 150 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_lr 80 · av1_decode 159 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
