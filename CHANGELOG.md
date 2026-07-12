@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.33] - 2026-07-11
+
+Starts the AV1 **loop restoration** filter (spec 7.17, the third and last in-loop
+filter, after deblocking + CDEF) with the **Wiener** path kernels (`src/av1_lr.cyr`,
+new module): the symmetric 3->7-tap coefficient expansion (7.17.6), the
+stripe-aware source fetch (7.17.7), and the separable 7-tap Wiener filter (7.17.5).
+All cross-checked against an independent Python model of 7.17.5. A 1-agent
+adversarial review (coeff expansion / rounding / get_source_sample / the filter
+convolution + memory) confirmed **all match, no bugs** — including the offset/limit
+bit-grouping, the source-coord offsets, and the horizontal/vertical + curr/cdef
+assignments. **20,208 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` green.**
+
+### Added
+- **AV1 loop-restoration Wiener kernels** (`src/av1_lr.cyr`): `av1_lr_wiener_coeff`
+  (7.17.6 — expands the 3 coded taps to the 7-tap symmetric, unit-DC-gain filter;
+  chroma's `coeff[0] == 0` degenerates to 5-tap); `av1_lr_get_source_sample`
+  (7.17.7 — clamps to the plane extent and routes by the stripe boundary: within
+  the stripe from `UpscaledCdefFrame`, outside from `UpscaledCurrFrame`, with the
+  3rd-line-above/below crop); `av1_lr_wiener_filter` (7.17.5 — two 1-D 7-tap
+  convolutions, horizontal into an `intermediate[(h+6) x w]` array then vertical
+  into `LrFrame`, with per-bit-depth rounding `InterRound0/1` from 7.11.3.2,
+  isCompound = 0).
+- **Tests** (`tests/av1_lr.tcyr`, 23 assertions): the coefficient expansion (luma
+  7-tap + chroma 5-tap, sum = 128), the source fetch (plane-extent clamp + stripe
+  routing + 3rd-line crop), and the filter — the **unit-DC-gain passthrough** (a
+  flat block is unchanged, the strongest check), a vertical ramp (also passes
+  through), and an impulse spread — all matching the Python model.
+
+### Notes
+- `drishti_version()` -> 733. Loop restoration is split like CDEF was: Wiener
+  kernels this bite, the self-guided / SGR box filter (7.17.3) next, then the
+  stripe-loop driver (7.17.1/2) + `read_lr` wiring + `LrFrame`. Two review caveats
+  are driver contracts (the caller must pass in-plane stripe bounds and keep
+  `UpscaledCurrFrame`/`UpscaledCdefFrame` at the same bit depth), not kernel bugs.
+
 ## [0.7.32] - 2026-07-11
 
 Wires the CDEF-index syntax into the decode/encode path: `read_cdef` is spliced

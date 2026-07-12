@@ -45,6 +45,7 @@ modules = [
     "src/av1_tile.cyr",
     "src/av1_deblock.cyr",
     "src/av1_cdef.cyr",
+    "src/av1_lr.cyr",
     "src/h264_nal.cyr",
     "src/h264_ps.cyr",
     "src/h265_nal.cyr",

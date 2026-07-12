@@ -6,22 +6,21 @@
 
 ## Version
 
-**0.7.32** — cut 2026-07-11, not yet tagged (user's git). Wires the CDEF-index
-syntax into the decode/encode path: `read_cdef` is spliced into
-`intra_frame_mode_info` (after `read_skip`), `write_cdef` mirrors it, and
-`clear_cdef` runs per superblock in `decode_tile`/`encode_tile`. A tile carries a
-CDEF read context (`av1_tile_set_cdef_ctx`, `av1_residual.cyr`); the splice is
-guarded by `cdef_ctx != 0` so existing non-CDEF streams stay byte-identical. A
-1-agent review confirmed all 6 wiring points (ctx offsets, splice placement, arg
-threading, `clear_cdef`, backward-compat, spec-order) with no wiring bugs.
-**Honest scope: the mechanism is wired + round-trip tested (at the mode-info
-level), but no production frame-level driver calls `set_cdef_ctx` yet**, so the
-splice is inert for real bitstreams until that driver lands (a later bite); a full
-tile-level CDEF round-trip is also blocked by the deferred non-skip encode lane.
-On top of the complete CDEF filter (kernels 0.7.29 + driver 0.7.30) + the
-`cdef_idx` primitives (0.7.31), the deblocking loop filter (0.7.27/0.7.28), and the
-**first fully decoded keyframe** (0.7.25). Next: the frame-level CDEF activation,
-then loop restoration (7.17). The remaining distance to 1.0 is the
+**0.7.33** — cut 2026-07-11, not yet tagged (user's git). Starts the AV1 **loop
+restoration** filter (spec 7.17 — the third and last in-loop filter) with the
+**Wiener** kernels (`av1_lr.cyr`, new module): the symmetric 3->7-tap coefficient
+expansion (7.17.6), the stripe-aware source fetch (7.17.7 — within-stripe from
+`UpscaledCdefFrame`, outside from `UpscaledCurrFrame`), and the separable 7-tap
+Wiener filter (7.17.5, horizontal then vertical, per-bit-depth rounding).
+Cross-checked against an independent Python model; a 1-agent review confirmed all
+match with no bugs (offset/limit grouping, source offsets, curr/cdef + h/v
+assignments all correct). On top of the complete CDEF filter (kernels 0.7.29 +
+driver 0.7.30) + wiring (0.7.31/0.7.32), the deblocking loop filter (0.7.27/0.7.28),
+and the **first fully decoded keyframe** (0.7.25). Loop restoration is split like
+CDEF: Wiener kernels this bite, the self-guided / SGR box filter (7.17.3) next,
+then the stripe-loop driver (7.17.1/2) + `read_lr` wiring. Also still open: the
+frame-level driver that activates CDEF (calls `set_cdef_ctx`) for real streams.
+The remaining distance to 1.0 is the
 rest of the in-loop filters + inter + conformance/10-bit + the encode-lane
 completion (finishing 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x
 VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
@@ -45,11 +44,11 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (32 `[lib]` modules, dependency order)
+## Source (33 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 732, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 733, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -74,6 +73,7 @@ VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop + clear_block_decoded_flags + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: all vertical then horizontal boundaries, in place) |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
+| `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) Wiener kernels — av1_lr_wiener_coeff (7.17.6 symmetric 3→7-tap) + av1_lr_get_source_sample (7.17.7 plane clamp + stripe routing) + av1_lr_wiener_filter (7.17.5 separable 7-tap H→V, per-depth InterRound0/1). SGR + driver are later bites |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
 | `src/h265_nal.cyr` | `h265_` | strict Annex-B scan, 2-byte NAL hdr, RBSP extract |

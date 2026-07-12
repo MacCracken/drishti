@@ -1,0 +1,136 @@
+# tests/av1_lr.tcyr — AV1 loop restoration Wiener kernels (spec 7.17.5-7.17.7).
+# The symmetric coefficient expansion, the stripe-aware source fetch, and the
+# separable 7-tap filter — the DC-gain (unity) passthrough plus non-flat cases
+# cross-checked against an independent Python model of 7.17.5.
+include "src/main.cyr"
+include "src/av1_lr.cyr"
+
+fn lr_fill(f, w, h, v): i64 {
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) { dr_frame_set(f, 0, x, y, v); x = x + 1; }
+        y = y + 1;
+    }
+    return 0;
+}
+fn mk_coeff(a, b, c): i64 {
+    var p = alloc(3 * 8);
+    store64(p + 0, a);
+    store64(p + 8, b);
+    store64(p + 16, c);
+    return p;
+}
+
+# ---- Wiener coefficient process (7.17.6) ----
+fn test_wiener_coeff() {
+    var out = alloc(7 * 8);
+    av1_lr_wiener_coeff(mk_coeff(3, 0 - 7, 15), out);
+    # filter = {3,-7,15, 128-2*(3-7+15)=106, 15,-7,3}; sum = 128.
+    assert_eq(load64(out + 0), 3, "coeff[0]");
+    assert_eq(load64(out + 8), 0 - 7, "coeff[1]");
+    assert_eq(load64(out + 16), 15, "coeff[2]");
+    assert_eq(load64(out + 24), 106, "center = 128 - 2*sum");
+    assert_eq(load64(out + 32), 15, "mirror[4]");
+    assert_eq(load64(out + 40), 0 - 7, "mirror[5]");
+    assert_eq(load64(out + 48), 3, "mirror[6]");
+    # chroma: coeff[0] == 0 -> 5-tap (filter[0] = filter[6] = 0).
+    av1_lr_wiener_coeff(mk_coeff(0, 4, 20), out);
+    assert_eq(load64(out + 0), 0, "chroma coeff[0] = 0");
+    assert_eq(load64(out + 24), 80, "chroma center 128 - 2*24");
+    assert_eq(load64(out + 48), 0, "chroma coeff[6] = 0");
+    return 0;
+}
+
+# ---- get source sample (7.17.7): plane-extent clamp + stripe routing ----
+fn test_get_source_sample() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var cdef = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    lr_fill(curr, 16, 16, 50);
+    lr_fill(cdef, 16, 16, 200);
+    # stripe rows [4,11]: within -> cdef; above/below -> curr.
+    assert_eq(av1_lr_get_source_sample(curr, cdef, 0, 8, 8, 15, 15, 4, 11), 200, "within stripe -> cdef");
+    assert_eq(av1_lr_get_source_sample(curr, cdef, 0, 8, 14, 15, 15, 4, 11), 50, "below stripe -> curr");
+    # x clamps to [0, PlaneEndX]: mark the boundary columns.
+    dr_frame_set(cdef, 0, 0, 8, 201);
+    dr_frame_set(cdef, 0, 15, 8, 202);
+    assert_eq(av1_lr_get_source_sample(curr, cdef, 0, 0 - 5, 8, 15, 15, 4, 11), 201, "x<0 clamps to 0");
+    assert_eq(av1_lr_get_source_sample(curr, cdef, 0, 100, 8, 15, 15, 4, 11), 202, "x>PlaneEndX clamps");
+    # 3rd-line crop: above-stripe y clamped to Max(StripeStartY-2, y). y=0, ssy=4 -> row 2.
+    dr_frame_set(curr, 0, 8, 2, 55);
+    assert_eq(av1_lr_get_source_sample(curr, cdef, 0, 8, 0, 15, 15, 4, 11), 55, "above: 3rd line -> 2nd (row 2)");
+    return 0;
+}
+
+# ---- Wiener filter (7.17.5) ----
+# Unit DC gain: a flat block passes through unchanged (the strongest check).
+fn test_wiener_dc_gain() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var cdef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var lr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    lr_fill(curr, 32, 32, 100);
+    lr_fill(cdef, 32, 32, 100);
+    var f = alloc(7 * 8);
+    av1_lr_wiener_coeff(mk_coeff(3, 0 - 7, 15), f);
+    # block (8,8) 4x4; stripe covers the whole frame so all reads come from cdef.
+    av1_lr_wiener_filter(curr, cdef, lr, 0, 8, 8, 4, 4, f, f, 31, 31, 0, 31);
+    assert_eq(dr_frame_get(lr, 0, 8, 8), 100, "flat DC-gain passthrough (8,8)");
+    assert_eq(dr_frame_get(lr, 0, 11, 11), 100, "flat DC-gain passthrough (11,11)");
+    return 0;
+}
+# A vertical ramp (cdef[y][x] = 100 + y) also passes through (unity gain, linear).
+fn test_wiener_ramp() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var cdef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var lr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) { dr_frame_set(curr, 0, x, y, 100 + y); dr_frame_set(cdef, 0, x, y, 100 + y); x = x + 1; }
+        y = y + 1;
+    }
+    var f = alloc(7 * 8);
+    av1_lr_wiener_coeff(mk_coeff(3, 0 - 7, 15), f);
+    av1_lr_wiener_filter(curr, cdef, lr, 0, 8, 8, 4, 4, f, f, 31, 31, 0, 31);
+    assert_eq(dr_frame_get(lr, 0, 8, 8), 108, "vramp (8,8) -> 108");
+    assert_eq(dr_frame_get(lr, 0, 8, 9), 109, "vramp (8,9) -> 109");
+    assert_eq(dr_frame_get(lr, 0, 11, 11), 111, "vramp (11,11) -> 111");
+    return 0;
+}
+# An impulse (200 amid flat 100) is spread by the 7-tap kernel per the Python model.
+fn test_wiener_impulse() {
+    var oe = alloc(8);
+    var curr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var cdef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var lr = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    lr_fill(curr, 32, 32, 100);
+    lr_fill(cdef, 32, 32, 100);
+    dr_frame_set(curr, 0, 10, 10, 200);
+    dr_frame_set(cdef, 0, 10, 10, 200);
+    var f = alloc(7 * 8);
+    av1_lr_wiener_coeff(mk_coeff(3, 0 - 7, 15), f);
+    av1_lr_wiener_filter(curr, cdef, lr, 0, 8, 8, 4, 4, f, f, 31, 31, 0, 31);
+    assert_eq(dr_frame_get(lr, 0, 10, 10), 169, "impulse center (10,10) -> 169");
+    assert_eq(dr_frame_get(lr, 0, 9, 10), 110, "impulse (9,10) -> 110");
+    assert_eq(dr_frame_get(lr, 0, 8, 8), 100, "impulse far (8,8) -> 100");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("lr wiener coefficient (7.17.6)");
+    test_wiener_coeff();
+    test_group("lr get source sample (7.17.7)");
+    test_get_source_sample();
+    test_group("lr wiener filter (7.17.5)");
+    test_wiener_dc_gain();
+    test_wiener_ramp();
+    test_wiener_impulse();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

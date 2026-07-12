@@ -18,18 +18,19 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.32 (AV1 intra keyframe decode complete; deblocking + CDEF done, cdef_idx wired)
+## Status — 0.7.33 (AV1 intra keyframe decode complete; deblocking + CDEF done, loop-restoration Wiener kernels in)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,185 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,208 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
 complete (`av1_deblock.cyr` — kernels + the whole-frame edge loop/driver), and
-the **CDEF** filter is complete (`av1_cdef.cyr` — the 7.15.2/7.15.3 kernels plus
-the 7.15 process / 7.15.1 block-process driver that derings a deblocked frame
-into a fresh `CdefFrame`); `read_cdef` bitstream wiring and loop restoration are
-next.
+the **CDEF** filter is complete (`av1_cdef.cyr` — kernels + driver + the wired
+`cdef_idx` read), and **loop restoration** (`av1_lr.cyr`, spec 7.17) is underway —
+its **Wiener** filter kernels (separable 7-tap + coefficient expansion + the
+stripe-aware source fetch) are in; the self-guided/SGR filter and the stripe-loop
+driver are next.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive
