@@ -15,8 +15,12 @@ horizontal filter into a `(h+7)`-row mid buffer at shift `6−ib`, then vertical
 `filter_type&3` for `w/h>4`, the `w≤4` variant sets (3/4) otherwise; phase = `mx−1`/`my−1`.
 Verified against a **Python port of `put_8tap_c`** across all four branches, both
 filter-selection paths (8×8 → sets 0–2, 4×4 → the `w≤4` sets), REGULAR + SHARP, at 8-bit —
-matched via position-weighted checksums + spot pixels. **20,945 suite assertions + 1,140
-fuzz assertions, all green; `make lint` green.**
+matched via position-weighted checksums + spot pixels. A 2-dimension adversarial review
+(shifts/precision + filter-selection/edges) found **no correctness defects** (its one nit
+— no in-kernel clamp on the mx/my sub-pel index — was refuted: dav1d doesn't clamp either;
+the caller masks mx/my to 0..15 by construction, and the kernel matches dav1d across the
+whole valid domain). **20,945 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` green.**
 
 ### Added
 - **`src/av1_mc.cyr`**: `av1_mc_put_8tap(dst, doff, dstride, src, soff, sstride, w, h, mx,
