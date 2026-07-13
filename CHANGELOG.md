@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.58] - 2026-07-12
+
+**Inter prediction — the `put_8tap` motion-compensation kernel (spec 7.11.3.2).** A
+faithful port of dav1d's `put_8tap_c` (`src/mc_tmpl.c`): `av1_mc_put_8tap` predicts a w×h
+block from reference samples via the sub-pel filters, with dav1d's intermediate precision.
+Four branches — **integer** (copy), **H-only**, **V-only**, and **H+V** (the 2-pass path:
+horizontal filter into a `(h+7)`-row mid buffer at shift `6−ib`, then vertical at `6+ib` +
+`Clip1`; `ib` = 4 for 8/10-bit, 2 for 12-bit). Filter selection matches dav1d: set =
+`filter_type&3` for `w/h>4`, the `w≤4` variant sets (3/4) otherwise; phase = `mx−1`/`my−1`.
+Verified against a **Python port of `put_8tap_c`** across all four branches, both
+filter-selection paths (8×8 → sets 0–2, 4×4 → the `w≤4` sets), REGULAR + SHARP, at 8-bit —
+matched via position-weighted checksums + spot pixels. **20,945 suite assertions + 1,140
+fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **`src/av1_mc.cyr`**: `av1_mc_put_8tap(dst, doff, dstride, src, soff, sstride, w, h, mx,
+  my, filter_type, bit_depth)` + `av1_mc_8tap` (8-tap dot product) + `av1_mc_subpel_row`.
+- **`tests/av1_mc_kernel.tcyr`**: `test_put_8tap` — 6 cases (integer, H, V, H+V, `w≤4`
+  H+V, SHARP H+V) against the dav1d `put_8tap_c` reference.
+
+### Scope / deferred
+- The `put_8tap` kernel only (operates on padded i64 sample arrays). The MC **driver**
+  (predict a block into the frame from a reference frame + MV, with edge extension), the
+  reference-frame buffer (DPB, needs multi-frame decode), MV prediction, and inter
+  mode-info are the next bites. dav1d's `prep_8tap` / scaled MC / bilinear / warp variants
+  are separate later concerns.
+
 ## [0.7.57] - 2026-07-12
 
 **Inter prediction — sub-pel interpolation filter table (spec 7.11.3.2).** First bite of

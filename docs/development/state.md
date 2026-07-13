@@ -6,18 +6,19 @@
 
 ## Version
 
-**0.7.57** — cut 2026-07-12, not yet tagged (user's git). **Inter prediction — sub-pel
-interpolation filter table (7.11.3.2).** The INTER arc begins (the last of the four
-AV1-decode capabilities). New module `src/av1_mc.cyr` lands the `Subpel_Filters` table —
-dav1d's `dav1d_mc_subpel_filters`, 6 sets × 15 phases × 8 taps (REGULAR/SMOOTH/SHARP + two
-w≤4 variants + scaled-bilinear) in dav1d's convention (rows sum to **64**, not the spec's
-128 — dav1d's coefficients are the spec's halved, matched by an extra intermediate-precision
-bit in its 2-pass filter; the `put_8tap` kernel will match dav1d's shifts). Verified three
-ways (90 row-sums=64; mirror symmetry per set; a per-(set,phase) position checksum vs an
-independent dav1d transcription). Table only — the `put_8tap` kernel + MC driver +
-reference-frame buffer + MV prediction + inter mode-info are the next bites (all table-free;
-dav1d `mc_tmpl.c`/`decode.c` references in hand). **Prior: superres complete 0.7.52–0.7.56;
-multi-tile complete 0.7.47–0.7.51; 10-bit 0.7.46 — 3 of 4 decode tracks done.** The remaining
+**0.7.58** — cut 2026-07-12, not yet tagged (user's git). **Inter prediction — the
+`put_8tap` motion-compensation kernel (7.11.3.2).** `av1_mc_put_8tap` predicts a w×h block
+from reference samples via the sub-pel filters — a faithful port of dav1d `put_8tap_c`
+(`mc_tmpl.c`) with dav1d's intermediate precision. Four branches: integer (copy), H-only,
+V-only, and the 2-pass H+V (horizontal into a (h+7)-row mid buffer at shift `6−ib`, then
+vertical at `6+ib` + `Clip1`; `ib`=4 for 8/10-bit, 2 for 12-bit). Filter selection matches
+dav1d (set `filter_type&3` for w/h>4, the w≤4 variant sets otherwise; phase mx−1/my−1).
+Verified against a Python port of `put_8tap_c` (all 4 branches, w>4 + w≤4 sets, REGULAR +
+SHARP). Kernel only — the MC driver (block prediction into the frame from a ref frame +
+MV), the ref-frame buffer (DPB, needs multi-frame decode), MV prediction, and inter
+mode-info are the next bites. **Prior: Subpel_Filters table 0.7.57; superres complete
+0.7.52–0.7.56; multi-tile complete 0.7.47–0.7.51; 10-bit 0.7.46 — 3 of 4 decode tracks
+done, inter underway.** The remaining
 distance to
 1.0 is inter + conformance +
 the encode-lane completion (finishing 0.7.x), then the other per-codec arcs (0.8.x
@@ -46,7 +47,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 757, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 758, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -73,7 +74,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 | `src/av1_decode.cyr` | `av1_` | AV1 decode spine (raw bytes → pixels) — **av1_decode_obus**: OBU-stream walk (av1_obu_next dispatch: SEQUENCE_HEADER→av1_seq_parse, FRAME_HEADER→uncompressed_header, FRAME OBU type 6→parse fh + byte-split tile group 5.10, TILE_GROUP→accumulate into a frame-decode context). **Av1FrameDec** frame-decode context (av1_frame_dec_new/group/finish): begins a frame, decodes each tile group's tiles into the SHARED frame grids (in-order/contiguous guard; dim-bomb → error), filters once when complete — supports **multi-tile + multi-tile-group + superres** frames at 8/10/12-bit. **av1_decode_frame**: thin single-group wrapper (new→group→finish; partial group → DR_ERR_UNSUPPORTED), used by the FRAME OBU path. av1_apply_loop_filters: in-loop pipeline (deblock 7.14 → CDEF 7.15 → **superres 7.16** → LR 7.17; superres upscales FrameWidth→UpscaledWidth, LR at the upscaled width); **filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters); **tile-group parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4) |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_superres.cyr` | `av1_` | superres upscaling (7.16) — Upscale_Filter[64][8] (dav1d resize filter negated to spec form; row-sum/integer-pel/mirror + per-phase position-checksum verified) + av1_superres_filter_pixel (one sample: phase/base/edge-clamp + Round2(sum,7) + Clip1) + av1_superres_upscale_row (the row loop, == dav1d resize_c) + av1_superres_step / av1_superres_x0 (dx/mx0 geometry, == dav1d scale_fac + get_upscale_x0) + av1_superres_upscale_frame (per-plane/row upscale into a new frame) + av1_superres_upscale_new (used by the in-loop pipeline to lift a downscaled frame to UpscaledWidth between CDEF and LR) — all reference-confirmed against dav1d; superres decodes end-to-end |
-| `src/av1_mc.cyr` | `av1_` | inter prediction (motion comp), **table layer** — Subpel_Filters[6][15][8] (dav1d_mc_subpel_filters: REGULAR/SMOOTH/SHARP + 2 w≤4 variants + scaled-bilinear; dav1d convention, rows sum to 64; verified by row-sum / mirror-symmetry / independent position-checksum) + av1_subpel_filter accessor. put_8tap kernel + MC driver + ref-frame buffer + MV pred are later bites (first module of the inter arc) |
+| `src/av1_mc.cyr` | `av1_` | inter prediction (motion comp) — Subpel_Filters[6][15][8] (dav1d_mc_subpel_filters: REGULAR/SMOOTH/SHARP + 2 w≤4 variants + scaled-bilinear; dav1d convention, rows sum 64; verified by row-sum/mirror-symmetry/independent position-checksum) + av1_subpel_filter accessor + **av1_mc_put_8tap** (2-pass 8-tap MC kernel == dav1d put_8tap_c: integer/H/V/H+V, dav1d intermediate precision, reference-tested). MC driver + ref-frame buffer + MV pred are later bites |
 | `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry) + the decode_tile wiring (AV1TILE_LRPARAMS, 0.7.39). Inert until a frame-level driver attaches the params |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
 | `src/h264_ps.cyr` | `h264_` | SPS (full, incl. High branch + crop) / PPS (minimal) |
@@ -88,13 +89,13 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 31 suites / **20,935 assertions**: drishti 51 · bits
+- `make test` — 32 suites / **20,945 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.

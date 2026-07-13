@@ -141,3 +141,113 @@ fn av1_subpel_filter(set, phase, tap): i64 {
     return load64(av1_subpel_filters_blob() +
     ((((set * AV1_SUBPEL_PHASES) + phase) * AV1_SUBPEL_TAPS) + tap) * 8);
 }
+
+# byte address of one 8-tap filter row (set, phase) in the blob.
+fn av1_mc_subpel_row(set, phase): i64 {
+    return av1_subpel_filters_blob() + (((set * AV1_SUBPEL_PHASES) + phase) * AV1_SUBPEL_TAPS * 8);
+}
+
+# one 8-tap dot product: sum_k f[k] * src[base + (k-3)*stride], src an i64 sample array,
+# base/stride in ELEMENT units, f a filter-row byte address (av1_mc_subpel_row).
+fn av1_mc_8tap(src, base, stride, f): i64 {
+    var s = 0;
+    var k = 0;
+    while (k < 8) {
+        s = s + (load64(f + (k * 8)) * load64(src + (((base + ((k - 3) * stride))) * 8)));
+        k = k + 1;
+    }
+    return s;
+}
+
+# av1_mc_put_8tap (spec 7.11.3.2 / dav1d put_8tap_c) — motion-compensated prediction of a
+# w x h block into dst[doff..] (row stride dstride) from the reference samples in the i64
+# array `src` (row stride sstride), the block's top-left at element `soff`. The caller pads
+# src by >=3 left/top and >=4 right/bottom so the 8-tap (taps -3..+4) stays in bounds. mx/my
+# are the sub-pel positions (0..15; 0 = no sub-pel filter in that dimension). filter_type =
+# h_set | (v_set << 2), each 0..2 (REGULAR/SMOOTH/SHARP); w<=4 / h<=4 use the w<=4 variant
+# sets. Matches dav1d's intermediate precision (intermediate_bits = 4 for 8/10-bit, 2 for
+# 12-bit): the H+V path filters horizontally into a (h+7)-row mid buffer at reduced shift,
+# then vertically at higher shift; the 1D paths go straight to output precision. Returns
+# DR_OK / DR_ERR_OOM.
+fn av1_mc_put_8tap(dst, doff, dstride, src, soff, sstride, w, h, mx, my, filter_type, bit_depth): i64 {
+    var ib = 4;
+    if (bit_depth == 12) { ib = 2; }
+    var irnd = 32 + ((1 << (6 - ib)) >> 1);   # dav1d intermediate_rnd (h-only path)
+    var fh = 0;
+    if (mx != 0) {
+        var hset = filter_type & 3;
+        if (w <= 4) { hset = 3 + (filter_type & 1); }
+        fh = av1_mc_subpel_row(hset, mx - 1);
+    }
+    var fv = 0;
+    if (my != 0) {
+        var vset = filter_type >> 2;
+        if (h <= 4) { vset = 3 + ((filter_type >> 2) & 1); }
+        fv = av1_mc_subpel_row(vset, my - 1);
+    }
+    if ((fh != 0) && (fv != 0)) {
+        # 2-pass: horizontal into mid[(h+7) x w] (rows from src -3..h+3), then vertical.
+        var mid = alloc(((h + 7) * w) * 8);   # ((h+7)*w) i64
+        if (mid == 0) { return DR_ERR_OOM; }
+        var r = 0;
+        while (r < (h + 7)) {
+            var x = 0;
+            while (x < w) {
+                var hs = av1_mc_8tap(src, (soff + ((r - 3) * sstride)) + x, 1, fh);
+                store64(mid + (((r * w) + x) * 8), av1_round2(hs, 6 - ib));
+                x = x + 1;
+            }
+            r = r + 1;
+        }
+        r = 0;
+        while (r < h) {
+            var x = 0;
+            while (x < w) {
+                var vs = av1_mc_8tap(mid, ((r + 3) * w) + x, w, fv);
+                store64(dst + (((doff + (r * dstride)) + x) * 8), dr_clip1(av1_round2(vs, 6 + ib), bit_depth));
+                x = x + 1;
+            }
+            r = r + 1;
+        }
+        return DR_OK;
+    }
+    if (fh != 0) {
+        # horizontal only.
+        var r = 0;
+        while (r < h) {
+            var x = 0;
+            while (x < w) {
+                var hs = av1_mc_8tap(src, (soff + (r * sstride)) + x, 1, fh);
+                store64(dst + (((doff + (r * dstride)) + x) * 8), dr_clip1((hs + irnd) >>> 6, bit_depth));
+                x = x + 1;
+            }
+            r = r + 1;
+        }
+        return DR_OK;
+    }
+    if (fv != 0) {
+        # vertical only.
+        var r = 0;
+        while (r < h) {
+            var x = 0;
+            while (x < w) {
+                var vs = av1_mc_8tap(src, (soff + (r * sstride)) + x, sstride, fv);
+                store64(dst + (((doff + (r * dstride)) + x) * 8), dr_clip1(av1_round2(vs, 6), bit_depth));
+                x = x + 1;
+            }
+            r = r + 1;
+        }
+        return DR_OK;
+    }
+    # integer position: copy the block.
+    var r = 0;
+    while (r < h) {
+        var x = 0;
+        while (x < w) {
+            store64(dst + (((doff + (r * dstride)) + x) * 8), load64(src + (((soff + (r * sstride)) + x) * 8)));
+            x = x + 1;
+        }
+        r = r + 1;
+    }
+    return DR_OK;
+}

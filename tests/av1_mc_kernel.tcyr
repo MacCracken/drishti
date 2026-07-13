@@ -1,0 +1,67 @@
+# tests/av1_mc_kernel.tcyr — AV1 inter prediction, the put_8tap motion-compensation
+# kernel (spec 7.11.3.2 / dav1d put_8tap_c). Verified against a Python port of dav1d
+# put_8tap_c (scratchpad/mc_put8tap.py): all four branches (integer / H / V / H+V),
+# both filter-selection paths (w>4 sets 0-2, w<=4 sets 3-4), and a SHARP filter_type.
+include "src/main.cyr"
+
+# a 16x16 padded reference plane, src[r][c] = (r*37 + c*11 + 20) & 255 (matches the
+# Python reference); the test block sits at (4,4) with >=4 border for the 8-tap.
+fn mc_src_plane(): i64 {
+    var s = alloc(16 * 16 * 8);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            store64(s + (((r * 16) + c) * 8), ((r * 37) + (c * 11) + 20) & 255);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return s;
+}
+# position-weighted checksum sum_i dst[i]*(i+1) — a wrong output pixel changes it.
+fn mc_checksum(dst, n): i64 {
+    var cs = 0;
+    var i = 0;
+    while (i < n) { cs = cs + (load64(dst + (i * 8)) * (i + 1)); i = i + 1; }
+    return cs;
+}
+
+fn test_put_8tap() {
+    var src = mc_src_plane();
+    var soff = (4 * 16) + 4;      # block top-left at (row 4, col 4)
+    var d = alloc(64 * 8);        # output scratch (up to 8x8)
+    # 1. integer (mx=0,my=0) -> copies the block. out[0] = src[4][4] = (148+44+20)&255 = 212.
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 0, 0, 8);
+    assert_eq(mc_checksum(d, 64), 301936, "put_8tap integer 8x8");
+    assert_eq(load64(d + 0), 212, "integer out[0] = src block top-left");
+    # 2. horizontal only, REGULAR half-pel (mx=8).
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 0, 0, 8);
+    assert_eq(mc_checksum(d, 64), 298113, "put_8tap H-only 8x8 REGULAR mx8");
+    # 3. vertical only, REGULAR half-pel (my=8).
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 8, 0, 8);
+    assert_eq(mc_checksum(d, 64), 289226, "put_8tap V-only 8x8 REGULAR my8");
+    # 4. the 2-pass H+V path (mx=8,my=8) -- checksum + spot pixels.
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 8, 0, 8);
+    assert_eq(mc_checksum(d, 64), 281124, "put_8tap H+V 8x8 REGULAR mx8my8");
+    assert_eq(load64(d + 0), 184, "H+V out[0] = 184");
+    assert_eq(load64(d + (27 * 8)), 124, "H+V out[27] = 124");
+    assert_eq(load64(d + (63 * 8)), 50, "H+V out[63] = 50");
+    # 5. H+V 4x4 -> the w<=4 filter set (3), mx=5 my=11.
+    av1_mc_put_8tap(d, 0, 4, src, soff, 16, 4, 4, 5, 11, 0, 8);
+    assert_eq(mc_checksum(d, 16), 11391, "put_8tap H+V 4x4 (w<=4 set) mx5my11");
+    # 6. H+V 8x8 SHARP (filter_type = SHARP|SHARP<<2 = 10), mx=3 my=13.
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 3, 13, 10, 8);
+    assert_eq(mc_checksum(d, 64), 274009, "put_8tap H+V 8x8 SHARP mx3my13");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("put_8tap motion-compensation kernel (7.11.3.2)");
+    test_put_8tap();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
