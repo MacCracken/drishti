@@ -432,6 +432,32 @@ fn frame_mk_fh(tile_cols, tile_rows, tile_cols_log2, tile_rows_log2): i64 {
     store64(fh + AV1FH_MI_ROW_STARTS + 8, 16);
     return fh;
 }
+# a 256x64 frame header with 2 tile columns [0,32)/[32,64) MI, 1 tile row (each tile
+# 32x16 MI = the frame_enc_keyframe tile) — for the multi-tile / multi-tile-group
+# tests. Same encode-matched params as frame_mk_fh (base_q 40, TX_MODE_SELECT,
+# disable_cdf_update=1); MiColStarts = [0, 32, 64], MiRowStarts = [0, 16].
+fn frame_mk_fh_2tile(): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_WIDTH, 256);
+    store64(fh + AV1FH_FRAME_HEIGHT, 64);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 256);
+    store64(fh + AV1FH_MI_COLS, 64);
+    store64(fh + AV1FH_MI_ROWS, 16);
+    store64(fh + AV1FH_BASE_Q_IDX, 40);
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_SELECT);
+    store64(fh + AV1FH_TILE_COLS, 2);
+    store64(fh + AV1FH_TILE_ROWS, 1);
+    store64(fh + AV1FH_TILE_COLS_LOG2, 1);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);
+    store64(fh + AV1FH_MI_COL_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 16, 64);
+    store64(fh + AV1FH_MI_ROW_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 16);
+    return fh;
+}
 # no filters (enable_cdef=0, uses_lr=0, lf_level=0): decode the keyframe end-to-end
 # to a flat DC (128) frame; the pipeline returns the reconstruction unchanged.
 fn test_frame_decode_plain() {
@@ -531,6 +557,54 @@ fn test_frame_decode_2tile() {
     assert_eq(load64(oe2), DR_OK, "2-tile + CDEF decode ok (filter over the whole frame)");
     assert_eq(dr_frame_width(cf), 256, "2-tile CdefFrame width 256");
     assert_eq(dr_frame_get(cf, 0, 180, 30), 128, "2-tile CDEF path -> right tile still 128");
+    return 0;
+}
+# multi-tile-GROUP: a frame whose 2 tiles arrive in 2 SEPARATE tile groups (partial
+# groups). Drives the frame-decode context directly: new -> group0 (not done) ->
+# group1 (done) -> finish, decoding into ONE shared frame. Same all-skip bytes into
+# each window -> whole 256x64 frame flat-128. Also checks the in-order/contiguous guard.
+fn test_frame_decode_multigroup() {
+    var tlen = 0;
+    var tb = frame_enc_keyframe(&tlen);
+    # two partial tile-group payloads, one tile each. Header is MSB-first:
+    # present=1 then tg_start then tg_end (1 bit each, tilebits = tile_cols_log2=1).
+    # group 0 -> present=1,tg_start=0,tg_end=0 = 0b100.... = 0x80; then tile 0 bytes.
+    var g0 = alloc(1 + tlen);
+    store8(g0 + 0, 0x80);
+    var i = 0;
+    while (i < tlen) { store8(g0 + 1 + i, load8(tb + i)); i = i + 1; }
+    # group 1 -> present=1,tg_start=1,tg_end=1 = 0b111.... = 0xE0; then tile 1 bytes.
+    var g1 = alloc(1 + tlen);
+    store8(g1 + 0, 0xE0);
+    i = 0;
+    while (i < tlen) { store8(g1 + 1 + i, load8(tb + i)); i = i + 1; }
+    var seq = frame_mk_seq(0);
+    var oe = alloc(8);
+    var fdc = av1_frame_dec_new(seq, frame_mk_fh_2tile(), oe);
+    assert_eq(load64(oe), DR_OK, "frame-dec context created");
+    assert_eq(fdc != 0, 1, "fdc non-null");
+    var d0 = av1_frame_dec_group(fdc, g0, 1 + tlen, oe);
+    assert_eq(load64(oe), DR_OK, "group 0 decodes");
+    assert_eq(d0, 0, "group 0 -> frame incomplete (more groups expected)");
+    var d1 = av1_frame_dec_group(fdc, g1, 1 + tlen, oe);
+    assert_eq(load64(oe), DR_OK, "group 1 decodes");
+    assert_eq(d1, 1, "group 1 -> frame complete");
+    var frame = av1_frame_dec_finish(fdc, oe);
+    assert_eq(load64(oe), DR_OK, "finish ok");
+    assert_eq(frame != 0, 1, "finish -> a frame");
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 256) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "multi-tile-group frame all flat-128 (2 groups, one shared frame)");
+    # trust no input: a first group that does NOT start at TileNum 0 is rejected.
+    var fdc2 = av1_frame_dec_new(seq, frame_mk_fh_2tile(), oe);
+    var dbad = av1_frame_dec_group(fdc2, g1, 1 + tlen, oe);   # g1 starts at tile 1
+    assert_eq(dbad, 0 - 1, "out-of-order first group -> -1");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "out-of-order group -> UNSUPPORTED");
     return 0;
 }
 # use_superres reconstructs downscaled then upscales (7.16); upscaling is not
@@ -758,6 +832,101 @@ fn frame_build_fh(out_len): i64 {
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
+# frame_build_seq for a 256x64 mono frame (max_frame_width_minus_1 = 255 -> width 256,
+# MiCols 64), otherwise identical to frame_build_seq. sb_cols = 4 -> max_log2_tile_cols
+# = 2, so 2 tile columns are legal (tile_info increment bit).
+fn frame_build_seq_2tile(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 1);            # still_picture = 1
+    dr_bw_put_bit(bw, 1);            # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15 (16-bit dims)
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 255, 16);     # max_frame_width_minus_1 = 255 -> width 256
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63 -> height 64
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0 (64x64 SB)
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra = 0
+    dr_bw_put_bit(bw, 1);            # enable_intra_edge_filter = 1
+    dr_bw_put_bit(bw, 0);            # enable_superres = 0
+    dr_bw_put_bit(bw, 0);            # enable_cdef = 0
+    dr_bw_put_bit(bw, 0);            # enable_restoration = 0
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 1);            # mono_chrome = 1 -> num_planes = 1
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # color_range = 0 (mono path returns here)
+    dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# frame_build_fh for the 256x64 frame with 2 tile columns (tile_cols_log2 = 1). The
+# tile_info section differs from frame_build_fh: uniform spacing, increment_tile_cols
+# = [1,0] (stop at log2 1; max_log2_tile_cols = 2 here), no tile-rows bit (sb_rows = 1),
+# then context_update_tile_id (tile_rows_log2+tile_cols_log2 = 1 bit) + tile_size_bytes.
+fn frame_build_fh_2tile(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1
+    dr_bw_put_bit(bw, 0);            # allow_screen_content_tools = 0
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1
+    dr_bw_put_bit(bw, 1);            # increment_tile_cols_log2 = 1 -> 2 tile columns
+    dr_bw_put_bit(bw, 0);            # increment_tile_cols_log2 = 0 (stop at log2 = 1)
+    dr_bw_put_bit(bw, 0);            # context_update_tile_id = 0 (1 bit)
+    dr_bw_put_bits(bw, 0, 2);        # tile_size_bytes_minus_1 = 0 -> 1 byte
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0 (mono: no DeltaQU*)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1 -> TX_MODE_SELECT
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# multi-tile-group over the OBU walk: TD + seq + FRAME_HEADER + two TILE_GROUP OBUs
+# (one tile each). av1_decode_obus creates the frame-decode context at the first group
+# and accumulates the second, returning the filtered 256x64 frame (all flat-128).
+fn test_obus_multigroup() {
+    var slen = 0;
+    var seq = frame_build_seq_2tile(&slen);
+    var flen = 0;
+    var fh = frame_build_fh_2tile(&flen);
+    var tlen = 0;
+    var tb = frame_enc_keyframe(&tlen);
+    var g0 = alloc(1 + tlen);
+    store8(g0 + 0, 0x80);            # present=1, tg_start=0, tg_end=0
+    var i = 0;
+    while (i < tlen) { store8(g0 + 1 + i, load8(tb + i)); i = i + 1; }
+    var g1 = alloc(1 + tlen);
+    store8(g1 + 0, 0xE0);            # present=1, tg_start=1, tg_end=1
+    i = 0;
+    while (i < tlen) { store8(g1 + 1 + i, load8(tb + i)); i = i + 1; }
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME_HEADER, fh, flen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, g0, 1 + tlen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, g1, 1 + tlen);
+    var n = dr_bw_flush(bw);
+    var oe = alloc(8);
+    var frame = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    assert_eq(load64(oe), DR_OK, "multi-group OBU stream decodes to a frame");
+    assert_eq(frame != 0, 1, "-> a frame");
+    assert_eq(dr_frame_width(frame), 256, "frame width 256");
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 256) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "2-tile-group OBU frame all flat-128 (av1_decode_obus accumulates)");
+    return 0;
+}
 # Header-construction sanity: the custom seq + fh parse to exactly the fields the
 # encode assumed (isolates header-layout bugs from the full decode).
 fn test_obus_header_sanity() {
@@ -948,6 +1117,7 @@ fn main() {
     test_frame_decode_plain();
     test_frame_decode_cdef();
     test_frame_decode_2tile();
+    test_frame_decode_multigroup();
     test_frame_decode_superres_rejected();
     test_frame_decode_10bit();
     test_frame_decode_12bit();
@@ -964,6 +1134,7 @@ fn main() {
     test_obus_header_sanity();
     test_obus_end_to_end();
     test_obus_frame_obu();
+    test_obus_multigroup();
     test_obus_forbidden_bit();
     test_obus_bad_seq_payload();
     test_obus_metadata_padding_skipped();

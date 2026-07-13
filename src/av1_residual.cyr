@@ -446,6 +446,20 @@ fn av1_get_filter_type(tile, blk, plane): i64 {
     return 0;
 }
 
+# Rebase an absolute plane 4x4 coord onto the tile origin for the coeff neighbour
+# context. The Above/Left level+dc arrays are PER-TILE — sized to the tile extent
+# + pad and cleared tile-relative (av1_clear_above/left_context, spec 5.11.2) — so
+# an absolute coord (start_x/y are absolute frame-plane pixels) must be rebased by
+# the tile's plane origin (MiColStart/MiRowStart >> plane subsampling). COL_START ==
+# ROW_START == 0 for a single tile spanning the frame, so this is a no-op there; a
+# windowed multi-tile tile lands at tile-relative slot 0 for its first column/row.
+fn av1_coeff_ctx_col(tile, start_x, subx): i64 {
+    return (start_x >> 2) - (load64(tile + AV1TILE_COL_START) >> subx);
+}
+fn av1_coeff_ctx_row(tile, start_y, suby): i64 {
+    return (start_y >> 2) - (load64(tile + AV1TILE_ROW_START) >> suby);
+}
+
 # ================================================================
 # transform_block (5.11.36) — predict → (coeffs → reconstruct) for one tx block.
 # blk is an Av1Block; mi (AV1MI_*) carries the mode info. plane/tx_sz/x/y select
@@ -507,10 +521,16 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     var have_ar = av1_bd_get(tile, plane, (sub_mi_row >> suby) - 1, (sub_mi_col >> subx) + step_x);
     var have_bl = av1_bd_get(tile, plane, (sub_mi_row >> suby) + step_y, (sub_mi_col >> subx) - 1);
 
+    # Reference-sample availability clamp (spec 7.11.2: maxX = MiCols*MI_SIZE-1,
+    # maxY = MiRows*MI_SIZE-1) is a FRAME edge, compared against the ABSOLUTE
+    # start_x/start_y — so pass the frame MI dims (FMI_COLS/FMI_ROWS), NOT the
+    # window extent MI_COLS/MI_ROWS. For a single tile FMI == MI_COLS, so this is
+    # unchanged there; a windowed tile (MiColStart>0) with the extent would clamp
+    # the above/left fill below the block and read the neighbouring tile's pixels.
     var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
     have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
     load64(tile + AV1TILE_ENABLE_EF), av1_get_filter_type(tile, blk, plane),
-    log2w, log2h, mi_cols, mi_rows);
+    log2w, log2h, load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
     if (rc != DR_OK) { return rc; }
     if (is_cfl) {
         var alpha = load64(mi + AV1MI_CFL_U);
@@ -532,7 +552,8 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         var quant = load64(tile + AV1TILE_QUANT);
         var eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
         load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),
-        start_x >> 2, start_y >> 2, mi_cols >> subx, mi_rows >> suby, bw, bh,
+        av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
+        mi_cols >> subx, mi_rows >> suby, bw, bh,
         load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
         load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
         quant, load64(tile + AV1TILE_OTT));

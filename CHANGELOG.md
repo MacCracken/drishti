@@ -4,6 +4,98 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.51] - 2026-07-12
+
+**Multi-tile-group frames — the multi-tile track is complete.** A frame whose tiles
+are split across **multiple `TILE_GROUP` OBUs** (each carrying a `TileNum` sub-range,
+spec 5.11.1) now decodes; previously only a single group covering the whole frame was
+accepted (`tg_count != num_tiles` → `DR_ERR_UNSUPPORTED`). The monolithic
+`av1_decode_frame` was decomposed into a **frame-decode context** (`Av1FrameDec`) that
+persists the reconstruction frame + the shared frame-sized MI grids + the LR params
+across groups: `av1_frame_dec_new` begins the frame, `av1_frame_dec_group` decodes one
+group's tiles into the shared grids (requiring each group to continue exactly at the
+next `TileNum` — in-order, contiguous, trust-no-input), and `av1_frame_dec_finish` runs
+the in-loop filters once over the whole frame when the last tile lands. `av1_decode_obus`
+now accumulates standalone tile-group OBUs into one context instead of returning at the
+first. `av1_decode_frame` is a thin single-group wrapper over the same context (behavior
+byte-identical for the common one-group case — the whole existing suite is the
+regression net). **20,572 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` green.**
+
+### Added
+- **Frame-decode context** (`src/av1_decode.cyr`): `Av1FrameDec` {frame, tile0,
+  lr_params, seq, fh, num_tiles, tiles_done} + `av1_frame_dec_new` / `av1_frame_dec_group`
+  / `av1_frame_dec_finish`. `av1_decode_frame` reduces to `new → group → finish`;
+  `av1_decode_obus` creates the context lazily at the first `TILE_GROUP` OBU and finishes
+  when a group completes the frame.
+- **Tests** (`tests/av1_decode.tcyr`): `test_frame_decode_multigroup` (drives the context
+  directly — two partial groups of one tile each into one shared 256×64 frame → flat-128;
+  plus the out-of-order/non-contiguous first-group reject) and `test_obus_multigroup` (a
+  full TD + seq + `FRAME_HEADER` + two `TILE_GROUP` OBU stream through `av1_decode_obus`).
+  New hand-built 2-tile-column headers: `frame_mk_fh_2tile` (struct) + `frame_build_seq_2tile`
+  / `frame_build_fh_2tile` (bitstream; `tile_cols_log2 = 1`, traced against `av1_tile_info`).
+
+### Scope / deferred
+- Multi-tile-group is exercised for **all-skip** tiles (the encode lane's current reach);
+  a non-skip end-to-end test awaits the non-skip encode lane. Groups must arrive in
+  `TileNum` order (the normal bitstream order); an out-of-order/overlapping group is
+  rejected `DR_ERR_UNSUPPORTED`. Multi-group split across **FRAME OBUs** (type 6, one
+  embedded group each) is not a real-stream shape and stays single-group per FRAME OBU.
+
+## [0.7.50] - 2026-07-12
+
+**Multi-tile intra correctness — the last table-free multi-tile gaps.** Two
+extent-vs-absolute defects in `av1_transform_block` that break intra decode for any
+tile past column/row 0 (both latent behind the flat-content 2-tile test): the 0.7.49
+scope note had flagged the first, and the adversarial review of that fix surfaced the
+second in the same function.
+
+1. **Coeff-context split.** The per-tile `AboveLevelContext` / `LeftLevelContext` (+ Dc)
+   arrays are sized to the tile **extent** and cleared tile-relative (spec 5.11.2
+   `clear_above/left_context`), but `av1_transform_block` indexed them with **absolute**
+   frame-plane coords (`start_x >> 2`) — correct only for a single tile (`MiColStart =
+   0`); a windowed tile overran the extent-sized array **and** failed the `(x4+k) <
+   max_x4` neighbour bound, zeroing the context past tile column 0. Now rebased to the
+   tile origin (`av1_coeff_ctx_col`/`av1_coeff_ctx_row`), landing slot 0 at the tile's
+   first column/row.
+2. **Intra reference-sample bound.** `av1_transform_block` passed the window **extent**
+   (`MI_COLS`/`MI_ROWS`) to `av1_intra_predict`, whose availability clamp `maxX =
+   MiCols*MI_SIZE-1` (spec 7.11.2) is a **frame** edge compared against the **absolute**
+   `start_x`. For a windowed tile the extent clamp sits *below* the block, collapsing the
+   whole above/left reference fill onto the neighbouring tile's edge column/row. Now it
+   passes the **frame** MI dims (`FMI_COLS`/`FMI_ROWS`) — the spec-literal `MiCols`, and
+   what the parameter meant pre-multi-tile (single tile: `FMI == MI_COLS`).
+
+Both are byte-identical for a single tile (`MiColStart = MiRowStart = 0`, `FMI ==
+extent`), so the whole existing suite is the regression net; each fix has a direct unit
+test since a non-skip multi-tile end-to-end test awaits the non-skip encode lane.
+**20,557 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **Coeff-context rebase** (`src/av1_residual.cyr`): `av1_coeff_ctx_col(tile, start_x,
+  subx)` / `av1_coeff_ctx_row(tile, start_y, suby)` = `(start_x >> 2) - (MiColStart >>
+  subx)` — the absolute→tile-relative plane-4x4 index for the coeff neighbour context;
+  `av1_transform_block` passes these to `av1_coeffs_decode`.
+- **Intra reference bound** (`src/av1_residual.cyr`): `av1_transform_block` passes
+  `FMI_COLS`/`FMI_ROWS` (frame MI dims) to `av1_intra_predict` in place of the window
+  extent `MI_COLS`/`MI_ROWS`, restoring the spec-7.11.2 frame `maxX`/`maxY`.
+- **Tests** (`tests/av1_residual.tcyr`): `test_coeff_ctx_tile_relative` (single tile ⇒
+  identity; column-windowed `[32,64)` first→slot 0 / 8 MI in→slot 8 / last→slot 31 /
+  chroma `subx=1`→slot 0; row-windowed `[16,32)` first→slot 0) and
+  `test_intra_predict_multitile_ref` (a DC block at absolute `x=128` whose left column
+  127 differs from its own above row 128+ — frame-mi reads 200, the old extent-mi reads
+  tile 0's 100).
+
+### Scope / deferred
+- The frame-addressed `LoopfilterTxSizes` / `BlockDecoded` grids keep **absolute**
+  plane coords (clamped to `MiColEnd`/`MiRowEnd`) — a deliberately different addressing
+  scheme (frame-wide, shared across tiles), untouched by this change.
+- The **encode** transform_block path (`av1_coeffs_encode`) is not yet wired, so it
+  needs no matching rebase today; when it lands it must use the same helpers.
+- A **non-skip multi-tile** end-to-end test still awaits the non-skip encode lane; both
+  fixes are unit-tested directly meanwhile. Multi-tile-group frames remain
+  `DR_ERR_UNSUPPORTED` (a later bite; roadmap.md).
+
 ## [0.7.49] - 2026-07-12
 
 **Multi-tile decode — the first multi-tile frame decodes.** Completing the

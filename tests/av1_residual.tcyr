@@ -414,6 +414,62 @@ fn test_tile_window() {
     assert_eq(load64(t2 + AV1TILE_COL_END), 16, "default col_end = MiCols");
     return 0;
 }
+# 0.7.50: the coeff neighbour context (Above/Left level+dc) is PER-TILE and cleared
+# tile-relative, so av1_coeff_ctx_col/row rebase an absolute plane-4x4 coord onto the
+# tile origin (MiColStart/MiRowStart >> subsampling). A single tile has origin 0, so
+# the rebase is the identity; a windowed multi-tile tile lands at slot 0 for its
+# first column/row. Guards the pre-0.7.50 bug where absolute indexing overran the
+# tile-sized array and failed the (< extent) neighbour bound for any tile past col 0.
+fn test_coeff_ctx_tile_relative() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(256, 64, 1, 0, 0, 8, 8, oe);
+    # single tile spanning the frame: origin 0 -> rebase is the identity.
+    var t0 = av1_tile_new(frame, 64, 16, 40, 1, 0, 1);
+    assert_eq(av1_coeff_ctx_col(t0, 128, 0), 32, "single-tile: col rebase identity (128>>2)");
+    assert_eq(av1_coeff_ctx_row(t0, 40, 0), 10, "single-tile: row rebase identity (40>>2)");
+    # windowed tile [32,64) x [0,16): the tile's first luma column (MiCol 32 ->
+    # start_x 128) rebases to tile-relative slot 0; deeper columns count from there.
+    var t = av1_tile_new(frame, 32, 16, 40, 1, 0, 1);
+    av1_tile_set_frame_mi(t, 64, 16);
+    av1_tile_set_window(t, 32, 0, 64, 16);
+    assert_eq(av1_coeff_ctx_col(t, 128, 0), 0, "windowed: tile's first column -> slot 0");
+    assert_eq(av1_coeff_ctx_col(t, 160, 0), 8, "windowed: 8 MI into the tile -> slot 8");
+    assert_eq(av1_coeff_ctx_col(t, 252, 0), 31, "windowed: tile's last column -> slot 31 (< extent+pad)");
+    # chroma (subx=1): MiCol 32 -> chroma start_x (32>>1)*4 = 64 -> slot 0.
+    assert_eq(av1_coeff_ctx_col(t, 64, 1), 0, "windowed chroma: first column -> slot 0");
+    # a row-windowed tile [0,64) x [16,32): first row (MiRow 16 -> start_y 64) -> slot 0.
+    var tr = av1_tile_new(frame, 64, 16, 40, 1, 0, 1);
+    av1_tile_set_frame_mi(tr, 64, 32);
+    av1_tile_set_window(tr, 0, 16, 64, 32);
+    assert_eq(av1_coeff_ctx_row(tr, 64, 0), 0, "windowed rows: tile's first row -> slot 0");
+    assert_eq(av1_coeff_ctx_row(tr, 96, 0), 8, "windowed rows: 8 MI down -> slot 8");
+    return 0;
+}
+# 0.7.50: the intra reference-sample availability clamp (spec 7.11.2 maxX/maxY) is a
+# FRAME edge compared against ABSOLUTE start_x/start_y, so `transform_block` passes the
+# frame MI dims (FMI_COLS/FMI_ROWS) to av1_intra_predict, NOT the tile window extent.
+# A windowed multi-tile tile fed the EXTENT would clamp the above row below the block
+# and read the neighbouring tile's pixels. This drives the clamp directly: a DC block at
+# absolute x=128 whose left neighbour column (127, tile 0's edge) differs from its own
+# tile's above row (128+). frame-mi reads 128+ (its own tile); extent-mi collapses to 127.
+fn test_intra_predict_multitile_ref() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(256, 64, 1, 0, 0, 8, 8, oe);   # 256x64 mono 8-bit
+    # row 7 (above the block): col 127 = 100 (tile 0's last col), cols 128..135 = 200.
+    dr_frame_set(frame, 0, 127, 7, 100);
+    var c = 128;
+    while (c < 136) { dr_frame_set(frame, 0, c, 7, 200); c = c + 1; }
+    # DC_PRED 8x8 (log2 3x3) block at (128,8): above avail, left NOT (tile boundary),
+    # no above-right. frame MI 64x16 -> maxX = 64*4-1 = 255 -> above reads cols 128..135.
+    var rc = av1_intra_predict(frame, 0, 128, 8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 64, 16);
+    assert_eq(rc, DR_OK, "intra predict ok (frame-mi bound)");
+    assert_eq(dr_frame_get(frame, 0, 128, 8), 200, "DC reads the tile's OWN above row (frame-mi 64)");
+    # the OLD extent bound (mi_cols=32 -> maxX=127) collapses the above row onto col 127:
+    var rc2 = av1_intra_predict(frame, 0, 128, 8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 32, 16);
+    assert_eq(rc2, DR_OK, "intra predict ok (extent bound)");
+    assert_eq(dr_frame_get(frame, 0, 128, 8), 100, "extent bound (the bug) reads tile 0's col 127");
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -437,6 +493,10 @@ fn main() {
     test_frame_addressed_grids();
     test_group("tile window (multi-tile MI origins)");
     test_tile_window();
+    test_group("coeff context tile-relative (multi-tile)");
+    test_coeff_ctx_tile_relative();
+    test_group("intra reference clamp frame-mi (multi-tile)");
+    test_intra_predict_multitile_ref();
     return assert_summary();
 }
 
