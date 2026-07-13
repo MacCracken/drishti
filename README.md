@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.46 (AV1 keyframe decode: raw OBU bytes → pixels; 8/10/12-bit)
+## Status — 0.7.47 (AV1 keyframe decode: raw OBU bytes → pixels; 8/10/12-bit; multi-tile foundation begun)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,521 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,527 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is
@@ -47,7 +47,9 @@ sequence + frame headers from raw OBU bytes and drives `av1_decode_frame`, handl
 **and** the combined FRAME OBU (type 6, frame header + tile group in one — the common
 real-stream form; it byte-splits off the tile group per spec 5.10). A complete
 keyframe bitstream now decodes **from raw bytes all the way to pixels** — both forms
-verified end-to-end. Multi-tile + multi-frame streams are the next step.
+verified end-to-end, at 8/10/12-bit. **Multi-tile** is underway (the MI grids are now
+frame-addressed so several tiles can share one frame-sized grid; the tile-window
+origins + driver come next); superres + inter prediction follow.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive

@@ -6,23 +6,24 @@
 
 ## Version
 
-**0.7.46** — cut 2026-07-12, not yet tagged (user's git). Enables **10/12-bit
-(high-bit-depth) decode** by dropping the `av1_seq_bitdepth != 8` reject guard in
-`av1_decode_frame` — the whole pixel pipeline already threads `bit_depth` (dequant's
-`1<<(7+bit_depth)` clamp + the 8/10/12-bit Qlookup, the inverse transform,
-reconstruct's `Clip1`, every intra mode, and all three in-loop filters' `(bit_depth-8)`
-scaling), so removing the guard was all it took. A 10-bit keyframe reconstructs to the
-correct mid-value (`1<<(BitDepth-1)` = 512), a 12-bit one to 2048. A 3-dimension
-adversarial **audit** workflow (intra-pred / residual-transform / filters-and-test)
-swept the pixel pipeline for hidden 8-bit assumptions. **This is the first of the four
-tracked remaining AV1-decode capabilities** the user directed be pursued (all of:
-**(1) multi-tile**, **(2) superres**, **(3) inter**, **(4) 10-bit** — none dropped;
-superres + inter await coefficient tables; see memory `av1-decode-remaining-tracks`).
-Builds on the complete single-tile decode spine (0.7.25 tile decode → 0.7.45 FRAME
-OBU). Next: multi-tile (the other table-free track). The remaining distance to 1.0 is
-multi-tile + superres + inter + conformance + the encode-lane completion (finishing
-0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x)
-+ freeze/docs (0.12.x). See
+**0.7.47** — cut 2026-07-12, not yet tagged (user's git). **Multi-tile foundation,
+step 1: frame-addressed MI grids** (track 1 of the 4 remaining AV1-decode
+capabilities). The MI grids (MiSizes / YModes / UVModes / Skips / InterTxSizes /
+LoopfilterTxSizes / CdefIdx) were tile-sized with a tile-relative stride, but the
+in-loop filters run frame-wide across tile boundaries, so multi-tile needs
+**frame-sized shared grids** indexed by absolute MI. This bite converts the substrate:
+`Av1Tile` gains `FMI_COLS`/`FMI_ROWS` (frame MI dims = grid alloc size + stride,
+defaulting to the tile dims, overridable via `av1_tile_set_frame_mi`); the grid alloc,
+all grid accessors, the CDEF ctx stride, and the `clear_cdef` stride now use the frame
+stride. **Behavior-preserving for single-tile** (FMI == MiCols → byte-identical; every
+existing test passes). A stride-consistency review + a `test_frame_addressed_grids`
+(two cells that collide under the tile stride stay distinct under the frame stride)
+confirm it. Next multi-tile steps: the tile-window origins (MiColStart/RowStart) + the
+SB-loop-at-origin + the multi-tile driver + a 2-tile end-to-end test. Superres + inter
+still await their coefficient tables (see memory `av1-decode-remaining-tracks`); 10-bit
+landed 0.7.46. The remaining distance to 1.0 is multi-tile + superres + inter +
+conformance + the encode-lane completion (finishing 0.7.x), then the other per-codec
+arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 > **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
@@ -47,7 +48,7 @@ multi-tile + superres + inter + conformance + the encode-lane completion (finish
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 746, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 747, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -67,7 +68,7 @@ multi-tile + superres + inter + conformance + the encode-lane completion (finish
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
-| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ MI grids + LoopfilterTxSizes + CdefIdx + CDEF read context via av1_tile_set_cdef_ctx) + Av1Block decode contexts |
+| `src/av1_residual.cyr` | `av1_` | residual driver (5.11.34/36) — residual()/transform_block(): predict_intra → coeffs() → reconstruct() per tx block into a DrFrame (+ CfL, BlockDecoded grid, MaxLumaW/H, get_filter_type 7.11.2.8); get_tx_size; Av1Tile (+ **frame-addressed** MI grids stride FMI_COLS + LoopfilterTxSizes + CdefIdx + CDEF read context via av1_tile_set_cdef_ctx; av1_tile_set_frame_mi for multi-tile) + Av1Block decode contexts |
 | `src/av1_partition.cyr` | `av1_` | partition tree (5.11.4/5) — decode_partition (all 10 types + split_or_horz/vert synthesized CDF) / decode_block (mode-info→tx-size→residual + MI-grid writes) + paired encode lane; Partition_Subsize / is_inside / partition ctx / reset_block_context |
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
@@ -87,12 +88,12 @@ multi-tile + superres + inter + conformance + the encode-lane completion (finish
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 29 suites / **20,521 assertions**: drishti 51 · bits
+- `make test` — 29 suites / **20,527 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
-  142 · av1_residual 35 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
+  142 · av1_residual 41 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
   av1_cdef 42 · av1_lr 80 · av1_decode 159 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG

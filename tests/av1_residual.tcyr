@@ -363,6 +363,32 @@ fn test_set_cdef_ctx() {
     return 0;
 }
 
+# Frame-addressed grids (multi-tile foundation): with FMI_COLS overridden ABOVE the
+# tile's MiCols, grid[r][c] indexes r*FMI_COLS + c — so two cells that would COLLIDE
+# under a tile stride (MiCols) stay distinct. Proves the grids are frame-strided, so
+# several tiles can later share one frame-sized grid.
+fn test_frame_addressed_grids() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 8, 8, 40, 1, 0, 1);   # tile MiCols = 8
+    av1_tile_set_frame_mi(t, 16, 8);                  # but the FRAME grid is 16 MI wide
+    av1_tile_grids_new(t);
+    assert_eq(av1_tile_frame_mi_cols(t), 16, "frame MiCols = 16 (overridden)");
+    # [1][2] -> flat 1*16+2 = 18; [0][10] -> flat 0*16+10 = 10. Under the OLD tile
+    # stride (8) both map to flat 10 and would collide; the frame stride keeps them apart.
+    av1_grid_set(t, AV1TILE_YMODES, 1, 2, 99);
+    av1_grid_set(t, AV1TILE_YMODES, 0, 10, 77);
+    assert_eq(av1_grid_get(t, AV1TILE_YMODES, 1, 2), 99, "grid[1][2] = 99 (frame stride, no collision)");
+    assert_eq(av1_grid_get(t, AV1TILE_YMODES, 0, 10), 77, "grid[0][10] = 77 (distinct cell)");
+    assert_eq(load64(load64(t + AV1TILE_YMODES) + (18 * 8)), 99, "raw flat offset 18 = r*FMI_COLS+c");
+    # the CdefIdx grid + the CDEF context both use the frame stride now.
+    av1_cdefidx_set(t, 1, 2, 5);
+    assert_eq(load64(load64(t + AV1TILE_CDEFIDX) + (18 * 8)), 5, "cdefidx[1][2] at flat 18 (frame stride)");
+    av1_tile_set_cdef_ctx(t, 1, 3, 0, 0, 0);
+    assert_eq(load64(load64(t + AV1TILE_CDEF_CTX) + 40), 16, "cdef ctx stride = frame MiCols (16)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("get_tx_size");
@@ -381,6 +407,8 @@ fn main() {
     test_filter_type_affects_prediction();
     test_group("cdef read context (av1_tile_set_cdef_ctx)");
     test_set_cdef_ctx();
+    test_group("frame-addressed MI grids (multi-tile foundation)");
+    test_frame_addressed_grids();
     return assert_summary();
 }
 

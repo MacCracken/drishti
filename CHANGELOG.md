@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.47] - 2026-07-12
+
+**Multi-tile foundation, step 1: frame-addressed MI grids.** The AV1 MI grids
+(MiSizes / YModes / UVModes / Skips / InterTxSizes / the 3 LoopfilterTxSizes /
+CdefIdx) were tile-sized with a tile-relative stride — but the in-loop filters run
+frame-wide across tile boundaries, so multi-tile requires **frame-sized shared grids**
+indexed by absolute MI. This bite converts the grid substrate: the grids now allocate
+at and stride by the **frame** MI dimensions (`Av1Tile` gains `FMI_COLS`/`FMI_ROWS`,
+defaulting to the tile dims), so several tiles can later share one frame-sized grid,
+each writing its own MI window. **Behavior-preserving for single-tile** (FMI == MiCols
+→ byte-identical; all existing tests pass unchanged). The tile-window origins + SB-loop
++ multi-tile driver are the next bites. Multi-tile is track 1 of the 4 tracked
+remaining AV1-decode capabilities. **20,527 suite assertions + 1,140 fuzz assertions,
+all green; `make lint` green.**
+
+### Changed
+- **Frame-addressed MI grids** (`src/av1_residual.cyr`): `Av1Tile` gains
+  `AV1TILE_FMI_COLS` / `AV1TILE_FMI_ROWS` (the frame MI dimensions = grid alloc size
+  + row stride), defaulted to the tile dims in `av1_tile_new` and overridable via
+  the new `av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows)` (call before
+  `av1_tile_grids_new`). `av1_tile_grids_new` allocs `FMI_COLS*FMI_ROWS`; every grid
+  accessor (`av1_grid_get/set`, `av1_lftx_get/set`, `av1_cdefidx_get/set`), the CDEF
+  read context stride (`av1_tile_set_cdef_ctx`, ctx+40), and the `clear_cdef` stride
+  passed from `decode_tile`/`encode_tile` now use the frame stride. All remaining
+  `AV1TILE_MI_COLS` uses stay tile-extent (SB-loop bounds, `is_inside`, pixel bounds,
+  tile-local scratch sizing) — audited for stride consistency.
+- **Test** (`tests/av1_residual.tcyr`, +6): `test_frame_addressed_grids` — with
+  `FMI_COLS` overridden above the tile MiCols, two grid cells that would COLLIDE under
+  the old tile stride (`[1][2]` and `[0][10]` both → flat 10 at stride 8) stay distinct
+  (→ flat 18 and 10 at stride 16), and the CdefIdx grid + CDEF ctx use the frame stride.
+
 ## [0.7.46] - 2026-07-12
 
 Enables **10/12-bit (high-bit-depth) decode**. `av1_decode_frame` no longer rejects
