@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.62] - 2026-07-13
+
+**Inter prediction — the MV-prediction foundation (spec 7.10.2).** Motion-vector prediction
+(`find_mv_stack`) is one of the largest AV1 subsystems; this is its **leaf-first first bite** — the
+self-contained pieces the rest of the process composes. `src/av1_mv.cyr` adds:
+
+- the **motion-vector representation** `Av1Mv` — a `(row, col)` pair in 1/8-luma-sample units
+  (`mv[0]` = row, `mv[1]` = col, matching the spec's `mv[]` convention) with
+  `av1_mv_new` / `av1_mv_row` / `av1_mv_col` / `av1_mv_set`;
+- **`av1_lower_mv_precision`** (spec 7.10.2.10) — drops an MV to the frame's allowed precision:
+  a no-op under `allow_high_precision_mv`, else clears the 1/8-pel bit toward zero, or snaps to whole
+  luma samples under `force_integer_mv`;
+- **`av1_setup_global_mv`** (spec 7.10.2.1) — the **global-motion MV candidate**: projects the
+  block's central luma sample through the reference's warp model (`gm_type` + `gm_params`, already
+  parsed into the frame header by `av1_global_motion_params`) and lowers it to the frame's precision.
+  This is the `GLOBALMV` predictor and the default candidate `find_mv_stack` falls back to. The
+  translation model shifts the stored translation from 1/2^16 warp precision to 1/8-pel (arithmetic
+  `>>>`, since `gm_params` may be negative); the rotzoom/affine models project through the 2×3 affine
+  matrix and round with `Round2Signed` (the symmetric variant, reusing `av1_round2_signed` from
+  `av1_intra.cyr` — not the floor-only `av1_round2`).
+
+Verified by 54 assertions with known answers **independently computed by a spec-literal Python port**
+(`scratchpad/mv_ref.py`) that shares no code with the implementation — covering all model types
+(identity / translation / rotzoom / affine), high/low precision, `force_integer_mv`, negative
+projections, non-zero block origins, a full rotzoom exercising every `yc` term + the `mi_row→y`
+wiring, and a negative projection that distinguishes `Round2Signed` from `Round2`. A **4-slice
+adversarial spec review** (guards+translation / rotzoom-affine projection+overflow / lower_mv_precision
++ composition / tests+libaom-dav1d cross-check, each finding adversarially verified) returned **no
+findings** — reviewers hand-recomputed the projection cases from the spec pseudocode and confirmed the
+matrix indices, shift kinds (arithmetic vs logical), rounding kind (`Round2Signed`), and i64 overflow
+bounds (worst-case products ≈ 2^41, far below 2^63). The two refuted findings were coverage
+suggestions, both folded into the suite as the two extra cases above. **21,253 suite assertions +
+1,140 fuzz assertions, all green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_mv.cyr`**: `Av1Mv` (row, col) + `av1_mv_new` / `av1_mv_row` / `av1_mv_col` / `av1_mv_set`;
+  `av1_lower_mv_precision` (7.10.2.10); `av1_setup_global_mv` (7.10.2.1).
+- **`tests/av1_mv.tcyr`**: `test_mv_repr`, `test_round2_signed` (the Round2Signed contract av1_mv
+  relies on), `test_lower_mv_precision`, `test_setup_global_mv` — 54 assertions.
+
+### Scope / deferred
+- Only these leaves. The MV candidate STACK — spatial scan (`scan_row` / `scan_col` /
+  `add_ref_mv_candidate`), temporal scan (needs the DPB's saved MVs), `extra_search`, the sorting
+  process, and the `NewMv` / `RefMv` / `Zero` / DRL contexts — plus the `find_mv_stack` driver, are
+  the next bites of the MV-prediction arc (roadmap.md), building on the storage + global candidate this
+  bite establishes.
+
 ## [0.7.61] - 2026-07-13
 
 **Inter prediction — the reference-frame buffer / DPB (spec 7.20 + 7.21).** The decoded-picture

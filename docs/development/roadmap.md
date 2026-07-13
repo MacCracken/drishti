@@ -217,10 +217,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   7.20 reference frame update + 7.21 loading: the 8-slot pixel `FrameStore` + `av1_dpb_store`/
   `_update`/`_load`, the `av1_dpb_ref_frame` inter hook mapping `ref_frame_idx` to the stored
   frame the MC driver reads, and the `av1_decode_stream` multi-frame OBU walk; a 5-slice
-  adversarial review returned no findings); next MV prediction + inter mode-info (then the
-  inter tile decode that lets `av1_decode_stream` decode a genuine inter frame referencing the
-  DPB), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
-  `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
+  adversarial review returned no findings), and the **MV-prediction foundation** `av1_mv.cyr`
+  0.7.62 (spec 7.10.2: the `Av1Mv` (row,col) representation + `av1_lower_mv_precision` 7.10.2.10 +
+  `av1_setup_global_mv` 7.10.2.1 — the global-motion MV candidate, the leaf-first entry to the
+  MV-pred arc; a 4-slice adversarial review returned no findings); next the MV candidate stack
+  (spatial/temporal scan + sorting + the NewMv/RefMv/Zero/DRL contexts + the `find_mv_stack`
+  driver) + inter mode-info (then the inter tile decode that lets `av1_decode_stream` decode a
+  genuine inter frame referencing the DPB), then compound/OBMC/warp + scaled-reference/BILINEAR
+  MC; all table-free, dav1d `mc_tmpl.c` / `decode.c` references in hand). See memory
+  `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

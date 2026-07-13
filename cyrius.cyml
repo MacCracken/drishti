@@ -48,6 +48,7 @@ modules = [
     "src/av1_cdef.cyr",
     "src/av1_superres.cyr",
     "src/av1_mc.cyr",
+    "src/av1_mv.cyr",
     "src/av1_decode.cyr",
     "src/av1_dpb.cyr",
     "src/h264_nal.cyr",

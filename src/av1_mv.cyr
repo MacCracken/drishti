@@ -1,0 +1,155 @@
+# src/av1_mv.cyr — AV1 motion-vector prediction (spec 7.10), FOUNDATION bite.
+#
+# Motion-vector prediction (find_mv_stack, 7.10.2) is one of the largest AV1
+# subsystems: it derives, for an inter block, the ordered list of candidate MVs
+# (spatial neighbours + temporal projection + global motion) plus the entropy
+# contexts (NewMv/RefMv/Zero/DRL) the mode reader consults. This module is its
+# LEAF-FIRST first bite — the two self-contained pieces the rest of the process
+# composes:
+#
+#   * the MOTION-VECTOR representation (a (row, col) pair in 1/8-luma-sample
+#     units; mv[0] = row, mv[1] = col, matching the spec's mv[] convention),
+#   * lower_mv_precision (7.10.2.10) — drop the MV to the precision the frame
+#     allows (clear the 1/8-pel bit when !allow_high_precision_mv; snap to whole
+#     pels when force_integer_mv), and
+#   * setup_global_mv (7.10.2.1) — the GLOBAL-MOTION MV candidate: project the
+#     block's central luma sample through the reference's warp model (gm_type +
+#     gm_params, already parsed into the frame header by av1_global_motion_params)
+#     and lower it to the frame's MV precision. This is the GLOBALMV predictor and
+#     the default candidate find_mv_stack falls back to.
+#
+# The rotzoom/affine projection rounds with Round2Signed (spec section 4):
+# symmetric rounding toward the nearest, sign preserved (distinct from av1_round2
+# / Round2, which floors toward negative infinity). That helper already exists as
+# av1_round2_signed in av1_intra.cyr (wired earlier), so this module reuses it.
+#
+# FLAT module — wired after src/av1_mc.cyr (the other inter-prediction leaf) so
+# the inter pieces sit together. Family av1_. Depends on: av1_intra
+# (av1_round2_signed + AV1_MI_SIZE), av1_modeinfo (av1_block_width /
+# av1_block_height), av1_frame (av1_fh_gm_* / allow_high_precision_mv /
+# force_integer_mv + AV1_WARPEDMODEL_PREC_BITS / AV1_GM_* / AV1_INTRA_FRAME),
+# drishti (DR_OK).
+#
+# Derived from the AV1 spec §7.10.2.1 (setup global MV) + §7.10.2.10 (lower
+# precision) + §4 (Round2Signed). SCOPE (0.7.62): these leaves only. The MV
+# candidate stack (scan_row/col, temporal_scan, extra_search, sorting, the
+# NewMv/RefMv/Zero/DRL contexts) and the find_mv_stack driver are later bites of
+# the MV-prediction arc (roadmap.md) — they build on the storage + global
+# candidate this bite establishes.
+
+# ================================================================
+# Av1Mv — a motion vector: two i64 components, mv[0] = row (vertical) then
+# mv[1] = col (horizontal), each in 1/8 luma-sample units (signed). This matches
+# the spec's mv[] ordering everywhere in 7.10.
+# ================================================================
+enum Av1MvOff {
+    AV1MV_ROW  = 0;    # mv[0] — vertical component (1/8 luma sample)
+    AV1MV_COL  = 8;    # mv[1] — horizontal component (1/8 luma sample)
+    AV1MV_SIZE = 16;
+}
+
+# av1_mv_new — allocate a zeroed (row, col) MV, or 0 on OOM.
+fn av1_mv_new(): i64 {
+    var m = alloc(AV1MV_SIZE);
+    if (m == 0) { return 0; }
+    store64(m + AV1MV_ROW, 0);
+    store64(m + AV1MV_COL, 0);
+    return m;
+}
+fn av1_mv_row(mv): i64 { return load64(mv + AV1MV_ROW); }
+fn av1_mv_col(mv): i64 { return load64(mv + AV1MV_COL); }
+fn av1_mv_set(mv, row, col): i64 {
+    store64(mv + AV1MV_ROW, row);
+    store64(mv + AV1MV_COL, col);
+    return DR_OK;
+}
+
+# ================================================================
+# av1_lower_mv_precision — the lower precision process (spec 7.10.2.10), in place
+# on `mv` (a 2-component Av1Mv). When high precision is ALLOWED the MV is left
+# exactly as-is (immediate return). Otherwise, per component:
+#   * force_integer_mv: snap to a whole luma sample — aInt = (|v| + 3) >> 3 (round
+#     to nearest 8, ties up), re-signed as ±(aInt << 3);
+#   * else: clear the 1/8-pel bit by moving an odd value one step TOWARD zero.
+# `allow_hp` = allow_high_precision_mv, `force_int` = force_integer_mv (both 0/1),
+# passed explicitly so the helper is reusable across the MV-pred arc.
+# ================================================================
+fn av1_lower_mv_precision(mv, allow_hp, force_int): i64 {
+    if (allow_hp == 1) { return DR_OK; }
+    var i = 0;
+    while (i < 2) {
+        var v = load64(mv + (i * 8));
+        if (force_int != 0) {
+            var a = v;
+            if (a < 0) { a = 0 - a; }        # Abs(v); a >= 0 so >> below is exact
+            var aint = (a + 3) >> 3;          # round |v| to nearest whole pel (ties up)
+            if (v > 0) { v = aint << 3; }
+            else { v = 0 - (aint << 3); }     # v == 0 -> aint 0 -> 0; negative -> -(..)
+        } else {
+            if (v & 1) {                       # odd (two's-complement: (-3)&1 == 1)
+                if (v > 0) { v = v - 1; }
+                else { v = v + 1; }            # toward zero either way
+            }
+        }
+        store64(mv + (i * 8), v);
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# av1_setup_global_mv — the setup global MV process (spec 7.10.2.1): the
+# global-motion MV candidate for a block. Projects the block's central luma
+# sample through the reference `ref`'s warp model and lowers the result to the
+# frame's MV precision. Writes the (row, col) result into `out_mv` (an Av1Mv).
+#   fh       — the parsed frame header (carries GmType / gm_params /
+#              allow_high_precision_mv / force_integer_mv)
+#   ref      — the reference frame (INTRA_FRAME..ALTREF_FRAME); INTRA_FRAME or an
+#              IDENTITY model yields the zero MV
+#   mi_col/mi_row — the block's top-left position in 4x4 (MI) units
+#   mi_size  — the block size (MiSize enum) → Block_Width/Height
+# Overflow-safe in i64: gm_params are <= ~2^24 and the projected coordinate x/y is
+# <= ~2^15, so the products stay far below the 2^63 range.
+# ================================================================
+fn av1_setup_global_mv(out_mv, fh, ref, mi_col, mi_row, mi_size): i64 {
+    var row = 0;
+    var col = 0;
+    var typ = AV1_GM_IDENTITY;
+    if (ref != AV1_INTRA_FRAME) { typ = av1_fh_gm_type(fh, ref); }
+    # INTRA_FRAME or IDENTITY -> zero MV (row/col stay 0).
+    if ((ref != AV1_INTRA_FRAME) && (typ != AV1_GM_IDENTITY)) {
+        if (typ == AV1_GM_TRANSLATION) {
+            # translation model: the MV is the stored translation, shifted from
+            # 1/2^16 warp precision down to 1/8-pel (>> 13). gm_params may be
+            # negative, so the arithmetic shift `>>>` (cyrius `>>` is logical).
+            row = av1_fh_gm_param(fh, ref, 0) >>> (AV1_WARPEDMODEL_PREC_BITS - 3);
+            col = av1_fh_gm_param(fh, ref, 1) >>> (AV1_WARPEDMODEL_PREC_BITS - 3);
+        } else {
+            # rotzoom / affine: project the central luma sample (x, y) through the
+            # 2x3 affine matrix, then round the sub-pel result to the MV precision.
+            var bw = av1_block_width(mi_size);
+            var bh = av1_block_height(mi_size);
+            var x = (mi_col * AV1_MI_SIZE) + (bw / 2) - 1;
+            var y = (mi_row * AV1_MI_SIZE) + (bh / 2) - 1;
+            var one = 1 << AV1_WARPEDMODEL_PREC_BITS;
+            var xc = ((av1_fh_gm_param(fh, ref, 2) - one) * x)
+            + (av1_fh_gm_param(fh, ref, 3) * y) + av1_fh_gm_param(fh, ref, 0);
+            var yc = (av1_fh_gm_param(fh, ref, 4) * x)
+            + ((av1_fh_gm_param(fh, ref, 5) - one) * y) + av1_fh_gm_param(fh, ref, 1);
+            if (av1_fh_allow_high_precision_mv(fh) == 1) {
+                row = av1_round2_signed(yc, AV1_WARPEDMODEL_PREC_BITS - 3);
+                col = av1_round2_signed(xc, AV1_WARPEDMODEL_PREC_BITS - 3);
+            } else {
+                # low precision: round to 1/4-pel (>> 14) then scale back to 1/8-pel
+                # (* 2), so the result has a clear low bit before lower_mv_precision.
+                row = av1_round2_signed(yc, AV1_WARPEDMODEL_PREC_BITS - 2) * 2;
+                col = av1_round2_signed(xc, AV1_WARPEDMODEL_PREC_BITS - 2) * 2;
+            }
+        }
+    }
+    store64(out_mv + AV1MV_ROW, row);
+    store64(out_mv + AV1MV_COL, col);
+    av1_lower_mv_precision(out_mv, av1_fh_allow_high_precision_mv(fh),
+    av1_fh_force_integer_mv(fh));
+    return DR_OK;
+}

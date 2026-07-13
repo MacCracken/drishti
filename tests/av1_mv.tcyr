@@ -1,0 +1,158 @@
+# tests/av1_mv.tcyr — MV-prediction foundation (spec 7.10.2.1 setup_global_mv +
+# 7.10.2.10 lower_mv_precision + the Av1Mv representation + Round2Signed).
+#
+# Known answers are independently computed by a spec-literal Python port
+# (scratchpad/mv_ref.py) transcribed straight from the spec pseudocode — it shares
+# no code with src/av1_mv.cyr, so a matching value cross-validates the port.
+include "src/main.cyr"
+
+# build a frame header carrying a global-motion model for ref = LAST_FRAME plus
+# the allow_high_precision_mv / force_integer_mv flags (all other fields zeroed).
+fn mv_fh(gtype, p0, p1, p2, p3, p4, p5, allow_hp, force_int): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_GM_TYPE + ((AV1_LAST_FRAME - 1) * 8), gtype);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 0) * 8), p0);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 1) * 8), p1);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 2) * 8), p2);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 3) * 8), p3);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 4) * 8), p4);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 5) * 8), p5);
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, allow_hp);
+    store64(fh + AV1FH_FORCE_INT_MV, force_int);
+    return fh;
+}
+# run setup_global_mv and assert the (row, col) result.
+fn chk_gmv(fh, ref, mc, mr, ms, erow, ecol, name): i64 {
+    var mv = av1_mv_new();
+    av1_setup_global_mv(mv, fh, ref, mc, mr, ms);
+    assert_eq(av1_mv_row(mv), erow, name);
+    assert_eq(av1_mv_col(mv), ecol, name);
+    return 0;
+}
+# run lower_mv_precision on (row, col) and assert the result.
+fn chk_lower(row, col, allow_hp, force_int, erow, ecol, name): i64 {
+    var mv = av1_mv_new();
+    av1_mv_set(mv, row, col);
+    av1_lower_mv_precision(mv, allow_hp, force_int);
+    assert_eq(av1_mv_row(mv), erow, name);
+    assert_eq(av1_mv_col(mv), ecol, name);
+    return 0;
+}
+
+# ================================================================
+# Av1Mv representation.
+# ================================================================
+fn test_mv_repr() {
+    var mv = av1_mv_new();
+    assert_eq(av1_mv_row(mv), 0, "fresh mv row 0");
+    assert_eq(av1_mv_col(mv), 0, "fresh mv col 0");
+    av1_mv_set(mv, 0 - 17, 42);
+    assert_eq(av1_mv_row(mv), 0 - 17, "mv row set (negative)");
+    assert_eq(av1_mv_col(mv), 42, "mv col set");
+    # the two components are independent (row at +0, col at +8).
+    av1_mv_set(mv, 3, 0 - 9);
+    assert_eq(av1_mv_row(mv), 3, "mv row reset");
+    assert_eq(av1_mv_col(mv), 0 - 9, "mv col reset (negative)");
+    return 0;
+}
+
+# ================================================================
+# Round2Signed contract (spec section 4) — av1_mv relies on the SYMMETRIC form
+# (distinct from av1_round2 / Round2 which floors toward -inf for negatives).
+# ================================================================
+fn test_round2_signed() {
+    assert_eq(av1_round2_signed(24576, 13), 3, "Round2Signed(24576,13)=3");
+    assert_eq(av1_round2_signed(0 - 24576, 13), 0 - 3, "Round2Signed(-24576,13)=-3 (symmetric)");
+    assert_eq(av1_round2_signed(0, 13), 0, "Round2Signed(0,13)=0");
+    # the load-bearing difference from Round2: negative ties round on magnitude.
+    assert_eq(av1_round2_signed(0 - 3, 1), 0 - 2, "Round2Signed(-3,1)=-2");
+    assert_eq(av1_round2(0 - 3, 1), 0 - 1, "Round2(-3,1)=-1 (floors, differs)");
+    assert_eq(av1_round2_signed(0 - 1, 1), 0 - 1, "Round2Signed(-1,1)=-1");
+    return 0;
+}
+
+# ================================================================
+# lower_mv_precision (7.10.2.10).
+# ================================================================
+fn test_lower_mv_precision() {
+    # allow_high_precision_mv=1 -> immediate no-op (odd values preserved).
+    chk_lower(5, 0 - 7, 1, 0, 5, 0 - 7, "lower hp=1 no-op");
+    # !hp, !force_int -> clear the 1/8-pel (low) bit toward zero.
+    chk_lower(5, 0 - 7, 0, 0, 4, 0 - 6, "lower !hp: odd toward zero");
+    chk_lower(1, 0 - 1, 0, 0, 0, 0, "lower !hp: +-1 -> 0");
+    chk_lower(4, 0 - 4, 0, 0, 4, 0 - 4, "lower !hp: even unchanged");
+    # force_integer_mv -> snap to whole pels: aInt=(|v|+3)>>3, re-signed *8.
+    chk_lower(10, 0 - 13, 0, 1, 8, 0 - 16, "lower force_int 10/-13");
+    chk_lower(12, 0 - 12, 0, 1, 8, 0 - 8, "lower force_int 12/-12 (ties)");
+    chk_lower(13, 0 - 16, 0, 1, 16, 0 - 16, "lower force_int 13/-16 (round up)");
+    chk_lower(0, 4, 0, 1, 0, 0, "lower force_int 0/4 -> 0/0");
+    chk_lower(16, 0 - 8, 0, 1, 16, 0 - 8, "lower force_int exact pels unchanged");
+    return 0;
+}
+
+# ================================================================
+# setup_global_mv (7.10.2.1) — known answers from mv_ref.py. ONE = 1<<16.
+# BLOCK_8X8 (enum 3) = 8x8; BLOCK_16X16 (enum 6) = 16x16.
+# ================================================================
+fn test_setup_global_mv() {
+    var ONE = 1 << 16;
+    # IDENTITY model -> zero MV.
+    chk_gmv(mv_fh(AV1_GM_IDENTITY, 0, 0, ONE, 0, 0, ONE, 1, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 0, 0, "identity -> 0");
+    # INTRA_FRAME ref -> zero MV (never reads GmType).
+    chk_gmv(mv_fh(AV1_GM_ROTZOOM, 99, 99, ONE, 0, 0, ONE, 1, 0),
+    AV1_INTRA_FRAME, 0, 0, 3, 0, 0, "intra ref -> 0");
+    # TRANSLATION, high precision: mv = gm_params[0,1] >> 13.
+    chk_gmv(mv_fh(AV1_GM_TRANSLATION, 40960, 0 - 24576, 0, 0, 0, 0, 1, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 5, 0 - 3, "translation hp 5/-3");
+    # TRANSLATION, low precision: then the low bit is cleared toward zero.
+    chk_gmv(mv_fh(AV1_GM_TRANSLATION, 40960, 0 - 24576, 0, 0, 0, 0, 0, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 4, 0 - 2, "translation lp 4/-2");
+    # TRANSLATION, negative exact.
+    chk_gmv(mv_fh(AV1_GM_TRANSLATION, 0 - 57344, 73728, 0, 0, 0, 0, 1, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 0 - 7, 9, "translation neg -7/9");
+    # ROTZOOM, high precision, 8x8 at (0,0): x=y=3, alpha=8192 -> col 3.
+    chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0, 0, ONE, 1, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 0, 3, "rotzoom hp 0/3");
+    # ROTZOOM at a non-zero block origin: mi_col=2, mi_row=1 -> x=11 -> col 11.
+    chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0, 0, ONE, 1, 0),
+    AV1_LAST_FRAME, 2, 1, 3, 0, 11, "rotzoom offset 0/11");
+    # AFFINE with an identity linear part -> behaves like translation (4096/-8192).
+    chk_gmv(mv_fh(AV1_GM_AFFINE, 4096, 0 - 8192, ONE, 0, 0, ONE, 1, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 0 - 1, 1, "affine-identity -1/1");
+    # ROTZOOM, low precision: 1/4-pel round *2 -> col 4.
+    chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0, 0, ONE, 0, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 0, 4, "rotzoom lp 0/4");
+    # ROTZOOM, force_integer_mv, 16x16: projected 34 -> snapped to 32.
+    chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 40000, 0, 0, ONE, 0, 1),
+    AV1_LAST_FRAME, 0, 0, 6, 0, 32, "rotzoom force_int 0/32");
+    # FULL rotzoom with non-zero shear (p3,p4) AND scale (p5 != ONE) at a non-zero
+    # origin (mi_col=2, mi_row=1): exercises EVERY yc term (gm[4]*x, (gm[5]-ONE)*y,
+    # gm[3]*y) + the mi_row->y wiring — a swapped index or mi_row/mi_col mix-up here
+    # would not match (18, 4).
+    chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0 - 8192, 8192, ONE + 8192, 1, 0),
+    AV1_LAST_FRAME, 2, 1, 3, 18, 4, "full-rotzoom shear+scale 18/4");
+    # NEGATIVE projection that DISTINGUISHES Round2Signed from Round2: yc=-12288 rounds
+    # to -2 under the symmetric Round2Signed but to -1 under floor Round2 — pins that
+    # the projection uses the signed variant.
+    chk_gmv(mv_fh(AV1_GM_AFFINE, 0, 0 - 12288, ONE, 0, 0, ONE, 1, 0),
+    AV1_LAST_FRAME, 0, 0, 3, 0 - 2, 0, "neg-round Round2Signed -2/0");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("Av1Mv representation");
+    test_mv_repr();
+    test_group("Round2Signed contract (section 4)");
+    test_round2_signed();
+    test_group("lower_mv_precision (7.10.2.10)");
+    test_lower_mv_precision();
+    test_group("setup_global_mv (7.10.2.1)");
+    test_setup_global_mv();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
