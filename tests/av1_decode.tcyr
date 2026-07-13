@@ -425,6 +425,11 @@ fn frame_mk_fh(tile_cols, tile_rows, tile_cols_log2, tile_rows_log2): i64 {
     store64(fh + AV1FH_TILE_ROWS_LOG2, tile_rows_log2);
     store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
     store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);        # matches encode disable_cdf=1
+    # single tile spanning the frame: MiColStarts = [0, MiCols], MiRowStarts = [0, MiRows].
+    store64(fh + AV1FH_MI_COL_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_ROW_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 16);
     return fh;
 }
 # no filters (enable_cdef=0, uses_lr=0, lf_level=0): decode the keyframe end-to-end
@@ -465,16 +470,67 @@ fn test_frame_decode_cdef() {
 }
 # Multi-tile frames are unsupported here -> rejected cleanly (never a wrong
 # decode). Uses a valid 2-tile group payload so the parse succeeds first.
-fn test_frame_decode_multitile_rejected() {
+# THE multi-tile milestone: a 256x64 frame split into two 128px tiles, each decoding
+# the SAME single-tile keyframe bytes into its own MI window of the shared frame
+# grids. Both halves reconstruct flat-DC (128) — proving per-tile placement + tile
+# independence (tile 1's left neighbor is across the tile edge -> unavailable, so it
+# reads the same bits as tile 0). (All-skip, so the coeff-context split isn't needed.)
+fn test_frame_decode_2tile() {
+    var tlen = 0;
+    var tb = frame_enc_keyframe(&tlen);            # the 32x16-MI single-tile bytes
+    # 2-tile group payload: header(present=0) + tile0(le1 size + data) + tile1(data).
+    var plen = 2 + (2 * tlen);
+    var buf = alloc(plen);
+    store8(buf + 0, 0x00);                          # tile_start_and_end_present_flag = 0
+    store8(buf + 1, tlen - 1);                      # tile0 size_minus_1 (le1) -> size tlen
+    var i = 0;
+    while (i < tlen) { store8(buf + 2 + i, load8(tb + i)); i = i + 1; }
+    i = 0;
+    while (i < tlen) { store8(buf + 2 + tlen + i, load8(tb + i)); i = i + 1; }
+    # frame header: 256x64 (MiCols 64), 2 tile columns [0,32) and [32,64).
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_WIDTH, 256);
+    store64(fh + AV1FH_FRAME_HEIGHT, 64);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 256);
+    store64(fh + AV1FH_MI_COLS, 64);
+    store64(fh + AV1FH_MI_ROWS, 16);
+    store64(fh + AV1FH_BASE_Q_IDX, 40);
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_SELECT);
+    store64(fh + AV1FH_TILE_COLS, 2);
+    store64(fh + AV1FH_TILE_ROWS, 1);
+    store64(fh + AV1FH_TILE_COLS_LOG2, 1);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);
+    store64(fh + AV1FH_MI_COL_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 16, 64);
+    store64(fh + AV1FH_MI_ROW_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 16);
     var oe = alloc(8);
-    var buf = alloc(8);
-    store8(buf + 0, 0x00);                 # present=0 -> tg covers both tiles
-    store8(buf + 1, 0x01);                 # tile0 size_minus_1=1 -> size 2
-    store8(buf + 2, 0xAA); store8(buf + 3, 0xBB);   # tile0 data
-    store8(buf + 4, 0xCC); store8(buf + 5, 0xDD);   # tile1 (last) data
-    var frame = av1_decode_frame(frame_mk_seq(0), frame_mk_fh(2, 1, 1, 0), buf, 6, oe);
-    assert_eq(frame, 0, "multi-tile -> no frame");
-    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "multi-tile -> DR_ERR_UNSUPPORTED (not a wrong decode)");
+    var frame = av1_decode_frame(frame_mk_seq(0), fh, buf, plen, oe);
+    assert_eq(load64(oe), DR_OK, "2-tile decode ok");
+    assert_eq(frame != 0, 1, "2-tile -> a frame");
+    assert_eq(dr_frame_width(frame), 256, "frame width 256");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 128, "tile 0 (left half) flat 128");
+    assert_eq(dr_frame_get(frame, 0, 180, 30), 128, "tile 1 (right half) flat 128");
+    # whole frame flat-128: both windows placed with no gap / overlap.
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 256) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "2-tile frame all flat-128 (both tile windows correct)");
+    # decode again with CDEF enabled: the filter pipeline runs over the WHOLE 2-tile
+    # frame (tile0's window reset to [0,64)); a wrong reset would OOB / mis-size the
+    # CdefFrame. All-skip -> CDEF is a no-op, so the 256x64 result stays flat-128.
+    var oe2 = alloc(8);
+    var cf = av1_decode_frame(frame_mk_seq(1), fh, buf, plen, oe2);
+    assert_eq(load64(oe2), DR_OK, "2-tile + CDEF decode ok (filter over the whole frame)");
+    assert_eq(dr_frame_width(cf), 256, "2-tile CdefFrame width 256");
+    assert_eq(dr_frame_get(cf, 0, 180, 30), 128, "2-tile CDEF path -> right tile still 128");
     return 0;
 }
 # use_superres reconstructs downscaled then upscales (7.16); upscaling is not
@@ -891,7 +947,7 @@ fn main() {
     test_group("frame-level driver (av1_decode_frame)");
     test_frame_decode_plain();
     test_frame_decode_cdef();
-    test_frame_decode_multitile_rejected();
+    test_frame_decode_2tile();
     test_frame_decode_superres_rejected();
     test_frame_decode_10bit();
     test_frame_decode_12bit();

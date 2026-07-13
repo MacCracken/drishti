@@ -6,25 +6,24 @@
 
 ## Version
 
-**0.7.48** — cut 2026-07-12, not yet tagged (user's git). **Multi-tile foundation,
-step 2: tile-window geometry (per-tile MI origins).** On top of 0.7.47's
-frame-addressed grids, `Av1Tile` gains an absolute MI window
-(`MiColStart`/`MiRowStart`/`MiColEnd`/`MiRowEnd`, spec 5.11.2) set via
-`av1_tile_set_window`. The `decode_tile` SB loop runs over the window
-(`c = MiColStart..MiColEnd`), making **every downstream coordinate frame-absolute**
-without touching the partition/block recursion; and the tile-bounds checks
-(`is_inside`, the partition early-outs + `has_rows`/`has_cols` + edge guards,
-`block_write_grids`, `bd_clear`, `transform_block`'s extent check) use the absolute
-window end. **The crux**: with a window, `MI_COLS` becomes the *extent*, so every bound
-against an absolute coord uses `COL_END`/`ROW_END`, never `MI_COLS`.
-**Behavior-preserving for single-tile** (`MiColEnd == MiCols` → byte-identical; every
-existing test passes). A window-bound review + `test_tile_window` (`is_inside` respects
-the window — the cross-tile-edge availability check) confirm it. Next multi-tile step:
-the tile-relative context split (above/left/coeff indexing) + grid sharing + the
-multi-tile driver + a 2-tile end-to-end test. Superres + inter still await their
-coefficient tables (see memory `av1-decode-remaining-tracks`); 10-bit landed 0.7.46.
-The remaining distance to 1.0 is multi-tile + superres + inter + conformance + the
-encode-lane completion (finishing 0.7.x), then the other per-codec arcs (0.8.x
+**0.7.49** — cut 2026-07-12, not yet tagged (user's git). **Multi-tile decode — the
+first multi-tile frame decodes.** Completing the 0.7.47/0.7.48 foundation
+(frame-addressed grids + tile-window geometry), `av1_decode_frame` loops the tile
+group's tiles, decoding each into its absolute MI window (from the header's
+`MiColStarts`/`MiRowStarts`) of **one shared set of frame-sized grids** (spec 5.11.2,
+via `av1_tile_share_grids`); then the in-loop filters run once over the whole frame
+(tile 0's window reset to the frame). A **2-tile test** decodes the same keyframe bytes
+into two 128px windows of a 256×64 frame → flat-DC everywhere, proving per-tile
+placement + tile independence. A frame split across multiple tile groups is rejected
+`DR_ERR_UNSUPPORTED` (a later bite). **Scope**: multi-tile is exercised for **all-skip**
+tiles; a non-skip multi-tile tile additionally needs the tile-relative above/left
+**coeff-context split** (deferred — documented). A 2-dimension review
+(driver-correctness / filter-frame + single-tile regression) cleared it; single-tile
+decode is unchanged (all tests pass). Multi-tile is track 1 of the 4 remaining
+AV1-decode capabilities; superres + inter still await their coefficient tables (see
+memory `av1-decode-remaining-tracks`); 10-bit landed 0.7.46. The remaining distance to
+1.0 is the multi-tile coeff-split + multi-tile-group + superres + inter + conformance +
+the encode-lane completion (finishing 0.7.x), then the other per-codec arcs (0.8.x
 H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
@@ -50,7 +49,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 748, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 749, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -90,13 +89,13 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 ## Gates (all green, 2026-07-11)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 29 suites / **20,538 assertions**: drishti 51 · bits
+- `make test` — 29 suites / **20,545 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 52 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_lr 80 · av1_decode 159 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_lr 80 · av1_decode 166 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.

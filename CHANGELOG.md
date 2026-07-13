@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.49] - 2026-07-12
+
+**Multi-tile decode — the first multi-tile frame decodes.** Completing the
+0.7.47/0.7.48 foundation (frame-addressed grids + tile-window geometry),
+`av1_decode_frame` now loops the tile group's tiles, decoding each into its absolute
+MI window (`[MiColStart, MiColEnd)`, from the header's `MiColStarts`/`MiRowStarts`) of
+**one shared set of frame-sized grids** (spec 5.11.2); then the in-loop filters run
+once over the whole frame. A 2-tile test decodes the same keyframe bytes into two
+128px windows of a 256×64 frame → flat-DC everywhere, proving per-tile placement +
+tile independence. Multi-tile is track 1 of the 4 remaining AV1-decode capabilities.
+A 2-dimension adversarial review (driver-correctness / filter-frame + single-tile
+regression) confirmed the driver with **no correctness defects**; its one
+coverage-gap finding (the 2-tile test used only no-op filters) was closed by decoding
+the 2-tile stream a second time with CDEF enabled (the filter pipeline runs over the
+whole frame). **20,545 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` green.**
+
+### Added
+- **Grid sharing** (`src/av1_residual.cyr`): `av1_tile_share_grids(dst, src)` copies
+  the frame-sized MI grid pointers + frame dims so several tiles write into one shared
+  frame grid, each in its own MI window.
+- **Multi-tile driver** (`src/av1_decode.cyr`, `av1_decode_frame`): loops
+  `[tg_start, tg_end]`, deriving each tile's window from `MiColStarts`/`MiRowStarts`;
+  tile 0 allocates the grids, the rest share them; each tile is assembled
+  (`set_frame_mi` + `set_window`), activated, and decoded into its window. The in-loop
+  filters then run over the whole frame (tile 0's window reset to the frame). A frame
+  split across multiple tile groups is rejected `DR_ERR_UNSUPPORTED` (a later bite).
+- **Test** (`tests/av1_decode.tcyr`): `test_frame_decode_2tile` — a 256×64 frame, two
+  128px tile columns, the same all-skip bytes decoded into each window → the whole
+  frame is flat-128 (both windows placed with no gap/overlap). (`frame_mk_fh` now sets
+  `MiColStarts`/`MiRowStarts`, which the driver reads.)
+
+### Scope / deferred
+- Multi-tile decode is exercised for **all-skip** tiles (the encode lane's current
+  reach). A **non-skip** multi-tile tile additionally needs the tile-relative
+  above/left **coeff-context split** (the strips are tile-local; a windowed tile would
+  misindex them). Deferred — documented in `av1_decode_frame` + roadmap.
+
 ## [0.7.48] - 2026-07-12
 
 **Multi-tile foundation, step 2: tile-window geometry (per-tile MI origins).**

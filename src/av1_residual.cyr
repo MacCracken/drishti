@@ -215,6 +215,24 @@ fn av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows): i64 {
 }
 fn av1_tile_frame_mi_cols(tile): i64 { return load64(tile + AV1TILE_FMI_COLS); }
 
+# Share the frame-sized MI grids (+ frame dims) of `src` with `dst` so a second
+# tile writes into the SAME frame grids as the first (each in its own MI window).
+# Call after av1_tile_grids_new(src) + av1_tile_new(dst), before dst's window/decode.
+fn av1_tile_share_grids(dst, src): i64 {
+    store64(dst + AV1TILE_FMI_COLS, load64(src + AV1TILE_FMI_COLS));
+    store64(dst + AV1TILE_FMI_ROWS, load64(src + AV1TILE_FMI_ROWS));
+    store64(dst + AV1TILE_MISIZES, load64(src + AV1TILE_MISIZES));
+    store64(dst + AV1TILE_YMODES, load64(src + AV1TILE_YMODES));
+    store64(dst + AV1TILE_UVMODES, load64(src + AV1TILE_UVMODES));
+    store64(dst + AV1TILE_SKIPS, load64(src + AV1TILE_SKIPS));
+    store64(dst + AV1TILE_INTERTX, load64(src + AV1TILE_INTERTX));
+    store64(dst + AV1TILE_LFTX + 0, load64(src + AV1TILE_LFTX + 0));
+    store64(dst + AV1TILE_LFTX + 8, load64(src + AV1TILE_LFTX + 8));
+    store64(dst + AV1TILE_LFTX + 16, load64(src + AV1TILE_LFTX + 16));
+    store64(dst + AV1TILE_CDEFIDX, load64(src + AV1TILE_CDEFIDX));
+    return 0;
+}
+
 # Set the tile's absolute MI window [col_start, col_end) x [row_start, row_end)
 # into the frame (spec 5.11.2 MiColStart..MiColEnd). Also refreshes MI_COLS/MI_ROWS
 # to the window extent (used for the tile-local above/left scratch sizing). Call
