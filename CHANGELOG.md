@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.55] - 2026-07-12
+
+**Superres upscaling — per-plane frame upscale (spec 7.16).** `av1_superres_upscale_frame`
+horizontally upscales a whole downscaled reconstruction frame (each plane at `FrameWidth`)
+into an upscaled frame (each plane at `UpscaledWidth`), one row at a time via the 0.7.52–54
+kernel stack. Superres scales **only horizontally**, so plane heights are unchanged; the
+per-plane widths come straight off the `DrFrame`s (chroma already carries the subsampled
+`(w+subx)>>subx` widths, matching dav1d's `in_cw`/`out_cw`), and each plane gets its own
+`dx`/`mx0`. Verified against a dav1d Python reference for mono (`8→16`) and a 4:2:0 frame
+(luma `8→16` + chroma `4→8` — the subsampled-width path). A 2-dimension adversarial
+review (plane-loop + chroma-correctness) returned **no findings**. **20,742 suite
+assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **`src/av1_superres.cyr`**: `av1_superres_upscale_frame(down, up, bit_depth)` — the
+  per-plane / per-row upscale loop (reads `dr_frame_plane_width/height`, allocates one
+  src/dst row scratch per plane, `DR_OK` / `DR_ERR_OOM`).
+- **`tests/av1_superres.tcyr`**: `test_superres_upscale_frame` — mono 8×3→16×3 and a
+  4:2:0 3-plane 8×4→16×4 (chroma 4×2→8×2), each row checked against the dav1d reference.
+
+### Scope / deferred
+- The standalone frame-upscale function. The **pipeline wiring** — inserting it between
+  CDEF and loop restoration (deblock → CDEF → **superres** → LR), running LR at the
+  upscaled width, and lifting the `av1_decode_frame` `use_superres` reject — is the next
+  bite, at which point a superres keyframe decodes end-to-end.
+
 ## [0.7.54] - 2026-07-12
 
 **Superres upscaling — geometry (spec 7.16), reference-confirmed against dav1d.** The

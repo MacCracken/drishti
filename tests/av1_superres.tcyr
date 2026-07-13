@@ -208,10 +208,87 @@ fn test_superres_geometry() {
     return 0;
 }
 
+# av1_superres_upscale_frame — upscale a whole downscaled frame into an upscaled one,
+# per plane, against the dav1d reference (scratchpad/sr_ref.py). Covers mono and a
+# 4:2:0 3-plane frame (chroma uses the subsampled widths 4->8).
+fn test_superres_upscale_frame() {
+    var oe = alloc(8);
+    # 8->16 luma reference row (every downscaled row is the ramp 10,30,..,150).
+    var lref = alloc(16 * 8);
+    store64(lref + 0, 8);    store64(lref + 8, 13);   store64(lref + 16, 24);  store64(lref + 24, 35);
+    store64(lref + 32, 45);  store64(lref + 40, 55);  store64(lref + 48, 65);  store64(lref + 56, 75);
+    store64(lref + 64, 85);  store64(lref + 72, 95);  store64(lref + 80, 105); store64(lref + 88, 115);
+    store64(lref + 96, 125); store64(lref + 104, 136); store64(lref + 112, 147); store64(lref + 120, 152);
+    # --- mono 8x3 -> 16x3 ---
+    var down = dr_frame_new(8, 3, 1, 0, 0, 8, 8, oe);
+    var up = dr_frame_new(16, 3, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 3) {
+        var x = 0;
+        while (x < 8) { dr_frame_set(down, 0, x, y, 10 + (x * 20)); x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(av1_superres_upscale_frame(down, up, 8), DR_OK, "mono upscale ok");
+    var bad = 0;
+    y = 0;
+    while (y < 3) {
+        var x = 0;
+        while (x < 16) { if (dr_frame_get(up, 0, x, y) != load64(lref + (x * 8))) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "mono: every upscaled row matches the 8->16 reference");
+    # --- 4:2:0 3-plane: luma 8x4->16x4, chroma 4x2->8x2 ---
+    var d3 = dr_frame_new(8, 4, 3, 1, 1, 8, 8, oe);
+    var u3 = dr_frame_new(16, 4, 3, 1, 1, 8, 8, oe);
+    y = 0;
+    while (y < 4) {
+        var x = 0;
+        while (x < 8) { dr_frame_set(d3, 0, x, y, 10 + (x * 20)); x = x + 1; }
+        y = y + 1;
+    }
+    var pl = 1;
+    while (pl < 3) {
+        y = 0;
+        while (y < 2) {
+            var x = 0;
+            while (x < 4) { dr_frame_set(d3, pl, x, y, 20 + (x * 40)); x = x + 1; }   # 20,60,100,140
+            y = y + 1;
+        }
+        pl = pl + 1;
+    }
+    assert_eq(av1_superres_upscale_frame(d3, u3, 8), DR_OK, "4:2:0 upscale ok");
+    bad = 0;
+    y = 0;
+    while (y < 4) {
+        var x = 0;
+        while (x < 16) { if (dr_frame_get(u3, 0, x, y) != load64(lref + (x * 8))) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "4:2:0 luma upscaled rows match (8->16)");
+    # chroma 4->8 reference [17,27,48,70,90,112,133,143].
+    var cref = alloc(8 * 8);
+    store64(cref + 0, 17);  store64(cref + 8, 27);  store64(cref + 16, 48);  store64(cref + 24, 70);
+    store64(cref + 32, 90); store64(cref + 40, 112); store64(cref + 48, 133); store64(cref + 56, 143);
+    pl = 1;
+    while (pl < 3) {
+        y = 0;
+        while (y < 2) {
+            var x = 0;
+            while (x < 8) { if (dr_frame_get(u3, pl, x, y) != load64(cref + (x * 8))) { bad = 1; } x = x + 1; }
+            y = y + 1;
+        }
+        pl = pl + 1;
+    }
+    assert_eq(bad, 0, "4:2:0 chroma upscaled rows match (subsampled 4->8)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Upscale_Filter table invariants (spec 7.16)");
     test_upscale_filter_invariants();
+    test_group("superres per-plane frame upscale (spec 7.16)");
+    test_superres_upscale_frame();
     test_group("superres geometry (dav1d get_upscale_x0)");
     test_superres_geometry();
     test_group("superres upscale row (dav1d resize_c reference)");
