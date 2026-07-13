@@ -389,6 +389,32 @@ fn test_frame_addressed_grids() {
     return 0;
 }
 
+# av1_tile_set_window: the tile decodes an absolute MI window [COL_START,COL_END) x
+# [ROW_START,ROW_END); MI_COLS/ROWS become the window EXTENT; is_inside (5.11.4)
+# respects the window so a neighbor across a tile edge is unavailable.
+fn test_tile_window() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(256, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    av1_tile_set_frame_mi(t, 64, 16);              # frame grid 64x16
+    av1_tile_set_window(t, 32, 0, 64, 16);         # window [32,64) x [0,16)
+    assert_eq(load64(t + AV1TILE_COL_START), 32, "col_start 32");
+    assert_eq(load64(t + AV1TILE_COL_END), 64, "col_end 64");
+    assert_eq(load64(t + AV1TILE_MI_COLS), 32, "MI_COLS = window extent (64-32)");
+    assert_eq(load64(t + AV1TILE_MI_ROWS), 16, "MI_ROWS = window extent");
+    # is_inside uses ABSOLUTE coords vs the window (governs cross-tile availability).
+    assert_eq(av1_is_inside(t, 0, 32), 1, "col 32 (window start) inside");
+    assert_eq(av1_is_inside(t, 0, 63), 1, "col 63 (window end-1) inside");
+    assert_eq(av1_is_inside(t, 0, 31), 0, "col 31 (left of window / other tile) NOT inside");
+    assert_eq(av1_is_inside(t, 0, 64), 0, "col 64 (window end) NOT inside");
+    assert_eq(av1_is_inside(t, 16, 40), 0, "row 16 (below window) NOT inside");
+    # default (single tile): window = whole frame.
+    var t2 = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    assert_eq(load64(t2 + AV1TILE_COL_START), 0, "default col_start 0");
+    assert_eq(load64(t2 + AV1TILE_COL_END), 16, "default col_end = MiCols");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("get_tx_size");
@@ -409,6 +435,8 @@ fn main() {
     test_set_cdef_ctx();
     test_group("frame-addressed MI grids (multi-tile foundation)");
     test_frame_addressed_grids();
+    test_group("tile window (multi-tile MI origins)");
+    test_tile_window();
     return assert_summary();
 }
 

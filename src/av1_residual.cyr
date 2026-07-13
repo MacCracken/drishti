@@ -94,7 +94,17 @@ enum Av1TileOff {
     #     a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new. ---
     AV1TILE_FMI_COLS  = 376;  # frame MiCols (grid stride + alloc width)
     AV1TILE_FMI_ROWS  = 384;  # frame MiRows (grid alloc height)
-    AV1TILE_SIZE      = 392;
+    # --- multi-tile window (0.7.48): the tile decodes the ABSOLUTE MI region
+    #     [COL_START, COL_END) x [ROW_START, ROW_END) of the frame (spec 5.11.2
+    #     MiColStart..MiColEnd). The SB loop starts at the origin so all downstream
+    #     coords are frame-absolute; bounds checks use the window. For a single tile
+    #     spanning the frame START=0, END=MI_COLS/ROWS (identical to the old 0-based
+    #     model). Defaulted in av1_tile_new; a multi-tile driver sets av1_tile_set_window. ---
+    AV1TILE_COL_START = 392;  # MiColStart (tile origin, MI units)
+    AV1TILE_ROW_START = 400;  # MiRowStart
+    AV1TILE_COL_END   = 408;  # MiColEnd
+    AV1TILE_ROW_END   = 416;  # MiRowEnd
+    AV1TILE_SIZE      = 424;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -150,6 +160,11 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     # a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new.
     store64(tile + AV1TILE_FMI_COLS, mi_cols);
     store64(tile + AV1TILE_FMI_ROWS, mi_rows);
+    # tile window defaults to the whole frame (origin 0, extent = tile dims).
+    store64(tile + AV1TILE_COL_START, 0);
+    store64(tile + AV1TILE_ROW_START, 0);
+    store64(tile + AV1TILE_COL_END, mi_cols);
+    store64(tile + AV1TILE_ROW_END, mi_rows);
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
@@ -199,6 +214,21 @@ fn av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows): i64 {
     return 0;
 }
 fn av1_tile_frame_mi_cols(tile): i64 { return load64(tile + AV1TILE_FMI_COLS); }
+
+# Set the tile's absolute MI window [col_start, col_end) x [row_start, row_end)
+# into the frame (spec 5.11.2 MiColStart..MiColEnd). Also refreshes MI_COLS/MI_ROWS
+# to the window extent (used for the tile-local above/left scratch sizing). Call
+# after av1_tile_new; single-tile callers skip it (av1_tile_new defaults to the
+# whole frame). Does NOT re-size grids — set av1_tile_set_frame_mi + grids_new first.
+fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
+    store64(tile + AV1TILE_COL_START, col_start);
+    store64(tile + AV1TILE_ROW_START, row_start);
+    store64(tile + AV1TILE_COL_END, col_end);
+    store64(tile + AV1TILE_ROW_END, row_end);
+    store64(tile + AV1TILE_MI_COLS, col_end - col_start);
+    store64(tile + AV1TILE_MI_ROWS, row_end - row_start);
+    return 0;
+}
 
 # Allocate the MI grids (MiSizes / YModes / UVModes / Skips / InterTxSizes) + the
 # 3 per-plane LoopfilterTxSizes grids, each FrameMiCols*FrameMiRows i64, zeroed
@@ -290,8 +320,8 @@ fn av1_tile_set_lr_params(tile, lr_params): i64 {
 # above (-1) row and left (-1) col to 1 within the tile extent, the interior to
 # 0, and BlockDecoded[plane][SB4>>subY][-1] = 0.
 fn av1_bd_clear(tile, r, c, sb4, num_planes): i64 {
-    var mi_col_end = load64(tile + AV1TILE_MI_COLS);
-    var mi_row_end = load64(tile + AV1TILE_MI_ROWS);
+    var mi_col_end = load64(tile + AV1TILE_COL_END);   # tile window end (absolute MI)
+    var mi_row_end = load64(tile + AV1TILE_ROW_END);
     var subx = load64(tile + AV1TILE_SUBX);
     var suby = load64(tile + AV1TILE_SUBY);
     var plane = 0;
@@ -425,8 +455,10 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     var step_y = av1_tx_height(tx_sz) >> 2;
     var mi_cols = load64(tile + AV1TILE_MI_COLS);
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);
-    var max_x = (mi_cols * AV1_MI_SIZE) >> subx;
-    var max_y = (mi_rows * AV1_MI_SIZE) >> suby;
+    # extent check against the tile's ABSOLUTE right/bottom edge (start_x/y are
+    # absolute frame pixels). COL_END == MiCols for a single tile spanning the frame.
+    var max_x = (load64(tile + AV1TILE_COL_END) * AV1_MI_SIZE) >> subx;
+    var max_y = (load64(tile + AV1TILE_ROW_END) * AV1_MI_SIZE) >> suby;
     if ((start_x >= max_x) || (start_y >= max_y)) { return DR_OK; }
 
     var log2w = av1_tx_width_log2(tx_sz);
@@ -494,12 +526,14 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         }
     }
     # mark this tx block decoded (BlockDecoded[plane][+i][+j] = 1) and record its
-    # tx size in LoopfilterTxSizes (frame-level, plane-MI indexed; clamped to the
-    # plane extent so an edge block on a non-64-aligned frame can't OOB).
+    # tx size in LoopfilterTxSizes (frame-addressed, plane-MI indexed; clamped to the
+    # plane extent so an edge block on a non-64-aligned frame can't OOB). plane_r/c
+    # are ABSOLUTE frame-plane coords, so the clamp is the tile's ABSOLUTE window edge
+    # (COL_END/ROW_END), NOT the window extent MI_COLS/MI_ROWS.
     var plane_r = start_y >> 2;
     var plane_c = start_x >> 2;
-    var pmi_rows = mi_rows >> suby;
-    var pmi_cols = mi_cols >> subx;
+    var pmi_rows = load64(tile + AV1TILE_ROW_END) >> suby;
+    var pmi_cols = load64(tile + AV1TILE_COL_END) >> subx;
     var have_lftx = 0;
     if (load64(tile + AV1TILE_LFTX) != 0) { have_lftx = 1; }   # deblock scratch (optional)
     var i = 0;

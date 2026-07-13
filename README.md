@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.47 (AV1 keyframe decode: raw OBU bytes → pixels; 8/10/12-bit; multi-tile foundation begun)
+## Status — 0.7.48 (AV1 keyframe decode: raw bytes → pixels; 8/10/12-bit; multi-tile geometry in)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (20,527 suite assertions + 1,140 fuzz
+derived, and adversarially tested (20,538 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
 the in-loop filter layer is underway: the **deblocking loop filter** is

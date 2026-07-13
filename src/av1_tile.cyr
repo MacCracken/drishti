@@ -78,18 +78,22 @@ fn av1_clear_left_context(tile, num_planes): i64 {
 fn av1_decode_tile(tile): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var num_planes = dr_frame_num_planes(frame);
-    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
-    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    # absolute MI window of this tile (5.11.2): the SB loop runs over it so every
+    # downstream coord is frame-absolute. Single-tile: START=0, END=frame MI dims.
+    var row_start = load64(tile + AV1TILE_ROW_START);
+    var row_end = load64(tile + AV1TILE_ROW_END);
+    var col_start = load64(tile + AV1TILE_COL_START);
+    var col_end = load64(tile + AV1TILE_COL_END);
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }         # RefLrWiener/RefSgrXqd = Mid, per tile
-    var r = 0;
-    while (r < mi_rows) {
+    var r = row_start;
+    while (r < row_end) {
         av1_clear_left_context(tile, num_planes);
-        var c = 0;
-        while (c < mi_cols) {
+        var c = col_start;
+        while (c < col_end) {
             # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. use_128 = 0 (the
             # SB loop steps by AV1_SB4 = 64x64). Guarded: grid may be unallocated.
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, 0); }

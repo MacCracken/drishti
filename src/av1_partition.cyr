@@ -71,10 +71,11 @@ fn av1_partition_subsize(partition, bsize): i64 {
     return load64(av1_partsub_tables() + (((partition * 22) + bsize) * 8));
 }
 
-# is_inside (5.11.4) for a single tile: 0 <= r < MiRows, 0 <= c < MiCols.
+# is_inside (5.11.4): MiColStart <= c < MiColEnd, MiRowStart <= r < MiRowEnd — the
+# tile WINDOW (absolute MI coords), so a neighbor across a tile edge is unavailable.
 fn av1_is_inside(tile, r, c): i64 {
-    if ((c < 0) || (c >= load64(tile + AV1TILE_MI_COLS))) { return 0; }
-    if ((r < 0) || (r >= load64(tile + AV1TILE_MI_ROWS))) { return 0; }
+    if ((c < load64(tile + AV1TILE_COL_START)) || (c >= load64(tile + AV1TILE_COL_END))) { return 0; }
+    if ((r < load64(tile + AV1TILE_ROW_START)) || (r >= load64(tile + AV1TILE_ROW_END))) { return 0; }
     return 1;
 }
 
@@ -221,12 +222,13 @@ fn av1_block_neighbours(tile, r, c, avail_u, avail_l, out): i64 {
 # the avail flags reject r>=MiRows / c>=MiCols). Without the clamp an edge block
 # on a non-64-aligned frame is an OOB heap write (trust-no-input-byte).
 fn av1_block_write_grids(tile, r, c, bw4, bh4, mi_size, y_mode, uv_mode, skip, tx_size, has_chroma): i64 {
-    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
-    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    # clamp to the tile WINDOW end (absolute); grids are frame-addressed so r,c are absolute.
+    var row_end = load64(tile + AV1TILE_ROW_END);
+    var col_end = load64(tile + AV1TILE_COL_END);
     var y = 0;
-    while ((y < bh4) && ((r + y) < mi_rows)) {
+    while ((y < bh4) && ((r + y) < row_end)) {
         var x = 0;
-        while ((x < bw4) && ((c + x) < mi_cols)) {
+        while ((x < bw4) && ((c + x) < col_end)) {
             av1_grid_set(tile, AV1TILE_YMODES, r + y, c + x, y_mode);
             if (has_chroma) { av1_grid_set(tile, AV1TILE_UVMODES, r + y, c + x, uv_mode); }
             av1_grid_set(tile, AV1TILE_MISIZES, r + y, c + x, mi_size);
@@ -347,8 +349,8 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
 # top-level helper) so the 10-way branch stays readable. has_rows/has_cols and
 # the HORZ_4/VERT_4 edge guards are recomputed from the tile extent.
 fn av1_decode_partition_leaf(tile, partition, r, c, half, quarter, sub_size, split_size): i64 {
-    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
-    var mi_cols = load64(tile + AV1TILE_MI_COLS);
+    var mi_rows = load64(tile + AV1TILE_ROW_END);   # tile window end (absolute MI)
+    var mi_cols = load64(tile + AV1TILE_COL_END);
     if (partition == AV1_PARTITION_NONE) {
         av1_decode_block(tile, r, c, sub_size);
         return 0;
@@ -410,9 +412,9 @@ fn av1_decode_partition_leaf(tile, partition, r, c, half, quarter, sub_size, spl
 # decode_partition (5.11.4) — read the partition, recurse or decode_block.
 # ================================================================
 fn av1_decode_partition(tile, r, c, bsize): i64 {
-    var mi_cols = load64(tile + AV1TILE_MI_COLS);
-    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
-    if ((r >= mi_rows) || (c >= mi_cols)) { return DR_OK; }
+    var col_end = load64(tile + AV1TILE_COL_END);   # tile window end (absolute MI)
+    var row_end = load64(tile + AV1TILE_ROW_END);
+    if ((r >= row_end) || (c >= col_end)) { return DR_OK; }
     var sd = load64(tile + AV1TILE_SD);
     var ncc = load64(tile + AV1TILE_NCC);
     var avail_u = av1_is_inside(tile, r - 1, c);
@@ -421,9 +423,9 @@ fn av1_decode_partition(tile, r, c, bsize): i64 {
     var half = num4x4 >> 1;
     var quarter = half >> 1;
     var has_rows = 0;
-    if ((r + half) < mi_rows) { has_rows = 1; }
+    if ((r + half) < row_end) { has_rows = 1; }
     var has_cols = 0;
-    if ((c + half) < mi_cols) { has_cols = 1; }
+    if ((c + half) < col_end) { has_cols = 1; }
     var bsl = av1_mi_width_log2(bsize);
     var partition = AV1_PARTITION_NONE;
     if (bsize >= AV1_BLOCK_8X8) {
@@ -470,8 +472,8 @@ fn av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur): i64 {
     return 0;
 }
 fn av1_encode_partition(tile, r, c, bsize, plan_part, part_cur, plan_mi, plan_tx, blk_cur): i64 {
-    var mi_cols = load64(tile + AV1TILE_MI_COLS);
-    var mi_rows = load64(tile + AV1TILE_MI_ROWS);
+    var mi_cols = load64(tile + AV1TILE_COL_END);   # tile window end (absolute MI)
+    var mi_rows = load64(tile + AV1TILE_ROW_END);
     if ((r >= mi_rows) || (c >= mi_cols)) { return DR_OK; }
     var enc = load64(tile + AV1TILE_ENC);
     var ncc = load64(tile + AV1TILE_NCC);

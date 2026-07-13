@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.48] - 2026-07-12
+
+**Multi-tile foundation, step 2: tile-window geometry (per-tile MI origins).**
+Building on 0.7.47's frame-addressed grids, `Av1Tile` gains an absolute MI window —
+`MiColStart`/`MiRowStart`/`MiColEnd`/`MiRowEnd` (spec 5.11.2) — set via
+`av1_tile_set_window`. The `decode_tile` SB loop now runs over the window
+(`r = MiRowStart..MiRowEnd`, `c = MiColStart..MiColEnd`), which makes **every
+downstream coordinate frame-absolute** (per the map's leverage insight — the
+partition/block recursion is untouched); and the tile-bounds checks (`is_inside`, the
+`decode_partition`/`_leaf`/`encode_partition` early-outs + `has_rows`/`has_cols` +
+edge guards, `block_write_grids`, `bd_clear`, `transform_block`'s extent check) now use
+the absolute window end. **Behavior-preserving for single-tile** (`MiColEnd == MiCols`
+→ byte-identical; all existing tests pass unchanged). A window-bound adversarial
+review **caught a real latent bug** — the `LoopfilterTxSizes` write clamp in
+`transform_block` still used the window *extent* (`MI_COLS`) against an *absolute*
+plane coord, so a windowed tile would have written no LFTX data → garbage deblock
+(invisible to single-tile tests since `MiCols == MiColEnd`); fixed at the source. The
+tile-relative context split (above/left/coeff indexing), grid sharing across tiles,
+and the multi-tile driver + 2-tile end-to-end test are the next bite. **20,538 suite
+assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Changed
+- **Tile-window geometry** (`src/av1_residual.cyr`, `src/av1_tile.cyr`,
+  `src/av1_partition.cyr`): `Av1Tile` gains `COL_START`/`ROW_START`/`COL_END`/`ROW_END`
+  (defaulted to `[0, MiCols) × [0, MiRows)` in `av1_tile_new`); `av1_tile_set_window`
+  sets the window and resets `MI_COLS`/`MI_ROWS` to the window extent (for the
+  tile-local above/left scratch). The SB loop starts at the origin; `is_inside` and
+  every partition/grid/extent bound compares against the absolute window end. The
+  crux: with a window, `MI_COLS` becomes the *extent*, so every bound against an
+  absolute coord uses `COL_END`/`ROW_END`, never `MI_COLS`.
+- **Test** (`tests/av1_residual.tcyr`, +11): `test_tile_window` — `set_window` sets
+  the window + resets `MI_COLS` to the extent; `is_inside` respects the window
+  (col 32/63 inside `[32,64)`, col 31/64 and row 16 outside — the cross-tile-edge
+  availability check); single-tile defaults to the whole frame.
+
 ## [0.7.47] - 2026-07-12
 
 **Multi-tile foundation, step 1: frame-addressed MI grids.** The AV1 MI grids
