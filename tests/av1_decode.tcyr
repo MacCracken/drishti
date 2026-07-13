@@ -600,6 +600,16 @@ fn test_frame_decode_multigroup() {
         y = y + 1;
     }
     assert_eq(bad, 0, "multi-tile-group frame all flat-128 (2 groups, one shared frame)");
+    # grid probe: identical flat-128 pixels can't distinguish a wrong-window grid write,
+    # so probe the SHARED frame-addressed grids directly. All-skip -> the Skips grid is 1
+    # at every decoded MI; group 1's tile must have written its skip flags into its OWN
+    # absolute window [32,64) (a frame-addressed share of tile0's grids), NOT tile 0's
+    # [0,32). grids_new zero-inits, so a tile-relative / wrong-window write would leave
+    # [32,64) at 0. This directly exercises the multi-tile grid addressing (0.7.47-0.7.51).
+    var tile0 = load64(fdc + AV1FDEC_TILE0);
+    assert_eq(av1_grid_get(tile0, AV1TILE_SKIPS, 4, 8), 1, "group 0 tile: skip=1 in [0,32)");
+    assert_eq(av1_grid_get(tile0, AV1TILE_SKIPS, 4, 40), 1, "group 1 tile: skip=1 at abs col 40 (own window [32,64))");
+    assert_eq(av1_grid_get(tile0, AV1TILE_SKIPS, 12, 60), 1, "group 1 tile: skip=1 at abs col 60 (deep in [32,64))");
     # trust no input: a first group that does NOT start at TileNum 0 is rejected.
     var fdc2 = av1_frame_dec_new(seq, frame_mk_fh_2tile(), oe);
     var dbad = av1_frame_dec_group(fdc2, g1, 1 + tlen, oe);   # g1 starts at tile 1

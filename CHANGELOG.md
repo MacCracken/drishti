@@ -19,8 +19,13 @@ the in-loop filters once over the whole frame when the last tile lands. `av1_dec
 now accumulates standalone tile-group OBUs into one context instead of returning at the
 first. `av1_decode_frame` is a thin single-group wrapper over the same context (behavior
 byte-identical for the common one-group case — the whole existing suite is the
-regression net). **20,572 suite assertions + 1,140 fuzz assertions, all green; `make
-lint` green.**
+regression net). A 2-dimension adversarial review (context-lifecycle + ordering/walk)
+confirmed the state machine with **no correctness defects** — all three findings
+refuted, including a traced check that a stray `FRAME_HEADER` between groups can only
+yield a correct frame or a clean error, never wrong pixels; its one coverage observation
+(identical flat content can't distinguish a wrong-window grid write) was closed by a
+direct Skips-grid probe. **20,575 suite assertions + 1,140 fuzz assertions, all green;
+`make lint` green.**
 
 ### Added
 - **Frame-decode context** (`src/av1_decode.cyr`): `Av1FrameDec` {frame, tile0,
@@ -30,6 +35,7 @@ lint` green.**
   when a group completes the frame.
 - **Tests** (`tests/av1_decode.tcyr`): `test_frame_decode_multigroup` (drives the context
   directly — two partial groups of one tile each into one shared 256×64 frame → flat-128;
+  a Skips-grid probe proving group 1's tile wrote into its own absolute `[32,64)` window;
   plus the out-of-order/non-contiguous first-group reject) and `test_obus_multigroup` (a
   full TD + seq + `FRAME_HEADER` + two `TILE_GROUP` OBU stream through `av1_decode_obus`).
   New hand-built 2-tile-column headers: `frame_mk_fh_2tile` (struct) + `frame_build_seq_2tile`
