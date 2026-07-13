@@ -207,7 +207,9 @@ Baseline (0.7.0): OBU layer + sequence header.
   use_superres keyframe decodes end-to-end, reference-confirmed against dav1d). **INTER
   underway** (the last of the four tracks, and the biggest — 7.11.3: the Subpel_Filters
   table 0.7.57, the `put_8tap` 8-tap MC kernel 0.7.58 (reference-confirmed vs dav1d
-  `put_8tap_c`); next the MC driver, the ref-frame buffer/DPB, MV prediction, inter
+  `put_8tap_c`), the `emu_edge` frame-boundary block fetch 0.7.59 (reference-confirmed vs
+  dav1d `emu_edge_c`); next the MC driver (MV → integer + sub-pel split → `emu_edge` gather
+  → `put_8tap` into the `DrFrame`), the ref-frame buffer/DPB, MV prediction, inter
   mode-info, then compound/OBMC/warp; all table-free, dav1d `mc_tmpl.c` / `decode.c`
   references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths

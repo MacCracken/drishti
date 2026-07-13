@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.59] - 2026-07-13
+
+**Inter prediction — the frame-boundary block fetch (`emu_edge`, spec 7.11.3.2).** A
+faithful port of dav1d's `emu_edge_c` (`src/mc_tmpl.c`): `av1_mc_emu_edge` fetches a
+`bw×bh` reference block at a source position `(x, y)` that may lie partly or wholly
+outside the frame, **clamping out-of-bounds reads to the nearest edge pixel** (the AV1
+frame-boundary MC rule). It copies the visible portion, then replicates the edge pixels
+outward — left/right along each visible row, then the top rows from the first (already
+edge-extended) visible row and the bottom rows from the previous written row, exactly as
+dav1d does. This is the padded-block fetch that will feed `av1_mc_put_8tap` when a motion
+vector points near or past a frame edge. Verified against a **Python port of `emu_edge_c`**
+(`scratchpad/emu_edge.py`): a fully-inside block plus the four out-of-frame cases
+(top-left, bottom-right, bottom-left overhangs, and a block wholly left of the frame — a
+single visible column replicated across the whole block), matched via position-weighted
+checksums + spot pixels. A 2-dimension adversarial review (extension-geometry +
+index/bounds-safety) returned **no findings**. **20,960 suite assertions + 1,140 fuzz
+assertions, all green; `make lint` green.**
+
+### Added
+- **`src/av1_mc.cyr`**: `av1_mc_emu_edge(bw, bh, iw, ih, x, y, dst, doff, dstride, ref,
+  roff, rstride)` — the frame-boundary reference-block fetch with edge clamping.
+- **`tests/av1_mc_emu_edge.tcyr`**: `test_emu_edge` — 5 cases (center no-extension + the
+  four overhang directions) against the dav1d `emu_edge_c` reference.
+
+### Scope / deferred
+- The `emu_edge` fetch only (operates on i64 sample arrays). The MC **driver** that splits a
+  motion vector into integer + sub-pel parts, calls `emu_edge` to gather the padded reference
+  block, and drives `put_8tap` into the `DrFrame` is the next bite; the reference-frame buffer
+  (DPB, needs multi-frame decode), MV prediction, and inter mode-info follow.
+
 ## [0.7.58] - 2026-07-12
 
 **Inter prediction — the `put_8tap` motion-compensation kernel (spec 7.11.3.2).** A
