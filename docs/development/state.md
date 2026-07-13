@@ -36,7 +36,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 - **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
   version for the arithmetic-shift operator `>>>`. The pin is the
-  *minimum*; a newer installed `cycc` (currently **6.4.60**) compiles
+  *minimum*; a newer installed `cycc` (currently **6.4.62**) compiles
   clean and only emits a harmless drift note. **Set
   `CYRIUS_NO_WARN_PIN_DRIFT=1`** in the env for clean build/test/lint
   output. Bump the pin only when a new toolchain feature is actually used
@@ -48,7 +48,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 758, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 759, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -87,7 +87,7 @@ H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 
 `src/main.cyr` is the include-wiring root (no code).
 
-## Gates (all green, 2026-07-11)
+## Gates (all green, 2026-07-13)
 
 - `make build` — smoke exercises one real operation per family, exit 0
 - `make test` — 33 suites / **20,960 assertions**: drishti 51 · bits
@@ -235,13 +235,15 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    verified by a 2-superblock varied-partition round-trip (both CDF modes).
    **[done 0.7.25 — MILESTONE close.]**
 
-**Next — the AV1 inter + in-loop-filter layer** toward AV1 100%: motion
-compensation, deblocking, CDEF, loop restoration, film-grain synthesis;
-then conformance / 10-bit + the encode-lane completion. The deferred,
+**Next — the AV1 inter layer** toward AV1 100%: the MC driver, the
+reference-frame buffer/DPB (needs multi-frame decode), MV prediction, inter
+mode-info, and compound/OBMC/warp; plus film-grain synthesis; then conformance
++ the encode-lane completion. (In-loop filters — deblocking, CDEF, loop
+restoration — plus superres and 10/12-bit are already complete.) The deferred,
 feature-gated pieces (128×128 SBs, palette, intrabc, segmentation, active
-delta-q/lf, multi-tile, superres, frame-end CDF save/average, the non-skip
-residual-encode lane) fold in with the inter / conformance work.
-(`get_filter_type` was completed in 0.7.26.)
+delta-q/lf, frame-end CDF save/average, the non-skip residual-encode lane)
+fold in with the inter / conformance work. (`get_filter_type` was completed
+in 0.7.26.)
 
 Full per-codec arc plan + the audit/freeze arcs in
 [`roadmap.md`](roadmap.md). Nothing else in flight.

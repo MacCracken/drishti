@@ -26,7 +26,7 @@ assertions, all green; `make lint` green.**
 - **`src/av1_mc.cyr`**: `av1_mc_emu_edge(bw, bh, iw, ih, x, y, dst, doff, dstride, ref,
   roff, rstride)` — the frame-boundary reference-block fetch with edge clamping.
 - **`tests/av1_mc_emu_edge.tcyr`**: `test_emu_edge` — 5 cases (center no-extension + the
-  four overhang directions) against the dav1d `emu_edge_c` reference.
+  four out-of-frame cases) against the dav1d `emu_edge_c` reference.
 
 ### Scope / deferred
 - The `emu_edge` fetch only (operates on i64 sample arrays). The MC **driver** that splits a

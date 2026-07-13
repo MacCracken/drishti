@@ -17,7 +17,7 @@ Consumers pull the single-file bundle from a tag:
 ```toml
 [deps.drishti]
 git = "https://github.com/MacCracken/drishti.git"
-tag = "0.7.0"
+tag = "0.7.59"   # track the latest release tag
 modules = ["dist/drishti.cyr"]
 ```
 

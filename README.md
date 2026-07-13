@@ -23,33 +23,35 @@ test-bench container.
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (20,960 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
-milestone — **profile-0 AV1 keyframes decode end-to-end to pixels** — and
-the in-loop filter layer is underway: the **deblocking loop filter** is
-complete (`av1_deblock.cyr` — kernels + the whole-frame edge loop/driver), and
-the **CDEF** filter is complete (`av1_cdef.cyr` — kernels + driver + the wired
-`cdef_idx` read), and **loop restoration** (`av1_lr.cyr`, spec 7.17) is complete through the
-decode-tile layer — both filter kernels (**Wiener** + **self-guided/SGR**), the
-stripe-loop driver, the full `read_lr` bitstream parse, and the `decode_tile`
-wiring (round-trip-tested end-to-end). The three filters are now
-**chained** by the in-loop filter pipeline (`av1_decode.cyr`,
-`av1_apply_loop_filters`), and the **frame-header filter activation** step is in
-place: `av1_lr_params_from_fh` + `av1_activate_intra_filters` build the LR params
-and attach the CDEF context to a decode tile straight from the parsed header —
-end-to-end tested by decoding a keyframe tile whose LR params were header-derived.
+milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
+OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
+loop filter** (`av1_deblock.cyr` — kernels + the whole-frame edge loop/driver),
+the **CDEF** filter (`av1_cdef.cyr` — kernels + driver + the wired `cdef_idx`
+read), and **loop restoration** (`av1_lr.cyr`, spec 7.17 — both **Wiener** +
+**self-guided/SGR** kernels, the stripe-loop driver, the full `read_lr` bitstream
+parse, and the `decode_tile` wiring) are all done and **chained** by the in-loop
+filter pipeline (`av1_decode.cyr`, `av1_apply_loop_filters`), with **superres**
+(spec 7.16) upscaling spliced in between CDEF and LR. The **frame-header filter
+activation** step (`av1_lr_params_from_fh` + `av1_activate_intra_filters`) builds
+the LR params and attaches the CDEF context straight from the parsed header.
 The **tile-group OBU parser** (`av1_tile_group_parse`, spec 5.11.1) extracts each
 tile's byte range (bounds-checked against hostile sizes), and the **frame-level
 driver** (`av1_decode_frame`) ties it all together: from a parsed sequence + frame
-header + the tile-group payload it assembles, decodes, and filters a single-tile
-keyframe **all the way to pixels** (multi-tile and superres are rejected cleanly for
-now). The **OBU-stream walk** (`av1_decode_obus`) closes the loop: it parses the
-sequence + frame headers from raw OBU bytes and drives `av1_decode_frame`, handling
-**both** the separate-OBU form (TD + sequence-header + frame-header + tile-group OBUs)
-**and** the combined FRAME OBU (type 6, frame header + tile group in one — the common
+header + the tile-group payload it assembles, decodes, and filters a keyframe
+**all the way to pixels** — now for **multi-tile** frames (0.7.47–0.7.51) and
+**use_superres** streams too. The **OBU-stream walk** (`av1_decode_obus`) closes the
+loop: it parses the sequence + frame headers from raw OBU bytes and drives
+`av1_decode_frame`, handling **both** the separate-OBU form (TD + sequence-header +
+frame-header + tile-group OBUs) **and** the combined FRAME OBU (type 6 — the common
 real-stream form; it byte-splits off the tile group per spec 5.10). A complete
-keyframe bitstream now decodes **from raw bytes all the way to pixels** — both forms
-verified end-to-end, at 8/10/12-bit. **Multi-tile** is underway (the MI grids are now
-frame-addressed so several tiles can share one frame-sized grid; the tile-window
-origins + driver come next); superres + inter prediction follow.
+keyframe bitstream decodes **from raw bytes all the way to pixels** — both forms
+verified end-to-end, at 8/10/12-bit, single- and multi-tile, with or without
+superres. **Inter prediction** — the last decode track — is **underway**: the
+three leaf motion-compensation pieces have landed (`av1_mc.cyr`: the
+**Subpel_Filters** interpolation table 0.7.57, the **`put_8tap`** 8-tap MC kernel
+0.7.58, the **`emu_edge`** frame-boundary block fetch 0.7.59, each reference-confirmed
+against dav1d); the MC driver, the reference-frame buffer/DPB (needs multi-frame
+decode), MV prediction, and inter mode-info come next — inter frames do not yet decode.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive
@@ -90,7 +92,12 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   per-block mode-info → tx-size → residual orchestration + MI grids, with a
   paired encode lane) + the tile/frame loop (spec 5.11.2 `decode_tile`: the
   superblock loop + CDF-context / symbol init, driving a whole keyframe into a
-  `DrFrame`) — **a profile-0 AV1 keyframe decodes end-to-end to pixels**
+  `DrFrame`) — **a profile-0 AV1 keyframe decodes end-to-end to pixels** — + the
+  **in-loop filter layer** (deblocking 7.14 / CDEF 7.15 / loop restoration 7.17,
+  chained in `av1_apply_loop_filters`) + **superres** upscaling (spec 7.16) +
+  **multi-tile** frames (frame-addressed MI grids + tile-group accumulation) +
+  **8/10/12-bit** + the inter-prediction leaf kernels (Subpel_Filters + `put_8tap`
+  + `emu_edge`, spec 7.11.3.2, reference-confirmed against dav1d)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,
@@ -99,13 +106,13 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   encoder, bounds-hardened), VP8 frame framing + byte-exact writer,
   VP9 uncompressed header
 
-A profile-0 AV1 **keyframe** now decodes end-to-end to pixels — the
-block/partition decode composes every primitive (mode-info → tx-size →
-transform-type → residual, driven by the partition tree + tile loop). The
-remaining AV1 work toward 100% is the inter + in-loop-filter layer
-(motion compensation, deblocking, CDEF, loop restoration, film grain),
-conformance / 10-bit, and the encode lane. The road to 1.0 is **one minor
-arc per codec** —
+A profile-0 AV1 **keyframe** decodes end-to-end to pixels — single- or
+multi-tile, with or without superres, at 8/10/12-bit — through the full
+in-loop filter chain. The remaining AV1 work toward 100% is **inter
+prediction** (the MC driver + reference-frame DPB + MV prediction + inter
+mode-info + compound/OBMC/warp — the leaf MC kernels are in),
+**film-grain synthesis**, conformance, and the encode lane. The road to 1.0
+is **one minor arc per codec** —
 **0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
 **0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
 **freeze/documentation** arc (0.12.x) before the 1.0.0 close-out.

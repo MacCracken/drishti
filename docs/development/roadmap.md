@@ -128,7 +128,7 @@ Baseline (0.7.0): OBU layer + sequence header.
   transform block decodes end-to-end, round-trip tested; 0.7.18: the
   adaptive per-tile CDF context (`av1_ccdf_*`) so decode works with CDF
   adaptation on — both `disable_cdf_update` modes complete)** → the
-  block/partition decode **(in progress — 7-bite arc: 0.7.19
+  block/partition decode **(done 0.7.19–0.7.25 — 7-bite arc: 0.7.19
   `src/av1_noncoeffcdf.cyr` the non-coeff CDF tables; 0.7.20
   `src/av1_modeinfo.cyr` the intra mode-info reads (skip / y+uv mode / CfL /
   angle / filter-intra decode + inverse encode) with the shared block-size
@@ -164,9 +164,9 @@ Baseline (0.7.0): OBU layer + sequence header.
   `decode_tile`/`encode_tile` SB loop, guarded by a per-tile CDEF context
   (`av1_tile_set_cdef_ctx`). The **frame-header activation** helper
   (`av1_activate_intra_filters`, 0.7.41) now calls `set_cdef_ctx` straight from the
-  parsed header; **still open**: no OBU / `tile_group_obu` walk feeds real tile bytes
-  into it yet, so the splice is exercised only in tests until that driver stage lands
-  (0.7.4x). Loop
+  parsed header, and the OBU / `tile_group_obu` walk (0.7.42–0.7.45) feeds real tile
+  bytes into it — a keyframe decodes raw OBU bytes to pixels end-to-end through the full
+  CDEF-inclusive loop-filter chain. Loop
   restoration (7.17) is **complete** (`src/av1_lr.cyr`): both filter kernels — the
   **Wiener** separable 7-tap (0.7.33) and the **self-guided / SGR** box filter
   (7.17.2/7.17.3, 0.7.34) — plus the stripe-loop process/loop_restore_block driver
