@@ -1,0 +1,266 @@
+# src/av1_dpb.cyr — AV1 decoded-picture buffer (DPB) + the reference-frame
+# update / loading processes + a multi-frame stream driver.
+#
+# The spec's FrameStore[ 0..NUM_REF_FRAMES-1 ] is the ring of decoded reference
+# frames that inter prediction reads from: after a frame is decoded (and in-loop
+# filtered + upscaled), the reference frame update process (spec 7.20) saves its
+# PIXELS into every slot flagged by refresh_frame_flags; a show_existing_frame
+# then pulls a stored frame back out via the reference frame loading process
+# (7.21). This module is the PIXEL half of that ring — the eight decoded-frame
+# (DrFrame) slots. The per-slot METADATA half (dimensions, order hints, saved
+# global-motion) already lives in Av1RefState (src/av1_frame.cyr), advanced by
+# av1_frame_update_refs; av1_dpb_update runs both together so one call is the
+# whole 7.20 process.
+#
+# This is the piece the inter layer needs: av1_dpb_ref_frame maps a frame's
+# LAST..ALTREF reference through ref_frame_idx to the stored DrFrame that the MC
+# driver (av1_mc_pred_block, 0.7.60) reads. It also unlocks MULTI-FRAME decode:
+# av1_decode_stream walks a whole OBU stream, decodes each frame into the DPB,
+# and serves show_existing_frame from it (av1_decode_obus stays the single-frame
+# entry; this is its multi-frame superset).
+#
+# FLAT module — wired LAST in the AV1 chain (after src/av1_decode.cyr) so it can
+# call the frame-decode driver + OBU walk. Family av1_. Depends on: av1_decode
+# (av1_decode_frame / av1_frame_dec_* / av1_obu_*), av1_frame (av1_fh_* / refs /
+# av1_frame_update_refs), av1_seq, frame (DrFrame), drishti (DR_ERR_*).
+#
+# Derived from the AV1 spec §7.20 (reference frame update) + §7.21 (reference
+# frame loading) + §7.2 (general OBU decode order). SCOPE (0.7.61): the decoded
+# frame ring + store/load/ref-frame accessors + the multi-frame walk. Only the
+# PIXEL FrameStore is new here; the saved-CDF / saved-MV / saved-segment-id state
+# (7.20's other outputs) belongs to later inter bites. Because the tile decoder
+# is intra-only so far, av1_decode_stream decodes multi-KEYFRAME / intra streams
+# and serves show_existing; a genuine inter frame's tiles await the inter
+# mode-info bite (roadmap.md).
+
+# ================================================================
+# Av1Dpb — the decoded-frame ring. Eight slots, each a DrFrame pointer
+# (FrameStore[i]); null = empty. Slots may alias the same DrFrame buffer (a
+# frame that refreshes several references, or a KEY show_existing that refreshes
+# all) — the arena owns the buffers (never freed), so aliasing is safe.
+# ================================================================
+enum Av1DpbOff {
+    AV1DPB_FRAMES = 0;    # [AV1_NUM_REF_FRAMES] DrFrame pointers -> 64
+    AV1DPB_SIZE   = 64;
+}
+
+# av1_dpb_new — allocate an empty DPB (all eight slots null). Returns the handle
+# or 0 on OOM.
+fn av1_dpb_new(): i64 {
+    var d = alloc(AV1DPB_SIZE);
+    if (d == 0) { return 0; }
+    memset(d, 0, AV1DPB_SIZE);
+    return d;
+}
+
+# av1_dpb_frame — the DrFrame in slot i (i in 0..NUM_REF_FRAMES-1), or 0 if the
+# index is out of range or the slot is empty.
+fn av1_dpb_frame(dpb, i): i64 {
+    if ((dpb == 0) || (i < 0) || (i >= AV1_NUM_REF_FRAMES)) { return 0; }
+    return load64(dpb + AV1DPB_FRAMES + (i * 8));
+}
+
+# av1_dpb_valid — 1 if slot i holds a frame, else 0.
+fn av1_dpb_valid(dpb, i): i64 {
+    if (av1_dpb_frame(dpb, i) != 0) { return 1; }
+    return 0;
+}
+
+# av1_dpb_count — number of occupied slots.
+fn av1_dpb_count(dpb): i64 {
+    if (dpb == 0) { return 0; }
+    var n = 0;
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        if (load64(dpb + AV1DPB_FRAMES + (i * 8)) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# ================================================================
+# av1_dpb_store — reference frame update process (spec 7.20), PIXEL half: store
+# `frame` into every slot i where bit i of refresh_frame_flags is 1. A frame that
+# refreshes several references (or a KEY show_existing → all 255) aliases one
+# buffer across those slots. Returns DR_OK, or DR_ERR_BOUNDS on a null dpb/frame.
+# The METADATA half (RefValid / dims / order hints / gm) is av1_frame_update_refs;
+# av1_dpb_update runs both.
+# ================================================================
+fn av1_dpb_store(dpb, fh, frame): i64 {
+    if ((dpb == 0) || (frame == 0)) { return DR_ERR_BOUNDS; }
+    var flags = av1_fh_refresh_frame_flags(fh);
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) {
+        if ((flags >> i) & 1) {
+            store64(dpb + AV1DPB_FRAMES + (i * 8), frame);
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# av1_dpb_update — the WHOLE reference frame update process (7.20): the pixel
+# store (av1_dpb_store) AND the metadata save (av1_frame_update_refs), so one
+# call advances both halves of the ring in lockstep. Returns DR_OK / DR_ERR_*.
+fn av1_dpb_update(dpb, refs, s, fh, frame): i64 {
+    var rc = av1_dpb_store(dpb, fh, frame);
+    if (rc != DR_OK) { return rc; }
+    av1_frame_update_refs(refs, s, fh);
+    return DR_OK;
+}
+
+# ================================================================
+# av1_dpb_load — reference frame loading process (spec 7.21), PIXEL half: return
+# FrameStore[ frame_to_show_map_idx ] for a show_existing_frame. Validates the
+# index range and that the slot is occupied (a show_existing pointing at an empty
+# slot is a malformed stream — DR_ERR_BAD_HEADER, never a null-deref). Writes
+# *out_err. The metadata half (loading dims / order hints back into the frame
+# variables) is surfaced by the header parser inline (av1_frame_parse_..., the
+# show_existing branch) for the fields the decode consults.
+# ================================================================
+fn av1_dpb_load(dpb, fh, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (dpb == 0) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var idx = av1_fh_frame_to_show(fh);
+    if ((idx < 0) || (idx >= AV1_NUM_REF_FRAMES)) {
+        store64(out_err, DR_ERR_BAD_HEADER); return 0;
+    }
+    var frame = load64(dpb + AV1DPB_FRAMES + (idx * 8));
+    if (frame == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+    return frame;
+}
+
+# ================================================================
+# av1_dpb_ref_frame — the inter-prediction hook: return the decoded reference
+# frame for a symbolic reference `refFrame` (LAST_FRAME..ALTREF_FRAME) of the
+# current frame, i.e. FrameStore[ ref_frame_idx[ refFrame - LAST_FRAME ] ]. This
+# is the DrFrame the MC driver (av1_mc_pred_block) reads from. Returns 0 if
+# refFrame is out of range, the mapped slot index is out of range, or the slot is
+# empty (the caller treats 0 as "reference unavailable").
+# ================================================================
+fn av1_dpb_ref_frame(dpb, fh, refFrame): i64 {
+    if ((dpb == 0) || (refFrame < AV1_LAST_FRAME) || (refFrame > AV1_ALTREF_FRAME)) {
+        return 0;
+    }
+    var slot = av1_fh_ref_frame_idx(fh, refFrame - AV1_LAST_FRAME);
+    return av1_dpb_frame(dpb, slot);
+}
+
+# ================================================================
+# av1_decode_stream — multi-frame OBU-stream driver: walk buf[0..sz), decode
+# EVERY coded frame into `dpb`, serve show_existing_frame from it, and return the
+# last OUTPUT (shown) frame (writes *out_err; *out_count, if non-null, gets the
+# number of frames processed). This is av1_decode_obus's multi-frame superset —
+# where that returns the first frame and stops, this keeps walking, running the
+# reference frame update after each frame so a later frame can reference an
+# earlier one through the DPB.
+#
+#   SEQUENCE_HEADER -> the active sequence.
+#   FRAME_HEADER    -> the active frame header. If show_existing_frame: load the
+#                      shown frame from the DPB (7.21), run the ref update (7.20),
+#                      and record it as output — no tile groups follow.
+#   FRAME (type 6)  -> parse fh, split off the embedded tile group (5.10), decode,
+#                      run the ref update, record output if show_frame.
+#   TILE_GROUP      -> accumulate into a frame-decode context; on the last group,
+#                      finish the frame, run the ref update, record output if shown.
+# temporal_delimiter / metadata / padding / redundant_frame_header / tile_list are
+# skipped.
+#
+# Returns 0 with *out_err on any parse/decode fault. A stream with no coded frame
+# at all -> 0 + DR_ERR_BAD_HEADER (as av1_decode_obus). A stream whose frames are
+# all non-shown -> 0 + DR_OK (the frames are in the DPB; none were output).
+#
+# SCOPE (0.7.61): the tile decoder is intra-only, so the coded frames this driver
+# fully decodes are keyframe / intra-only frames; a genuine inter frame's tiles
+# await the inter mode-info bite. show_existing + the DPB ring are complete.
+# ================================================================
+fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (out_count != 0) { store64(out_count, 0); }
+    if ((dpb == 0) || (buf == 0) || (sz < 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var it = av1_obu_iter_init(buf, sz);
+    if (it == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var refs = av1_ref_state_new();
+    if (refs == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var seq = 0;
+    var fh = 0;
+    var fdc = 0;      # frame-decode context, created at the first TILE_GROUP of a frame
+    var output = 0;   # last shown frame (the return value)
+    var count = 0;    # frames processed (coded or show_existing)
+    var otype = 0;
+    var ooff = 0;
+    var osize = 0;
+    var rc = av1_obu_next(it, &otype, &ooff, &osize);
+    while (rc == DR_OK) {
+        if (otype == AV1_OBU_SEQUENCE_HEADER) {
+            var serr = 0;
+            seq = av1_seq_parse(buf + ooff, osize, &serr);
+            if (serr != DR_OK) { store64(out_err, serr); return 0; }
+            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+        }
+        if (otype == AV1_OBU_FRAME_HEADER) {
+            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var o = av1_obu_iter_obu(it);
+            var ferr = 0;
+            fh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
+            av1_obu_sid(o), buf + ooff, osize, &ferr);
+            if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
+            if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            fdc = 0;   # a new frame begins; any prior context is retired
+            if (av1_fh_show_existing_frame(fh) == 1) {
+                # 7.21 load + 7.20 update + output; no tile groups follow.
+                var lerr = 0;
+                var shown = av1_dpb_load(dpb, fh, &lerr);
+                if (lerr != DR_OK) { store64(out_err, lerr); return 0; }
+                var uerr = av1_dpb_update(dpb, refs, seq, fh, shown);
+                if (uerr != DR_OK) { store64(out_err, uerr); return 0; }
+                output = shown;
+                count = count + 1;
+                fh = 0;
+            }
+        }
+        if (otype == AV1_OBU_FRAME) {
+            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var of = av1_obu_iter_obu(it);
+            var frr = 0;
+            var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
+            av1_obu_sid(of), buf + ooff, osize, &frr);
+            if (frr != DR_OK) { store64(out_err, frr); return 0; }
+            if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
+            if (hbytes > osize) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+            var frame = av1_decode_frame(seq, ffh, buf + ooff + hbytes, osize - hbytes, out_err);
+            if (frame == 0) { return 0; }   # av1_decode_frame wrote the precise cause
+            var uerr2 = av1_dpb_update(dpb, refs, seq, ffh, frame);
+            if (uerr2 != DR_OK) { store64(out_err, uerr2); return 0; }
+            if (av1_fh_show_frame(ffh) == 1) { output = frame; }
+            count = count + 1;
+            fh = 0;
+        }
+        if (otype == AV1_OBU_TILE_GROUP) {
+            if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            if (fdc == 0) {
+                fdc = av1_frame_dec_new(seq, fh, out_err);
+                if (fdc == 0) { return 0; }
+            }
+            var gdone = av1_frame_dec_group(fdc, buf + ooff, osize, out_err);
+            if (gdone < 0) { return 0; }
+            if (gdone == 1) {
+                var gfin_err = 0;
+                var gframe = av1_frame_dec_finish(fdc, &gfin_err);
+                if (gfin_err != DR_OK) { store64(out_err, gfin_err); return 0; }
+                var uerr3 = av1_dpb_update(dpb, refs, seq, fh, gframe);
+                if (uerr3 != DR_OK) { store64(out_err, uerr3); return 0; }
+                if (av1_fh_show_frame(fh) == 1) { output = gframe; }
+                count = count + 1;
+                fdc = 0;
+                fh = 0;
+            }
+        }
+        rc = av1_obu_next(it, &otype, &ooff, &osize);
+    }
+    if (rc != AV1_OBU_END) { store64(out_err, rc); return 0; }
+    if (count == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+    if (out_count != 0) { store64(out_count, count); }
+    return output;
+}

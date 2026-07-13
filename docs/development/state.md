@@ -6,32 +6,31 @@
 
 ## Version
 
-**0.7.60** — cut 2026-07-13, not yet tagged (user's git). **Inter prediction — the MC
-driver (`av1_mc_pred_block`, spec 7.11.3.1 steps 10 + 13).** The piece that composes the two
-leaf kernels into block prediction: split the clamped MV into an integer top-left + a
-1/16-pel phase per axis (the unscaled reduction of 7.11.3.3 — `pos16 = (x<<4) +
-((2*mv)>>>sub)`, `xScale == 1<<14`, `stepX == 1024`, proven exact against a literal port of
-the full scaling process for both MV signs), gather the (possibly out-of-frame, edge-clamped)
-padded reference block via `emu_edge`, filter it with `put_8tap`, write the `Clip1`'d result
-into the destination `DrFrame`. Scoped to the base inter case — single reference,
-translation-only (no warp), non-compound, **unscaled** (ref plane dims == current plane
-dims); BILINEAR / scaled refs / compound / OBMC / warp cleanly rejected as later bites.
-Verified against a **spec-literal Python reference** (`scratchpad/mc_driver_ref.py`, its
-`Subpel_Filters` parsed straight from the spec markdown — no shared table/kernel code): 18
-known-answer cases + chroma pixel dump + write-confinement + border-independence. A **5-slice
-adversarial spec review** (geometry/gather/filters/safety/tests, each finding adversarially
-verified) found **3 confirmed defects, ALL FIXED in this cut**: (critical) an i64-overflow
-bypass of the block-inside-plane guard reaching the unchecked write-back → OOB write, now the
-overflow-safe subtraction form; (major) the unscaled gate compared only per-plane dims, so a
-scaled reference with colliding subsampled-chroma dims (luma 24×18 vs 23×17 → both 12×9
-chroma) was silently accepted → wrong pixels, now gates on luma frame dims too; (minor)
-`put_8tap`'s H+V path allocated its mid buffer per call from the never-freed arena →
-unbounded growth across a frame, now a persistent module-global scratch (`av1_mc_mid_scratch`).
-**Prior: `emu_edge` fetch 0.7.59; `put_8tap` kernel 0.7.58; Subpel_Filters table 0.7.57;
-superres complete 0.7.52–0.7.56; multi-tile complete 0.7.47–0.7.51; 10-bit 0.7.46 — 3 of 4
-decode tracks done, inter underway.** Next on the inter track: the ref-frame buffer/DPB
-(needs multi-frame decode), MV prediction, and inter mode-info. The remaining distance to
-1.0 is inter + conformance + the encode-lane completion (finishing 0.7.x), then the other
+**0.7.61** — cut 2026-07-13, not yet tagged (user's git). **Inter prediction — the
+reference-frame buffer / DPB (spec 7.20 + 7.21).** The decoded-picture buffer: `src/av1_dpb.cyr`
+adds the eight-slot pixel `FrameStore` (`Av1Dpb`) + the **reference frame update process** (7.20 —
+`av1_dpb_store` saves a decoded frame's pixels into every `refresh_frame_flags` slot; `av1_dpb_update`
+runs that plus the metadata half `av1_frame_update_refs` so one call is the whole process) + the
+**reference frame loading process** (7.21 — `av1_dpb_load` serves a `show_existing_frame` from a
+slot). **The inter hook** `av1_dpb_ref_frame` maps a frame's `LAST_FRAME`..`ALTREF_FRAME` reference
+through `ref_frame_idx` to the stored `DrFrame` the MC driver (`av1_mc_pred_block`, 0.7.60) reads —
+the seam that connects the DPB to motion compensation once inter mode-info lands. **Multi-frame
+decode** `av1_decode_stream` walks a whole OBU stream, decodes every coded frame into the DPB
+(reference-frame update after each), serves `show_existing`, and returns the last shown frame
+(`av1_decode_obus` stays the single-frame entry, unchanged). Verified by 82 assertions (unit tests
+pin the exact `(refresh_frame_flags>>i)&1` bit-to-slot / `frame_to_show_map_idx` / `refFrame-LAST`
+mappings with distinct dummy frames + a real multi-keyframe OBU stream). A **5-slice adversarial
+spec review** (7.20 / 7.21 / inter-hook+walk / safety / tests+dav1d-libaom cross-check, each finding
+adversarially verified) returned **NO findings** — the aliasing store is behaviorally identical to
+the spec's per-slot pixel copy (every decode yields a fresh, never-mutated frame), the
+load→update→output ordering matches the decode-frame-wrapup sequence, and the tests pin the
+mappings. Only the PIXEL ring is new; the saved-CDF/MV/segment-id state + full 7.21 metadata reload
+are inter-only later bites. **Prior: MC driver `av1_mc_pred_block` 0.7.60; `emu_edge` fetch 0.7.59;
+`put_8tap` kernel 0.7.58; Subpel_Filters table 0.7.57; superres complete 0.7.52–0.7.56; multi-tile
+complete 0.7.47–0.7.51; 10-bit 0.7.46 — 3 of 4 decode tracks done, inter underway.** Next on the
+inter track: MV prediction + inter mode-info (then the inter tile decode that lets `av1_decode_stream`
+decode a genuine inter frame referencing the DPB), then compound/OBMC/warp. The remaining distance
+to 1.0 is inter + conformance + the encode-lane completion (finishing 0.7.x), then the other
 per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
@@ -53,7 +52,7 @@ per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
-## Source (36 `[lib]` modules, dependency order)
+## Source (37 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -82,6 +81,7 @@ per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
 | `src/av1_decode.cyr` | `av1_` | AV1 decode spine (raw bytes → pixels) — **av1_decode_obus**: OBU-stream walk (av1_obu_next dispatch: SEQUENCE_HEADER→av1_seq_parse, FRAME_HEADER→uncompressed_header, FRAME OBU type 6→parse fh + byte-split tile group 5.10, TILE_GROUP→accumulate into a frame-decode context). **Av1FrameDec** frame-decode context (av1_frame_dec_new/group/finish): begins a frame, decodes each tile group's tiles into the SHARED frame grids (in-order/contiguous guard; dim-bomb → error), filters once when complete — supports **multi-tile + multi-tile-group + superres** frames at 8/10/12-bit. **av1_decode_frame**: thin single-group wrapper (new→group→finish; partial group → DR_ERR_UNSUPPORTED), used by the FRAME OBU path. av1_apply_loop_filters: in-loop pipeline (deblock 7.14 → CDEF 7.15 → **superres 7.16** → LR 7.17; superres upscales FrameWidth→UpscaledWidth, LR at the upscaled width); **filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters); **tile-group parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4) |
+| `src/av1_dpb.cyr` | `av1_` | decoded-picture buffer / ref-frame ring (spec 7.20 + 7.21) — **Av1Dpb** 8-slot pixel FrameStore (av1_dpb_new/frame/valid/count); **reference frame update** (7.20): av1_dpb_store (pixel half — stores a decoded frame into every refresh_frame_flags slot) + av1_dpb_update (full process: pixel store + the metadata half av1_frame_update_refs); **reference frame loading** (7.21): av1_dpb_load (serves show_existing_frame from FrameStore[frame_to_show_map_idx]); **av1_dpb_ref_frame** (the inter/MC hook: LAST..ALTREF → ref_frame_idx → the stored DrFrame av1_mc_pred_block reads); **av1_decode_stream** (multi-frame OBU walk — decodes every coded frame into the DPB, serves show_existing, returns the last shown frame; av1_decode_obus stays the single-frame entry). PIXEL ring only; saved-CDF/MV/segment-id + full 7.21 metadata reload are inter-only later bites |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_superres.cyr` | `av1_` | superres upscaling (7.16) — Upscale_Filter[64][8] (dav1d resize filter negated to spec form; row-sum/integer-pel/mirror + per-phase position-checksum verified) + av1_superres_filter_pixel (one sample: phase/base/edge-clamp + Round2(sum,7) + Clip1) + av1_superres_upscale_row (the row loop, == dav1d resize_c) + av1_superres_step / av1_superres_x0 (dx/mx0 geometry, == dav1d scale_fac + get_upscale_x0) + av1_superres_upscale_frame (per-plane/row upscale into a new frame) + av1_superres_upscale_new (used by the in-loop pipeline to lift a downscaled frame to UpscaledWidth between CDEF and LR) — all reference-confirmed against dav1d; superres decodes end-to-end |
 | `src/av1_mc.cyr` | `av1_` | inter prediction (motion comp) — Subpel_Filters[6][15][8] (dav1d_mc_subpel_filters: REGULAR/SMOOTH/SHARP + 2 w≤4 variants + scaled-bilinear; dav1d convention, rows sum 64; verified by row-sum/mirror-symmetry/independent position-checksum) + av1_subpel_filter accessor + **av1_mc_put_8tap** (2-pass 8-tap MC kernel == dav1d put_8tap_c: integer/H/V/H+V, dav1d intermediate precision, persistent mid scratch, reference-tested) + **av1_mc_emu_edge** (frame-boundary block fetch == dav1d emu_edge_c: out-of-frame reads clamp to the edge, reference-tested) + **av1_mc_pred_block** (the MC driver, spec 7.11.3.1 steps 10+13: unscaled 1/16-pel MV split av1_mc_pos16 → emu_edge gather → put_8tap → Clip1 into a DrFrame; single-ref/translation-only/non-compound/unscaled base case, scaled/BILINEAR/compound/warp rejected; spec-literal-reference-tested; 5-slice review → 3 defects fixed) + persistent scratch (av1_mc_drv_scratch / av1_mc_mid_scratch). Ref-frame buffer/DPB + MV pred + inter mode-info are later bites |
@@ -99,13 +99,13 @@ per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (
 ## Gates (all green, 2026-07-13)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 34 suites / **21,117 assertions**: drishti 51 · bits
+- `make test` — 35 suites / **21,199 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -171,7 +171,14 @@ per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (
   a **critical** i64-overflow bypass of the block-inside-plane guard reaching
   the unchecked write-back (OOB write), a **major** scaled-chroma-ref acceptance
   emitting wrong pixels, and a **minor** per-call arena alloc in the put_8tap
-  H+V path; plus 2 refuted test-coverage suggestions)
+  H+V path; plus 2 refuted test-coverage suggestions), and the DPB / ref-frame
+  buffer (`av1_dpb.cyr`, 5 slices, each finding adversarially verified: reference
+  frame update 7.20 + loading 7.21 + the inter-hook/multi-frame walk + hostile-input
+  safety + tests/dav1d-libaom cross-derivation → **NO findings** — reviewers
+  confirmed the aliasing pixel store is behaviorally identical to the spec's
+  per-slot copy since every decode yields a fresh never-mutated frame, the
+  load→update→output ordering matches decode-frame-wrapup, and the unit tests pin
+  the bit-to-slot / frame_to_show / refFrame-LAST mappings with distinct frames)
 
 ## Dependencies
 
@@ -253,13 +260,16 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    **[done 0.7.25 — MILESTONE close.]**
 
 **Next — the AV1 inter layer** toward AV1 100%: the MC leaf kernels
-(`put_8tap` 0.7.58, `emu_edge` 0.7.59) and the **MC driver** that composes them
-(`av1_mc_pred_block` 0.7.60 — single-ref/unscaled/translation-only/non-compound)
-are in; next the reference-frame buffer/DPB (needs multi-frame decode), MV
-prediction, inter mode-info, then compound/OBMC/warp + scaled-reference/BILINEAR
-MC; plus film-grain synthesis; then conformance + the encode-lane completion.
-(In-loop filters — deblocking, CDEF, loop restoration — plus superres and
-10/12-bit are already complete.) The deferred,
+(`put_8tap` 0.7.58, `emu_edge` 0.7.59), the **MC driver** that composes them
+(`av1_mc_pred_block` 0.7.60 — single-ref/unscaled/translation-only/non-compound),
+and the **reference-frame buffer/DPB** (`av1_dpb.cyr` 0.7.61 — the 8-slot pixel
+FrameStore + ref update 7.20 / loading 7.21 + the `av1_dpb_ref_frame` MC hook +
+the `av1_decode_stream` multi-frame walk) are in; next MV prediction + inter
+mode-info (then the inter tile decode that lets `av1_decode_stream` decode a
+genuine inter frame referencing the DPB through the MC driver), then
+compound/OBMC/warp + scaled-reference/BILINEAR MC; plus film-grain synthesis;
+then conformance + the encode-lane completion. (In-loop filters — deblocking,
+CDEF, loop restoration — plus superres and 10/12-bit are already complete.) The deferred,
 feature-gated pieces (128×128 SBs, palette, intrabc, segmentation, active
 delta-q/lf, frame-end CDF save/average, the non-skip residual-encode lane)
 fold in with the inter / conformance work. (`get_filter_type` was completed

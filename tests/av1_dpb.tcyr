@@ -1,0 +1,391 @@
+# tests/av1_dpb.tcyr — the decoded-picture buffer (DPB) + reference frame update
+# (spec 7.20) / loading (7.21) + the multi-frame stream driver.
+#
+# Two layers: (1) UNIT tests of av1_dpb_store / _load / _ref_frame / _count with
+# directly-built Av1FrameHeader records (alloc AV1FH_SIZE + store just the fields
+# each process reads: refresh_frame_flags / frame_to_show_map_idx / ref_frame_idx)
+# and distinct dummy DrFrames, so the slot-selection semantics are pinned exactly;
+# (2) an end-to-end multi-frame stream through av1_decode_stream built from real
+# OBU bytes (reduced-still-picture keyframes), proving the walk decodes each frame
+# into the DPB and returns the last shown one.
+include "src/main.cyr"
+
+# a small distinct DrFrame: 8x8 mono 8-bit, every sample = val (so different
+# frames are trivially told apart by a single pixel read).
+fn dpb_frame(val): i64 {
+    var e = alloc(8);
+    var f = dr_frame_new(8, 8, 1, 0, 0, 8, 0, e);
+    dr_frame_fill(f, 0, val);
+    return f;
+}
+
+# a minimal fh record carrying only refresh_frame_flags (for av1_dpb_store).
+fn dpb_fh_refresh(flags): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, flags);
+    return fh;
+}
+
+# ================================================================
+# av1_dpb_store — reference frame update, PIXEL half (spec 7.20).
+# ================================================================
+fn test_dpb_store_slots() {
+    var dpb = av1_dpb_new();
+    assert_eq(av1_dpb_count(dpb), 0, "fresh DPB empty");
+    var fa = dpb_frame(11);
+    var fb = dpb_frame(22);
+    # refresh slots 1 and 4 (bits 0b0001_0010 = 18) with fa.
+    assert_eq(av1_dpb_store(dpb, dpb_fh_refresh(18), fa), DR_OK, "store fa -> slots 1,4");
+    assert_eq(av1_dpb_frame(dpb, 1), fa, "slot 1 = fa");
+    assert_eq(av1_dpb_frame(dpb, 4), fa, "slot 4 = fa");
+    assert_eq(av1_dpb_frame(dpb, 0), 0, "slot 0 still empty");
+    assert_eq(av1_dpb_frame(dpb, 2), 0, "slot 2 still empty");
+    assert_eq(av1_dpb_count(dpb), 2, "two slots occupied");
+    # refresh slot 2 only (bit 0b0000_0100 = 4) with fb — must not disturb 1/4.
+    assert_eq(av1_dpb_store(dpb, dpb_fh_refresh(4), fb), DR_OK, "store fb -> slot 2");
+    assert_eq(av1_dpb_frame(dpb, 2), fb, "slot 2 = fb");
+    assert_eq(av1_dpb_frame(dpb, 1), fa, "slot 1 still fa (untouched)");
+    assert_eq(av1_dpb_frame(dpb, 4), fa, "slot 4 still fa (untouched)");
+    assert_eq(av1_dpb_count(dpb), 3, "three slots occupied");
+    # overwrite slot 1 (bit 0b0000_0010 = 2) with fb.
+    av1_dpb_store(dpb, dpb_fh_refresh(2), fb);
+    assert_eq(av1_dpb_frame(dpb, 1), fb, "slot 1 overwritten to fb");
+    assert_eq(dr_frame_get(av1_dpb_frame(dpb, 4), 0, 0, 0), 11, "slot 4 frame content = fa's 11");
+    return 0;
+}
+# refresh_frame_flags = 255 (KEY / SWITCH / KEY-show_existing) refreshes all 8 slots
+# to the SAME buffer (aliasing is intended — arena owns it).
+fn test_dpb_store_all() {
+    var dpb = av1_dpb_new();
+    var f = dpb_frame(99);
+    assert_eq(av1_dpb_store(dpb, dpb_fh_refresh(255), f), DR_OK, "store all -> 255");
+    assert_eq(av1_dpb_count(dpb), 8, "all 8 slots occupied");
+    var i = 0;
+    while (i < 8) { assert_eq(av1_dpb_frame(dpb, i), f, "slot aliases the one buffer"); i = i + 1; }
+    # refresh_frame_flags = 0 is a no-op (non-key show_existing, refreshes nothing).
+    var g = dpb_frame(7);
+    av1_dpb_store(dpb, dpb_fh_refresh(0), g);
+    assert_eq(av1_dpb_count(dpb), 8, "flags=0 changes nothing");
+    assert_eq(av1_dpb_frame(dpb, 0), f, "flags=0: slot 0 still f");
+    return 0;
+}
+# hostile: null dpb / null frame -> DR_ERR_BOUNDS (never a null store).
+fn test_dpb_store_reject() {
+    var dpb = av1_dpb_new();
+    assert_eq(av1_dpb_store(0, dpb_fh_refresh(1), dpb_frame(1)), DR_ERR_BOUNDS, "null dpb");
+    assert_eq(av1_dpb_store(dpb, dpb_fh_refresh(1), 0), DR_ERR_BOUNDS, "null frame");
+    return 0;
+}
+
+# ================================================================
+# av1_dpb_load — reference frame loading, PIXEL half (spec 7.21).
+# ================================================================
+fn test_dpb_load() {
+    var dpb = av1_dpb_new();
+    var f3 = dpb_frame(33);
+    var f6 = dpb_frame(66);
+    av1_dpb_store(dpb, dpb_fh_refresh(1 << 3), f3);   # slot 3
+    av1_dpb_store(dpb, dpb_fh_refresh(1 << 6), f6);   # slot 6
+    var oe = alloc(8);
+    # show_existing pointing at slot 3.
+    var fh3 = alloc(AV1FH_SIZE);
+    memset(fh3, 0, AV1FH_SIZE);
+    store64(fh3 + AV1FH_SHOW_EXISTING, 1);
+    store64(fh3 + AV1FH_FRAME_TO_SHOW, 3);
+    assert_eq(av1_dpb_load(dpb, fh3, oe), f3, "load slot 3 -> f3");
+    assert_eq(load64(oe), DR_OK, "load ok");
+    assert_eq(dr_frame_get(av1_dpb_load(dpb, fh3, oe), 0, 4, 4), 33, "loaded content = f3's 33");
+    # show_existing pointing at slot 6.
+    store64(fh3 + AV1FH_FRAME_TO_SHOW, 6);
+    assert_eq(av1_dpb_load(dpb, fh3, oe), f6, "load slot 6 -> f6");
+    # show_existing pointing at an EMPTY slot (0) -> BAD_HEADER, not a null-deref.
+    store64(fh3 + AV1FH_FRAME_TO_SHOW, 0);
+    assert_eq(av1_dpb_load(dpb, fh3, oe), 0, "load empty slot -> 0");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "load empty slot -> BAD_HEADER");
+    # out-of-range index -> BAD_HEADER.
+    store64(fh3 + AV1FH_FRAME_TO_SHOW, 8);
+    assert_eq(av1_dpb_load(dpb, fh3, oe), 0, "load idx 8 -> 0");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "load idx 8 -> BAD_HEADER");
+    # null dpb -> BOUNDS.
+    assert_eq(av1_dpb_load(0, fh3, oe), 0, "load null dpb -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "load null dpb -> BOUNDS");
+    return 0;
+}
+
+# ================================================================
+# av1_dpb_ref_frame — the inter hook: LAST..ALTREF -> ref_frame_idx -> FrameStore.
+# ================================================================
+fn test_dpb_ref_frame() {
+    var dpb = av1_dpb_new();
+    # occupy distinct slots with distinct content.
+    var s0 = dpb_frame(50);
+    var s5 = dpb_frame(55);
+    var s7 = dpb_frame(57);
+    av1_dpb_store(dpb, dpb_fh_refresh(1 << 0), s0);
+    av1_dpb_store(dpb, dpb_fh_refresh(1 << 5), s5);
+    av1_dpb_store(dpb, dpb_fh_refresh(1 << 7), s7);
+    # a frame header mapping LAST->slot0, GOLDEN->slot5, ALTREF->slot7.
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_LAST_FRAME - AV1_LAST_FRAME) * 8), 0);
+    store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_GOLDEN_FRAME - AV1_LAST_FRAME) * 8), 5);
+    store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_ALTREF_FRAME - AV1_LAST_FRAME) * 8), 7);
+    assert_eq(av1_dpb_ref_frame(dpb, fh, AV1_LAST_FRAME), s0, "LAST_FRAME -> slot 0");
+    assert_eq(av1_dpb_ref_frame(dpb, fh, AV1_GOLDEN_FRAME), s5, "GOLDEN_FRAME -> slot 5");
+    assert_eq(av1_dpb_ref_frame(dpb, fh, AV1_ALTREF_FRAME), s7, "ALTREF_FRAME -> slot 7");
+    assert_eq(dr_frame_get(av1_dpb_ref_frame(dpb, fh, AV1_GOLDEN_FRAME), 0, 1, 1), 55, "GOLDEN content 55");
+    # a ref mapping to an EMPTY slot (LAST2 -> slot 3, unoccupied) -> 0 (unavailable).
+    store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_LAST2_FRAME - AV1_LAST_FRAME) * 8), 3);
+    assert_eq(av1_dpb_ref_frame(dpb, fh, AV1_LAST2_FRAME), 0, "ref -> empty slot -> 0");
+    # out-of-range refFrame (INTRA_FRAME=0, or > ALTREF) -> 0.
+    assert_eq(av1_dpb_ref_frame(dpb, fh, AV1_INTRA_FRAME), 0, "INTRA_FRAME -> 0");
+    assert_eq(av1_dpb_ref_frame(dpb, fh, AV1_ALTREF_FRAME + 1), 0, "ref > ALTREF -> 0");
+    assert_eq(av1_dpb_ref_frame(0, fh, AV1_LAST_FRAME), 0, "null dpb -> 0");
+    return 0;
+}
+
+# ================================================================
+# av1_dpb_frame / _valid bounds.
+# ================================================================
+fn test_dpb_accessors() {
+    var dpb = av1_dpb_new();
+    var f = dpb_frame(1);
+    av1_dpb_store(dpb, dpb_fh_refresh(1 << 2), f);
+    assert_eq(av1_dpb_valid(dpb, 2), 1, "slot 2 valid");
+    assert_eq(av1_dpb_valid(dpb, 3), 0, "slot 3 invalid");
+    assert_eq(av1_dpb_frame(dpb, 0 - 1), 0, "negative index -> 0");
+    assert_eq(av1_dpb_frame(dpb, 8), 0, "index 8 (out of range) -> 0");
+    assert_eq(av1_dpb_valid(dpb, 0 - 1), 0, "negative index invalid");
+    assert_eq(av1_dpb_count(0), 0, "null dpb count 0");
+    return 0;
+}
+
+# ================================================================
+# av1_dpb_update — the WHOLE 7.20 (pixel store + metadata via update_refs).
+# ================================================================
+fn test_dpb_update_full() {
+    var dpb = av1_dpb_new();
+    var s = frame_dpb_seq();
+    var refs = av1_ref_state_new();
+    var f = dpb_frame(128);
+    # a keyframe-like fh: refresh all, dims 8x8, order_hint 5, current_frame_id 0.
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    store64(fh + AV1FH_FRAME_WIDTH, 8);
+    store64(fh + AV1FH_FRAME_HEIGHT, 8);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 8);
+    store64(fh + AV1FH_MI_COLS, 2);
+    store64(fh + AV1FH_MI_ROWS, 2);
+    store64(fh + AV1FH_ORDER_HINT, 5);
+    store64(fh + AV1FH_FRAME_TYPE, AV1_KEY_FRAME);
+    assert_eq(av1_dpb_update(dpb, refs, s, fh, f), DR_OK, "update ok");
+    # pixel half: all slots hold f.
+    assert_eq(av1_dpb_count(dpb), 8, "update: all slots stored");
+    assert_eq(av1_dpb_frame(dpb, 3), f, "update: slot 3 = f");
+    # metadata half: RefValid + geometry advanced by av1_frame_update_refs.
+    assert_eq(av1_ref_valid(refs, 0), 1, "update: ref slot 0 valid");
+    assert_eq(av1_ref_frame_width(refs, 0), 8, "update: ref width 8");
+    assert_eq(av1_ref_order_hint(refs, 3), 5, "update: ref order_hint 5");
+    assert_eq(load64(refs + AV1REF_BITDEPTH + 0), 8, "update: ref bitdepth from seq");
+    return 0;
+}
+
+# ================================================================
+# av1_decode_stream — the multi-frame OBU walk (real bytes -> DPB + output).
+# Stream-building helpers replicate the reduced-still-picture keyframe from
+# av1_decode.tcyr (128x64 mono, flat-DC 128).
+# ================================================================
+fn frame_dpb_seq(): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_BITDEPTH, 8);
+    store64(s + AV1_SEQ_NUM_PLANES, 1);
+    return s;
+}
+fn dpb_obus_append(bw, src, n): i64 {
+    var i = 0;
+    while (i < n) { dr_bw_put_bits(bw, load8(src + i), 8); i = i + 1; }
+    return 0;
+}
+fn dpb_obus_wrap(bw, type, payload, plen): i64 {
+    av1_obu_write_header(bw, type, 0, 0, 0, 1, plen);
+    if (plen > 0) { dpb_obus_append(bw, payload, plen); }
+    return 0;
+}
+# reduced-still-picture seq: profile 0, 8-bit mono, 128x64, no cdef/lr/superres
+# (byte-identical layout to av1_decode.tcyr frame_build_seq).
+fn dpb_build_seq(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 1);            # still_picture = 1
+    dr_bw_put_bit(bw, 1);            # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 127, 16);     # max_frame_width_minus_1 = 127 -> 128
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63 -> 64
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra = 0
+    dr_bw_put_bit(bw, 1);            # enable_intra_edge_filter = 1
+    dr_bw_put_bit(bw, 0);            # enable_superres = 0
+    dr_bw_put_bit(bw, 0);            # enable_cdef = 0
+    dr_bw_put_bit(bw, 0);            # enable_restoration = 0
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 1);            # mono_chrome = 1
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # color_range = 0
+    dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# reduced-still-picture KEY frame header (128x64, base_q 40, single tile,
+# TX_MODE_SELECT) — byte-identical to av1_decode.tcyr frame_build_fh.
+fn dpb_build_fh(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1
+    dr_bw_put_bit(bw, 0);            # allow_screen_content_tools = 0
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1
+    dr_bw_put_bit(bw, 0);            # increment_tile_cols_log2 = 0
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1 -> TX_MODE_SELECT
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# the 128x64 keyframe tile payload (flat-DC 128), same plan as av1_decode.tcyr.
+fn dpb_enc_keyframe(out_len): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    return av1_encode_intra_tile(etile, pp, pm, pt, 1, out_len);
+}
+# one keyframe as TD? no — build TD+SEQ once, then N (FRAME_HEADER + TILE_GROUP).
+# single-frame stream through the multi-frame driver: count 1, frame stored to all
+# slots (KEY refreshes all), output is the decoded frame.
+fn test_stream_single() {
+    var slen = 0;
+    var seq = dpb_build_seq(&slen);
+    var flen = 0;
+    var fhb = dpb_build_fh(&flen);
+    var tlen = 0;
+    var tile = dpb_enc_keyframe(&tlen);
+    var bw = dr_bw_init(256);
+    dpb_obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    dpb_obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    dpb_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen);
+    dpb_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var out = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "single-frame stream decodes");
+    assert_eq(load64(oc), 1, "frame count 1");
+    assert_eq(out != 0, 1, "output frame returned");
+    assert_eq(dr_frame_width(out), 128, "output width 128");
+    assert_eq(dr_frame_get(out, 0, 40, 30), 128, "output flat-DC 128");
+    # KEY frame refreshes all 8 slots with the decoded frame.
+    assert_eq(av1_dpb_count(dpb), 8, "keyframe -> all 8 DPB slots populated");
+    assert_eq(av1_dpb_frame(dpb, 0), out, "slot 0 = output frame");
+    assert_eq(av1_dpb_frame(dpb, 7), out, "slot 7 = output frame");
+    return 0;
+}
+# two keyframes: the walk decodes BOTH, the DPB ends holding the SECOND (each KEY
+# refreshes all slots), the returned output is the second frame, count 2.
+fn test_stream_two_frames() {
+    var slen = 0;
+    var seq = dpb_build_seq(&slen);
+    var flen = 0;
+    var fhb = dpb_build_fh(&flen);
+    var tlen = 0;
+    var tile = dpb_enc_keyframe(&tlen);
+    var bw = dr_bw_init(512);
+    dpb_obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    dpb_obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    dpb_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen);   # frame 1
+    dpb_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    dpb_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen);   # frame 2
+    dpb_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var out = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "two-frame stream decodes");
+    assert_eq(load64(oc), 2, "frame count 2");
+    assert_eq(out != 0, 1, "output = last frame");
+    assert_eq(dr_frame_get(out, 0, 10, 10), 128, "second frame flat-DC 128");
+    assert_eq(av1_dpb_frame(dpb, 0), out, "DPB slot 0 = second (last) frame");
+    assert_eq(av1_dpb_count(dpb), 8, "DPB all slots hold the last keyframe");
+    return 0;
+}
+# hostile / edge: null dpb, null buf, negative size, no coded frame.
+fn test_stream_reject() {
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    assert_eq(av1_decode_stream(0, alloc(4), 4, oc, oe), 0, "null dpb -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "null dpb -> BOUNDS");
+    assert_eq(av1_decode_stream(dpb, 0, 4, oc, oe), 0, "null buf -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "null buf -> BOUNDS");
+    assert_eq(av1_decode_stream(dpb, alloc(4), 0 - 1, oc, oe), 0, "negative sz -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "negative sz -> BOUNDS");
+    # a TD-only stream: walked, but no coded frame -> BAD_HEADER, count 0.
+    var bw = dr_bw_init(16);
+    dpb_obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    var n = dr_bw_flush(bw);
+    assert_eq(av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe), 0, "TD-only -> no frame");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "TD-only -> BAD_HEADER");
+    assert_eq(load64(oc), 0, "TD-only -> count 0");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("DPB reference frame update (7.20 pixel store)");
+    test_dpb_store_slots();
+    test_dpb_store_all();
+    test_dpb_store_reject();
+    test_group("DPB reference frame loading (7.21)");
+    test_dpb_load();
+    test_group("DPB inter ref-frame hook + accessors");
+    test_dpb_ref_frame();
+    test_dpb_accessors();
+    test_group("DPB full update (pixel + metadata)");
+    test_dpb_update_full();
+    test_group("multi-frame stream driver (av1_decode_stream)");
+    test_stream_single();
+    test_stream_two_frames();
+    test_stream_reject();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

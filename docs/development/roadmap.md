@@ -213,10 +213,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   into the `DrFrame`, for the single-ref/translation-only/non-compound/unscaled base case;
   spec-literal-reference-tested; a 5-slice adversarial review found + fixed 3 defects — a
   critical i64-overflow guard bypass, a major scaled-chroma-ref acceptance, and a minor
-  per-call arena alloc); next the ref-frame buffer/DPB (needs multi-frame decode), MV
-  prediction, inter mode-info, then compound/OBMC/warp + scaled-reference/BILINEAR MC; all
-  table-free, dav1d `mc_tmpl.c` / `decode.c` references in hand). See memory
-  `av1-decode-remaining-tracks`.
+  per-call arena alloc), and the **reference-frame buffer / DPB** `av1_dpb.cyr` 0.7.61 (spec
+  7.20 reference frame update + 7.21 loading: the 8-slot pixel `FrameStore` + `av1_dpb_store`/
+  `_update`/`_load`, the `av1_dpb_ref_frame` inter hook mapping `ref_frame_idx` to the stored
+  frame the MC driver reads, and the `av1_decode_stream` multi-frame OBU walk; a 5-slice
+  adversarial review returned no findings); next MV prediction + inter mode-info (then the
+  inter tile decode that lets `av1_decode_stream` decode a genuine inter frame referencing the
+  DPB), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
+  `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

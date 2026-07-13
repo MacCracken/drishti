@@ -4,6 +4,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.61] - 2026-07-13
+
+**Inter prediction — the reference-frame buffer / DPB (spec 7.20 + 7.21).** The decoded-picture
+buffer: the ring of decoded reference frames that inter prediction reads from. `src/av1_dpb.cyr`
+adds the eight-slot pixel `FrameStore` (`Av1Dpb`) and the two processes that drive it — the
+**reference frame update process** (7.20) saves a decoded frame's pixels into every slot flagged by
+`refresh_frame_flags`, and the **reference frame loading process** (7.21) serves a
+`show_existing_frame` back from a slot. The per-slot *metadata* (dimensions, order hints, saved
+global-motion) already lived in `Av1RefState` (`av1_frame_update_refs`); `av1_dpb_update` now runs
+both halves so one call is the whole 7.20 process. Two things this unlocks:
+
+- **The inter hook** — `av1_dpb_ref_frame(dpb, fh, refFrame)` maps a frame's `LAST_FRAME`..
+  `ALTREF_FRAME` reference through `ref_frame_idx` to the stored `DrFrame` the MC driver
+  (`av1_mc_pred_block`, 0.7.60) reads. This is the seam that will connect the DPB to motion
+  compensation once inter mode-info lands.
+- **Multi-frame decode** — `av1_decode_stream` walks a whole OBU stream, decodes **every** coded
+  frame into the DPB (running the reference frame update after each so a later frame can reference
+  an earlier one), and serves `show_existing_frame` from the ring — returning the last shown frame.
+  `av1_decode_obus` stays the single-frame entry point (unchanged); this is its multi-frame
+  superset.
+
+Verified by 82 assertions: unit tests pin the exact slot semantics (the `(refresh_frame_flags >> i)
+& 1` bit-to-slot mapping, the `frame_to_show_map_idx` load, the `refFrame - LAST_FRAME` ref
+mapping — each with distinct dummy frames so an off-by-one is caught) plus a real end-to-end
+multi-keyframe OBU stream through `av1_decode_stream`. A **5-slice adversarial spec review**
+(reference-frame update 7.20 / loading 7.21 / inter-hook + walk / hostile-input safety /
+tests + dav1d-libaom cross-check, each finding adversarially verified) returned **no findings** —
+the reviewers confirmed the aliasing store is behaviorally identical to the spec's per-slot pixel
+copy (every decode yields a fresh, never-mutated frame), the load/update ordering matches the
+decode-frame-wrapup sequence, and the tests genuinely pin the mappings. **21,199 suite assertions +
+1,140 fuzz assertions, all green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_dpb.cyr`**: `Av1Dpb` (the 8-slot decoded-frame `FrameStore`) + `av1_dpb_new` /
+  `av1_dpb_frame` / `av1_dpb_valid` / `av1_dpb_count`; `av1_dpb_store` (7.20 pixel half) +
+  `av1_dpb_update` (full 7.20: pixel store + `av1_frame_update_refs`); `av1_dpb_load` (7.21);
+  `av1_dpb_ref_frame` (the inter/MC hook); `av1_decode_stream` (the multi-frame OBU-stream driver).
+- **`tests/av1_dpb.tcyr`**: `test_dpb_store_slots` / `_store_all` / `_store_reject` (7.20),
+  `test_dpb_load` (7.21), `test_dpb_ref_frame` / `_accessors`, `test_dpb_update_full` (pixel +
+  metadata), `test_stream_single` / `_two_frames` / `_reject` (`av1_decode_stream`) — 82 assertions.
+
+### Scope / deferred
+- Only the **pixel** `FrameStore` ring is new. The saved-CDF / saved-MV / saved-segment-id outputs
+  of 7.20 and the full 7.21 metadata reload are inter-only decode state (later bites). Because the
+  tile decoder is intra-only so far, `av1_decode_stream` fully decodes keyframe / intra-only streams
+  and serves `show_existing`; a genuine inter frame's tile decode awaits the inter mode-info bite
+  (roadmap.md).
+
 ## [0.7.60] - 2026-07-13
 
 **Inter prediction — the MC driver (`av1_mc_pred_block`, spec 7.11.3.1 steps 10 + 13).**
