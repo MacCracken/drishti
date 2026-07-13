@@ -330,6 +330,254 @@ fn test_stack_reset() {
     return 0;
 }
 
+# ================================================================
+# Spatial neighbour scans (7.10.2.2/3/4) + add_ref_mv_candidate (7.10.2.7). Known
+# answers from the spec-literal Python port scratchpad/mvscan_ref.py. Base context:
+# 16x16 frame grid, tile [0,16)x[0,16), the given block, ref0=1/ref1=2, hp=1.
+# ================================================================
+fn mvs_ctx_dim(dim, mi_size, mi_row, mi_col): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, av1_mv_grid_new(dim, dim), dim, dim);
+    av1_mvctx_set_tile(ctx, 0, dim, 0, dim);
+    av1_mvctx_set_block(ctx, mi_row, mi_col, mi_size);
+    av1_mvctx_set_refs(ctx, 1, 2);
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+fn mvs_ctx(mi_size, mi_row, mi_col): i64 { return mvs_ctx_dim(16, mi_size, mi_row, mi_col); }
+# set an MI cell in ctx's grid (fmi_cols read from the ctx).
+fn mvs_cell(ctx, r, c, avail, is_inter, mi_size, ymode, ref0, ref1, mv0r, mv0c, mv1r, mv1c): i64 {
+    return av1_mv_grid_set(load64(ctx + AV1MVC_GRID), load64(ctx + AV1MVC_FMI_COLS), r, c,
+    avail, is_inter, mi_size, ymode, ref0, ref1, mv0r, mv0c, mv1r, mv1c);
+}
+fn mvs_num(ctx): i64 { return av1_mv_stack_num(load64(ctx + AV1MVC_STACK)); }
+fn mvs_nmv(ctx): i64 { return av1_mv_stack_newmv_count(load64(ctx + AV1MVC_STACK)); }
+fn mvs_row(ctx, idx, list): i64 { return av1_mv_stack_row(load64(ctx + AV1MVC_STACK), idx, list); }
+fn mvs_col(ctx, idx, list): i64 { return av1_mv_stack_col(load64(ctx + AV1MVC_STACK), idx, list); }
+fn mvs_wt(ctx, idx): i64 { return av1_mv_stack_weight(load64(ctx + AV1MVC_STACK), idx); }
+
+# is_inside (tile window) + found-match tracking.
+fn test_mvctx_basics() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_tile(ctx, 2, 10, 3, 12);
+    assert_eq(av1_mvctx_is_inside(ctx, 4, 4), 1, "inside");
+    assert_eq(av1_mvctx_is_inside(ctx, 1, 4), 0, "above tile row -> outside");
+    assert_eq(av1_mvctx_is_inside(ctx, 4, 2), 0, "left of tile col -> outside");
+    assert_eq(av1_mvctx_is_inside(ctx, 10, 4), 0, "row == row_end -> outside");
+    assert_eq(av1_mvctx_is_inside(ctx, 4, 12), 0, "col == col_end -> outside");
+    assert_eq(av1_mvctx_found_match(ctx), 0, "found_match starts 0");
+    store64(ctx + AV1MVC_FOUND, 1);
+    assert_eq(av1_mvctx_found_match(ctx), 1, "found_match set");
+    av1_mvctx_clear_found_match(ctx);
+    assert_eq(av1_mvctx_found_match(ctx), 0, "found_match cleared");
+    return 0;
+}
+
+# S1: scan_row(-1) over an 8x8 inter neighbour above -> one candidate weight 4.
+fn test_scan_row_basic() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, 0, 12, 0 - 8, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 0, 12, 0 - 8, 0, 0);
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "S1 one candidate (8x8 nbr, len-step covers both cols)");
+    assert_eq(mvs_row(ctx, 0, 0), 12, "S1 mv row 12");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 8, "S1 mv col -8");
+    assert_eq(mvs_wt(ctx, 0), 4, "S1 weight 4 (len 2 * 2)");
+    assert_eq(av1_mvctx_found_match(ctx), 1, "S1 FoundMatch set");
+    return 0;
+}
+# S2: neighbour with a different reference -> no candidate, FoundMatch stays 0.
+fn test_scan_row_diff_ref() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 5, 0, 1, 2, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 5, 0, 1, 2, 0, 0);
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 0, "S2 different ref -> empty stack");
+    assert_eq(av1_mvctx_found_match(ctx), 0, "S2 FoundMatch stays 0");
+    return 0;
+}
+# S3: 32x32 block over 16x16 neighbours -> len-steps by 4, two adds of the same MV
+# dedup to one entry with accumulated weight 16.
+fn test_scan_row_lenstep() {
+    var ctx = mvs_ctx(9, 4, 4);   # 32x32: bw4=8, end4=8
+    var cc = 4;
+    while (cc < 12) {
+        mvs_cell(ctx, 3, cc, 1, 1, 6, 14, 1, 0, 4, 4, 0, 0);   # 16x16 nbrs (bw4=4)
+        cc = cc + 1;
+    }
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "S3 dedup -> one entry");
+    assert_eq(mvs_wt(ctx, 0), 16, "S3 weight 8+8 (two len-4 steps, dedup)");
+    return 0;
+}
+# S4: scan_col with the neighbour column outside the tile -> is_inside break.
+fn test_scan_col_outside() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_tile(ctx, 0, 16, 4, 16);   # tile col_start = 4
+    mvs_cell(ctx, 4, 3, 1, 1, 3, 14, 1, 0, 9, 9, 0, 0);
+    av1_mv_scan_col(ctx, 0 - 1, 0);          # mvCol = 4-1 = 3 < 4 -> break
+    assert_eq(mvs_num(ctx), 0, "S4 neighbour col outside tile -> empty");
+    return 0;
+}
+# S5: scan_point top-right — the avail (decoded) gate.
+fn test_scan_point_avail() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 6, 0, 1, 3, 14, 1, 0, 7, 7, 0, 0);   # avail=0
+    av1_mv_scan_point(ctx, 0 - 1, 2, 0);
+    assert_eq(mvs_num(ctx), 0, "S5a avail=0 (undecoded) -> skipped");
+    store64(av1_mv_grid_cell(load64(ctx + AV1MVC_GRID), 16, 3, 6) + AV1MIR_AVAIL, 1);
+    av1_mv_scan_point(ctx, 0 - 1, 2, 0);
+    assert_eq(mvs_num(ctx), 1, "S5b avail=1 -> added");
+    assert_eq(mvs_wt(ctx, 0), 4, "S5b scan_point weight 4");
+    assert_eq(mvs_row(ctx, 0, 0), 7, "S5b mv row 7");
+    return 0;
+}
+# S6: GLOBALMV neighbour with a >TRANSLATION global model on a large block ->
+# substitutes GlobalMvs[0].
+fn test_scan_globalmv() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_global(ctx, 100, 0 - 50, 0, 0, 2, 0);   # GlobalMvs[0]=(100,-50), GmType0=ROTZOOM
+    mvs_cell(ctx, 3, 4, 1, 1, 3, AV1_GLOBALMV, 1, 0, 1, 1, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, AV1_GLOBALMV, 1, 0, 1, 1, 0, 0);
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "S6 one candidate");
+    assert_eq(mvs_row(ctx, 0, 0), 100, "S6 uses GlobalMvs[0] row 100 (not stored mv 1)");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 50, "S6 uses GlobalMvs[0] col -50");
+    return 0;
+}
+# S7: NEWMV neighbour -> NewMvCount increments.
+fn test_scan_newmv_count() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, AV1_NEWMV, 1, 0, 2, 3, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, AV1_NEWMV, 1, 0, 2, 3, 0, 0);
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "S7 one candidate");
+    assert_eq(mvs_nmv(ctx), 1, "S7 NewMvCount 1 (NEWMV neighbour)");
+    return 0;
+}
+# S8: compound scan — matching ref0/ref1 pair.
+fn test_scan_compound() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, AV1_NEW_NEWMV, 1, 2, 5, 6, 7, 8);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, AV1_NEW_NEWMV, 1, 2, 5, 6, 7, 8);
+    av1_mv_scan_row(ctx, 0 - 1, 1);
+    assert_eq(mvs_num(ctx), 1, "S8 one compound candidate");
+    assert_eq(mvs_row(ctx, 0, 0), 5, "S8 list0 row 5");
+    assert_eq(mvs_col(ctx, 0, 0), 6, "S8 list0 col 6");
+    assert_eq(mvs_row(ctx, 0, 1), 7, "S8 list1 row 7");
+    assert_eq(mvs_col(ctx, 0, 1), 8, "S8 list1 col 8");
+    assert_eq(mvs_nmv(ctx), 1, "S8 NEW_NEWMV -> newmv 1");
+    return 0;
+}
+# S9: single-pred neighbour whose BOTH ref lists match our RefFrame[0] -> two
+# distinct candidates (one per list).
+fn test_scan_both_lists_match() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, 1, 3, 3, 9, 9);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 1, 3, 3, 9, 9);
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 2, "S9 both lists match ref0 -> two candidates");
+    assert_eq(mvs_row(ctx, 0, 0), 3, "S9 candidate0 = list0 mv (3,3)");
+    assert_eq(mvs_row(ctx, 1, 0), 9, "S9 candidate1 = list1 mv (9,9)");
+    return 0;
+}
+
+# S10: scan_row deltaRow=-3 exercises the parity adjustment (dr=-3, deltaCol=1 for
+# an even MiRow/MiCol) -> neighbour probed at (MiRow-3, MiCol+1).
+fn test_scan_row_delta3_parity() {
+    var ctx = mvs_ctx(3, 4, 4);   # 8x8 at (4,4), even/even -> dr=-3, deltaCol=1
+    mvs_cell(ctx, 1, 5, 1, 1, 3, 14, 1, 0, 21, 0 - 13, 0, 0);
+    mvs_cell(ctx, 1, 6, 1, 1, 3, 14, 1, 0, 21, 0 - 13, 0, 0);
+    av1_mv_scan_row(ctx, 0 - 3, 0);
+    assert_eq(mvs_num(ctx), 1, "S10 deltaRow=-3 parity -> one candidate at (1,5)");
+    assert_eq(mvs_row(ctx, 0, 0), 21, "S10 mv row 21");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 13, "S10 mv col -13");
+    assert_eq(mvs_wt(ctx, 0), 4, "S10 weight 4 (len max(2,2)=2 * 2)");
+    return 0;
+}
+# S11: scan_col len-step (transpose of S3) over 16x16 left neighbours.
+fn test_scan_col_lenstep() {
+    var ctx = mvs_ctx(9, 4, 4);   # 32x32: bh4=8, end4=8
+    var rr = 4;
+    while (rr < 12) {
+        mvs_cell(ctx, rr, 3, 1, 1, 6, 14, 1, 0, 4, 4, 0, 0);   # 16x16 nbrs (bh4=4)
+        rr = rr + 1;
+    }
+    av1_mv_scan_col(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "S11 scan_col dedup -> one entry");
+    assert_eq(mvs_wt(ctx, 0), 16, "S11 weight 8+8 (two len-4 steps)");
+    return 0;
+}
+# S12: scan_point top-left corner (deltaRow=-1, deltaCol=-1).
+fn test_scan_point_topleft() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 3, 1, 1, 3, 14, 1, 0, 15, 25, 0, 0);
+    av1_mv_scan_point(ctx, 0 - 1, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "S12 top-left candidate");
+    assert_eq(mvs_row(ctx, 0, 0), 15, "S12 mv row 15");
+    assert_eq(mvs_col(ctx, 0, 0), 25, "S12 mv col 25");
+    return 0;
+}
+# S13: useStep16 — a 64x64 block (bw4=16) steps by max(4,len) even over 8x8
+# neighbours, so only 4 of the 16 above cells are probed (cc = 0,4,8,12).
+fn test_scan_row_usestep16() {
+    var ctx = mvs_ctx_dim(32, 12, 4, 0);   # 64x64 at (4,0) in a 32x32 grid
+    var cc = 0;
+    while (cc < 16) {
+        mvs_cell(ctx, 3, cc, 1, 1, 3, 14, 1, 0, cc, cc, 0, 0);   # 8x8 nbrs, distinct mv per col
+        cc = cc + 1;
+    }
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 4, "S13 useStep16 -> 4 probes (steps by 4)");
+    assert_eq(mvs_row(ctx, 0, 0), 0, "S13 probe0 = col 0");
+    assert_eq(mvs_row(ctx, 1, 0), 4, "S13 probe1 = col 4");
+    assert_eq(mvs_row(ctx, 2, 0), 8, "S13 probe2 = col 8");
+    assert_eq(mvs_row(ctx, 3, 0), 12, "S13 probe3 = col 12");
+    assert_eq(mvs_wt(ctx, 0), 8, "S13 weight 8 (len 4 * 2)");
+    return 0;
+}
+
+# S14: scan_row(-3) with ODD MiRow/MiCol -> the &1 parity terms are non-zero
+# (dr = -3 + 1 = -2, deltaCol = 1 - 1 = 0), so the probe is (MiRow-2, MiCol).
+fn test_scan_row_odd_parity() {
+    var ctx = mvs_ctx(3, 5, 5);   # 8x8 at (5,5), odd/odd
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 0, 31, 0 - 17, 0, 0);
+    mvs_cell(ctx, 3, 6, 1, 1, 3, 14, 1, 0, 31, 0 - 17, 0, 0);
+    av1_mv_scan_row(ctx, 0 - 3, 0);
+    assert_eq(mvs_num(ctx), 1, "S14 odd parity -> probe at (3,5)");
+    assert_eq(mvs_row(ctx, 0, 0), 31, "S14 mv row 31 (odd MiRow parity applied)");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 17, "S14 mv col -17");
+    return 0;
+}
+# S15: scan_col(-3) with ODD MiRow -> the transpose parity (delta_row = 1-(MiRow&1)
+# = 0, dc = -3 + (MiCol&1)); pins the scan_col parity keyed on the right operands.
+fn test_scan_col_odd_parity() {
+    var ctx = mvs_ctx(9, 5, 8);   # 32x32 (bh4=8) at (5,8), odd MiRow
+    mvs_cell(ctx, 5, 5, 1, 1, 6, 14, 1, 0, 40, 0 - 20, 0, 0);
+    mvs_cell(ctx, 6, 5, 1, 1, 6, 14, 1, 0, 40, 0 - 20, 0, 0);
+    av1_mv_scan_col(ctx, 0 - 3, 0);
+    assert_eq(mvs_num(ctx), 1, "S15 scan_col odd parity -> probe at (5,5)");
+    assert_eq(mvs_row(ctx, 0, 0), 40, "S15 mv row 40");
+    assert_eq(mvs_wt(ctx, 0), 8, "S15 weight 8 (len max(2,min(8,4))=4 * 2)");
+    return 0;
+}
+# S16: compound GLOBAL_GLOBALMV per-list substitution — gmtype0=ROTZOOM(>TRANS)
+# substitutes GlobalMvs[0] into list 0, gmtype1=TRANSLATION keeps the stored list 1.
+fn test_scan_compound_global() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_global(ctx, 200, 100, 111, 222, 2, 1);   # GMV0=(200,100) type ROTZOOM; GMV1 type TRANSLATION
+    mvs_cell(ctx, 3, 4, 1, 1, 3, AV1_GLOBAL_GLOBALMV, 1, 2, 1, 1, 9, 9);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, AV1_GLOBAL_GLOBALMV, 1, 2, 1, 1, 9, 9);
+    av1_mv_scan_row(ctx, 0 - 1, 1);
+    assert_eq(mvs_num(ctx), 1, "S16 one compound candidate");
+    assert_eq(mvs_row(ctx, 0, 0), 200, "S16 list0 substituted GlobalMvs[0] row 200");
+    assert_eq(mvs_col(ctx, 0, 0), 100, "S16 list0 col 100");
+    assert_eq(mvs_row(ctx, 0, 1), 9, "S16 list1 NOT substituted (TRANSLATION) -> stored 9");
+    assert_eq(mvs_col(ctx, 0, 1), 9, "S16 list1 col 9");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -352,6 +600,24 @@ fn main() {
     test_stack_sort_compound();
     test_stack_dedup_after_lowering();
     test_stack_reset();
+    test_group("spatial neighbour scans (7.10.2.2/3/4) + add_ref_mv (7.10.2.7)");
+    test_mvctx_basics();
+    test_scan_row_basic();
+    test_scan_row_diff_ref();
+    test_scan_row_lenstep();
+    test_scan_col_outside();
+    test_scan_point_avail();
+    test_scan_globalmv();
+    test_scan_newmv_count();
+    test_scan_compound();
+    test_scan_both_lists_match();
+    test_scan_row_delta3_parity();
+    test_scan_col_lenstep();
+    test_scan_point_topleft();
+    test_scan_row_usestep16();
+    test_scan_row_odd_parity();
+    test_scan_col_odd_parity();
+    test_scan_compound_global();
     return assert_summary();
 }
 

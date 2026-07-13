@@ -220,12 +220,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   adversarial review returned no findings), the **MV-prediction foundation** `av1_mv.cyr`
   0.7.62 (spec 7.10.2: the `Av1Mv` (row,col) representation + `av1_lower_mv_precision` 7.10.2.10 +
   `av1_setup_global_mv` 7.10.2.1 — the global-motion MV candidate, the leaf-first entry to the
-  MV-pred arc), and the **MV candidate stack** `av1_mv.cyr` 0.7.63 (`Av1MvStack` + `av1_mv_stack_add`
+  MV-pred arc), the **MV candidate stack** `av1_mv.cyr` 0.7.63 (`Av1MvStack` + `av1_mv_stack_add`
   — the dedup-or-append core of the search-stack processes 7.10.2.8/9 — + the stable
-  `av1_mv_stack_sort` 7.10.2.13 + `has_newmv`; both bites' 4-slice adversarial reviews returned no
-  findings) are in; next the neighbour scans (scan_row/col/point + temporal, which need the inter MI
-  grid) that FEED the stack + the `find_mv_stack` driver + the NewMv/RefMv/Zero/DRL contexts + inter
-  mode-info (then the inter tile decode that lets `av1_decode_stream` decode a genuine inter frame
+  `av1_mv_stack_sort` 7.10.2.13 + `has_newmv`), and the **spatial neighbour scans** `av1_mv.cyr`
+  0.7.64 (`av1_mv_scan_row`/`_col`/`_point` 7.10.2.2/3/4 + `av1_add_ref_mv_candidate` 7.10.2.7 + the
+  search-stack selection preambles, over the `Av1MvCtx`/`Av1MiRec` grid; all three bites' 4-slice
+  adversarial reviews returned no findings) are in; next the `find_mv_stack` driver (scan ordering +
+  `REF_CAT_LEVEL` + foundAbove/Left tracking + sorts) + inter mode-info (which populates the MI grid
+  the scans read) + the temporal scan (needs the DPB's deferred saved MVs) + the NewMv/RefMv/Zero/DRL
+  contexts (then the inter tile decode that lets `av1_decode_stream` decode a genuine inter frame
   referencing the DPB), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
   `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths

@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.64] - 2026-07-13
+
+**Inter prediction — the spatial neighbour scans (spec 7.10.2.2/3/4 + 7.10.2.7).** The third bite of
+the MV-prediction arc, and the largest: the traversal that finds matching-reference neighbours (the
+row above, the column to the left, the top-left/top-right corners) and feeds their motion vectors into
+the candidate stack. Extends `src/av1_mv.cyr` with:
+
+- the **per-4×4 MI grid** `Av1MiRec` — a cell holding `avail` (decoded-this-frame) / `is_inter` /
+  `MiSize` / `YMode` / `RefFrames[2]` / `Mvs[2]`, frame-addressed, with `av1_mv_grid_new` / `_cell` /
+  `_set`; populated by inter mode-info (a later bite) — here it's caller/test-built;
+- the **scan context** `Av1MvCtx` bundling the grid + frame stride + tile bounds + current block
+  (`MiRow`/`MiCol`/`MiSize`) + the block's `RefFrame[0..1]` + `GlobalMvs[0..1]` / `GmType` + the
+  precision flags + `FoundMatch` + the candidate stack, with grouped setters, `av1_mvctx_is_inside`,
+  and the `FoundMatch` accessors;
+- **`av1_mv_scan_row`** / **`av1_mv_scan_col`** (7.10.2.2/3) — the neighbour traversal: the `end4`
+  bound (`Min(Min(bw4, MiCols−MiCol), 16)`), the `deltaRow`/`deltaCol` parity adjustment for far rows/
+  columns, the `len`-stepping (a wide neighbour is examined once, advancing by its covered extent),
+  `useStep16` for ≥64-sample blocks, `weight = len·2`, and the `is_inside` tile-edge break;
+- **`av1_mv_scan_point`** (7.10.2.4) — a single corner probe (weight 4) gated on `is_inside` AND the
+  cell's `avail` (the top-right corner may be inside the tile but not yet decoded, so its stored MI
+  would be stale);
+- **`av1_add_ref_mv_candidate`** (7.10.2.7) + the **search-stack selection preambles**
+  (`av1_mv_search_stack` / `av1_mv_compound_search_stack`, 7.10.2.8/9) — the `is_inter` gate, the
+  single (each candidate list vs `RefFrame[0]`) / compound (both refs) dispatch, and the `GLOBALMV` /
+  `GLOBAL_GLOBALMV` global-motion substitution (a `>TRANSLATION` model on a large block substitutes
+  `GlobalMvs`) — then delegating the dedup/append/`NewMvCount` to the reviewed `av1_mv_stack_add`.
+
+Verified by 195 assertions (62 new) with known answers **independently computed by a spec-literal
+Python port** (`scratchpad/mvscan_ref.py`, no shared code): the basic scan, different-reference
+rejection, `scan_row`/`scan_col` len-stepping, the `is_inside` tile-edge break, the `scan_point`
+`avail` gate, the `GLOBALMV` substitution, `NewMvCount`, compound, both-lists-match, the `deltaRow`=-3
+parity adjustment (even and odd `MiRow`/`MiCol`), the `scan_col` transpose parity, top-left
+`scan_point`, `useStep16`, and the compound `GLOBAL_GLOBALMV` per-list substitution. A **4-slice
+adversarial spec review** (scan_row/col geometry / scan_point+add_ref+selection / record-layout+OOB+
+hang safety / tests+libaom-dav1d cross-check, each finding adversarially verified) returned **no
+findings** — reviewers hand-traced the parity math, proved the `is_inside` gate before every grid read
+prevents OOB (and that `len ≥ 1` prevents an infinite loop), and confirmed the single-dispatch checks
+`RefFrame[0]` against BOTH neighbour lists (not the `REF1==REF1` bug). The four refuted findings were
+coverage suggestions — the three parity/compound cases above were folded into the suite, and the
+tile⊆grid caller invariant (the load-bearing OOB precondition) is now documented at
+`av1_mvctx_set_tile`. **21,394 suite assertions + 1,140 fuzz assertions, all green; `make lint` +
+`make fmt-check` green.**
+
+### Added
+- **`src/av1_mv.cyr`** (extended): `Av1MiRec` grid (`av1_mv_grid_new` / `_cell` / `_set`); `Av1MvCtx`
+  (`av1_mvctx_new` + setters + `_is_inside` / `_cell` / `_found_match` / `_clear_found_match`);
+  `av1_mv_search_stack`, `av1_mv_compound_search_stack`, `av1_add_ref_mv_candidate`, `av1_mv_scan_row`,
+  `av1_mv_scan_col`, `av1_mv_scan_point`.
+- **`tests/av1_mv.tcyr`** (extended): `test_mvctx_basics` + 16 scan scenarios (S1–S16) — 195 assertions.
+
+### Scope / deferred
+- The SPATIAL scans + selection + the grid/context. The MI grid is populated by inter mode-info
+  (later). The TEMPORAL scan (7.10.2.5/6, needs the DPB's deferred saved MVs), the extra search
+  (7.10.2.11), the context/clamping (7.10.2.14), and the `find_mv_stack` DRIVER (the scan ordering,
+  the `REF_CAT_LEVEL` bonus, the foundAbove/Left tracking, the sorts) — plus the NewMv/RefMv/Zero/DRL
+  entropy contexts — are the next bites (roadmap.md).
+
 ## [0.7.63] - 2026-07-13
 
 **Inter prediction — the MV candidate stack (spec 7.10.2).** The second bite of the MV-prediction

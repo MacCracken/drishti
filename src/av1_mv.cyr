@@ -10,9 +10,13 @@
 #     the self-contained leaves the rest of the process composes;
 #   * (0.7.63) THE CANDIDATE STACK — the RefStackMv/WeightStack record, the
 #     dedup-or-append core of the search-stack processes (7.10.2.8/9), the stable
-#     sort (7.10.2.13), and has_newmv. See the second half of this file.
-# Still ahead: the neighbour scans (scan_row/col/point, temporal) that feed the
-# stack, the find_mv_stack driver, and the entropy contexts (roadmap.md).
+#     sort (7.10.2.13), and has_newmv;
+#   * (0.7.64) THE SPATIAL NEIGHBOUR SCANS — scan_row/col/point (7.10.2.2/3/4) +
+#     add_ref_mv_candidate (7.10.2.7) + the search-stack selection preambles,
+#     reading a per-4x4 MI grid (Av1MiRec) bundled with the block/tile context in
+#     an Av1MvCtx. See the third section of this file.
+# Still ahead: the temporal scan, the find_mv_stack driver, and the entropy
+# contexts (roadmap.md).
 #
 # The 0.7.62 foundation, composed by the rest of the process:
 #
@@ -34,15 +38,16 @@
 #
 # FLAT module — wired after src/av1_mc.cyr (the other inter-prediction leaf) so
 # the inter pieces sit together. Family av1_. Depends on: av1_intra
-# (av1_round2_signed + AV1_MI_SIZE), av1_modeinfo (av1_block_width /
-# av1_block_height), av1_frame (av1_fh_gm_* / allow_high_precision_mv /
-# force_integer_mv + AV1_WARPEDMODEL_PREC_BITS / AV1_GM_* / AV1_INTRA_FRAME),
-# drishti (DR_OK).
+# (av1_round2_signed + av1_iabs + AV1_MI_SIZE), av1_modeinfo (av1_block_width /
+# av1_block_height / av1_num_4x4_w / av1_num_4x4_h), av1_frame (av1_fh_gm_* /
+# allow_high_precision_mv / force_integer_mv + av1_min / av1_max +
+# AV1_WARPEDMODEL_PREC_BITS / AV1_GM_* / AV1_INTRA_FRAME), drishti (DR_OK).
 #
 # Derived from the AV1 spec §7.10.2.1 (setup global MV) + §7.10.2.10 (lower
 # precision) + §4 (Round2Signed) + §7.10.2.8/9 (search stack) + §7.10.2.13
-# (sorting). The neighbour scans (which read the not-yet-built inter MI grid) and
-# the find_mv_stack driver + contexts are later bites of the arc (roadmap.md).
+# (sorting) + §7.10.2.2/3/4 (spatial scans) + §7.10.2.7 (add ref MV). The MI grid
+# the scans read is populated by inter mode-info (a later bite); the temporal scan
+# + find_mv_stack driver + entropy contexts are also later bites (roadmap.md).
 
 # ================================================================
 # Av1Mv — a motion vector: two i64 components, mv[0] = row (vertical) then
@@ -353,6 +358,322 @@ fn av1_mv_stack_sort(mvs, start, end, is_compound): i64 {
             idx = idx + 1;
         }
         end = new_end;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# THE SPATIAL NEIGHBOUR SCANS (spec 7.10.2.2/3/4) + add_ref_mv_candidate
+# (7.10.2.7) + the search-stack SELECTION preambles (7.10.2.8/9). These traverse
+# the already-decoded neighbours (the row above / column to the left / the
+# top-right & top-left corners) and feed matching-reference candidates into the
+# candidate stack (av1_mv_stack_add). They read a per-4x4 MI grid — MiSizes /
+# YModes / RefFrames / Mvs / IsInters — that inter mode-info populates as each
+# block decodes; here that grid + the block/tile context is bundled in an
+# Av1MvCtx so the scans are self-contained and driven from a caller-built context
+# (tests today; the find_mv_stack driver + inter mode-info next). The `find`
+# match-tracking (FoundMatch) is exposed for the driver.
+#
+# `mvs` = the candidate stack handle (`stack` is reserved); `ctx` = the scan
+# context; `grid` = the MI-record grid.
+# ================================================================
+
+# Av1MiRec — one 4x4 MI cell the scans read. avail = has been decoded this frame
+# (the scan-point "RefFrames written" check); the rest mirror the spec's per-MI
+# arrays. Frame-addressed: cell(r,c) = grid + (r*fmi_cols + c)*AV1MIR_SIZE.
+enum Av1MiRecOff {
+    AV1MIR_AVAIL   = 0;     # decoded this frame (0/1)
+    AV1MIR_ISINTER = 8;     # IsInters[r][c]
+    AV1MIR_MISIZE  = 16;    # MiSizes[r][c]
+    AV1MIR_YMODE   = 24;    # YModes[r][c]
+    AV1MIR_REF0    = 32;    # RefFrames[r][c][0]
+    AV1MIR_REF1    = 40;    # RefFrames[r][c][1]
+    AV1MIR_MV0ROW  = 48;    # Mvs[r][c][0] row
+    AV1MIR_MV0COL  = 56;    # Mvs[r][c][0] col
+    AV1MIR_MV1ROW  = 64;    # Mvs[r][c][1] row
+    AV1MIR_MV1COL  = 72;    # Mvs[r][c][1] col
+    AV1MIR_SIZE    = 80;
+}
+
+# av1_mv_grid_new — allocate a zeroed fmi_cols x fmi_rows MI grid (or 0 on bad
+# arg / OOM). Zeroed = every cell avail=0, is_inter=0 (undecoded).
+fn av1_mv_grid_new(fmi_cols, fmi_rows): i64 {
+    var n = fmi_cols * fmi_rows;
+    if (n <= 0) { return 0; }
+    var g = alloc(n * AV1MIR_SIZE);
+    if (g == 0) { return 0; }
+    memset(g, 0, n * AV1MIR_SIZE);
+    return g;
+}
+fn av1_mv_grid_cell(grid, fmi_cols, r, c): i64 {
+    return grid + (((r * fmi_cols) + c) * AV1MIR_SIZE);
+}
+# av1_mv_grid_set — write one MI cell (for tests + inter mode-info).
+fn av1_mv_grid_set(grid, fmi_cols, r, c, avail, is_inter, mi_size, ymode, ref0, ref1, mv0r, mv0c, mv1r, mv1c): i64 {
+    var cell = av1_mv_grid_cell(grid, fmi_cols, r, c);
+    store64(cell + AV1MIR_AVAIL, avail);
+    store64(cell + AV1MIR_ISINTER, is_inter);
+    store64(cell + AV1MIR_MISIZE, mi_size);
+    store64(cell + AV1MIR_YMODE, ymode);
+    store64(cell + AV1MIR_REF0, ref0);
+    store64(cell + AV1MIR_REF1, ref1);
+    store64(cell + AV1MIR_MV0ROW, mv0r);
+    store64(cell + AV1MIR_MV0COL, mv0c);
+    store64(cell + AV1MIR_MV1ROW, mv1r);
+    store64(cell + AV1MIR_MV1COL, mv1c);
+    return DR_OK;
+}
+
+# Av1MvCtx — everything the scans need for one block: the MI grid + frame stride,
+# the tile bounds (for is_inside), the current block (MiRow/MiCol/MiSize), the
+# block's references RefFrame[0..1], the GlobalMvs[0..1] + GmType[RefFrame[0..1]]
+# (for the GLOBALMV substitution), the MV precision flags, FoundMatch, and the
+# candidate stack.
+enum Av1MvCtxOff {
+    AV1MVC_GRID       = 0;
+    AV1MVC_FMI_COLS   = 8;
+    AV1MVC_FMI_ROWS   = 16;
+    AV1MVC_ROW_START  = 24;
+    AV1MVC_ROW_END    = 32;
+    AV1MVC_COL_START  = 40;
+    AV1MVC_COL_END    = 48;
+    AV1MVC_MI_ROW     = 56;
+    AV1MVC_MI_COL     = 64;
+    AV1MVC_MI_SIZE    = 72;
+    AV1MVC_REF0       = 80;
+    AV1MVC_REF1       = 88;
+    AV1MVC_GMV0_ROW   = 96;
+    AV1MVC_GMV0_COL   = 104;
+    AV1MVC_GMV1_ROW   = 112;
+    AV1MVC_GMV1_COL   = 120;
+    AV1MVC_GMTYPE0    = 128;
+    AV1MVC_GMTYPE1    = 136;
+    AV1MVC_ALLOW_HP   = 144;
+    AV1MVC_FORCE_INT  = 152;
+    AV1MVC_FOUND      = 160;
+    AV1MVC_STACK      = 168;
+    AV1MVC_SIZE       = 176;
+}
+fn av1_mvctx_new(): i64 {
+    var c = alloc(AV1MVC_SIZE);
+    if (c == 0) { return 0; }
+    memset(c, 0, AV1MVC_SIZE);
+    return c;
+}
+fn av1_mvctx_set_grid(ctx, grid, fmi_cols, fmi_rows): i64 {
+    store64(ctx + AV1MVC_GRID, grid);
+    store64(ctx + AV1MVC_FMI_COLS, fmi_cols);
+    store64(ctx + AV1MVC_FMI_ROWS, fmi_rows);
+    return DR_OK;
+}
+# Set the tile window (for is_inside). CONTRACT: the caller MUST keep the tile
+# bounds within the grid — 0 <= col_start <= col_end <= fmi_cols and 0 <=
+# row_start <= row_end <= fmi_rows. This is the load-bearing OOB invariant: every
+# grid cell read in the scans is gated by av1_mvctx_is_inside FIRST, so a candidate
+# is read only when its coords are inside the tile — which is in-grid ONLY under
+# this contract. Real tiles are always within the frame (= the grid), so a decoder
+# driving this always satisfies it; the check is elided from the hot scan path.
+fn av1_mvctx_set_tile(ctx, row_start, row_end, col_start, col_end): i64 {
+    store64(ctx + AV1MVC_ROW_START, row_start);
+    store64(ctx + AV1MVC_ROW_END, row_end);
+    store64(ctx + AV1MVC_COL_START, col_start);
+    store64(ctx + AV1MVC_COL_END, col_end);
+    return DR_OK;
+}
+fn av1_mvctx_set_block(ctx, mi_row, mi_col, mi_size): i64 {
+    store64(ctx + AV1MVC_MI_ROW, mi_row);
+    store64(ctx + AV1MVC_MI_COL, mi_col);
+    store64(ctx + AV1MVC_MI_SIZE, mi_size);
+    return DR_OK;
+}
+fn av1_mvctx_set_refs(ctx, ref0, ref1): i64 {
+    store64(ctx + AV1MVC_REF0, ref0);
+    store64(ctx + AV1MVC_REF1, ref1);
+    return DR_OK;
+}
+fn av1_mvctx_set_global(ctx, g0r, g0c, g1r, g1c, gt0, gt1): i64 {
+    store64(ctx + AV1MVC_GMV0_ROW, g0r);
+    store64(ctx + AV1MVC_GMV0_COL, g0c);
+    store64(ctx + AV1MVC_GMV1_ROW, g1r);
+    store64(ctx + AV1MVC_GMV1_COL, g1c);
+    store64(ctx + AV1MVC_GMTYPE0, gt0);
+    store64(ctx + AV1MVC_GMTYPE1, gt1);
+    return DR_OK;
+}
+fn av1_mvctx_set_precision(ctx, allow_hp, force_int): i64 {
+    store64(ctx + AV1MVC_ALLOW_HP, allow_hp);
+    store64(ctx + AV1MVC_FORCE_INT, force_int);
+    return DR_OK;
+}
+fn av1_mvctx_set_stack(ctx, mvs): i64 { store64(ctx + AV1MVC_STACK, mvs); return DR_OK; }
+fn av1_mvctx_found_match(ctx): i64 { return load64(ctx + AV1MVC_FOUND); }
+fn av1_mvctx_clear_found_match(ctx): i64 { store64(ctx + AV1MVC_FOUND, 0); return DR_OK; }
+fn av1_mvctx_cell(ctx, r, c): i64 {
+    return av1_mv_grid_cell(load64(ctx + AV1MVC_GRID), load64(ctx + AV1MVC_FMI_COLS), r, c);
+}
+
+# is_inside (5.11.4, tile window): MiColStart <= c < MiColEnd, MiRowStart <= r < MiRowEnd.
+fn av1_mvctx_is_inside(ctx, r, c): i64 {
+    if ((c < load64(ctx + AV1MVC_COL_START)) || (c >= load64(ctx + AV1MVC_COL_END))) { return 0; }
+    if ((r < load64(ctx + AV1MVC_ROW_START)) || (r >= load64(ctx + AV1MVC_ROW_END))) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# search stack (7.10.2.8) — select the candidate MV for a single-prediction
+# neighbour then hand it to av1_mv_stack_add. GLOBALMV/GLOBAL_GLOBALMV with a
+# >TRANSLATION global model on a "large" (min dim >= 8) block substitute
+# GlobalMvs[0] for the stored MV. Sets FoundMatch.
+# ================================================================
+fn av1_mv_search_stack(ctx, mv_row, mv_col, weight, cand_list): i64 {
+    var cell = av1_mvctx_cell(ctx, mv_row, mv_col);
+    var cand_mode = load64(cell + AV1MIR_YMODE);
+    var cand_size = load64(cell + AV1MIR_MISIZE);
+    var large = 0;
+    if (av1_min(av1_block_width(cand_size), av1_block_height(cand_size)) >= 8) { large = 1; }
+    var r = 0;
+    var c = 0;
+    if (((cand_mode == AV1_GLOBALMV) || (cand_mode == AV1_GLOBAL_GLOBALMV))
+    && (load64(ctx + AV1MVC_GMTYPE0) > AV1_GM_TRANSLATION) && (large == 1)) {
+        r = load64(ctx + AV1MVC_GMV0_ROW);
+        c = load64(ctx + AV1MVC_GMV0_COL);
+    } else {
+        if (cand_list == 0) {
+            r = load64(cell + AV1MIR_MV0ROW);
+            c = load64(cell + AV1MIR_MV0COL);
+        } else {
+            r = load64(cell + AV1MIR_MV1ROW);
+            c = load64(cell + AV1MIR_MV1COL);
+        }
+    }
+    store64(ctx + AV1MVC_FOUND, 1);
+    av1_mv_stack_add(load64(ctx + AV1MVC_STACK), r, c, 0, 0, 0, cand_mode, weight,
+    load64(ctx + AV1MVC_ALLOW_HP), load64(ctx + AV1MVC_FORCE_INT));
+    return DR_OK;
+}
+
+# compound search stack (7.10.2.9) — a matching compound neighbour: both stored
+# MVs, with per-list GlobalMvs substitution for GLOBAL_GLOBALMV. Sets FoundMatch.
+fn av1_mv_compound_search_stack(ctx, mv_row, mv_col, weight): i64 {
+    var cell = av1_mvctx_cell(ctx, mv_row, mv_col);
+    var cand_mode = load64(cell + AV1MIR_YMODE);
+    var r0 = load64(cell + AV1MIR_MV0ROW);
+    var c0 = load64(cell + AV1MIR_MV0COL);
+    var r1 = load64(cell + AV1MIR_MV1ROW);
+    var c1 = load64(cell + AV1MIR_MV1COL);
+    if (cand_mode == AV1_GLOBAL_GLOBALMV) {
+        if (load64(ctx + AV1MVC_GMTYPE0) > AV1_GM_TRANSLATION) {
+            r0 = load64(ctx + AV1MVC_GMV0_ROW);
+            c0 = load64(ctx + AV1MVC_GMV0_COL);
+        }
+        if (load64(ctx + AV1MVC_GMTYPE1) > AV1_GM_TRANSLATION) {
+            r1 = load64(ctx + AV1MVC_GMV1_ROW);
+            c1 = load64(ctx + AV1MVC_GMV1_COL);
+        }
+    }
+    store64(ctx + AV1MVC_FOUND, 1);
+    av1_mv_stack_add(load64(ctx + AV1MVC_STACK), r0, c0, r1, c1, 1, cand_mode, weight,
+    load64(ctx + AV1MVC_ALLOW_HP), load64(ctx + AV1MVC_FORCE_INT));
+    return DR_OK;
+}
+
+# add reference motion vector (7.10.2.7) — examine a candidate MI location for a
+# reference match. Skips non-inter cells. Single: for each candidate list whose
+# RefFrames matches our RefFrame[0], run search_stack. Compound: both lists must
+# match RefFrame[0]/RefFrame[1], then run compound_search_stack.
+fn av1_add_ref_mv_candidate(ctx, mv_row, mv_col, is_compound, weight): i64 {
+    var cell = av1_mvctx_cell(ctx, mv_row, mv_col);
+    if (load64(cell + AV1MIR_ISINTER) == 0) { return DR_OK; }
+    var ref0 = load64(ctx + AV1MVC_REF0);
+    if (is_compound == 0) {
+        if (load64(cell + AV1MIR_REF0) == ref0) { av1_mv_search_stack(ctx, mv_row, mv_col, weight, 0); }
+        if (load64(cell + AV1MIR_REF1) == ref0) { av1_mv_search_stack(ctx, mv_row, mv_col, weight, 1); }
+    } else {
+        if ((load64(cell + AV1MIR_REF0) == ref0)
+        && (load64(cell + AV1MIR_REF1) == load64(ctx + AV1MVC_REF1))) {
+            av1_mv_compound_search_stack(ctx, mv_row, mv_col, weight);
+        }
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# scan row (7.10.2.2) — scan the row `delta_row` above (in 4x4 units) for matching
+# neighbours, advancing by each neighbour's covered width so a wide block is only
+# examined once. deltaRow beyond -1 gets the parity adjustment that halves the
+# stored-MV footprint. Stops at the tile edge (is_inside) or end4.
+# ================================================================
+fn av1_mv_scan_row(ctx, delta_row, is_compound): i64 {
+    var mi_size = load64(ctx + AV1MVC_MI_SIZE);
+    var bw4 = av1_num_4x4_w(mi_size);
+    var mi_row = load64(ctx + AV1MVC_MI_ROW);
+    var mi_col = load64(ctx + AV1MVC_MI_COL);
+    var end4 = av1_min(av1_min(bw4, load64(ctx + AV1MVC_FMI_COLS) - mi_col), 16);
+    var delta_col = 0;
+    var use16 = 0;
+    if (bw4 >= 16) { use16 = 1; }
+    var dr = delta_row;
+    if (av1_iabs(delta_row) > 1) {
+        dr = dr + (mi_row & 1);
+        delta_col = 1 - (mi_col & 1);
+    }
+    var i = 0;
+    while (i < end4) {
+        var mr = mi_row + dr;
+        var mc = mi_col + delta_col + i;
+        if (av1_mvctx_is_inside(ctx, mr, mc) == 0) { break; }
+        var cand_size = load64(av1_mvctx_cell(ctx, mr, mc) + AV1MIR_MISIZE);
+        var len = av1_min(bw4, av1_num_4x4_w(cand_size));
+        if (av1_iabs(dr) > 1) { len = av1_max(2, len); }
+        if (use16 == 1) { len = av1_max(4, len); }
+        av1_add_ref_mv_candidate(ctx, mr, mc, is_compound, len * 2);
+        i = i + len;
+    }
+    return DR_OK;
+}
+
+# scan col (7.10.2.3) — the transpose of scan row: scan the column `delta_col` to
+# the left, advancing by each neighbour's covered height.
+fn av1_mv_scan_col(ctx, delta_col, is_compound): i64 {
+    var mi_size = load64(ctx + AV1MVC_MI_SIZE);
+    var bh4 = av1_num_4x4_h(mi_size);
+    var mi_row = load64(ctx + AV1MVC_MI_ROW);
+    var mi_col = load64(ctx + AV1MVC_MI_COL);
+    var end4 = av1_min(av1_min(bh4, load64(ctx + AV1MVC_FMI_ROWS) - mi_row), 16);
+    var delta_row = 0;
+    var use16 = 0;
+    if (bh4 >= 16) { use16 = 1; }
+    var dc = delta_col;
+    if (av1_iabs(delta_col) > 1) {
+        delta_row = 1 - (mi_row & 1);
+        dc = dc + (mi_col & 1);
+    }
+    var i = 0;
+    while (i < end4) {
+        var mr = mi_row + delta_row + i;
+        var mc = mi_col + dc;
+        if (av1_mvctx_is_inside(ctx, mr, mc) == 0) { break; }
+        var cand_size = load64(av1_mvctx_cell(ctx, mr, mc) + AV1MIR_MISIZE);
+        var len = av1_min(bh4, av1_num_4x4_h(cand_size));
+        if (av1_iabs(dc) > 1) { len = av1_max(2, len); }
+        if (use16 == 1) { len = av1_max(4, len); }
+        av1_add_ref_mv_candidate(ctx, mr, mc, is_compound, len * 2);
+        i = i + len;
+    }
+    return DR_OK;
+}
+
+# scan point (7.10.2.4) — examine a single corner location (top-left / top-right),
+# weight 4. Only if inside the tile AND the cell has been decoded this frame
+# (avail) — the top-right corner may be inside but not yet decoded, so its stored
+# MI would be stale.
+fn av1_mv_scan_point(ctx, delta_row, delta_col, is_compound): i64 {
+    var mr = load64(ctx + AV1MVC_MI_ROW) + delta_row;
+    var mc = load64(ctx + AV1MVC_MI_COL) + delta_col;
+    if (av1_mvctx_is_inside(ctx, mr, mc) == 1) {
+        if (load64(av1_mvctx_cell(ctx, mr, mc) + AV1MIR_AVAIL) == 1) {
+            av1_add_ref_mv_candidate(ctx, mr, mc, is_compound, 4);
+        }
     }
     return DR_OK;
 }
