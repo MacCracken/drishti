@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.65] - 2026-07-13
+
+**Inter prediction — the `find_mv_stack` driver (spec 7.10.2).** The bite that ties the MV-prediction
+arc together: the process that builds an inter block's complete ordered candidate MV list plus the
+entropy contexts the mode reader consults. Extends `src/av1_mv.cyr` with the full `find_mv_stack`
+process (temporal scan the sole deferral):
+
+- **`av1_find_mv_stack`** — the driver: resets the stack, runs the spatial scan sequence (row/col at
+  deltas −1/−3/−5 + the top-left and top-right corner points), tracks the above/left match flags into
+  `CloseMatches`/`TotalMatches`, applies the `REF_CAT_LEVEL` weight bonus to the immediate-neighbourhood
+  candidates, two-region-sorts the stack (`[0, numNearest)` then `[numNearest, NumMvFound)`), fills to
+  2 via `extra_search`, and derives the contexts + clamps — all in the spec's exact ordered-step
+  sequence (including the subtle `FoundMatch` reset points);
+- **`av1_mv_extra_search`** + **`av1_add_extra_mv_candidate`** + **`av1_mv_store_combined`**
+  (7.10.2.11/12) — the fill-to-2: the two-pass partial-match search of the row above / column left, the
+  single-prediction sign-bias-adjusted dedup/append (weight 2, no lowering) + the global-motion fill
+  (positions filled *without* incrementing `NumMvFound`, per the spec note), and the compound
+  `RefIdMvs`/`RefDiffMvs`/`combinedMvs` combine machinery;
+- **`av1_mv_context_and_clamping`** (7.10.2.14) — the `DrlCtxStack` (per-entry DRL context from the
+  weight gap at `REF_CAT_LEVEL`), `NewMvContext`/`RefMvContext` (from `CloseMatches`/`TotalMatches`/
+  `numNew`), `ZeroMvContext` (0 — temporal deferred), and the MV clamp;
+- **`av1_clamp_mv_row`/`_col`** (spec 6) — clamp an MV so the referenced block stays within `MV_BORDER
+  + block·8` of the frame edge;
+- the extended `Av1MvCtx` (sign-bias pointer + the driver outputs + the extra-search scratch) with the
+  `av1_mvctx_set_signbias` / output accessors (`_close_matches` / `_total_matches` / `_newmv_context` /
+  `_refmv_context` / `_zero_context` / `_drl_context`).
+
+Verified by 255 assertions (60 new) with known answers **independently computed by a spec-literal Python
+port** (`scratchpad/mvdriver_ref.py`, no shared code): the above+left two-candidate case (weight bonus,
+`NewMvContext`), the empty→global-fill and one→global-fill cases (the fills not counted toward
+`NumMvFound`), the positive and negative MV clamps, `DrlCtxStack` `z=1` and `z=2` branches, all three
+context branches, the compound `extra_search` combine, and single-prediction sign-bias negation + the
+distinct-append path. A **5-slice adversarial spec review** (driver orchestration / extra_search+add_
+extra / context+clamp / record-layout+OOB+hang safety / tests+libaom-dav1d cross-check, each finding
+adversarially verified) returned **no findings** — reviewers traced the exact scan/`FoundMatch`
+sequence, verified the extended-context offsets never overlap or OOB, and confirmed the sign-bias
+negation, the global-fill-not-counted rule, and the clamp arithmetic against the spec. The four refuted
+findings were coverage suggestions, all folded into the suite (the `z=2` DrlCtx, sign-bias negation,
+negative clamp, and distinct-append cases). **21,454 suite assertions + 1,140 fuzz assertions, all
+green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_mv.cyr`** (extended): `av1_find_mv_stack` (7.10.2); `av1_mv_extra_search` /
+  `av1_add_extra_mv_candidate` / `av1_mv_store_combined` (7.10.2.11/12); `av1_mv_context_and_clamping`
+  (7.10.2.14); `av1_clamp_mv_row` / `_col` (spec 6); the extended `Av1MvCtx` + `av1_mvctx_set_signbias`
+  / `_signbias` / `_set_use_ref_frame_mvs` + the output accessors.
+- **`tests/av1_mv.tcyr`** (extended): `test_driver_*` D1–D10 (above/left, global fills, clamp ±, DrlCtx
+  z=1/z=2, context branches, compound combine, sign-bias) — 255 assertions total.
+
+### Scope / deferred
+- The full `find_mv_stack` EXCEPT the **temporal scan** (7.10.2.5, step 11 `if use_ref_frame_mvs:
+  temporal_scan`) — it needs the DPB's saved motion field (deferred with the DPB). The driver skips it
+  and leaves `ZeroMvContext` at 0, which is correct for `use_ref_frame_mvs == 0`. The caller pre-sets
+  `GlobalMvs` (`av1_setup_global_mv`); the MI grid is populated by inter mode-info (the next bite).
+
 ## [0.7.64] - 2026-07-13
 
 **Inter prediction — the spatial neighbour scans (spec 7.10.2.2/3/4 + 7.10.2.7).** The third bite of

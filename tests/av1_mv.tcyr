@@ -578,6 +578,168 @@ fn test_scan_compound_global() {
     return 0;
 }
 
+# ================================================================
+# find_mv_stack driver (7.10.2) + extra_search (7.10.2.11) + context_and_clamping
+# (7.10.2.14) + clamp (spec 6). Known answers from scratchpad/mvdriver_ref.py.
+# ================================================================
+# D1: an above (NEARESTMV) + a left (NEWMV) neighbour -> 2 spatial candidates,
+# CloseMatches 2, the REF_CAT_LEVEL weight bonus, NewMvContext 4.
+fn test_driver_above_left() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, 0, 10, 10, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 0, 10, 10, 0, 0);
+    mvs_cell(ctx, 4, 3, 1, 1, 3, AV1_NEWMV, 1, 0, 20, 0 - 20, 0, 0);
+    mvs_cell(ctx, 5, 3, 1, 1, 3, AV1_NEWMV, 1, 0, 20, 0 - 20, 0, 0);
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 2, "D1 num 2");
+    assert_eq(mvs_row(ctx, 0, 0), 10, "D1 entry0 row 10 (above)");
+    assert_eq(mvs_wt(ctx, 0), 644, "D1 entry0 weight 4 + REF_CAT_LEVEL");
+    assert_eq(mvs_row(ctx, 1, 0), 20, "D1 entry1 row 20 (left NEWMV)");
+    assert_eq(mvs_wt(ctx, 1), 644, "D1 entry1 weight 644");
+    assert_eq(av1_mvctx_close_matches(ctx), 2, "D1 CloseMatches 2");
+    assert_eq(av1_mvctx_total_matches(ctx), 2, "D1 TotalMatches 2");
+    assert_eq(av1_mvctx_newmv_context(ctx), 4, "D1 NewMvContext 5-1 (close>=2, numNew 1)");
+    assert_eq(av1_mvctx_refmv_context(ctx), 5, "D1 RefMvContext 5");
+    assert_eq(av1_mvctx_zero_context(ctx), 0, "D1 ZeroMvContext 0");
+    assert_eq(av1_mvctx_drl_context(ctx, 0), 0, "D1 drl0 0 (both >= REF_CAT)");
+    return 0;
+}
+# D2: no inter neighbours -> extra_search fills positions 0,1 with GlobalMvs[0]
+# (NumMvFound stays 0); contexts all minimal.
+fn test_driver_empty_global() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_global(ctx, 64, 0 - 32, 0, 0, 0, 0);
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 0, "D2 NumMvFound 0 (global fills are not counted)");
+    assert_eq(mvs_row(ctx, 0, 0), 64, "D2 fill[0] = GlobalMvs[0] row 64");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 32, "D2 fill[0] col -32");
+    assert_eq(mvs_row(ctx, 1, 0), 64, "D2 fill[1] row 64");
+    assert_eq(av1_mvctx_close_matches(ctx), 0, "D2 CloseMatches 0");
+    assert_eq(av1_mvctx_newmv_context(ctx), 0, "D2 NewMvContext min(total,1)=0");
+    assert_eq(av1_mvctx_refmv_context(ctx), 0, "D2 RefMvContext 0");
+    return 0;
+}
+# D3: exactly one spatial candidate -> extra fills position 1 with GlobalMvs[0].
+fn test_driver_one_global() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_global(ctx, 6, 8, 0, 0, 0, 0);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, 0, 5, 5, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 0, 5, 5, 0, 0);
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 1, "D3 NumMvFound 1");
+    assert_eq(mvs_row(ctx, 0, 0), 5, "D3 entry0 = spatial (5,5)");
+    assert_eq(mvs_wt(ctx, 0), 644, "D3 entry0 weight 644");
+    assert_eq(mvs_row(ctx, 1, 0), 6, "D3 fill[1] = GlobalMvs[0] row 6");
+    assert_eq(mvs_col(ctx, 1, 0), 8, "D3 fill[1] col 8");
+    assert_eq(av1_mvctx_close_matches(ctx), 1, "D3 CloseMatches 1");
+    assert_eq(av1_mvctx_newmv_context(ctx), 3, "D3 NewMvContext 3-0");
+    assert_eq(av1_mvctx_refmv_context(ctx), 3, "D3 RefMvContext 2+1");
+    return 0;
+}
+# D4: a huge MV clamped to the frame border (8x8 at MI (2,2), border 128+64).
+fn test_driver_clamp() {
+    var ctx = mvs_ctx(3, 2, 2);
+    mvs_cell(ctx, 1, 2, 1, 1, 3, 14, 1, 0, 100000, 100000, 0, 0);
+    mvs_cell(ctx, 1, 3, 1, 1, 3, 14, 1, 0, 100000, 100000, 0, 0);
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 1, "D4 num 1");
+    assert_eq(mvs_row(ctx, 0, 0), 576, "D4 clamped row 576");
+    assert_eq(mvs_col(ctx, 0, 0), 576, "D4 clamped col 576");
+    return 0;
+}
+# D5: DrlCtxStack — two near (bonus-weighted) + one far candidate -> drl [0,1,0].
+fn test_driver_drl() {
+    var ctx = mvs_ctx(9, 4, 4);   # 32x32
+    var cc = 4;
+    while (cc < 12) { mvs_cell(ctx, 3, cc, 1, 1, 6, 14, 1, 0, 1, 1, 0, 0); cc = cc + 1; }
+    var rr = 4;
+    while (rr < 12) { mvs_cell(ctx, rr, 3, 1, 1, 6, 14, 1, 0, 2, 2, 0, 0); rr = rr + 1; }
+    mvs_cell(ctx, 3, 3, 1, 1, 6, 14, 1, 0, 3, 3, 0, 0);   # top-left corner -> far candidate
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 3, "D5 num 3");
+    assert_eq(mvs_wt(ctx, 0), 656, "D5 w0 656 (16 + REF_CAT)");
+    assert_eq(mvs_wt(ctx, 2), 4, "D5 w2 4 (far corner)");
+    assert_eq(av1_mvctx_drl_context(ctx, 0), 0, "D5 drl0 0 (both >= REF_CAT)");
+    assert_eq(av1_mvctx_drl_context(ctx, 1), 1, "D5 drl1 1 (w0 >= REF_CAT, w1 < REF_CAT)");
+    assert_eq(av1_mvctx_drl_context(ctx, 2), 0, "D5 drl2 0 (last)");
+    return 0;
+}
+# D6: CloseMatches==1 (above only) with a NEWMV neighbour -> NewMvContext 2.
+fn test_driver_close1_newmv() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, AV1_NEWMV, 1, 0, 5, 5, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, AV1_NEWMV, 1, 0, 5, 5, 0, 0);
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(av1_mvctx_close_matches(ctx), 1, "D6 CloseMatches 1 (above only)");
+    assert_eq(av1_mvctx_newmv_context(ctx), 2, "D6 NewMvContext 3-1");
+    assert_eq(av1_mvctx_refmv_context(ctx), 3, "D6 RefMvContext 2+1");
+    return 0;
+}
+# D7: compound — one compound neighbour above; extra_search combines the RefId /
+# RefDiff buckets into the second candidate pair.
+fn test_driver_compound() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, AV1_NEW_NEWMV, 1, 2, 5, 6, 7, 8);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, AV1_NEW_NEWMV, 1, 2, 5, 6, 7, 8);
+    av1_find_mv_stack(ctx, 1);
+    assert_eq(mvs_num(ctx), 2, "D7 num 2 (1 spatial + 1 combined)");
+    assert_eq(mvs_row(ctx, 0, 0), 5, "D7 entry0 list0 row 5");
+    assert_eq(mvs_row(ctx, 0, 1), 7, "D7 entry0 list1 row 7");
+    assert_eq(mvs_wt(ctx, 0), 644, "D7 entry0 weight 644");
+    assert_eq(mvs_row(ctx, 1, 0), 7, "D7 entry1 list0 row 7 (combined swap)");
+    assert_eq(mvs_row(ctx, 1, 1), 5, "D7 entry1 list1 row 5");
+    assert_eq(mvs_wt(ctx, 1), 2, "D7 entry1 weight 2");
+    assert_eq(av1_mvctx_newmv_context(ctx), 2, "D7 NewMvContext 3-1");
+    assert_eq(av1_mvctx_drl_context(ctx, 0), 1, "D7 drl0 1 (644 >= cat, 2 < cat)");
+    return 0;
+}
+
+# D8: two adjacent FAR candidates (no immediate neighbours -> no REF_CAT_LEVEL
+# bonus, both weight 4) -> DrlCtxStack z=2 at idx 0 (w0 < REF_CAT_LEVEL).
+fn test_driver_drl_z2() {
+    var ctx = mvs_ctx(3, 4, 4);
+    mvs_cell(ctx, 3, 3, 1, 1, 3, 14, 1, 0, 30, 30, 0, 0);   # scan_point(-1,-1) top-left, far
+    mvs_cell(ctx, 1, 5, 1, 1, 3, 14, 1, 0, 40, 40, 0, 0);   # scan_row(-3) (dr=-3,dc=1), far
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 2, "D8 num 2 (two far candidates)");
+    assert_eq(mvs_wt(ctx, 0), 4, "D8 w0 4 (no bonus, not immediate)");
+    assert_eq(av1_mvctx_close_matches(ctx), 0, "D8 CloseMatches 0");
+    assert_eq(av1_mvctx_drl_context(ctx, 0), 2, "D8 drl0 2 (w0 < REF_CAT_LEVEL)");
+    assert_eq(av1_mvctx_drl_context(ctx, 1), 0, "D8 drl1 0 (last)");
+    return 0;
+}
+# D9: single-prediction sign-bias negation via extra_search + the distinct-append
+# path. Above spatial (matching ref); a left neighbour with a DIFFERENT sign-bias
+# non-matching ref -> extra appends the NEGATED MV, bumping NumMvFound.
+fn test_driver_signbias_append() {
+    var ctx = mvs_ctx(3, 4, 4);
+    var sb = alloc(8 * 8);                 # RefFrameSignBias[8]
+    memset(sb, 0, 8 * 8);
+    store64(sb + (3 * 8), 1);              # ref 3 is a backwards reference (bias 1); ref 1 = 0
+    av1_mvctx_set_signbias(ctx, sb);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, 0, 5, 5, 0, 0);          # above, ref 1 (matching)
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 0, 5, 5, 0, 0);
+    mvs_cell(ctx, 4, 3, 1, 1, 3, 14, 3, 0, 10, 20, 0, 0);        # left, ref 3 (non-matching)
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 2, "D9 num 2 (spatial + extra distinct-append)");
+    assert_eq(mvs_row(ctx, 0, 0), 5, "D9 entry0 = spatial (5,5)");
+    assert_eq(mvs_row(ctx, 1, 0), 0 - 10, "D9 entry1 row -10 (sign-bias negated)");
+    assert_eq(mvs_col(ctx, 1, 0), 0 - 20, "D9 entry1 col -20 (negated)");
+    assert_eq(mvs_wt(ctx, 1), 2, "D9 entry1 weight 2 (extra)");
+    return 0;
+}
+# D10: negative-edge clamp — a huge NEGATIVE MV clamped to the top/left bound.
+fn test_driver_clamp_negative() {
+    var ctx = mvs_ctx(3, 2, 2);
+    mvs_cell(ctx, 1, 2, 1, 1, 3, 14, 1, 0, 0 - 100000, 0 - 100000, 0, 0);
+    mvs_cell(ctx, 1, 3, 1, 1, 3, 14, 1, 0, 0 - 100000, 0 - 100000, 0, 0);
+    av1_find_mv_stack(ctx, 0);
+    assert_eq(mvs_num(ctx), 1, "D10 num 1");
+    assert_eq(mvs_row(ctx, 0, 0), 0 - 256, "D10 clamped row -256 (top bound)");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 256, "D10 clamped col -256 (left bound)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -618,6 +780,17 @@ fn main() {
     test_scan_row_odd_parity();
     test_scan_col_odd_parity();
     test_scan_compound_global();
+    test_group("find_mv_stack driver (7.10.2) + extra_search + context/clamping");
+    test_driver_above_left();
+    test_driver_empty_global();
+    test_driver_one_global();
+    test_driver_clamp();
+    test_driver_drl();
+    test_driver_close1_newmv();
+    test_driver_compound();
+    test_driver_drl_z2();
+    test_driver_signbias_append();
+    test_driver_clamp_negative();
     return assert_summary();
 }
 

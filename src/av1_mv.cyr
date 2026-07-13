@@ -46,7 +46,7 @@
 # Derived from the AV1 spec §7.10.2.1 (setup global MV) + §7.10.2.10 (lower
 # precision) + §4 (Round2Signed) + §7.10.2.8/9 (search stack) + §7.10.2.13
 # (sorting) + §7.10.2.2/3/4 (spatial scans) + §7.10.2.7 (add ref MV). The MI grid
-# the scans read is populated by inter mode-info (a later bite); the temporal scan
+# the scans read is populated by inter mode-info (a later bite, roadmap.md); the temporal scan
 # + find_mv_stack driver + entropy contexts are also later bites (roadmap.md).
 
 # ================================================================
@@ -452,7 +452,21 @@ enum Av1MvCtxOff {
     AV1MVC_FORCE_INT  = 152;
     AV1MVC_FOUND      = 160;
     AV1MVC_STACK      = 168;
-    AV1MVC_SIZE       = 176;
+    # --- find_mv_stack driver (0.7.65): sign bias + outputs + extra-search scratch ---
+    AV1MVC_SIGNBIAS   = 176;   # ptr to RefFrameSignBias[8] (indexed by ref frame 0..7; 0 = all-forward)
+    AV1MVC_USE_RFMV   = 184;   # use_ref_frame_mvs (temporal-scan gate; the scan itself is a later bite, roadmap.md)
+    AV1MVC_CLOSE      = 192;   # CloseMatches
+    AV1MVC_TOTAL      = 200;   # TotalMatches
+    AV1MVC_NEWMVCTX   = 208;   # NewMvContext
+    AV1MVC_REFMVCTX   = 216;   # RefMvContext
+    AV1MVC_ZEROCTX    = 224;   # ZeroMvContext
+    AV1MVC_DRL        = 232;   # DrlCtxStack[8] inline -> 296
+    AV1MVC_RID        = 296;   # RefIdMvs[2 list][2 idx][2 comp] (compound extra) -> 360; idx list*4+i*2+comp
+    AV1MVC_RIDCNT     = 360;   # RefIdCount[2] -> 376
+    AV1MVC_RDIFF      = 376;   # RefDiffMvs[2][2][2] -> 440
+    AV1MVC_RDIFFCNT   = 440;   # RefDiffCount[2] -> 456
+    AV1MVC_COMB       = 456;   # combinedMvs[2 cc][2 list][2 comp] -> 520; idx cc*4+list*2+comp
+    AV1MVC_SIZE       = 520;
 }
 fn av1_mvctx_new(): i64 {
     var c = alloc(AV1MVC_SIZE);
@@ -508,6 +522,21 @@ fn av1_mvctx_set_precision(ctx, allow_hp, force_int): i64 {
 fn av1_mvctx_set_stack(ctx, mvs): i64 { store64(ctx + AV1MVC_STACK, mvs); return DR_OK; }
 fn av1_mvctx_found_match(ctx): i64 { return load64(ctx + AV1MVC_FOUND); }
 fn av1_mvctx_clear_found_match(ctx): i64 { store64(ctx + AV1MVC_FOUND, 0); return DR_OK; }
+# RefFrameSignBias[8] ptr (indexed by ref frame 0..7). 0 = all-forward (bias 0).
+fn av1_mvctx_set_signbias(ctx, ptr): i64 { store64(ctx + AV1MVC_SIGNBIAS, ptr); return DR_OK; }
+fn av1_mvctx_signbias(ctx, ref): i64 {
+    var p = load64(ctx + AV1MVC_SIGNBIAS);
+    if (p == 0) { return 0; }
+    return load64(p + (ref * 8));
+}
+fn av1_mvctx_set_use_ref_frame_mvs(ctx, v): i64 { store64(ctx + AV1MVC_USE_RFMV, v); return DR_OK; }
+# driver outputs (valid after av1_find_mv_stack).
+fn av1_mvctx_close_matches(ctx): i64 { return load64(ctx + AV1MVC_CLOSE); }
+fn av1_mvctx_total_matches(ctx): i64 { return load64(ctx + AV1MVC_TOTAL); }
+fn av1_mvctx_newmv_context(ctx): i64 { return load64(ctx + AV1MVC_NEWMVCTX); }
+fn av1_mvctx_refmv_context(ctx): i64 { return load64(ctx + AV1MVC_REFMVCTX); }
+fn av1_mvctx_zero_context(ctx): i64 { return load64(ctx + AV1MVC_ZEROCTX); }
+fn av1_mvctx_drl_context(ctx, idx): i64 { return load64(ctx + AV1MVC_DRL + (idx * 8)); }
 fn av1_mvctx_cell(ctx, r, c): i64 {
     return av1_mv_grid_cell(load64(ctx + AV1MVC_GRID), load64(ctx + AV1MVC_FMI_COLS), r, c);
 }
@@ -665,7 +694,7 @@ fn av1_mv_scan_col(ctx, delta_col, is_compound): i64 {
 
 # scan point (7.10.2.4) — examine a single corner location (top-left / top-right),
 # weight 4. Only if inside the tile AND the cell has been decoded this frame
-# (avail) — the top-right corner may be inside but not yet decoded, so its stored
+# (avail) — the top-right corner may be inside the tile but still undecoded, so its stored
 # MI would be stale.
 fn av1_mv_scan_point(ctx, delta_row, delta_col, is_compound): i64 {
     var mr = load64(ctx + AV1MVC_MI_ROW) + delta_row;
@@ -675,5 +704,344 @@ fn av1_mv_scan_point(ctx, delta_row, delta_col, is_compound): i64 {
             av1_add_ref_mv_candidate(ctx, mr, mc, is_compound, 4);
         }
     }
+    return DR_OK;
+}
+
+# ================================================================
+# THE find_mv_stack DRIVER (spec 7.10.2) + its remaining sub-processes: extra
+# search (7.10.2.11), add extra MV candidate (7.10.2.12), context and clamping
+# (7.10.2.14), and clamp_mv_row/col (spec 6). This orchestrates the pieces built
+# above — setup_global_mv (the caller pre-sets GlobalMvs), the spatial scans, the
+# stack sort — into the full candidate list + the entropy contexts (NewMv / RefMv
+# / Zero / DRL) the inter mode reader consults, with the MVs clamped to the frame.
+# The TEMPORAL scan (7.10.2.5, step 11) is DEFERRED — it needs the DPB's saved
+# motion field (roadmap.md); this driver is correct for use_ref_frame_mvs == 0.
+# ================================================================
+
+# clamp_mv_row / clamp_mv_col (spec 6) — clamp an MV component so the referenced
+# block stays within `border` of the frame edge. MiRows/MiCols = the frame dims
+# (fmi_rows/fmi_cols); MiRow/MiCol/MiSize = the current block.
+fn av1_clamp_mv_row(ctx, mvec, border): i64 {
+    var bh4 = av1_num_4x4_h(load64(ctx + AV1MVC_MI_SIZE));
+    var mi_row = load64(ctx + AV1MVC_MI_ROW);
+    var mb_top = 0 - ((mi_row * AV1_MI_SIZE) * 8);
+    var mb_bot = ((load64(ctx + AV1MVC_FMI_ROWS) - bh4 - mi_row) * AV1_MI_SIZE) * 8;
+    return av1_clip3(mb_top - border, mb_bot + border, mvec);
+}
+fn av1_clamp_mv_col(ctx, mvec, border): i64 {
+    var bw4 = av1_num_4x4_w(load64(ctx + AV1MVC_MI_SIZE));
+    var mi_col = load64(ctx + AV1MVC_MI_COL);
+    var mb_left = 0 - ((mi_col * AV1_MI_SIZE) * 8);
+    var mb_right = ((load64(ctx + AV1MVC_FMI_COLS) - bw4 - mi_col) * AV1_MI_SIZE) * 8;
+    return av1_clip3(mb_left - border, mb_right + border, mvec);
+}
+
+# add extra MV candidate (7.10.2.12) — examine a neighbour for partial-match MVs.
+# Single: sign-adjust each list's MV (per RefFrameSignBias) and append (dedup vs
+# RefStackMv[idx][0], weight 2) — no lowering, no NewMvCount. Compound: bucket each
+# matching MV into RefIdMvs (same frame) or RefDiffMvs (different frame, sign-
+# adjusted), capped at 2 each, for extra_search to combine.
+fn av1_add_extra_mv_candidate(ctx, mv_row, mv_col, is_compound): i64 {
+    var cell = av1_mvctx_cell(ctx, mv_row, mv_col);
+    var mvs = load64(ctx + AV1MVC_STACK);
+    var cl = 0;
+    while (cl < 2) {
+        var cand_ref = load64(cell + AV1MIR_REF0);
+        var cmr = load64(cell + AV1MIR_MV0ROW);
+        var cmc = load64(cell + AV1MIR_MV0COL);
+        if (cl == 1) {
+            cand_ref = load64(cell + AV1MIR_REF1);
+            cmr = load64(cell + AV1MIR_MV1ROW);
+            cmc = load64(cell + AV1MIR_MV1COL);
+        }
+        if (cand_ref > AV1_INTRA_FRAME) {
+            if (is_compound != 0) {
+                var lst = 0;
+                while (lst < 2) {
+                    var rf = load64(ctx + AV1MVC_REF0);
+                    if (lst == 1) { rf = load64(ctx + AV1MVC_REF1); }
+                    var idcnt = load64(ctx + AV1MVC_RIDCNT + (lst * 8));
+                    if ((cand_ref == rf) && (idcnt < 2)) {
+                        store64(ctx + AV1MVC_RID + (((lst * 4) + (idcnt * 2) + 0) * 8), cmr);
+                        store64(ctx + AV1MVC_RID + (((lst * 4) + (idcnt * 2) + 1) * 8), cmc);
+                        store64(ctx + AV1MVC_RIDCNT + (lst * 8), idcnt + 1);
+                    } else {
+                        var dcnt = load64(ctx + AV1MVC_RDIFFCNT + (lst * 8));
+                        if (dcnt < 2) {
+                            var dr = cmr;
+                            var dc = cmc;
+                            if (av1_mvctx_signbias(ctx, cand_ref) != av1_mvctx_signbias(ctx, rf)) {
+                                dr = 0 - dr;
+                                dc = 0 - dc;
+                            }
+                            store64(ctx + AV1MVC_RDIFF + (((lst * 4) + (dcnt * 2) + 0) * 8), dr);
+                            store64(ctx + AV1MVC_RDIFF + (((lst * 4) + (dcnt * 2) + 1) * 8), dc);
+                            store64(ctx + AV1MVC_RDIFFCNT + (lst * 8), dcnt + 1);
+                        }
+                    }
+                    lst = lst + 1;
+                }
+            } else {
+                var sr = cmr;
+                var sc = cmc;
+                if (av1_mvctx_signbias(ctx, cand_ref) != av1_mvctx_signbias(ctx, load64(ctx + AV1MVC_REF0))) {
+                    sr = 0 - sr;
+                    sc = 0 - sc;
+                }
+                var num = load64(mvs + AV1MVS_NUMFOUND);
+                var idx = 0;
+                var dup = 0;
+                while (idx < num) {
+                    if ((load64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 0) * 8)) == sr)
+                    && (load64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 1) * 8)) == sc)) {
+                        dup = 1;
+                        break;
+                    }
+                    idx = idx + 1;
+                }
+                if (dup == 0) {
+                    store64(mvs + AV1MVS_REFSTACK + (((num * 4) + 0) * 8), sr);
+                    store64(mvs + AV1MVS_REFSTACK + (((num * 4) + 1) * 8), sc);
+                    store64(mvs + AV1MVS_WEIGHT + (num * 8), 2);
+                    store64(mvs + AV1MVS_NUMFOUND, num + 1);
+                }
+            }
+        }
+        cl = cl + 1;
+    }
+    return DR_OK;
+}
+
+# copy combinedMvs[comb_idx] (both lists) into RefStackMv[dst_idx], weight 2.
+fn av1_mv_store_combined(ctx, mvs, dst_idx, comb_idx): i64 {
+    store64(mvs + AV1MVS_REFSTACK + (((dst_idx * 4) + 0) * 8), load64(ctx + AV1MVC_COMB + (((comb_idx * 4) + 0) * 8)));
+    store64(mvs + AV1MVS_REFSTACK + (((dst_idx * 4) + 1) * 8), load64(ctx + AV1MVC_COMB + (((comb_idx * 4) + 1) * 8)));
+    store64(mvs + AV1MVS_REFSTACK + (((dst_idx * 4) + 2) * 8), load64(ctx + AV1MVC_COMB + (((comb_idx * 4) + 2) * 8)));
+    store64(mvs + AV1MVS_REFSTACK + (((dst_idx * 4) + 3) * 8), load64(ctx + AV1MVC_COMB + (((comb_idx * 4) + 3) * 8)));
+    store64(mvs + AV1MVS_WEIGHT + (dst_idx * 8), 2);
+    return DR_OK;
+}
+
+# extra search (7.10.2.11) — fill RefStackMv to 2 candidates when the scans found
+# fewer. Two-pass partial-match search (row above, then column left) via
+# add_extra_mv_candidate, then global-motion fill. Single prediction: the row-above
+# / col-left matches went straight on the stack; positions up to index 1 are filled
+# with GlobalMvs[0] WITHOUT incrementing NumMvFound (spec note). Compound: the
+# RefIdMvs/RefDiffMvs/GlobalMvs are combined into pairs and appended.
+fn av1_mv_extra_search(ctx, is_compound): i64 {
+    store64(ctx + AV1MVC_RIDCNT + 0, 0);
+    store64(ctx + AV1MVC_RIDCNT + 8, 0);
+    store64(ctx + AV1MVC_RDIFFCNT + 0, 0);
+    store64(ctx + AV1MVC_RDIFFCNT + 8, 0);
+    var mvs = load64(ctx + AV1MVC_STACK);
+    var mi_size = load64(ctx + AV1MVC_MI_SIZE);
+    var mi_row = load64(ctx + AV1MVC_MI_ROW);
+    var mi_col = load64(ctx + AV1MVC_MI_COL);
+    var w4 = av1_min(av1_min(16, av1_num_4x4_w(mi_size)), load64(ctx + AV1MVC_FMI_COLS) - mi_col);
+    var h4 = av1_min(av1_min(16, av1_num_4x4_h(mi_size)), load64(ctx + AV1MVC_FMI_ROWS) - mi_row);
+    var num4x4 = av1_min(w4, h4);
+    var pas = 0;
+    while (pas < 2) {
+        var idx = 0;
+        while ((idx < num4x4) && (load64(mvs + AV1MVS_NUMFOUND) < 2)) {
+            var mr = mi_row - 1;
+            var mc = mi_col + idx;
+            if (pas == 1) {
+                mr = mi_row + idx;
+                mc = mi_col - 1;
+            }
+            if (av1_mvctx_is_inside(ctx, mr, mc) == 0) { break; }
+            av1_add_extra_mv_candidate(ctx, mr, mc, is_compound);
+            var sz = load64(av1_mvctx_cell(ctx, mr, mc) + AV1MIR_MISIZE);
+            if (pas == 0) { idx = idx + av1_num_4x4_w(sz); }
+            else { idx = idx + av1_num_4x4_h(sz); }
+        }
+        pas = pas + 1;
+    }
+    if (is_compound != 0) {
+        # combinedMvs[compCount][list] = RefIdMvs then RefDiffMvs then GlobalMvs.
+        var lst = 0;
+        while (lst < 2) {
+            var cc = 0;
+            var i = 0;
+            # combinedMvs[cc][lst] base = COMB + (cc*4 + lst*2)*8; the two comps are at +0/+8.
+            var idcnt = load64(ctx + AV1MVC_RIDCNT + (lst * 8));
+            while (i < idcnt) {
+                var cbo = ctx + AV1MVC_COMB + (((cc * 4) + (lst * 2)) * 8);
+                var rio = ctx + AV1MVC_RID + (((lst * 4) + (i * 2)) * 8);
+                store64(cbo, load64(rio));
+                store64(cbo + 8, load64(rio + 8));
+                cc = cc + 1;
+                i = i + 1;
+            }
+            i = 0;
+            var dcnt = load64(ctx + AV1MVC_RDIFFCNT + (lst * 8));
+            while ((i < dcnt) && (cc < 2)) {
+                var cbd = ctx + AV1MVC_COMB + (((cc * 4) + (lst * 2)) * 8);
+                var rdo = ctx + AV1MVC_RDIFF + (((lst * 4) + (i * 2)) * 8);
+                store64(cbd, load64(rdo));
+                store64(cbd + 8, load64(rdo + 8));
+                cc = cc + 1;
+                i = i + 1;
+            }
+            var gr = load64(ctx + AV1MVC_GMV0_ROW);
+            var gc = load64(ctx + AV1MVC_GMV0_COL);
+            if (lst == 1) {
+                gr = load64(ctx + AV1MVC_GMV1_ROW);
+                gc = load64(ctx + AV1MVC_GMV1_COL);
+            }
+            while (cc < 2) {
+                var cbg = ctx + AV1MVC_COMB + (((cc * 4) + (lst * 2)) * 8);
+                store64(cbg, gr);
+                store64(cbg + 8, gc);
+                cc = cc + 1;
+            }
+            lst = lst + 1;
+        }
+        var num = load64(mvs + AV1MVS_NUMFOUND);
+        if (num == 1) {
+            var use_idx = 0;
+            if ((load64(ctx + AV1MVC_COMB + (0 * 8)) == load64(mvs + AV1MVS_REFSTACK + (0 * 8)))
+            && (load64(ctx + AV1MVC_COMB + (1 * 8)) == load64(mvs + AV1MVS_REFSTACK + (1 * 8)))
+            && (load64(ctx + AV1MVC_COMB + (2 * 8)) == load64(mvs + AV1MVS_REFSTACK + (2 * 8)))
+            && (load64(ctx + AV1MVC_COMB + (3 * 8)) == load64(mvs + AV1MVS_REFSTACK + (3 * 8)))) {
+                use_idx = 1;
+            }
+            av1_mv_store_combined(ctx, mvs, 1, use_idx);
+            store64(mvs + AV1MVS_NUMFOUND, 2);
+        } else {
+            av1_mv_store_combined(ctx, mvs, num, 0);
+            av1_mv_store_combined(ctx, mvs, num + 1, 1);
+            store64(mvs + AV1MVS_NUMFOUND, num + 2);
+        }
+    } else {
+        var num = load64(mvs + AV1MVS_NUMFOUND);
+        var idx = num;
+        while (idx < 2) {
+            store64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 0) * 8), load64(ctx + AV1MVC_GMV0_ROW));
+            store64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 1) * 8), load64(ctx + AV1MVC_GMV0_COL));
+            idx = idx + 1;
+        }
+    }
+    return DR_OK;
+}
+
+# context and clamping (7.10.2.14) — derive DrlCtxStack + New/RefMvContext and
+# clamp the stack MVs to the frame edge. ZeroMvContext was set (0) by the driver.
+fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
+    var mvs = load64(ctx + AV1MVC_STACK);
+    var mi_size = load64(ctx + AV1MVC_MI_SIZE);
+    var bw = av1_block_width(mi_size);
+    var bh = av1_block_height(mi_size);
+    var num_lists = 1;
+    if (is_compound != 0) { num_lists = 2; }
+    var num = load64(mvs + AV1MVS_NUMFOUND);
+    var idx = 0;
+    while (idx < num) {
+        var z = 0;
+        if ((idx + 1) < num) {
+            var w0 = load64(mvs + AV1MVS_WEIGHT + (idx * 8));
+            var w1 = load64(mvs + AV1MVS_WEIGHT + ((idx + 1) * 8));
+            if (w0 >= AV1_REF_CAT_LEVEL) {
+                if (w1 < AV1_REF_CAT_LEVEL) { z = 1; }
+            } else {
+                z = 2;
+            }
+        }
+        store64(ctx + AV1MVC_DRL + (idx * 8), z);
+        idx = idx + 1;
+    }
+    var row_border = AV1_MV_BORDER + (bh * 8);
+    var col_border = AV1_MV_BORDER + (bw * 8);
+    var lst = 0;
+    while (lst < num_lists) {
+        var j = 0;
+        while (j < num) {
+            var ro = AV1MVS_REFSTACK + (((j * 4) + (lst * 2) + 0) * 8);
+            var co = AV1MVS_REFSTACK + (((j * 4) + (lst * 2) + 1) * 8);
+            store64(mvs + ro, av1_clamp_mv_row(ctx, load64(mvs + ro), row_border));
+            store64(mvs + co, av1_clamp_mv_col(ctx, load64(mvs + co), col_border));
+            j = j + 1;
+        }
+        lst = lst + 1;
+    }
+    var close = load64(ctx + AV1MVC_CLOSE);
+    var total = load64(ctx + AV1MVC_TOTAL);
+    var nn = av1_min(num_new, 1);
+    if (close == 0) {
+        store64(ctx + AV1MVC_NEWMVCTX, av1_min(total, 1));
+        store64(ctx + AV1MVC_REFMVCTX, total);
+    } else {
+        if (close == 1) {
+            store64(ctx + AV1MVC_NEWMVCTX, 3 - nn);
+            store64(ctx + AV1MVC_REFMVCTX, 2 + total);
+        } else {
+            store64(ctx + AV1MVC_NEWMVCTX, 5 - nn);
+            store64(ctx + AV1MVC_REFMVCTX, 5);
+        }
+    }
+    return DR_OK;
+}
+
+# av1_find_mv_stack (7.10.2) — the driver. Resets the stack, runs the spatial scan
+# sequence (row/col at deltas -1/-3/-5 + the two corner points), tracks the
+# above/left match flags into CloseMatches/TotalMatches, applies the REF_CAT_LEVEL
+# bonus to the immediate-neighbourhood candidates, two-region-sorts the stack,
+# fills to 2 via extra_search, and derives the contexts + clamps. The caller must
+# have pre-set GlobalMvs[0..1] (av1_setup_global_mv) + the block/tile/refs/precision
+# + sign-bias + stack in `ctx`. Outputs (NumMvFound, RefStackMv, and the contexts)
+# are read via the av1_mvctx_* / av1_mv_stack_* accessors. Temporal scan is a later bite (roadmap.md).
+fn av1_find_mv_stack(ctx, is_compound): i64 {
+    var mvs = load64(ctx + AV1MVC_STACK);
+    av1_mv_stack_reset(mvs);
+    store64(ctx + AV1MVC_FOUND, 0);
+    var mi_size = load64(ctx + AV1MVC_MI_SIZE);
+    var bw4 = av1_num_4x4_w(mi_size);
+    var bh4 = av1_num_4x4_h(mi_size);
+    av1_mv_scan_row(ctx, 0 - 1, is_compound);
+    var found_above = load64(ctx + AV1MVC_FOUND);
+    store64(ctx + AV1MVC_FOUND, 0);
+    av1_mv_scan_col(ctx, 0 - 1, is_compound);
+    var found_left = load64(ctx + AV1MVC_FOUND);
+    store64(ctx + AV1MVC_FOUND, 0);
+    if (av1_max(bw4, bh4) <= 16) { av1_mv_scan_point(ctx, 0 - 1, bw4, is_compound); }
+    if (load64(ctx + AV1MVC_FOUND) == 1) { found_above = 1; }
+    store64(ctx + AV1MVC_CLOSE, found_above + found_left);
+    var num_nearest = load64(mvs + AV1MVS_NUMFOUND);
+    var num_new = load64(mvs + AV1MVS_NEWMVCOUNT);
+    if (num_nearest > 0) {
+        var bi = 0;
+        while (bi < num_nearest) {
+            store64(mvs + AV1MVS_WEIGHT + (bi * 8),
+            load64(mvs + AV1MVS_WEIGHT + (bi * 8)) + AV1_REF_CAT_LEVEL);
+            bi = bi + 1;
+        }
+    }
+    store64(ctx + AV1MVC_ZEROCTX, 0);
+    # temporal scan (7.10.2.5, step 11) DEFERRED — needs the DPB saved motion field
+    # (roadmap.md); ZeroMvContext therefore stays 0 (correct for use_ref_frame_mvs == 0).
+    av1_mv_scan_point(ctx, 0 - 1, 0 - 1, is_compound);
+    if (load64(ctx + AV1MVC_FOUND) == 1) { found_above = 1; }
+    store64(ctx + AV1MVC_FOUND, 0);
+    av1_mv_scan_row(ctx, 0 - 3, is_compound);
+    if (load64(ctx + AV1MVC_FOUND) == 1) { found_above = 1; }
+    store64(ctx + AV1MVC_FOUND, 0);
+    av1_mv_scan_col(ctx, 0 - 3, is_compound);
+    if (load64(ctx + AV1MVC_FOUND) == 1) { found_left = 1; }
+    store64(ctx + AV1MVC_FOUND, 0);
+    if (bh4 > 1) {
+        av1_mv_scan_row(ctx, 0 - 5, is_compound);
+        if (load64(ctx + AV1MVC_FOUND) == 1) { found_above = 1; }
+        store64(ctx + AV1MVC_FOUND, 0);
+    }
+    if (bw4 > 1) {
+        av1_mv_scan_col(ctx, 0 - 5, is_compound);
+        if (load64(ctx + AV1MVC_FOUND) == 1) { found_left = 1; }
+    }
+    store64(ctx + AV1MVC_TOTAL, found_above + found_left);
+    av1_mv_stack_sort(mvs, 0, num_nearest, is_compound);
+    av1_mv_stack_sort(mvs, num_nearest, load64(mvs + AV1MVS_NUMFOUND), is_compound);
+    if (load64(mvs + AV1MVS_NUMFOUND) < 2) { av1_mv_extra_search(ctx, is_compound); }
+    av1_mv_context_and_clamping(ctx, is_compound, num_new);
     return DR_OK;
 }

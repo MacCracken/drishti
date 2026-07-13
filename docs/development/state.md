@@ -6,41 +6,39 @@
 
 ## Version
 
-**0.7.64** — cut 2026-07-13, not yet tagged (user's git). **Inter prediction — the spatial neighbour
-scans (spec 7.10.2.2/3/4 + 7.10.2.7).** The third and largest MV-prediction bite: the traversal that
-finds matching-reference neighbours (the row above, the column to the left, the corners) and feeds
-their MVs into the candidate stack. `src/av1_mv.cyr` grows the **per-4×4 MI grid** `Av1MiRec` (avail/
-is_inter/MiSize/YMode/RefFrames[2]/Mvs[2] per cell, frame-addressed; av1_mv_grid_new/cell/set —
-populated by inter mode-info later, caller/test-built here), the **scan context** `Av1MvCtx` (the grid
-+ tile bounds + block + RefFrame[0..1] + GlobalMvs/GmType + precision + FoundMatch + the stack;
-av1_mvctx_* setters + is_inside), **`av1_mv_scan_row`/`_scan_col`** (7.10.2.2/3 — end4 = Min(Min(bw4,
-MiCols−MiCol), 16), the deltaRow/deltaCol parity adjustment for far rows/cols, the len-stepping (a wide
-neighbour probed once), useStep16, weight = len·2, the is_inside break), **`av1_mv_scan_point`**
-(7.10.2.4 — a corner probe weight 4 gated on is_inside AND the cell's avail), and
-**`av1_add_ref_mv_candidate`** (7.10.2.7) + the **search-stack selection preambles**
-(`av1_mv_search_stack`/`_compound_search_stack` 7.10.2.8/9 — the is_inter gate, the single (each list
-vs RefFrame[0]) / compound (both refs) dispatch, the GLOBALMV/GLOBAL_GLOBALMV substitution) delegating
-dedup/append/NewMvCount to the reviewed av1_mv_stack_add. Verified by 195 assertions (62 new) with
-known answers independently computed by a spec-literal Python port (`scratchpad/mvscan_ref.py`, no
-shared code) — basic scan, diff-ref rejection, len-stepping (row+col), is_inside break, the scan_point
-avail gate, GLOBALMV substitution, compound, both-lists-match, the deltaRow=-3 parity (even AND odd
-MiRow/MiCol), the scan_col transpose parity, top-left scan_point, useStep16, and the compound
-GLOBAL_GLOBALMV per-list substitution. A **4-slice adversarial spec review** (scan_row/col geometry /
-scan_point+add_ref+selection / record-layout+OOB+hang safety / tests+libaom-dav1d cross-check, each
-finding adversarially verified) returned **NO findings** — reviewers hand-traced the parity math,
-proved the is_inside gate before every grid read prevents OOB (and len≥1 prevents an infinite loop),
-and confirmed the single-dispatch checks RefFrame[0] against BOTH neighbour lists (not the REF1==REF1
-bug); the 4 refuted coverage suggestions were folded in (the 3 parity/compound cases + the tile⊆grid
-OOB invariant now documented at av1_mvctx_set_tile). Only the SPATIAL scans are new; the temporal scan
-(needs the DPB's deferred saved MVs) + the find_mv_stack driver + inter mode-info + entropy contexts
-are later bites. **Prior: MV candidate stack `av1_mv.cyr` 0.7.63; MV-prediction foundation 0.7.62; DPB
-/ ref-frame buffer `av1_dpb.cyr` 0.7.61; MC driver `av1_mc_pred_block` 0.7.60; `emu_edge` 0.7.59;
-`put_8tap` 0.7.58; Subpel_Filters 0.7.57; superres 0.7.52–0.7.56; multi-tile 0.7.47–0.7.51; 10-bit
-0.7.46 — 3 of 4 decode tracks done, inter underway.** Next on the inter track: the find_mv_stack driver
-+ inter mode-info (which populates the MI grid these scans read) + the temporal scan (then the inter
-tile decode). The remaining distance to 1.0
-is inter + conformance + the encode-lane completion (finishing 0.7.x), then the other per-codec arcs
-(0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
+**0.7.65** — cut 2026-07-13, not yet tagged (user's git). **Inter prediction — the find_mv_stack driver
+(spec 7.10.2).** The bite that ties the MV-prediction arc together: the process that builds an inter
+block's complete ordered candidate MV list + the entropy contexts the mode reader consults.
+`src/av1_mv.cyr` grows the full find_mv_stack (temporal the sole deferral): **`av1_find_mv_stack`** (the
+driver — resets the stack, runs the spatial scan sequence (row/col at deltas −1/−3/−5 + the two corner
+points), tracks above/left match flags into CloseMatches/TotalMatches, applies the REF_CAT_LEVEL weight
+bonus to the immediate candidates, two-region-sorts, fills to 2 via extra_search, derives the contexts
++ clamps — in the spec's exact ordered-step sequence incl. the subtle FoundMatch resets),
+**`av1_mv_extra_search`** + **`av1_add_extra_mv_candidate`** + **`av1_mv_store_combined`** (7.10.2.11/12
+— the two-pass partial-match search + the single sign-bias-adjusted dedup/append + global fill (NOT
+counted toward NumMvFound) + the compound RefId/RefDiff/combined machinery), **`av1_mv_context_and_clamping`**
+(7.10.2.14 — DrlCtxStack + NewMvContext/RefMvContext from CloseMatches/TotalMatches/numNew + ZeroMvContext
+0 + the clamp), **`av1_clamp_mv_row`/`_col`** (spec 6), and the extended Av1MvCtx (sign-bias ptr +
+outputs + extra-search scratch) + av1_mvctx_set_signbias / the output accessors. Verified by 255
+assertions (60 new) with known answers independently computed by a spec-literal Python port
+(`scratchpad/mvdriver_ref.py`, no shared code) — above+left two-candidate (bonus + NewMvContext),
+empty→global-fill + one→global-fill (fills not counted), positive AND negative clamp, DrlCtxStack z=1
+AND z=2, all three context branches, compound extra combine, single sign-bias negation + distinct
+append. A **5-slice adversarial spec review** (driver orchestration / extra_search+add_extra /
+context+clamp / record-layout+OOB+hang safety / tests+libaom-dav1d cross-check, each finding
+adversarially verified) returned **NO findings** — reviewers traced the exact scan/FoundMatch sequence,
+verified the extended-context offsets never overlap or OOB, and confirmed the sign-bias negation, the
+global-fill-not-counted rule, and the clamp arithmetic against the spec; the 4 refuted coverage
+suggestions (z=2 DrlCtx, sign-bias, negative clamp, distinct append) were folded in. The TEMPORAL scan
+(7.10.2.5) is the sole deferral — needs the DPB saved motion field; correct for use_ref_frame_mvs==0.
+**Prior: spatial neighbour scans `av1_mv.cyr` 0.7.64; MV candidate stack 0.7.63; MV-prediction
+foundation 0.7.62; DPB / ref-frame buffer `av1_dpb.cyr` 0.7.61; MC driver `av1_mc_pred_block` 0.7.60;
+`emu_edge` 0.7.59; `put_8tap` 0.7.58; Subpel_Filters 0.7.57; superres 0.7.52–0.7.56; multi-tile
+0.7.47–0.7.51; 10-bit 0.7.46 — 3 of 4 decode tracks done, inter underway.** Next on the inter track:
+inter mode-info (which reads these MV contexts to decode the inter block + populates the MI grid the
+scans read) + the temporal scan (needs the DPB's deferred saved MVs), then the inter tile decode. The
+remaining distance to 1.0 is inter + conformance + the encode-lane completion (finishing 0.7.x), then
+the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs (0.12.x). See
 [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
 > **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
@@ -90,7 +88,7 @@ is inter + conformance + the encode-lane completion (finishing 0.7.x), then the 
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
 | `src/av1_decode.cyr` | `av1_` | AV1 decode spine (raw bytes → pixels) — **av1_decode_obus**: OBU-stream walk (av1_obu_next dispatch: SEQUENCE_HEADER→av1_seq_parse, FRAME_HEADER→uncompressed_header, FRAME OBU type 6→parse fh + byte-split tile group 5.10, TILE_GROUP→accumulate into a frame-decode context). **Av1FrameDec** frame-decode context (av1_frame_dec_new/group/finish): begins a frame, decodes each tile group's tiles into the SHARED frame grids (in-order/contiguous guard; dim-bomb → error), filters once when complete — supports **multi-tile + multi-tile-group + superres** frames at 8/10/12-bit. **av1_decode_frame**: thin single-group wrapper (new→group→finish; partial group → DR_ERR_UNSUPPORTED), used by the FRAME OBU path. av1_apply_loop_filters: in-loop pipeline (deblock 7.14 → CDEF 7.15 → **superres 7.16** → LR 7.17; superres upscales FrameWidth→UpscaledWidth, LR at the upscaled width); **filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters); **tile-group parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4) |
-| `src/av1_mv.cyr` | `av1_` | motion-vector prediction (spec 7.10.2) — **foundation** (0.7.62): **Av1Mv** (row,col) MV representation (1/8-luma-sample units; av1_mv_new/row/col/set); **av1_lower_mv_precision** + **av1_lower_mv_comp** (7.10.2.10); **av1_setup_global_mv** (7.10.2.1 — the global-motion MV candidate: 2×3 affine projection of the block center through gm_type/gm_params, rounded with the symmetric av1_round2_signed). **candidate stack** (0.7.63): **Av1MvStack** (RefStackMv[8][2][2] + WeightStack[8] + NumMvFound/NewMvCount; av1_mv_stack_new/reset/num/newmv_count/weight/row/col); **av1_mv_stack_add** (dedup-or-append core of search stack 7.10.2.8/9 — lower + weight-accumulate-or-append capped at 8 + NewMvCount); **av1_mv_stack_sort** + **_swap** (stable descending sort 7.10.2.13); **av1_has_newmv**. **spatial scans** (0.7.64): **Av1MiRec** per-4×4 MI grid (av1_mv_grid_new/cell/set) + **Av1MvCtx** scan context (av1_mvctx_* + is_inside); **av1_mv_scan_row**/**_scan_col** (7.10.2.2/3 — end4/parity/len-step/useStep16/is_inside break); **av1_mv_scan_point** (7.10.2.4 — corner probe gated on is_inside+avail); **av1_add_ref_mv_candidate** (7.10.2.7) + **av1_mv_search_stack**/**_compound_search_stack** (7.10.2.8/9 — is_inter + single/compound ref-match dispatch + GLOBALMV substitution). The MI grid is populated by inter mode-info; the temporal scan + find_mv_stack driver + entropy contexts are later bites |
+| `src/av1_mv.cyr` | `av1_` | motion-vector prediction (spec 7.10.2) — **foundation** (0.7.62): **Av1Mv** (row,col) MV representation (1/8-luma-sample units; av1_mv_new/row/col/set); **av1_lower_mv_precision** + **av1_lower_mv_comp** (7.10.2.10); **av1_setup_global_mv** (7.10.2.1 — the global-motion MV candidate: 2×3 affine projection of the block center through gm_type/gm_params, rounded with the symmetric av1_round2_signed). **candidate stack** (0.7.63): **Av1MvStack** (RefStackMv[8][2][2] + WeightStack[8] + NumMvFound/NewMvCount; av1_mv_stack_new/reset/num/newmv_count/weight/row/col); **av1_mv_stack_add** (dedup-or-append core of search stack 7.10.2.8/9 — lower + weight-accumulate-or-append capped at 8 + NewMvCount); **av1_mv_stack_sort** + **_swap** (stable descending sort 7.10.2.13); **av1_has_newmv**. **spatial scans** (0.7.64): **Av1MiRec** per-4×4 MI grid (av1_mv_grid_new/cell/set) + **Av1MvCtx** scan context (av1_mvctx_* + is_inside); **av1_mv_scan_row**/**_scan_col** (7.10.2.2/3 — end4/parity/len-step/useStep16/is_inside break); **av1_mv_scan_point** (7.10.2.4 — corner probe gated on is_inside+avail); **av1_add_ref_mv_candidate** (7.10.2.7) + **av1_mv_search_stack**/**_compound_search_stack** (7.10.2.8/9 — is_inter + single/compound ref-match dispatch + GLOBALMV substitution). **find_mv_stack** (0.7.65): **av1_find_mv_stack** (7.10.2 driver — scan sequence + REF_CAT_LEVEL bonus + Close/TotalMatches + two-region sort); **av1_mv_extra_search**/**_add_extra_mv_candidate**/**_store_combined** (7.10.2.11/12 — fill-to-2 + sign-bias + global fill + compound combine); **av1_mv_context_and_clamping** (7.10.2.14 — DrlCtxStack/New/Ref/ZeroMvContext); **av1_clamp_mv_row**/**_col** (spec 6). The MI grid is populated by inter mode-info; the temporal scan is the sole deferral (needs the DPB saved MVs) |
 | `src/av1_dpb.cyr` | `av1_` | decoded-picture buffer / ref-frame ring (spec 7.20 + 7.21) — **Av1Dpb** 8-slot pixel FrameStore (av1_dpb_new/frame/valid/count); **reference frame update** (7.20): av1_dpb_store (pixel half — stores a decoded frame into every refresh_frame_flags slot) + av1_dpb_update (full process: pixel store + the metadata half av1_frame_update_refs); **reference frame loading** (7.21): av1_dpb_load (serves show_existing_frame from FrameStore[frame_to_show_map_idx]); **av1_dpb_ref_frame** (the inter/MC hook: LAST..ALTREF → ref_frame_idx → the stored DrFrame av1_mc_pred_block reads); **av1_decode_stream** (multi-frame OBU walk — decodes every coded frame into the DPB, serves show_existing, returns the last shown frame; av1_decode_obus stays the single-frame entry). PIXEL ring only; saved-CDF/MV/segment-id + full 7.21 metadata reload are inter-only later bites |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_superres.cyr` | `av1_` | superres upscaling (7.16) — Upscale_Filter[64][8] (dav1d resize filter negated to spec form; row-sum/integer-pel/mirror + per-phase position-checksum verified) + av1_superres_filter_pixel (one sample: phase/base/edge-clamp + Round2(sum,7) + Clip1) + av1_superres_upscale_row (the row loop, == dav1d resize_c) + av1_superres_step / av1_superres_x0 (dx/mx0 geometry, == dav1d scale_fac + get_upscale_x0) + av1_superres_upscale_frame (per-plane/row upscale into a new frame) + av1_superres_upscale_new (used by the in-loop pipeline to lift a downscaled frame to UpscaledWidth between CDEF and LR) — all reference-confirmed against dav1d; superres decodes end-to-end |
@@ -109,13 +107,13 @@ is inter + conformance + the encode-lane completion (finishing 0.7.x), then the 
 ## Gates (all green, 2026-07-13)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 36 suites / **21,394 assertions**: drishti 51 · bits
+- `make test` — 36 suites / **21,454 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 195 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 255 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -210,7 +208,15 @@ is inter + conformance + the encode-lane completion (finishing 0.7.x), then the 
   is_inside gate before every grid read prevents OOB and that len≥1 prevents an
   infinite loop, and confirmed the single-dispatch checks RefFrame[0] against BOTH
   neighbour lists; the 4 refuted coverage suggestions were folded in — 3 parity/
-  compound cases + the tile⊆grid OOB invariant documented at av1_mvctx_set_tile)
+  compound cases + the tile⊆grid OOB invariant documented at av1_mvctx_set_tile),
+  and the find_mv_stack driver (`av1_mv.cyr`, 5 slices, each finding adversarially
+  verified: driver orchestration+FoundMatch-sequence / extra_search+add_extra /
+  context+clamp / record-layout+OOB+hang safety / tests+libaom-dav1d cross-check →
+  **NO findings** — reviewers traced the exact scan/FoundMatch ordered sequence,
+  verified the extended-context offsets never overlap or OOB, and confirmed the
+  sign-bias negation + the global-fill-not-counted rule + the clamp arithmetic
+  against the spec; the 4 refuted coverage suggestions — z=2 DrlCtx, sign-bias,
+  negative clamp, distinct-append — were folded into the suite)
 
 ## Dependencies
 
@@ -303,13 +309,16 @@ stack** (`av1_mv.cyr` 0.7.63 — `Av1MvStack` + `av1_mv_stack_add` search-stack 
 append 7.10.2.8/9 + the stable `av1_mv_stack_sort` 7.10.2.13 + `has_newmv`), and the
 **spatial neighbour scans** (`av1_mv.cyr` 0.7.64 — `av1_mv_scan_row`/`_col`/`_point`
 7.10.2.2/3/4 + `av1_add_ref_mv_candidate` 7.10.2.7 + the search-stack selection, reading
-the `Av1MvCtx`/`Av1MiRec` grid) are in; next the `find_mv_stack` driver (scan ordering +
-`REF_CAT_LEVEL` + foundAbove/Left tracking + the sorts) + inter mode-info (which populates
-the MI grid the scans read) + the temporal scan (which needs the DPB's deferred saved MVs)
-+ the NewMv/RefMv/Zero/DRL contexts, then inter mode-info wiring (then the inter tile decode
-that lets `av1_decode_stream` decode a genuine inter frame referencing the DPB through the
-MC driver), then compound/OBMC/warp + scaled-reference/BILINEAR MC; plus film-grain
-synthesis; then conformance + the encode-lane completion. (In-loop filters — deblocking,
+the `Av1MvCtx`/`Av1MiRec` grid), and the **`find_mv_stack` driver** (`av1_mv.cyr` 0.7.65 —
+`av1_find_mv_stack` 7.10.2 + `av1_mv_extra_search`/`_add_extra` 7.10.2.11/12 +
+`av1_mv_context_and_clamping` 7.10.2.14 + `av1_clamp_mv_row`/`_col`, the full candidate list
++ NewMv/RefMv/Zero/DRL contexts; temporal deferred) are in — the MV candidate-list construction
+is complete for `use_ref_frame_mvs == 0`; next inter mode-info (which reads these MV contexts to
+decode the inter block AND populates the MI grid the scans read) + the temporal scan (which needs
+the DPB's deferred saved MVs), then the inter tile decode that lets `av1_decode_stream` decode a
+genuine inter frame referencing the DPB through the MC driver, then compound/OBMC/warp +
+scaled-reference/BILINEAR MC; plus film-grain synthesis; then conformance + the encode-lane
+completion. (In-loop filters — deblocking,
 CDEF, loop restoration — plus superres and 10/12-bit are already complete.) The deferred,
 feature-gated pieces (128×128 SBs, palette, intrabc, segmentation, active
 delta-q/lf, frame-end CDF save/average, the non-skip residual-encode lane)
