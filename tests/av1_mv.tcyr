@@ -141,6 +141,195 @@ fn test_setup_global_mv() {
     return 0;
 }
 
+# ================================================================
+# has_newmv (7.10.2) — the six NEWMV-carrying modes vs the rest.
+# ================================================================
+fn test_has_newmv() {
+    assert_eq(av1_has_newmv(AV1_NEWMV), 1, "NEWMV -> newmv");
+    assert_eq(av1_has_newmv(AV1_NEW_NEWMV), 1, "NEW_NEWMV -> newmv");
+    assert_eq(av1_has_newmv(AV1_NEAR_NEWMV), 1, "NEAR_NEWMV -> newmv");
+    assert_eq(av1_has_newmv(AV1_NEW_NEARMV), 1, "NEW_NEARMV -> newmv");
+    assert_eq(av1_has_newmv(AV1_NEAREST_NEWMV), 1, "NEAREST_NEWMV -> newmv");
+    assert_eq(av1_has_newmv(AV1_NEW_NEARESTMV), 1, "NEW_NEARESTMV -> newmv");
+    assert_eq(av1_has_newmv(AV1_NEARESTMV), 0, "NEARESTMV -> not");
+    assert_eq(av1_has_newmv(AV1_NEARMV), 0, "NEARMV -> not");
+    assert_eq(av1_has_newmv(AV1_GLOBALMV), 0, "GLOBALMV -> not");
+    assert_eq(av1_has_newmv(AV1_NEAREST_NEARESTMV), 0, "NEAREST_NEARESTMV -> not");
+    assert_eq(av1_has_newmv(AV1_NEAR_NEARMV), 0, "NEAR_NEARMV -> not");
+    assert_eq(av1_has_newmv(AV1_GLOBAL_GLOBALMV), 0, "GLOBAL_GLOBALMV -> not");
+    return 0;
+}
+
+# ================================================================
+# av1_mv_stack_add — single prediction (search stack 7.10.2.8): dedup-or-append,
+# weight accumulation, NewMvCount, precision lowering.
+# ================================================================
+fn test_stack_add_single() {
+    var s = av1_mv_stack_new();
+    assert_eq(av1_mv_stack_num(s), 0, "fresh stack empty");
+    av1_mv_stack_add(s, 10, 20, 0, 0, 0, AV1_NEARESTMV, 5, 1, 0);   # append (hp=1, no lowering)
+    assert_eq(av1_mv_stack_num(s), 1, "add -> num 1");
+    assert_eq(av1_mv_stack_row(s, 0, 0), 10, "entry0 row 10");
+    assert_eq(av1_mv_stack_col(s, 0, 0), 20, "entry0 col 20");
+    assert_eq(av1_mv_stack_weight(s, 0), 5, "entry0 weight 5");
+    assert_eq(av1_mv_stack_newmv_count(s), 0, "no newmv yet");
+    # same MV again -> dedup: weight accumulates, num unchanged.
+    av1_mv_stack_add(s, 10, 20, 0, 0, 0, AV1_NEARESTMV, 3, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 1, "dedup -> num still 1");
+    assert_eq(av1_mv_stack_weight(s, 0), 8, "dedup -> weight 5+3");
+    # distinct MV, NEWMV -> append + NewMvCount++.
+    av1_mv_stack_add(s, 30, 40, 0, 0, 0, AV1_NEWMV, 7, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 2, "append -> num 2");
+    assert_eq(av1_mv_stack_row(s, 1, 0), 30, "entry1 row 30");
+    assert_eq(av1_mv_stack_newmv_count(s), 1, "NEWMV -> newmv 1");
+    # dedup of a NEWMV STILL increments NewMvCount (independent of dedup).
+    av1_mv_stack_add(s, 30, 40, 0, 0, 0, AV1_NEWMV, 2, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 2, "dedup -> num still 2");
+    assert_eq(av1_mv_stack_weight(s, 1), 9, "dedup -> weight 7+2");
+    assert_eq(av1_mv_stack_newmv_count(s), 2, "newmv increments even on dedup");
+    # lowering applied to the candidate before store/compare: (5,-7) hp=0 -> (4,-6).
+    av1_mv_stack_add(s, 5, 0 - 7, 0, 0, 0, AV1_NEARMV, 1, 0, 0);
+    assert_eq(av1_mv_stack_row(s, 2, 0), 4, "lowered row 5->4");
+    assert_eq(av1_mv_stack_col(s, 2, 0), 0 - 6, "lowered col -7->-6");
+    return 0;
+}
+
+# full stack: the 9th distinct candidate is a silent no-op, but a dedup still
+# accumulates weight on a full stack.
+fn test_stack_full() {
+    var s = av1_mv_stack_new();
+    var i = 0;
+    while (i < 8) {
+        av1_mv_stack_add(s, i, 0, 0, 0, 0, AV1_NEARESTMV, 1, 1, 0);   # distinct rows 0..7
+        i = i + 1;
+    }
+    assert_eq(av1_mv_stack_num(s), 8, "stack full at MAX_REF_MV_STACK_SIZE=8");
+    av1_mv_stack_add(s, 100, 0, 0, 0, 0, AV1_NEARESTMV, 1, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 8, "9th distinct -> no effect (full)");
+    assert_eq(av1_mv_stack_row(s, 7, 0), 7, "entry7 not overwritten");
+    av1_mv_stack_add(s, 3, 0, 0, 0, 0, AV1_NEARESTMV, 5, 1, 0);   # matches the row-3 entry
+    assert_eq(av1_mv_stack_num(s), 8, "dedup on full stack -> num still 8");
+    assert_eq(av1_mv_stack_weight(s, 3), 6, "dedup on full stack accumulates (1+5)");
+    return 0;
+}
+
+# ================================================================
+# av1_mv_stack_add — compound (compound search stack 7.10.2.9): the dedup matches
+# on BOTH lists.
+# ================================================================
+fn test_stack_add_compound() {
+    var s = av1_mv_stack_new();
+    av1_mv_stack_add(s, 1, 2, 3, 4, 1, AV1_NEAREST_NEARESTMV, 5, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 1, "compound add -> num 1");
+    assert_eq(av1_mv_stack_row(s, 0, 0), 1, "list0 row 1");
+    assert_eq(av1_mv_stack_col(s, 0, 0), 2, "list0 col 2");
+    assert_eq(av1_mv_stack_row(s, 0, 1), 3, "list1 row 3");
+    assert_eq(av1_mv_stack_col(s, 0, 1), 4, "list1 col 4");
+    av1_mv_stack_add(s, 1, 2, 3, 4, 1, AV1_NEAREST_NEARESTMV, 3, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 1, "identical pair -> dedup (num 1)");
+    assert_eq(av1_mv_stack_weight(s, 0), 8, "dedup weight 5+3");
+    # list-1 differs -> NOT a dedup (both lists must match).
+    av1_mv_stack_add(s, 1, 2, 3, 5, 1, AV1_NEAREST_NEARESTMV, 2, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 2, "list1 differs -> append (num 2)");
+    av1_mv_stack_add(s, 7, 8, 9, 10, 1, AV1_NEW_NEWMV, 4, 1, 0);
+    assert_eq(av1_mv_stack_newmv_count(s), 1, "NEW_NEWMV -> newmv 1");
+    return 0;
+}
+
+# helper: build the standard weights [3,7,5,7,1] with distinct rows [0,10,20,30,40].
+fn stack_5(): i64 {
+    var s = av1_mv_stack_new();
+    av1_mv_stack_add(s, 0, 0, 0, 0, 0, AV1_NEARESTMV, 3, 1, 0);
+    av1_mv_stack_add(s, 10, 10, 0, 0, 0, AV1_NEARESTMV, 7, 1, 0);
+    av1_mv_stack_add(s, 20, 20, 0, 0, 0, AV1_NEARESTMV, 5, 1, 0);
+    av1_mv_stack_add(s, 30, 30, 0, 0, 0, AV1_NEARESTMV, 7, 1, 0);
+    av1_mv_stack_add(s, 40, 40, 0, 0, 0, AV1_NEARESTMV, 1, 1, 0);
+    return s;
+}
+
+# ================================================================
+# av1_mv_stack_sort (7.10.2.13) — stable descending sort by weight.
+# ================================================================
+fn test_stack_sort() {
+    var s = stack_5();
+    av1_mv_stack_sort(s, 0, 5, 0);
+    # descending, STABLE: the two weight-7 entries keep insertion order (row10 then row30).
+    assert_eq(av1_mv_stack_weight(s, 0), 7, "sorted w0 = 7");
+    assert_eq(av1_mv_stack_row(s, 0, 0), 10, "sorted mv0 = 10 (first 7, stable)");
+    assert_eq(av1_mv_stack_weight(s, 1), 7, "sorted w1 = 7");
+    assert_eq(av1_mv_stack_row(s, 1, 0), 30, "sorted mv1 = 30 (second 7, stable)");
+    assert_eq(av1_mv_stack_weight(s, 2), 5, "sorted w2 = 5");
+    assert_eq(av1_mv_stack_row(s, 2, 0), 20, "sorted mv2 = 20");
+    assert_eq(av1_mv_stack_weight(s, 3), 3, "sorted w3 = 3");
+    assert_eq(av1_mv_stack_row(s, 3, 0), 0, "sorted mv3 = 0");
+    assert_eq(av1_mv_stack_weight(s, 4), 1, "sorted w4 = 1");
+    assert_eq(av1_mv_stack_row(s, 4, 0), 40, "sorted mv4 = 40");
+    return 0;
+}
+
+# partial sort of [1,4) only (find_mv_stack sorts [0,numNearest) and the tail
+# separately) — entries 0 and 4 must stay put.
+fn test_stack_sort_subrange() {
+    var s = stack_5();
+    av1_mv_stack_sort(s, 1, 4, 0);
+    assert_eq(av1_mv_stack_row(s, 0, 0), 0, "idx0 untouched (row 0)");
+    assert_eq(av1_mv_stack_weight(s, 0), 3, "idx0 weight untouched (3)");
+    assert_eq(av1_mv_stack_weight(s, 1), 7, "sub w1 = 7");
+    assert_eq(av1_mv_stack_row(s, 1, 0), 10, "sub mv1 = 10 (stable)");
+    assert_eq(av1_mv_stack_weight(s, 2), 7, "sub w2 = 7");
+    assert_eq(av1_mv_stack_row(s, 2, 0), 30, "sub mv2 = 30 (stable)");
+    assert_eq(av1_mv_stack_weight(s, 3), 5, "sub w3 = 5");
+    assert_eq(av1_mv_stack_row(s, 3, 0), 20, "sub mv3 = 20");
+    assert_eq(av1_mv_stack_row(s, 4, 0), 40, "idx4 untouched (row 40)");
+    assert_eq(av1_mv_stack_weight(s, 4), 1, "idx4 weight untouched (1)");
+    return 0;
+}
+
+# compound sort (is_compound=1) — swap must move BOTH lists together.
+fn test_stack_sort_compound() {
+    var s = av1_mv_stack_new();
+    av1_mv_stack_add(s, 1, 2, 3, 4, 1, AV1_NEAREST_NEARESTMV, 5, 1, 0);   # w5 pair (1,2)/(3,4)
+    av1_mv_stack_add(s, 5, 6, 7, 8, 1, AV1_NEAREST_NEARESTMV, 9, 1, 0);   # w9 pair (5,6)/(7,8)
+    av1_mv_stack_sort(s, 0, 2, 1);
+    # descending: the w9 pair moves to idx0, carrying BOTH lists intact.
+    assert_eq(av1_mv_stack_weight(s, 0), 9, "compound sort idx0 weight 9");
+    assert_eq(av1_mv_stack_row(s, 0, 0), 5, "idx0 list0 row 5");
+    assert_eq(av1_mv_stack_col(s, 0, 0), 6, "idx0 list0 col 6");
+    assert_eq(av1_mv_stack_row(s, 0, 1), 7, "idx0 list1 row 7 (both lists swapped)");
+    assert_eq(av1_mv_stack_col(s, 0, 1), 8, "idx0 list1 col 8 (both lists swapped)");
+    assert_eq(av1_mv_stack_weight(s, 1), 5, "compound sort idx1 weight 5");
+    assert_eq(av1_mv_stack_row(s, 1, 1), 3, "idx1 list1 row 3");
+    assert_eq(av1_mv_stack_col(s, 1, 1), 4, "idx1 list1 col 4");
+    return 0;
+}
+
+# dedup happens AFTER lowering: two candidates distinct in raw form but identical
+# once lowered must merge (proves the compare uses the LOWERED value, not the raw).
+fn test_stack_dedup_after_lowering() {
+    var s = av1_mv_stack_new();
+    av1_mv_stack_add(s, 4, 0 - 6, 0, 0, 0, AV1_NEARESTMV, 5, 0, 0);   # (4,-6) hp=0 -> unchanged
+    av1_mv_stack_add(s, 5, 0 - 7, 0, 0, 0, AV1_NEARESTMV, 3, 0, 0);   # (5,-7) hp=0 -> (4,-6)
+    assert_eq(av1_mv_stack_num(s), 1, "distinct raw MVs that lower to the same -> dedup");
+    assert_eq(av1_mv_stack_weight(s, 0), 8, "dedup-after-lowering accumulates weight (5+3)");
+    assert_eq(av1_mv_stack_row(s, 0, 0), 4, "stored the lowered row 4");
+    assert_eq(av1_mv_stack_col(s, 0, 0), 0 - 6, "stored the lowered col -6");
+    return 0;
+}
+
+# reset clears counts and lets the next find_mv_stack overwrite from idx 0.
+fn test_stack_reset() {
+    var s = av1_mv_stack_new();
+    av1_mv_stack_add(s, 1, 1, 0, 0, 0, AV1_NEWMV, 5, 1, 0);
+    assert_eq(av1_mv_stack_num(s), 1, "before reset num 1");
+    assert_eq(av1_mv_stack_newmv_count(s), 1, "before reset newmv 1");
+    av1_mv_stack_reset(s);
+    assert_eq(av1_mv_stack_num(s), 0, "reset -> num 0");
+    assert_eq(av1_mv_stack_newmv_count(s), 0, "reset -> newmv 0");
+    av1_mv_stack_add(s, 9, 9, 0, 0, 0, AV1_NEARESTMV, 2, 1, 0);
+    assert_eq(av1_mv_stack_row(s, 0, 0), 9, "re-add after reset overwrites entry0");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -151,6 +340,18 @@ fn main() {
     test_lower_mv_precision();
     test_group("setup_global_mv (7.10.2.1)");
     test_setup_global_mv();
+    test_group("has_newmv (7.10.2)");
+    test_has_newmv();
+    test_group("MV candidate stack: add (search stack 7.10.2.8/9)");
+    test_stack_add_single();
+    test_stack_full();
+    test_stack_add_compound();
+    test_group("MV candidate stack: sort (7.10.2.13) + reset");
+    test_stack_sort();
+    test_stack_sort_subrange();
+    test_stack_sort_compound();
+    test_stack_dedup_after_lowering();
+    test_stack_reset();
     return assert_summary();
 }
 

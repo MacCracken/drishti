@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.63] - 2026-07-13
+
+**Inter prediction — the MV candidate stack (spec 7.10.2).** The second bite of the MV-prediction
+arc: the ordered list of candidate MVs that `find_mv_stack` builds for an inter block, plus the two
+operations that manage it. Extends `src/av1_mv.cyr` with:
+
+- the **candidate-stack record** `Av1MvStack` — `RefStackMv[8][2][2]` (idx × list × row/col) +
+  `WeightStack[8]` + `NumMvFound` / `NewMvCount`, with `av1_mv_stack_new` / `_reset` / `_num` /
+  `_newmv_count` / `_weight` / `_row` / `_col`;
+- **`av1_mv_stack_add`** — the dedup-or-append core shared by the search-stack (7.10.2.8, single) and
+  compound search-stack (7.10.2.9) processes: it lowers the caller-selected candidate to the frame's
+  MV precision, then either adds `weight` to a matching stack entry (single prediction matches list 0;
+  compound requires BOTH lists) or appends it (capped at `MAX_REF_MV_STACK_SIZE` = 8; a full stack
+  drops a new candidate but a match still accumulates weight), and increments `NewMvCount` per
+  `has_newmv(cand_mode)` independent of the dedup outcome;
+- **`av1_mv_stack_sort`** + `av1_mv_stack_swap` — the sorting process (7.10.2.13): a **stable**
+  descending bubble sort by weight (the strict `<` keeps equal-weighted candidates in insertion
+  order) with the `newEnd` early-out, over a caller-given sub-range so `find_mv_stack` can order the
+  near and far halves separately;
+- **`av1_has_newmv`** — the six NEWMV-carrying inter modes (`NEWMV`, `NEW_NEWMV`, `NEAR_NEWMV`,
+  `NEW_NEARMV`, `NEAREST_NEWMV`, `NEW_NEARESTMV`);
+- and a refactor extracting **`av1_lower_mv_comp`** (one MV component through 7.10.2.10) as the single
+  source of truth, so the stack-add lowers raw components without allocating a temporary MV; the
+  whole-MV `av1_lower_mv_precision` now delegates to it (behaviour-preserving, covered by the 0.7.62
+  tests).
+
+Verified by 133 assertions (79 new): single + compound dedup (incl. the both-lists-must-match
+compound case), weight accumulation, `NewMvCount` incrementing even on a dedup, the full-stack drop,
+`has_newmv` over all 12 inter modes, a stable descending sort whose equal-weight ordering is
+hand-traced against the spec bubble sort, a sub-range sort leaving outside entries untouched, a
+compound sort exercising the both-lists swap, and a dedup-after-lowering case (distinct raw
+candidates that collapse to the same lowered MV). A **4-slice adversarial spec review** (add /
+sort+swap / has_newmv+refactor+layout / tests+libaom-dav1d cross-check, each finding adversarially
+verified) returned **no findings** — reviewers hand-traced the bubble sort for stability, verified the
+`RefStackMv` flattening (`idx*4 + list*2 + comp`) never goes OOB, and confirmed the `lower_mv_comp`
+refactor reproduces 7.10.2.10 component-for-component. The two refuted findings were coverage
+suggestions, both folded into the suite (the compound-sort and dedup-after-lowering cases above).
+**21,332 suite assertions + 1,140 fuzz assertions, all green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_mv.cyr`** (extended): `Av1MvStack` + `av1_mv_stack_new` / `_reset` / `_num` /
+  `_newmv_count` / `_weight` / `_row` / `_col`; `av1_mv_stack_add` (search stack 7.10.2.8/9);
+  `av1_mv_stack_sort` + `av1_mv_stack_swap` (sorting 7.10.2.13); `av1_has_newmv`; `av1_lower_mv_comp`.
+- **`tests/av1_mv.tcyr`** (extended): `test_has_newmv`, `test_stack_add_single`, `test_stack_full`,
+  `test_stack_add_compound`, `test_stack_sort`, `test_stack_sort_subrange`, `test_stack_sort_compound`,
+  `test_stack_dedup_after_lowering`, `test_stack_reset` — 133 assertions total.
+
+### Scope / deferred
+- Only the STACK MECHANICS. The neighbour scans (`scan_row` / `scan_col` / `scan_point` / temporal)
+  that FEED candidates into the stack read the per-block MI grid (`RefFrames` / `Mvs` / `YModes` /
+  `MiSizes`) that inter mode-info produces — not yet built — as does the caller-side global-MV
+  substitution; the `find_mv_stack` driver, the `REF_CAT_LEVEL` bonus application, and the
+  NewMv/RefMv/Zero/DRL entropy contexts are later bites (roadmap.md).
+
 ## [0.7.62] - 2026-07-13
 
 **Inter prediction — the MV-prediction foundation (spec 7.10.2).** Motion-vector prediction
