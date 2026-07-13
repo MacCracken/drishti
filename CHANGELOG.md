@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.54] - 2026-07-12
+
+**Superres upscaling — geometry (spec 7.16), reference-confirmed against dav1d.** The
+horizontal upscale is now correct end-to-end. `av1_superres_step(down_w, up_w)` and
+`av1_superres_x0(down_w, up_w, step)` compute the per-plane subpel step `dx` and initial
+fractional offset `mx0` that `av1_superres_upscale_row` consumes — exact ports of dav1d's
+`scale_fac` + `get_upscale_x0` (`src/decode.c`, user-provided): `dx = ((down_w<<14) +
+up_w/2)/up_w`; `err = up_w·dx − (down_w<<14)`; `x0 = (−((up_w−down_w)<<13) + up_w/2)/up_w
++ 128 − err/2`, then `& 0x3fff`. All integer divisions are C-truncating (toward zero,
+matching dav1d, incl. the negative numerator in `x0`), and the final mask keeps the low
+14 bits when `x0` is negative pre-mask. Verified by 12 `step`/`x0` known-answers (all
+matching a Python port of dav1d — e.g. `8→16` → `8192`/`12417`, `8→12` → `10923`/`13780`)
+plus two **end-to-end** upscales (geometry → row driver → the reference upscaled row).
+A 2-dimension adversarial review (formula-vs-dav1d + edge/overflow) returned **no
+findings**. **20,737 suite assertions + 1,140 fuzz assertions, all green; `make lint`
+green.**
+
+### Added
+- **`src/av1_superres.cyr`**: `av1_superres_step` / `av1_superres_x0` (spec 7.16 / dav1d
+  `scale_fac` + `get_upscale_x0`).
+- **`tests/av1_superres.tcyr`**: `test_superres_geometry` — 12 `step`/`x0` known-answers
+  + two full geometry→driver upscales (`8→16`, `8→12`) against the dav1d reference.
+
+### Scope / deferred
+- Geometry only (per-plane widths supplied by the caller — luma uses `FrameWidth →
+  UpscaledWidth`, chroma the subsampled widths). The per-plane loop (upscale every row of
+  every plane into a new frame) + pipeline wiring (CDEF → superres → LR, LR geometry under
+  the upscaled width, and lifting the `av1_decode_frame` `use_superres` reject) are the
+  next bites — at which point superres decodes end-to-end.
+
 ## [0.7.53] - 2026-07-12
 
 **Superres upscaling — row driver (spec 7.16), reference-confirmed against dav1d.**

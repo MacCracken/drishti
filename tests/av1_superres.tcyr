@@ -158,10 +158,62 @@ fn test_superres_upscale_row() {
     return 0;
 }
 
+# av1_superres_step / av1_superres_x0 (dav1d get_upscale_x0 + scale_fac) + the full
+# geometry->driver chain, against the Python port (scratchpad/upscale_geom.py).
+fn test_superres_geometry() {
+    # step / x0 known-answers for several (down_w, up_w).
+    assert_eq(av1_superres_step(8, 16), 8192, "step 8->16 = 8192");
+    assert_eq(av1_superres_x0(8, 16, 8192), 12417, "x0 8->16 = 12417");
+    assert_eq(av1_superres_step(8, 12), 10923, "step 8->12 = 10923");
+    assert_eq(av1_superres_x0(8, 12, 10923), 13780, "x0 8->12 = 13780");
+    assert_eq(av1_superres_step(8, 10), 13107, "step 8->10 = 13107");
+    assert_eq(av1_superres_x0(8, 10, 13107), 14876, "x0 8->10 = 14876");
+    assert_eq(av1_superres_step(13, 16), 13312, "step 13->16 = 13312");
+    assert_eq(av1_superres_x0(13, 16, 13312), 14977, "x0 13->16 = 14977");
+    assert_eq(av1_superres_step(6, 8), 12288, "step 6->8 = 12288");
+    assert_eq(av1_superres_x0(6, 8, 12288), 14465, "x0 6->8 = 14465");
+    assert_eq(av1_superres_step(100, 128), 12800, "step 100->128 = 12800");
+    assert_eq(av1_superres_x0(100, 128, 12800), 14721, "x0 100->128 = 14721");
+    # end-to-end: compute the geometry, then upscale a ramp -> the reference row.
+    var src = alloc(8 * 8);
+    var i = 0;
+    while (i < 8) { store64(src + (i * 8), 10 + (i * 20)); i = i + 1; }
+    # 8 -> 16 (2x).
+    var s2 = av1_superres_step(8, 16);
+    var x2 = av1_superres_x0(8, 16, s2);
+    var d2 = alloc(16 * 8);
+    av1_superres_upscale_row(src, 8, d2, 16, s2, x2, 8);
+    var e2 = alloc(16 * 8);
+    store64(e2 + 0, 8);    store64(e2 + 8, 13);    store64(e2 + 16, 24);  store64(e2 + 24, 35);
+    store64(e2 + 32, 45);  store64(e2 + 40, 55);   store64(e2 + 48, 65);  store64(e2 + 56, 75);
+    store64(e2 + 64, 85);  store64(e2 + 72, 95);   store64(e2 + 80, 105); store64(e2 + 88, 115);
+    store64(e2 + 96, 125); store64(e2 + 104, 136); store64(e2 + 112, 147); store64(e2 + 120, 152);
+    var bad = 0;
+    var x = 0;
+    while (x < 16) { if (load64(d2 + (x * 8)) != load64(e2 + (x * 8))) { bad = 1; } x = x + 1; }
+    assert_eq(bad, 0, "8->16 full geometry+driver matches dav1d reference");
+    # 8 -> 12.
+    var s3 = av1_superres_step(8, 12);
+    var x3 = av1_superres_x0(8, 12, s3);
+    var d3 = alloc(12 * 8);
+    av1_superres_upscale_row(src, 8, d3, 12, s3, x3, 8);
+    var e3 = alloc(12 * 8);
+    store64(e3 + 0, 9);    store64(e3 + 8, 18);    store64(e3 + 16, 33);  store64(e3 + 24, 47);
+    store64(e3 + 32, 60);  store64(e3 + 40, 73);   store64(e3 + 48, 87);  store64(e3 + 56, 100);
+    store64(e3 + 64, 113); store64(e3 + 72, 127);  store64(e3 + 80, 142); store64(e3 + 88, 151);
+    bad = 0;
+    x = 0;
+    while (x < 12) { if (load64(d3 + (x * 8)) != load64(e3 + (x * 8))) { bad = 1; } x = x + 1; }
+    assert_eq(bad, 0, "8->12 full geometry+driver matches dav1d reference");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Upscale_Filter table invariants (spec 7.16)");
     test_upscale_filter_invariants();
+    test_group("superres geometry (dav1d get_upscale_x0)");
+    test_superres_geometry();
     test_group("superres upscale row (dav1d resize_c reference)");
     test_superres_upscale_row();
     test_group("Upscale_Filter position checksum (tap-order pin)");

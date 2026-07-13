@@ -166,3 +166,21 @@ fn av1_superres_upscale_row(src, src_w, dst, dst_w, dx, mx0, bit_depth): i64 {
     }
     return 0;
 }
+
+# av1_superres_step / av1_superres_x0 (spec 7.16 upscaling geometry; == dav1d
+# scale_fac + get_upscale_x0, src/decode.c) — given a plane's DOWNSCALED width
+# (down_w = FrameWidth for luma, the subsampled width for chroma) and its UPSCALED
+# width (up_w = UpscaledWidth), compute the per-output-pixel subpel step (dx) and the
+# initial fractional offset x0 (0..SCALE_MASK) that av1_superres_upscale_row consumes
+# as dx / mx0. Reference-confirmed against dav1d. `/` is C-truncating (toward zero),
+# matching dav1d's integer division; the final `& SCALE_MASK` keeps the low 14 bits
+# even when x0 is negative before the mask (two's-complement, as in dav1d).
+fn av1_superres_step(down_w, up_w): i64 {
+    return ((down_w << AV1_SUPERRES_SCALE_BITS) + (up_w >> 1)) / up_w;
+}
+fn av1_superres_x0(down_w, up_w, step): i64 {
+    var err = (up_w * step) - (down_w << AV1_SUPERRES_SCALE_BITS);
+    var num = (0 - ((up_w - down_w) << (AV1_SUPERRES_SCALE_BITS - 1))) + (up_w >> 1);
+    var x0 = ((num / up_w) + (1 << (AV1_SUPERRES_EXTRA_BITS - 1))) - (err / 2);
+    return x0 & AV1_SUPERRES_SCALE_MASK;
+}
