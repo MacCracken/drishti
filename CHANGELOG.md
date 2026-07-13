@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.57] - 2026-07-12
+
+**Inter prediction — sub-pel interpolation filter table (spec 7.11.3.2).** First bite of
+the inter arc (the last of the four AV1-decode capabilities). New module `src/av1_mc.cyr`
+lands the **`Subpel_Filters` table** — dav1d's `dav1d_mc_subpel_filters` (`src/tables.c`),
+6 filter sets × 15 sub-pel phases × 8 taps: `0 REGULAR · 1 SMOOTH · 2 SHARP · 3 REGULAR(w≤4)
+· 4 SMOOTH(w≤4) · 5 scaled-bilinear`. Stored in dav1d's convention (every phase row sums to
+**64**, not the spec's 128 — dav1d carries an extra intermediate-precision bit through its
+2-pass filter, so its coefficients are the spec's halved; the `put_8tap` kernel, a later
+bite, will match dav1d's shifts to keep the two in one convention). Verified three ways so
+a transcription/sign slip fails the build: every one of the 90 phase rows sums to 64;
+mirror symmetry `Subpel_Filters[s][p] == reverse(Subpel_Filters[s][14−p])` holds in all 6
+sets; and a per-(set,phase) cubic **position-weighted checksum** against 90 goldens
+transcribed **independently** from dav1d (pins tap order). A 2-dimension adversarial
+review (dav1d-vs-spec convention + table values/set-order) returned **no findings**.
+**20,935 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **`src/av1_mc.cyr`**: `av1_subpel_filters_blob` (lazy 6×15×8 table) + `av1_subpel_filter(set,
+  phase, tap)`; `enum Av1Mc` (`SUBPEL_SETS=6`, `SUBPEL_PHASES=15`, `SUBPEL_TAPS=8`).
+- **`tests/av1_mc.tcyr`**: `test_subpel_invariants` (row-sums, symmetry, spot values) +
+  `test_subpel_checksum` (90 position checksums vs the independent transcription).
+
+### Scope / deferred
+- The table only. The `put_8tap` 8-tap MC kernel (2-pass H/V filtering with dav1d's
+  intermediate precision), the MC driver, the reference-frame buffer (DPB), MV prediction,
+  and inter mode-info are the next bites — all table-free now (the dav1d `mc_tmpl.c` /
+  `decode.c` references are in hand). Inter is the last of the four AV1-decode tracks;
+  multi-tile, 10-bit, and superres are complete.
+
 ## [0.7.56] - 2026-07-12
 
 **Superres decodes end-to-end — the superres track is complete (spec 7.16).** The upscale
