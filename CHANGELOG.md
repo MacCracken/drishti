@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.60] - 2026-07-13
+
+**Inter prediction — the MC driver (`av1_mc_pred_block`, spec 7.11.3.1 steps 10 + 13).**
+The piece that composes the two reference-tested leaf kernels into block prediction: it
+takes a motion vector and a same-sized reference frame, splits the MV into an integer
+top-left + a 1/16-pel phase per axis, gathers the (possibly out-of-frame, edge-clamped)
+padded reference block via `av1_mc_emu_edge`, filters it with `av1_mc_put_8tap`, and writes
+the `Clip1`'d result into the destination `DrFrame`. Scoped to the base inter case — single
+reference, translation-only (no warp), non-compound, **unscaled** (reference plane dims ==
+current plane dims); BILINEAR, scaled references, compound, OBMC, and warp are cleanly
+rejected as later bites. **Geometry**: for equal frame dimensions the full motion-vector
+scaling process (spec 7.11.3.3) collapses exactly to `pos16 = (x << 4) + ((2*mv) >>> sub)`,
+`integer = pos16 >>> 4`, `phase = pos16 & 15` (`xScale == 1<<14`, `stepX == 1024`, the
+`halfSample`/`off` rounding terms cancel — proven against a literal port of the full
+process, both MV signs). **Gather**: the driver copies the exact `Clip3`-clamped read
+window and lets `emu_edge` replicate it outward, which is pixel-identical to the spec's
+per-sample plane clamp. Verified against a **spec-literal Python reference**
+(`scratchpad/mc_driver_ref.py`) whose `Subpel_Filters` table is parsed straight out of the
+AV1-spec markdown, so it shares no table or kernel code with `src/av1_mc.cyr`: 18
+known-answer cases (integer/H-only/V-only/H+V paths, each overhang direction, wholly-out MVs,
+chroma with subsampled MV, the `w≤4`/`h≤4` 4-tap remap, mixed filter sets, extreme MVs both
+signs, 8/10/12-bit) plus a full chroma-block pixel dump, write-confinement, and
+border-independence checks. A **5-slice adversarial spec review** (geometry / gather /
+filters / safety / tests-cross-impl, each with independent adversarial verification of every
+finding) returned **3 confirmed findings, all fixed in this cut**:
+
+- **[critical]** the block-inside-plane guard formed `x + w` as an i64 before comparing to
+  the plane width, which **wraps for a hostile `x` near i64-max** and slips an unclamped
+  coordinate into the write-back (`dr_frame_set` has no bounds check → OOB write). Fixed to
+  the overflow-safe subtraction form `x > pw - w` (`pw - w`, `ph - h` cannot overflow given
+  the validated `w,h ∈ [1,128]`, `pw,ph ∈ [1,16384]`), regression-tested with the i64-max
+  `x`/`y` attack inputs.
+- **[major]** the unscaled-reference gate compared only the *per-plane* dims, not the luma
+  frame dims — subsampled chroma planes collide across different luma sizes (luma 24×18 and
+  23×17 both give 12×9 chroma at 4:2:0), so a **scaled reference was silently accepted and
+  emitted wrong chroma pixels**. Fixed to also require equal luma `FrameWidth`/`FrameHeight`
+  (spec 7.11.3.3 derives scaledness from luma), regression-tested with the collision pair on
+  both the luma and chroma plane.
+- **[minor]** `av1_mc_put_8tap`'s 2-pass (H+V) path allocated its intermediate buffer per
+  call from the arena allocator (never freed), so per-block invocation grew memory unbounded
+  across a frame — the very pattern the driver's own persistent scratch exists to avoid.
+  Fixed with a lazily-built persistent module-global mid scratch
+  (`av1_mc_mid_scratch`, sized for the largest block once).
+
+Two refuted findings were test-coverage suggestions (2×2 chroma blocks; a handful of
+untested 12-bit 1D / SMOOTH-`w≤4` branches — all independently verified numerically correct
+by the reviewers' own sweeps). **21,117 suite assertions + 1,140 fuzz assertions, all green;
+`make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_mc.cyr`**: `av1_mc_pred_block(dst, ref, plane, x, y, w, h, mv_row, mv_col,
+  filt_x, filt_y)` — the single-reference unscaled translation-only MC driver; `av1_mc_pos16`
+  (the 7.11.3.3 unscaled 1/16-pel split); `av1_mc_drv_scratch` / `av1_mc_mid_scratch`
+  (persistent gather/rect/out/mid scratch blobs) + the `Av1McDrv` size enum.
+- **`tests/av1_mc_driver.tcyr`**: `test_mc_pos16` (geometry split incl. negative-MV floor +
+  chroma halving), `test_mc_pred_known_answers` (18 spec-literal cases),
+  `test_mc_pred_chroma_full`, `test_mc_pred_confinement`, `test_mc_pred_border_independent`,
+  `test_mc_pred_rejects` (BILINEAR / scaled-ref incl. the chroma collision / i64-overflow /
+  null / range) — 157 assertions.
+
+### Fixed
+- **[critical]** `av1_mc_pred_block` i64-overflow bypass of the block-inside-plane guard →
+  OOB write; now the overflow-safe subtraction form.
+- **[major]** `av1_mc_pred_block` accepted a scaled reference when subsampled chroma plane
+  dims collided; now gates on the luma frame dims too.
+- **[minor]** `av1_mc_put_8tap` H+V per-call arena allocation → unbounded growth across a
+  frame; now a persistent module-global mid scratch.
+
+### Scope / deferred
+- The single-reference, unscaled, translation-only, non-compound base case only. The
+  reference-frame buffer/DPB (needs multi-frame decode), MV prediction, inter mode-info, and
+  compound/OBMC/warp/scaled-reference/BILINEAR prediction are the next bites of the inter
+  arc (roadmap.md).
+
 ## [0.7.59] - 2026-07-13
 
 **Inter prediction — the frame-boundary block fetch (`emu_edge`, spec 7.11.3.2).** A

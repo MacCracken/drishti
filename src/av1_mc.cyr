@@ -3,9 +3,11 @@
 #
 # First module of the inter-prediction arc (the last of the four AV1-decode
 # capabilities). Landed so far: the sub-pel interpolation FILTER TABLE, the 8-tap
-# motion-compensation kernel (put_8tap), and the frame-boundary block fetch (emu_edge).
-# The MC driver (MV -> integer + sub-pel split, ref block fetch -> put_8tap -> DrFrame),
-# reference-frame buffer, MV prediction, and inter mode-info grow in the next bites (roadmap.md).
+# motion-compensation kernel (put_8tap), the frame-boundary block fetch (emu_edge), and
+# the MC DRIVER (av1_mc_pred_block — spec 7.11.3.1 steps 10+13 for the single-reference,
+# translation-only, unscaled case: MV -> integer + 1/16-pel split, clamped ref-block
+# gather via emu_edge, put_8tap into the DrFrame). The reference-frame buffer/DPB,
+# MV prediction, and inter mode-info grow in the next bites (roadmap.md).
 #
 # Subpel_Filters (spec 7.11.3.2) — 6 filter sets x 15 sub-pel phases x 8 taps.
 # Sourced from dav1d's dav1d_mc_subpel_filters (src/tables.c) in dav1d's convention,
@@ -188,7 +190,12 @@ fn av1_mc_put_8tap(dst, doff, dstride, src, soff, sstride, w, h, mx, my, filter_
     }
     if ((fh != 0) && (fv != 0)) {
         # 2-pass: horizontal into mid[(h+7) x w] (rows from src -3..h+3), then vertical.
-        var mid = alloc(((h + 7) * w) * 8);   # ((h+7)*w) i64
+        # The mid buffer comes from a lazily-built PERSISTENT module-global scratch, not a
+        # per-call alloc: this kernel runs once per inter block, and the arena is never freed,
+        # so per-call allocation would grow memory unbounded across a frame (the same reason
+        # the MC driver keeps persistent scratch). Sized for the largest block; each call
+        # fully writes the (h+7)*w cells it then reads.
+        var mid = av1_mc_mid_scratch();
         if (mid == 0) { return DR_ERR_OOM; }
         var r = 0;
         while (r < (h + 7)) {
@@ -317,6 +324,166 @@ fn av1_mc_emu_edge(bw, bh, iw, ih, x, y, dst, doff, dstride, ref, roff, rstride)
             c = c + 1;
         }
         by = by + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# The MC DRIVER — av1_mc_pred_block (spec 7.11.3.1 steps 10 + 13 + the non-compound
+# write-back), for the base inter case: single reference, translation-only (no warp),
+# non-compound, UNSCALED (reference plane dims == current plane dims). It composes the
+# two reference-tested leaf kernels: emu_edge gathers the (possibly out-of-frame,
+# edge-clamped) padded reference block, put_8tap filters it into the destination frame.
+#
+# Geometry (spec 7.11.3.3 reduced to the unscaled case): with equal frame dims,
+# xScale == yScale == 1 << REF_SCALE_SHIFT, so startX = ((x << 4) + ((2*mv) >> subX)) << 6
+# + 32 and stepX = 1024 exactly. Every sample position p = startX + 1024*c then reduces to
+#   pos16  = (x << 4) + ((2*mv) >> sub)      (1/16-pel block position; mv is 1/8 LUMA pel,
+#                                             halved per axis for subsampled chroma planes)
+#   integer top-left  = pos16 >> 4  =  (p >> 10) - c       (arithmetic shift: floor)
+#   1/16-pel phase    = pos16 & 15  =  (p >> 6) & SUBPEL_MASK
+# (the halfSample / off rounding terms of 7.11.3.3 cancel exactly at these two
+# extractions — verified against a literal port of the full scaling process).
+#
+# Gather (spec 7.11.3.4): the reference reads are Clip3-clamped to the plane per sample.
+# The driver copies the exact clamped read range [rx0..rx1] x [ry0..ry1] (a plain u16 ->
+# i64 format copy, no geometry) and lets emu_edge replicate it outward — clamping to that
+# rect's edges is pixel-identical to the spec's per-sample plane clamp, because the rect
+# endpoints ARE the clamped extremes of the wanted window. The 8-tap window needs 3
+# samples before / 4 after the block per axis, only when that axis has a nonzero phase.
+# ================================================================
+
+enum Av1McDrv {
+    AV1_MC_MAX_BLK    = 128;   # largest inter block dimension (128x128 superblock)
+    AV1_MC_MAX_GATHER = 135;   # MAX_BLK + 7 taps of padding per axis
+}
+
+# lazily-built driver scratch blobs (per-call allocation would grow the arena unbounded
+# across a frame's blocks; sized for the largest block once).
+var Av1_McRect = 0;     # visible-rect copy      (<= 135*135 i64)
+var Av1_McGather = 0;   # padded gather block    (<= 135*135 i64)
+var Av1_McOut = 0;      # filtered output block  (<= 128*128 i64)
+var Av1_McMid = 0;      # put_8tap H+V mid pass  ((MAX_BLK+7)*MAX_BLK i64)
+
+# Persistent mid-pass scratch for av1_mc_put_8tap's 2-pass (H+V) path. Lazily built once,
+# sized for the largest block ((h+7)*w with h,w <= AV1_MC_MAX_BLK). Called (via forward
+# reference) from put_8tap, which fully writes the (h+7)*w cells before reading them.
+fn av1_mc_mid_scratch(): i64 {
+    if (Av1_McMid != 0) { return Av1_McMid; }
+    Av1_McMid = alloc(((AV1_MC_MAX_BLK + 7) * AV1_MC_MAX_BLK) * 8);
+    return Av1_McMid;
+}
+
+fn av1_mc_drv_scratch(): i64 {
+    if (Av1_McOut != 0) { return DR_OK; }
+    var g = AV1_MC_MAX_GATHER * AV1_MC_MAX_GATHER * 8;
+    Av1_McRect = alloc(g);
+    Av1_McGather = alloc(g);
+    Av1_McOut = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);
+    if ((Av1_McRect == 0) || (Av1_McGather == 0) || (Av1_McOut == 0)) {
+        Av1_McOut = 0;
+        return DR_ERR_OOM;
+    }
+    return DR_OK;
+}
+
+# 1/16-pel position of a block edge (spec 7.11.3.3, unscaled): x in plane samples, mv in
+# 1/8 LUMA pel, sub the plane's subsampling in that axis. Arithmetic shift — mv may be
+# negative and the split below needs floor semantics.
+fn av1_mc_pos16(x, mv, sub): i64 {
+    return (x << 4) + ((2 * mv) >>> sub);
+}
+
+# av1_mc_pred_block — predict one w x h inter block into dst[plane] at plane coords
+# (x, y), from the same-sized reference frame `ref`, motion vector (mv_row, mv_col) in
+# 1/8 LUMA pel (spec mv[0]/mv[1]), interpolation filters filt_x / filt_y in 0..2
+# (EIGHTTAP / EIGHTTAP_SMOOTH / EIGHTTAP_SHARP — spec InterpFilters[..][1] / [..][0];
+# the w<=4 / h<=4 4-tap remap happens inside put_8tap). Any MV is safe: out-of-frame
+# reads clamp to the edge (7.11.3.4). Returns DR_OK, or
+#   DR_ERR_UNSUPPORTED — BILINEAR filter, or scaled / mismatched reference (both are
+#                        later bites of the inter arc; roadmap.md)
+#   DR_ERR_BOUNDS      — bad plane / block dims / block outside the destination plane
+#   DR_ERR_OOM         — scratch allocation failure
+fn av1_mc_pred_block(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y): i64 {
+    if ((dst == 0) || (ref == 0)) { return DR_ERR_BOUNDS; }
+    if ((plane < 0) || (plane >= dr_frame_num_planes(dst)) || (plane >= dr_frame_num_planes(ref))) {
+        return DR_ERR_BOUNDS;
+    }
+    if ((w < 1) || (h < 1) || (w > AV1_MC_MAX_BLK) || (h > AV1_MC_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    if ((filt_x == 3) || (filt_y == 3)) { return DR_ERR_UNSUPPORTED; }   # BILINEAR — a later inter bite (roadmap.md)
+    if ((filt_x < 0) || (filt_x > 2) || (filt_y < 0) || (filt_y > 2)) { return DR_ERR_BOUNDS; }
+    var bd = dr_frame_bit_depth(dst);
+    var pw = dr_frame_plane_width(dst, plane);
+    var ph = dr_frame_plane_height(dst, plane);
+    # unscaled only: the reference must match the current frame's geometry exactly
+    # (scaled-reference prediction is a later bite of the inter arc; roadmap.md). Compare the
+    # LUMA frame dims, not just this plane's dims: spec 7.11.3.3 derives scaledness from luma
+    # (RefUpscaledWidth vs FrameWidth), and subsampled chroma planes collide across different
+    # luma sizes — e.g. luma 24x18 and 23x17 both give 12x9 chroma at 4:2:0 — so a plane-only
+    # check would silently accept a scaled reference and emit wrong chroma pixels.
+    if ((dr_frame_bit_depth(ref) != bd) || (dr_frame_subx(ref) != dr_frame_subx(dst)) ||
+    (dr_frame_suby(ref) != dr_frame_suby(dst)) ||
+    (dr_frame_width(ref) != dr_frame_width(dst)) || (dr_frame_height(ref) != dr_frame_height(dst)) ||
+    (dr_frame_plane_width(ref, plane) != pw) || (dr_frame_plane_height(ref, plane) != ph)) {
+        return DR_ERR_UNSUPPORTED;
+    }
+    # overflow-safe block-inside-plane check: form the bound by SUBTRACTION (pw - w, ph - h
+    # cannot overflow — w,h in [1,128], pw,ph in [1,16384]) rather than the addition x + w,
+    # which would wrap for a hostile x near i64-max and slip an unclamped coord into the
+    # write-back. x,y already proven >= 0 above, so a negative (pw - w) rejects everything.
+    if ((x < 0) || (y < 0) || (x > (pw - w)) || (y > (ph - h))) { return DR_ERR_BOUNDS; }
+    if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
+    # ---- 7.11.3.3 (unscaled): integer top-left + 1/16-pel phase per axis ----
+    var sx = 0;
+    var sy = 0;
+    if (plane > 0) {
+        sx = dr_frame_subx(dst);
+        sy = dr_frame_suby(dst);
+    }
+    var p16x = av1_mc_pos16(x, mv_col, sx);
+    var p16y = av1_mc_pos16(y, mv_row, sy);
+    var ix = p16x >>> 4;
+    var fx = p16x & 15;
+    var iy = p16y >>> 4;
+    var fy = p16y & 15;
+    var nh = 0;
+    if (fx != 0) { nh = 1; }
+    var nv = 0;
+    if (fy != 0) { nv = 1; }
+    var gx = ix - (3 * nh);
+    var gw = w + (7 * nh);
+    var gy = iy - (3 * nv);
+    var gh = h + (7 * nv);
+    # ---- 7.11.3.4 gather: exact clamped read range, format-copied, emu_edge-extended ----
+    var rx0 = av1_clip3(0, pw - 1, gx);
+    var rx1 = av1_clip3(0, pw - 1, (gx + gw) - 1);
+    var ry0 = av1_clip3(0, ph - 1, gy);
+    var ry1 = av1_clip3(0, ph - 1, (gy + gh) - 1);
+    var rw = (rx1 - rx0) + 1;
+    var rh = (ry1 - ry0) + 1;
+    var rr = 0;
+    while (rr < rh) {
+        var rc = 0;
+        while (rc < rw) {
+            store64(Av1_McRect + (((rr * rw) + rc) * 8), dr_frame_get(ref, plane, rx0 + rc, ry0 + rr));
+            rc = rc + 1;
+        }
+        rr = rr + 1;
+    }
+    av1_mc_emu_edge(gw, gh, rw, rh, gx - rx0, gy - ry0, Av1_McGather, 0, gw, Av1_McRect, 0, rw);
+    # ---- put_8tap: block top-left sits (3*nv, 3*nh) into the padded gather ----
+    var e = av1_mc_put_8tap(Av1_McOut, 0, w, Av1_McGather, ((3 * nv) * gw) + (3 * nh), gw,
+    w, h, fx, fy, filt_x | (filt_y << 2), bd);
+    if (e != DR_OK) { return e; }
+    # ---- non-compound write-back (7.11.3.1): Clip1 already applied by the kernel ----
+    var r = 0;
+    while (r < h) {
+        var c = 0;
+        while (c < w) {
+            dr_frame_set(dst, plane, x + c, y + r, load64(Av1_McOut + (((r * w) + c) * 8)));
+            c = c + 1;
+        }
+        r = r + 1;
     }
     return DR_OK;
 }

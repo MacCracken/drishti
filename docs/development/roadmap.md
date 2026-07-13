@@ -208,10 +208,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   underway** (the last of the four tracks, and the biggest — 7.11.3: the Subpel_Filters
   table 0.7.57, the `put_8tap` 8-tap MC kernel 0.7.58 (reference-confirmed vs dav1d
   `put_8tap_c`), the `emu_edge` frame-boundary block fetch 0.7.59 (reference-confirmed vs
-  dav1d `emu_edge_c`); next the MC driver (MV → integer + sub-pel split → `emu_edge` gather
-  → `put_8tap` into the `DrFrame`), the ref-frame buffer/DPB, MV prediction, inter
-  mode-info, then compound/OBMC/warp; all table-free, dav1d `mc_tmpl.c` / `decode.c`
-  references in hand). See memory `av1-decode-remaining-tracks`.
+  dav1d `emu_edge_c`), and the **MC driver** `av1_mc_pred_block` 0.7.60 (spec 7.11.3.1
+  steps 10+13: the unscaled 1/16-pel MV split → `emu_edge` gather → `put_8tap` → `Clip1`
+  into the `DrFrame`, for the single-ref/translation-only/non-compound/unscaled base case;
+  spec-literal-reference-tested; a 5-slice adversarial review found + fixed 3 defects — a
+  critical i64-overflow guard bypass, a major scaled-chroma-ref acceptance, and a minor
+  per-call arena alloc); next the ref-frame buffer/DPB (needs multi-frame decode), MV
+  prediction, inter mode-info, then compound/OBMC/warp + scaled-reference/BILINEAR MC; all
+  table-free, dav1d `mc_tmpl.c` / `decode.c` references in hand). See memory
+  `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
