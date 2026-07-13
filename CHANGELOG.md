@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.52] - 2026-07-12
+
+**Superres upscaling — kernel layer (spec 7.16).** The first of the two remaining
+table-dependent decode tracks. Superres codes a frame at a reduced width and upscales
+it horizontally back to `UpscaledWidth` on decode (a normative 8-tap poly-phase filter,
+run between CDEF and loop restoration). New module `src/av1_superres.cyr` lands the
+kernel layer: the **`Upscale_Filter[64][8]` table** + the **per-output-pixel filter
+application**. The table is sourced from dav1d's `dav1d_resize_filter` (`src/tables.c`)
+— which stores it **negated** (rows sum to −128) — with every value negated back to the
+spec's positive-centre form (rows sum to +128, the `Round2(sum, 7)` normalization). It
+is verified **structurally** so a transcription/sign slip fails the build, not a decode:
+every one of the 64 phase rows sums to 128, phase 0 is the integer-pel identity
+`[0,0,0,128,0,0,0,0]`, and mirror symmetry holds (`Upscale_Filter[p]` reversed ==
+`Upscale_Filter[64−p]`). `av1_superres_filter_pixel` applies one phase (spec 7.16:
+phase = `subpel>>8 & 63`, integer base = `subpel>>14`, taps read `base+k−3` clamped to
+the plane edge, `Round2(sum, 7)` + `Clip1`). A 2-dimension adversarial review (kernel-geometry +
+table/test-adequacy) confirmed the kernel spec-correct; it caught **one real
+test-coverage gap** — the row-sum + symmetry invariants don't pin tap ORDER within a
+phase (a permutation preserving the sum, and for the self-mirrored phase 32 the
+palindrome, would survive) — which is now closed by a **per-phase position-weighted
+cubic checksum against goldens transcribed independently from dav1d** (a second,
+separate transcription; agreement verifies the cyrius table row-by-row, position-by-
+position). **20,720 suite assertions + 1,140 fuzz assertions, all green; `make lint`
+green.**
+
+### Added
+- **`src/av1_superres.cyr`**: `enum Av1Superres` (spec 7.16 constants —
+  `SCALE_BITS=14`, `EXTRA_BITS=8`, `FILTER_TAPS=8`, `FILTER_OFFSET=3`, `FILTER_SHIFTS=64`,
+  …); `av1_upscale_filter_blob` (lazy 64×8 table) + `av1_upscale_filter(idx, tap)`;
+  `av1_superres_filter_pixel(src, src_w, subpel_x, bit_depth)`.
+- **`tests/av1_superres.tcyr`**: table invariants (64 row-sums, integer-pel, symmetry,
+  spot values) + a **per-phase position-weighted checksum** pinning tap order (goldens
+  from an independent Python transcription of dav1d) + kernel known-answers (integer-pel
+  identity, flat→flat, edge clamp, bit-depth clip, hand-computed fractional phase-17 = 76).
+
+### Scope / deferred
+- Kernel layer only (mirrors the CDEF/LR kernel-then-driver split). The per-plane **row
+  geometry** (initial subpel position + step, spec 7.16) and the **pipeline wiring**
+  (CDEF → superres → LR, and lifting the `av1_decode_frame` `use_superres` reject) are
+  the next bites (roadmap.md). Sub-pel interpolation + warp filter tables for **inter**
+  are now also in hand (same dav1d paste) for that track.
+
 ## [0.7.51] - 2026-07-12
 
 **Multi-tile-group frames — the multi-tile track is complete.** A frame whose tiles

@@ -203,8 +203,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   the table-free ones first (10-bit landed 0.7.46; **multi-tile is COMPLETE**:
   frame-addressed MI grids 0.7.47, tile-window origins 0.7.48, driver + first 2-tile
   decode 0.7.49, tile-relative coeff-context + intra-reference rebases 0.7.50,
-  multi-tile-**group** frames 0.7.51); superres + inter remain BLOCKED on their
-  coefficient tables from the user. See memory `av1-decode-remaining-tracks`.
+  multi-tile-**group** frames 0.7.51); **superres** underway (7.16 — the
+  `Upscale_Filter` table + per-pixel kernel landed 0.7.52; row geometry + pipeline
+  wiring next). The superres + inter coefficient tables (dav1d `src/tables.c`) are now
+  in hand. See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

@@ -1,0 +1,129 @@
+# tests/av1_superres.tcyr — AV1 superres upscaling kernel (spec 7.16):
+# the Upscale_Filter[64][8] table + the per-pixel filter application.
+include "src/main.cyr"
+
+# ================================================================
+# Upscale_Filter structural invariants — these mechanically catch a transcription
+# or sign slip in the 512-value table (sourced from dav1d, negated to the spec's
+# positive-centre form), so a wrong coefficient fails the build, not a decode.
+# ================================================================
+fn test_upscale_filter_invariants() {
+    # every one of the 64 phase rows sums to 128 (= 1 << FILTER_BITS).
+    var p = 0;
+    while (p < 64) {
+        var sum = 0;
+        var k = 0;
+        while (k < 8) { sum = sum + av1_upscale_filter(p, k); k = k + 1; }
+        assert_eq(sum, 128, "phase row sums to 128");
+        p = p + 1;
+    }
+    # phase 0 is the integer-pel identity [0,0,0,128,0,0,0,0].
+    assert_eq(av1_upscale_filter(0, 0), 0, "phase 0 tap 0 = 0");
+    assert_eq(av1_upscale_filter(0, 3), 128, "phase 0 tap 3 = 128 (integer-pel centre)");
+    assert_eq(av1_upscale_filter(0, 7), 0, "phase 0 tap 7 = 0");
+    # a couple of spot values (dav1d negated): phase 32 is the self-symmetric centre.
+    assert_eq(av1_upscale_filter(32, 3), 79, "phase 32 tap 3 = 79");
+    assert_eq(av1_upscale_filter(32, 4), 79, "phase 32 tap 4 = 79");
+    assert_eq(av1_upscale_filter(1, 3), 128, "phase 1 tap 3 = 128");
+    assert_eq(av1_upscale_filter(63, 4), 128, "phase 63 tap 4 = 128");
+    # mirror symmetry: Upscale_Filter[p][k] == Upscale_Filter[64-p][7-k], p = 1..63.
+    var q = 1;
+    var bad = 0;
+    while (q < 64) {
+        var t = 0;
+        while (t < 8) {
+            if (av1_upscale_filter(q, t) != av1_upscale_filter(64 - q, 7 - t)) { bad = 1; }
+            t = t + 1;
+        }
+        q = q + 1;
+    }
+    assert_eq(bad, 0, "mirror symmetry: phase p == reverse(phase 64-p)");
+    return 0;
+}
+
+# ================================================================
+# av1_superres_filter_pixel — one upscaled sample. subpel_x carries the phase in
+# bits 8..13 and the integer base in bits >= 14.
+# ================================================================
+fn test_superres_filter_pixel() {
+    # a downscaled row: src[i] = 10 + 20*i -> 10,30,50,70,90,110,130,150.
+    var src = alloc(8 * 8);
+    var i = 0;
+    while (i < 8) { store64(src + (i * 8), 10 + (i * 20)); i = i + 1; }
+    # integer-pel phase (bits 8..13 = 0): output = src[base] exactly.
+    assert_eq(av1_superres_filter_pixel(src, 8, 3 << 14, 8), 70, "integer-pel base 3 -> src[3]");
+    assert_eq(av1_superres_filter_pixel(src, 8, 5 << 14, 8), 110, "integer-pel base 5 -> src[5]");
+    # flat row -> flat output for fractional phases (each row sums to 128).
+    var flat = alloc(8 * 8);
+    i = 0;
+    while (i < 8) { store64(flat + (i * 8), 128); i = i + 1; }
+    assert_eq(av1_superres_filter_pixel(flat, 8, (5 << 14) | (17 << 8), 8), 128, "flat -> flat (phase 17)");
+    assert_eq(av1_superres_filter_pixel(flat, 8, (2 << 14) | (40 << 8), 8), 128, "flat -> flat (phase 40)");
+    # genuine fractional interpolation (non-flat, non-integer phase): base 3, phase 17
+    # = [-1,5,-18,111,40,-13,5,-1] over src[0..7] (base+k-3 == k). Hand-computed:
+    # sum = -10+150-900+7770+3600-1430+650-150 = 9680; Round2(9680,7) = (9680+64)>>7 = 76.
+    assert_eq(av1_superres_filter_pixel(src, 8, (3 << 14) | (17 << 8), 8), 76, "fractional phase 17 on a ramp -> 76");
+    # edge clamp: base 0 reads src[0] for the negative taps (Clip3 to the plane edge).
+    assert_eq(av1_superres_filter_pixel(src, 8, 0, 8), 10, "left edge, integer phase -> src[0]");
+    assert_eq(av1_superres_filter_pixel(src, 8, 7 << 14, 8), 150, "right edge, integer phase -> src[7]");
+    # bit-depth clip: a flat 1000 clips to 255 at 8-bit, passes at 10-bit.
+    var big = alloc(8 * 8);
+    i = 0;
+    while (i < 8) { store64(big + (i * 8), 1000); i = i + 1; }
+    assert_eq(av1_superres_filter_pixel(big, 8, 3 << 14, 8), 255, "8-bit clip: 1000 -> 255");
+    assert_eq(av1_superres_filter_pixel(big, 8, 3 << 14, 10), 1000, "10-bit: 1000 passes (< 1023)");
+    return 0;
+}
+
+# fill 8 consecutive golden checksums.
+fn supg8(g, off, v0, v1, v2, v3, v4, v5, v6, v7) {
+    store64(g + ((off + 0) * 8), v0);  store64(g + ((off + 1) * 8), v1);
+    store64(g + ((off + 2) * 8), v2);  store64(g + ((off + 3) * 8), v3);
+    store64(g + ((off + 4) * 8), v4);  store64(g + ((off + 5) * 8), v5);
+    store64(g + ((off + 6) * 8), v6);  store64(g + ((off + 7) * 8), v7);
+    return 0;
+}
+# Position-sensitive per-phase checksum: cs[p] = sum_k Upscale_Filter[p][k] * (k+1)^3.
+# The cubic weights give every tap a distinct, non-symmetric position weight, so ANY
+# within-row permutation changes cs[p] — closing the gap that row-sum + mirror symmetry
+# miss (a palindrome scramble of the self-mirrored phase 32, or coordinated swaps in a
+# mirror-partner pair). The 64 goldens are computed INDEPENDENTLY (scratchpad Python,
+# a separate transcription of dav1d's raw dav1d_resize_filter), so a transcription slip
+# in the cyrius table is caught rather than matched.
+fn test_upscale_filter_position_checksum() {
+    var w = alloc(8 * 8);
+    store64(w + 0, 1);    store64(w + 8, 8);    store64(w + 16, 27);   store64(w + 24, 64);
+    store64(w + 32, 125); store64(w + 40, 216); store64(w + 48, 343);  store64(w + 56, 512);
+    var g = alloc(64 * 8);
+    supg8(g,  0,  8192,  8199,  8466,  8473,  8613,  8681,  9030,  8981);
+    supg8(g,  8,  8753,  9039,  8990,  9058,  9278,  9564,  9515,  9546);
+    supg8(g, 16,  9766, 10052, 10083, 10186, 10217, 10248, 10686, 10717);
+    supg8(g, 24, 10839, 10870, 10612, 11030, 11213, 11335, 11197, 11767);
+    supg8(g, 32, 11502, 11561, 11807, 11885, 12007, 12190, 12338, 12566);
+    supg8(g, 40, 12651, 12773, 12858, 13188, 13273, 13358, 13353, 13438);
+    supg8(g, 48, 13670, 13944, 14029, 13926, 14158, 14432, 14608, 14505);
+    supg8(g, 56, 14737, 14887, 14784, 15403, 15579, 15665, 15780, 15885);
+    var p = 0;
+    while (p < 64) {
+        var cs = 0;
+        var k = 0;
+        while (k < 8) { cs = cs + (av1_upscale_filter(p, k) * load64(w + (k * 8))); k = k + 1; }
+        assert_eq(cs, load64(g + (p * 8)), "phase position-weighted checksum (tap order pinned)");
+        p = p + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("Upscale_Filter table invariants (spec 7.16)");
+    test_upscale_filter_invariants();
+    test_group("Upscale_Filter position checksum (tap-order pin)");
+    test_upscale_filter_position_checksum();
+    test_group("superres filter pixel (spec 7.16)");
+    test_superres_filter_pixel();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

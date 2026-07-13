@@ -1,0 +1,146 @@
+# ================================================================
+# av1_superres.cyr — AV1 superres upscaling (spec 7.16), kernel layer.
+#
+# Superres codes a frame at a reduced (downscaled) width and, on decode, upscales
+# it horizontally from FrameWidth back to UpscaledWidth with a normative 8-tap
+# poly-phase filter, inserted in the in-loop pipeline between CDEF and loop
+# restoration. This module is the KERNEL layer: the Upscale_Filter table + the
+# per-output-pixel filter application. The per-plane row geometry (initial subpel
+# position + step, spec 7.16) and the pipeline wiring grow in the next bites
+# (roadmap.md).
+#
+# Upscale_Filter[64][8] (spec 7.16): 64 subpel phases x 8 taps. Cross-checked
+# against dav1d's dav1d_resize_filter (src/tables.c) — dav1d stores it NEGATED
+# (its rows sum to -128, integer phase = {0,0,0,-128,0,0,0,0}); the spec's table is
+# the positive-centre form used by Round2(sum, FILTER_BITS=7), so every value here
+# is dav1d's negated. The table is verified by the suite (each phase row sums to 128;
+# phase 0 is the integer-pel identity [0,0,0,128,0,0,0,0]; mirror symmetry
+# Upscale_Filter[p] == reverse(Upscale_Filter[64-p]); AND a per-phase position-weighted
+# cubic checksum against goldens transcribed INDEPENDENTLY from dav1d, which pins tap
+# ORDER — catching a within-row permutation the sum/symmetry checks alone would miss),
+# so a transcription or sign slip fails the build rather than silently corrupting a decode.
+# ================================================================
+
+enum Av1Superres {
+    AV1_SUPERRES_FILTER_BITS   = 6;      # log2 of the phase count
+    AV1_SUPERRES_FILTER_SHIFTS = 64;     # 1 << FILTER_BITS  (number of phases)
+    AV1_SUPERRES_FILTER_TAPS   = 8;
+    AV1_SUPERRES_FILTER_OFFSET = 3;      # TAPS/2 - 1 (integer sample sits at tap 3)
+    AV1_SUPERRES_SCALE_BITS    = 14;     # fractional bits of the subpel accumulator
+    AV1_SUPERRES_SCALE_MASK    = 16383;  # (1 << SCALE_BITS) - 1
+    AV1_SUPERRES_EXTRA_BITS    = 8;      # SCALE_BITS - FILTER_BITS (subpel -> phase shift)
+    AV1_SUPERRES_BORDER        = 8;
+    AV1_SUPERRES_NUM           = 8;      # SuperresDenom numerator
+    AV1_SUPERRES_DENOM_MIN     = 9;
+    AV1_SUPERRES_FILTER_ROWU64 = 8;      # u64 stride of one 8-tap phase row in the blob
+}
+
+# lazily-built Upscale_Filter blob (64*8 i64), cyrius global-array literals do not
+# initialize reliably (same pattern as av1_scan / av1_coeffcdf).
+var Av1_UpscaleFilter = 0;   # module-global pointer (8*512 bytes once built)
+
+fn av1_upfill8(t, row, v0, v1, v2, v3, v4, v5, v6, v7) {
+    var o = t + (row * AV1_SUPERRES_FILTER_ROWU64 * 8);
+    store64(o + 0, v0);   store64(o + 8, v1);   store64(o + 16, v2);  store64(o + 24, v3);
+    store64(o + 32, v4);  store64(o + 40, v5);  store64(o + 48, v6);  store64(o + 56, v7);
+    return 0;
+}
+
+# Build (once) and return the Upscale_Filter[64][8] blob. Values are dav1d's
+# dav1d_resize_filter negated -> the spec's positive-centre Upscale_Filter.
+fn av1_upscale_filter_blob(): i64 {
+    if (Av1_UpscaleFilter != 0) { return Av1_UpscaleFilter; }
+    var t = alloc(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
+    if (t == 0) { return 0; }
+    av1_upfill8(t,  0,  0,  0,  0, 128,   0,   0,  0,  0);
+    av1_upfill8(t,  1,  0,  0, 0 - 1, 128,   2, 0 - 1,  0,  0);
+    av1_upfill8(t,  2,  0,  1, 0 - 3, 127,   4, 0 - 2,  1,  0);
+    av1_upfill8(t,  3,  0,  1, 0 - 4, 127,   6, 0 - 3,  1,  0);
+    av1_upfill8(t,  4,  0,  2, 0 - 6, 126,   8, 0 - 3,  1,  0);
+    av1_upfill8(t,  5,  0,  2, 0 - 7, 125,  11, 0 - 4,  1,  0);
+    av1_upfill8(t,  6, 0 - 1,  2, 0 - 8, 125,  13, 0 - 5,  2,  0);
+    av1_upfill8(t,  7, 0 - 1,  3, 0 - 9, 124,  15, 0 - 6,  2,  0);
+    av1_upfill8(t,  8, 0 - 1,  3, 0 - 10, 123,  18, 0 - 6,  2, 0 - 1);
+    av1_upfill8(t,  9, 0 - 1,  3, 0 - 11, 122,  20, 0 - 7,  3, 0 - 1);
+    av1_upfill8(t, 10, 0 - 1,  4, 0 - 12, 121,  22, 0 - 8,  3, 0 - 1);
+    av1_upfill8(t, 11, 0 - 1,  4, 0 - 13, 120,  25, 0 - 9,  3, 0 - 1);
+    av1_upfill8(t, 12, 0 - 1,  4, 0 - 14, 118,  28, 0 - 9,  3, 0 - 1);
+    av1_upfill8(t, 13, 0 - 1,  4, 0 - 15, 117,  30, 0 - 10,  4, 0 - 1);
+    av1_upfill8(t, 14, 0 - 1,  5, 0 - 16, 116,  32, 0 - 11,  4, 0 - 1);
+    av1_upfill8(t, 15, 0 - 1,  5, 0 - 16, 114,  35, 0 - 12,  4, 0 - 1);
+    av1_upfill8(t, 16, 0 - 1,  5, 0 - 17, 112,  38, 0 - 12,  4, 0 - 1);
+    av1_upfill8(t, 17, 0 - 1,  5, 0 - 18, 111,  40, 0 - 13,  5, 0 - 1);
+    av1_upfill8(t, 18, 0 - 1,  5, 0 - 18, 109,  43, 0 - 14,  5, 0 - 1);
+    av1_upfill8(t, 19, 0 - 1,  6, 0 - 19, 107,  45, 0 - 14,  5, 0 - 1);
+    av1_upfill8(t, 20, 0 - 1,  6, 0 - 19, 105,  48, 0 - 15,  5, 0 - 1);
+    av1_upfill8(t, 21, 0 - 1,  6, 0 - 19, 103,  51, 0 - 16,  5, 0 - 1);
+    av1_upfill8(t, 22, 0 - 1,  6, 0 - 20, 101,  53, 0 - 16,  6, 0 - 1);
+    av1_upfill8(t, 23, 0 - 1,  6, 0 - 20,  99,  56, 0 - 17,  6, 0 - 1);
+    av1_upfill8(t, 24, 0 - 1,  6, 0 - 20,  97,  58, 0 - 17,  6, 0 - 1);
+    av1_upfill8(t, 25, 0 - 1,  6, 0 - 20,  95,  61, 0 - 18,  6, 0 - 1);
+    av1_upfill8(t, 26, 0 - 2,  7, 0 - 20,  93,  64, 0 - 18,  6, 0 - 2);
+    av1_upfill8(t, 27, 0 - 2,  7, 0 - 20,  91,  66, 0 - 19,  6, 0 - 1);
+    av1_upfill8(t, 28, 0 - 2,  7, 0 - 20,  88,  69, 0 - 19,  6, 0 - 1);
+    av1_upfill8(t, 29, 0 - 2,  7, 0 - 20,  86,  71, 0 - 19,  6, 0 - 1);
+    av1_upfill8(t, 30, 0 - 2,  7, 0 - 20,  84,  74, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 31, 0 - 2,  7, 0 - 20,  81,  76, 0 - 20,  7, 0 - 1);
+    av1_upfill8(t, 32, 0 - 2,  7, 0 - 20,  79,  79, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 33, 0 - 1,  7, 0 - 20,  76,  81, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 34, 0 - 2,  7, 0 - 20,  74,  84, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 35, 0 - 1,  6, 0 - 19,  71,  86, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 36, 0 - 1,  6, 0 - 19,  69,  88, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 37, 0 - 1,  6, 0 - 19,  66,  91, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 38, 0 - 2,  6, 0 - 18,  64,  93, 0 - 20,  7, 0 - 2);
+    av1_upfill8(t, 39, 0 - 1,  6, 0 - 18,  61,  95, 0 - 20,  6, 0 - 1);
+    av1_upfill8(t, 40, 0 - 1,  6, 0 - 17,  58,  97, 0 - 20,  6, 0 - 1);
+    av1_upfill8(t, 41, 0 - 1,  6, 0 - 17,  56,  99, 0 - 20,  6, 0 - 1);
+    av1_upfill8(t, 42, 0 - 1,  6, 0 - 16,  53, 101, 0 - 20,  6, 0 - 1);
+    av1_upfill8(t, 43, 0 - 1,  5, 0 - 16,  51, 103, 0 - 19,  6, 0 - 1);
+    av1_upfill8(t, 44, 0 - 1,  5, 0 - 15,  48, 105, 0 - 19,  6, 0 - 1);
+    av1_upfill8(t, 45, 0 - 1,  5, 0 - 14,  45, 107, 0 - 19,  6, 0 - 1);
+    av1_upfill8(t, 46, 0 - 1,  5, 0 - 14,  43, 109, 0 - 18,  5, 0 - 1);
+    av1_upfill8(t, 47, 0 - 1,  5, 0 - 13,  40, 111, 0 - 18,  5, 0 - 1);
+    av1_upfill8(t, 48, 0 - 1,  4, 0 - 12,  38, 112, 0 - 17,  5, 0 - 1);
+    av1_upfill8(t, 49, 0 - 1,  4, 0 - 12,  35, 114, 0 - 16,  5, 0 - 1);
+    av1_upfill8(t, 50, 0 - 1,  4, 0 - 11,  32, 116, 0 - 16,  5, 0 - 1);
+    av1_upfill8(t, 51, 0 - 1,  4, 0 - 10,  30, 117, 0 - 15,  4, 0 - 1);
+    av1_upfill8(t, 52, 0 - 1,  3, 0 - 9,  28, 118, 0 - 14,  4, 0 - 1);
+    av1_upfill8(t, 53, 0 - 1,  3, 0 - 9,  25, 120, 0 - 13,  4, 0 - 1);
+    av1_upfill8(t, 54, 0 - 1,  3, 0 - 8,  22, 121, 0 - 12,  4, 0 - 1);
+    av1_upfill8(t, 55, 0 - 1,  3, 0 - 7,  20, 122, 0 - 11,  3, 0 - 1);
+    av1_upfill8(t, 56, 0 - 1,  2, 0 - 6,  18, 123, 0 - 10,  3, 0 - 1);
+    av1_upfill8(t, 57,  0,  2, 0 - 6,  15, 124, 0 - 9,  3, 0 - 1);
+    av1_upfill8(t, 58,  0,  2, 0 - 5,  13, 125, 0 - 8,  2, 0 - 1);
+    av1_upfill8(t, 59,  0,  1, 0 - 4,  11, 125, 0 - 7,  2,  0);
+    av1_upfill8(t, 60,  0,  1, 0 - 3,   8, 126, 0 - 6,  2,  0);
+    av1_upfill8(t, 61,  0,  1, 0 - 3,   6, 127, 0 - 4,  1,  0);
+    av1_upfill8(t, 62,  0,  1, 0 - 2,   4, 127, 0 - 3,  1,  0);
+    av1_upfill8(t, 63,  0,  0, 0 - 1,   2, 128, 0 - 1,  0,  0);
+    Av1_UpscaleFilter = t;
+    return t;
+}
+
+# Upscale_Filter[idx][tap] — the coefficient for subpel phase idx (0..63), tap 0..7.
+fn av1_upscale_filter(idx, tap): i64 {
+    return load64(av1_upscale_filter_blob() + (((idx * AV1_SUPERRES_FILTER_TAPS) + tap) * 8));
+}
+
+# One upscaled output sample (spec 7.16). `src` is a row of `src_w` i64 luma/chroma
+# samples (the downscaled plane row); `subpel_x` is the 14-bit-fraction source
+# position for this output pixel. The 8-tap phase is (subpel_x >> EXTRA_BITS) & 63,
+# the integer base is subpel_x >> SCALE_BITS, and taps read src[base + k - OFFSET]
+# clamped to the plane edge (Clip3), then Round2(sum, 7) + Clip1 to the bit depth.
+fn av1_superres_filter_pixel(src, src_w, subpel_x, bit_depth): i64 {
+    var idx = (subpel_x >> AV1_SUPERRES_EXTRA_BITS) & (AV1_SUPERRES_FILTER_SHIFTS - 1);
+    var base = subpel_x >> AV1_SUPERRES_SCALE_BITS;
+    var flt = av1_upscale_filter_blob() + (idx * AV1_SUPERRES_FILTER_TAPS * 8);
+    var sum = 0;
+    var k = 0;
+    while (k < AV1_SUPERRES_FILTER_TAPS) {
+        var sx = av1_clip3(0, src_w - 1, (base + k) - AV1_SUPERRES_FILTER_OFFSET);
+        sum = sum + (load64(flt + (k * 8)) * load64(src + (sx * 8)));
+        k = k + 1;
+    }
+    # FILTER_BITS = 7 (the phase rows sum to 128 = 1<<7).
+    return dr_clip1(av1_round2(sum, 7), bit_depth);
+}
