@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.53] - 2026-07-12
+
+**Superres upscaling — row driver (spec 7.16), reference-confirmed against dav1d.**
+`av1_superres_upscale_row(src, src_w, dst, dst_w, dx, mx0, bit_depth)` upscales one plane
+row: a single subpel accumulator starts at `mx0 − (1<<14)` (dav1d's `src_x = −1`) and
+steps by `dx`, one `av1_superres_filter_pixel` per output. This is the combined-
+accumulator form of dav1d's `resize_c` (`src/mc_tmpl.c`), which keeps `src_x` (integer)
+and `mx` (fractional, masked to 14 bits) separate; a Python port
+(`scratchpad/resize_ref.py`) proves the two forms **identical** and the cyrius output
+matches dav1d's `resize_c` byte-for-byte on 2× / 1.5× / flat test vectors. Building the
+driver surfaced a latent kernel fix: `av1_superres_filter_pixel`'s integer base now uses
+an **arithmetic** shift (`>>>`), since the accumulator is negative at a row's start
+(logical `>>` would send the left-edge base to a huge positive index instead of `−1`) —
+the positive-only kernel known-answers are unchanged. A 2-dimension adversarial review
+(combined-vs-split accumulator equivalence + edge/shift audit) returned **no findings**.
+**20,723 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added
+- **`src/av1_superres.cyr`**: `av1_superres_upscale_row` (the spec-7.16 / dav1d
+  `resize_c` row loop). `av1_superres_filter_pixel` base shift `>>` → `>>>` (arithmetic).
+- **`tests/av1_superres.tcyr`**: `test_superres_upscale_row` — 2× (`dx=8192`, `mx0=8321`),
+  1.5× (`dx=10923`, `mx0=5461`), and flat, each checked against the dav1d `resize_c`
+  reference output (goldens from the Python port).
+
+### Scope / deferred
+- The row driver takes `dx`/`mx0` as inputs. Their per-plane **geometry** (dav1d
+  `get_upscale_x0` / spec 7.16 — `dx = ((src_w<<14)+dst_w/2)/dst_w`, `mx0` from the
+  initial-offset equation) is the next bite, then the per-plane loop + pipeline wiring
+  (CDEF → superres → LR, lifting the `use_superres` reject).
+
 ## [0.7.52] - 2026-07-12
 
 **Superres upscaling — kernel layer (spec 7.16).** The first of the two remaining

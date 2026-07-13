@@ -132,7 +132,10 @@ fn av1_upscale_filter(idx, tap): i64 {
 # clamped to the plane edge (Clip3), then Round2(sum, 7) + Clip1 to the bit depth.
 fn av1_superres_filter_pixel(src, src_w, subpel_x, bit_depth): i64 {
     var idx = (subpel_x >> AV1_SUPERRES_EXTRA_BITS) & (AV1_SUPERRES_FILTER_SHIFTS - 1);
-    var base = subpel_x >> AV1_SUPERRES_SCALE_BITS;
+    # ARITHMETIC shift: at a row's start the driver's accumulator is negative (dav1d's
+    # src_x = -1), so base must sign-extend to -1, not a huge positive (logical) value.
+    # (The phase idx is masked to 6 bits, so logical vs arithmetic there is identical.)
+    var base = subpel_x >>> AV1_SUPERRES_SCALE_BITS;
     var flt = av1_upscale_filter_blob() + (idx * AV1_SUPERRES_FILTER_TAPS * 8);
     var sum = 0;
     var k = 0;
@@ -143,4 +146,23 @@ fn av1_superres_filter_pixel(src, src_w, subpel_x, bit_depth): i64 {
     }
     # FILTER_BITS = 7 (the phase rows sum to 128 = 1<<7).
     return dr_clip1(av1_round2(sum, 7), bit_depth);
+}
+
+# av1_superres_upscale_row (spec 7.16, == dav1d resize_c inner loop) — upscale one plane
+# row of `src_w` downscaled samples (i64 array `src`) into `dst_w` upscaled samples
+# (i64 array `dst`). `dx` is the subpel x-step and `mx0` the initial fractional x-offset
+# [0, SCALE_MASK]; both come from the per-plane geometry (spec 7.16 / dav1d
+# get_upscale_x0, computed by the caller — grows next, roadmap.md). A subpel accumulator
+# starts at mx0 - (1 << SCALE_BITS) (dav1d keeps src_x = -1 and mx = mx0 separately; the
+# combined accumulator += dx is provably identical, verified in scratchpad/resize_ref.py)
+# and steps by dx; each output is one av1_superres_filter_pixel.
+fn av1_superres_upscale_row(src, src_w, dst, dst_w, dx, mx0, bit_depth): i64 {
+    var subpel = mx0 - (1 << AV1_SUPERRES_SCALE_BITS);
+    var x = 0;
+    while (x < dst_w) {
+        store64(dst + (x * 8), av1_superres_filter_pixel(src, src_w, subpel, bit_depth));
+        subpel = subpel + dx;
+        x = x + 1;
+    }
+    return 0;
 }

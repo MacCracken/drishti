@@ -114,10 +114,56 @@ fn test_upscale_filter_position_checksum() {
     return 0;
 }
 
+# av1_superres_upscale_row vs a faithful Python port of dav1d resize_c (goldens from
+# scratchpad/resize_ref.py). The driver's combined subpel accumulator is proven equal
+# to dav1d's split src_x/mx form there, so these pin the whole row loop against the
+# reference. dx/mx0 are supplied directly (their geometry grows next; roadmap.md).
+fn test_superres_upscale_row() {
+    var src = alloc(8 * 8);
+    var i = 0;
+    while (i < 8) { store64(src + (i * 8), 10 + (i * 20)); i = i + 1; }   # 10,30,..,150
+    # 2x: src_w 8 -> dst_w 16, dx=8192, mx0=8321.
+    var dst = alloc(16 * 8);
+    av1_superres_upscale_row(src, 8, dst, 16, 8192, 8321, 8);
+    var e2 = alloc(16 * 8);
+    store64(e2 + 0, 8);    store64(e2 + 8, 10);   store64(e2 + 16, 18);  store64(e2 + 24, 30);
+    store64(e2 + 32, 40);  store64(e2 + 40, 50);  store64(e2 + 48, 60);  store64(e2 + 56, 70);
+    store64(e2 + 64, 80);  store64(e2 + 72, 90);  store64(e2 + 80, 100); store64(e2 + 88, 110);
+    store64(e2 + 96, 120); store64(e2 + 104, 130); store64(e2 + 112, 142); store64(e2 + 120, 150);
+    var bad = 0;
+    var x = 0;
+    while (x < 16) { if (load64(dst + (x * 8)) != load64(e2 + (x * 8))) { bad = 1; } x = x + 1; }
+    assert_eq(bad, 0, "2x upscale row matches dav1d resize_c reference");
+    # 1.5x: dst_w 12, dx=10923, mx0=5461.
+    var dst2 = alloc(12 * 8);
+    av1_superres_upscale_row(src, 8, dst2, 12, 10923, 5461, 8);
+    var e15 = alloc(12 * 8);
+    store64(e15 + 0, 9);   store64(e15 + 8, 10);  store64(e15 + 16, 22);  store64(e15 + 24, 37);
+    store64(e15 + 32, 50); store64(e15 + 40, 63); store64(e15 + 48, 76);  store64(e15 + 56, 90);
+    store64(e15 + 64, 103); store64(e15 + 72, 116); store64(e15 + 80, 130); store64(e15 + 88, 145);
+    bad = 0;
+    x = 0;
+    while (x < 12) { if (load64(dst2 + (x * 8)) != load64(e15 + (x * 8))) { bad = 1; } x = x + 1; }
+    assert_eq(bad, 0, "1.5x upscale row matches dav1d resize_c reference");
+    # flat input -> flat output (every phase row sums to 128).
+    var flat = alloc(8 * 8);
+    i = 0;
+    while (i < 8) { store64(flat + (i * 8), 200); i = i + 1; }
+    var dstf = alloc(16 * 8);
+    av1_superres_upscale_row(flat, 8, dstf, 16, 8192, 8321, 8);
+    bad = 0;
+    x = 0;
+    while (x < 16) { if (load64(dstf + (x * 8)) != 200) { bad = 1; } x = x + 1; }
+    assert_eq(bad, 0, "flat row -> flat upscaled row (all 200)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Upscale_Filter table invariants (spec 7.16)");
     test_upscale_filter_invariants();
+    test_group("superres upscale row (dav1d resize_c reference)");
+    test_superres_upscale_row();
     test_group("Upscale_Filter position checksum (tap-order pin)");
     test_upscale_filter_position_checksum();
     test_group("superres filter pixel (spec 7.16)");
