@@ -218,3 +218,20 @@ fn av1_superres_upscale_frame(down, up, bit_depth): i64 {
     }
     return DR_OK;
 }
+
+# av1_superres_upscale_new — allocate a fresh frame at `up_w` (UpscaledWidth) x the
+# same height/planes/subsampling/depth as `down` (border >= 8 for CDEF/LR), upscale
+# `down` into it (av1_superres_upscale_frame), and return it. Returns 0 with *out_err
+# set on alloc/upscale failure. Used by the in-loop pipeline to lift a downscaled frame
+# to display width between CDEF and loop restoration (spec 7.16).
+fn av1_superres_upscale_new(down, up_w, out_err): i64 {
+    store64(out_err, DR_OK);
+    var b = dr_frame_border(down);
+    if (b < 8) { b = 8; }
+    var up = dr_frame_new(up_w, dr_frame_height(down), dr_frame_num_planes(down),
+    dr_frame_subx(down), dr_frame_suby(down), dr_frame_bit_depth(down), b, out_err);
+    if (up == 0) { return 0; }   # dr_frame_new wrote the cause
+    var rc = av1_superres_upscale_frame(down, up, dr_frame_bit_depth(down));
+    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    return up;
+}

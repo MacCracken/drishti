@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.56] - 2026-07-12
+
+**Superres decodes end-to-end — the superres track is complete (spec 7.16).** The upscale
+is now wired into the in-loop pipeline: **deblock → CDEF → superres → loop restoration**.
+`av1_apply_loop_filters` inserts an upscale stage after CDEF — when `use_superres` is set
+it lifts the reconstruction from `FrameWidth` to `UpscaledWidth` (`av1_superres_upscale_new`
+→ a fresh upscaled-width frame). Loop restoration then runs at the upscaled width (its
+params already carry `UpscaledWidth`); since LR reads **both** the deblocked (`curr`) and
+CDEF frames across the full upscaled width, both are upscaled (they alias when CDEF is
+off). The reconstruction frame is still built + decoded at `FrameWidth` (downscaled); only
+the post-CDEF output changes width. The `av1_decode_frame` / `av1_frame_dec_new`
+`use_superres` reject is **lifted**. A `use_superres` keyframe now decodes to the display
+width — verified end-to-end: an all-skip 128→256 (2×) keyframe decodes to a 256-wide
+flat-128 frame, with and without CDEF (the separate up-CDEF path). Non-superres decode is
+unchanged (`use_superres == 0` ⇒ the new stage is a no-op). A 2-dimension adversarial review (frame-lifecycle across the
+superres × CDEF × LR combinations + non-superres regression) returned **no findings**.
+**20,748 suite assertions + 1,140 fuzz assertions, all green; `make lint` green.**
+
+### Added / changed
+- **`src/av1_superres.cyr`**: `av1_superres_upscale_new(down, up_w, out_err)` — allocate a
+  fresh `UpscaledWidth` frame and upscale `down` into it.
+- **`src/av1_decode.cyr`**: `av1_apply_loop_filters` gains the superres stage between CDEF
+  and LR (upscales the deblocked + CDEF frames; LR at the upscaled width). `av1_frame_dec_new`
+  drops the `use_superres` reject.
+- **`tests/av1_decode.tcyr`**: `test_frame_decode_superres` (replaces the old
+  `_rejected` test) — a `use_superres` 128→256 keyframe decodes to a 256-wide flat-128
+  frame at the correct dims + unchanged height, with and without CDEF.
+
+### Scope / deferred
+- Superres is exercised end-to-end for **all-skip** content (the encode lane's reach). A
+  superres + loop-restoration end-to-end test (both frames upscaled, LR at the upscaled
+  width) awaits a richer test harness; the both-upscaled LR path is covered by inspection
+  + the adversarial review. This closes track 2 (superres) of the four AV1-decode
+  capabilities — **inter** is the last, and its tables + `mc` reference are already in hand.
+
 ## [0.7.55] - 2026-07-12
 
 **Superres upscaling — per-plane frame upscale (spec 7.16).** `av1_superres_upscale_frame`

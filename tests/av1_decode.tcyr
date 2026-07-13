@@ -617,17 +617,36 @@ fn test_frame_decode_multigroup() {
     assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "out-of-order group -> UNSUPPORTED");
     return 0;
 }
-# use_superres reconstructs downscaled then upscales (7.16); upscaling is not
-# implemented, so it is rejected rather than emitting a wrong-size frame.
-fn test_frame_decode_superres_rejected() {
+# use_superres reconstructs at FrameWidth (downscaled) then upscales to UpscaledWidth
+# (7.16) between CDEF and LR. An all-skip keyframe -> flat-128; upscaling a flat frame
+# stays flat-128, now at the upscaled width (256, a 2x upscale of the 128 recon).
+fn test_frame_decode_superres() {
     var olen = 0;
     var out = frame_enc_keyframe(&olen);
     var oe = alloc(8);
-    var fh = frame_mk_fh(1, 1, 0, 0);
+    var fh = frame_mk_fh(1, 1, 0, 0);                 # FrameWidth 128 (MiCols 32)
     store64(fh + AV1FH_USE_SUPERRES, 1);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 256);          # 2x upscale
     var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
-    assert_eq(frame, 0, "superres -> no frame");
-    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "use_superres -> DR_ERR_UNSUPPORTED");
+    assert_eq(load64(oe), DR_OK, "superres decode ok");
+    assert_eq(frame != 0, 1, "superres -> a frame");
+    assert_eq(dr_frame_width(frame), 256, "output at UpscaledWidth 256");
+    assert_eq(dr_frame_height(frame), 64, "height unchanged (horizontal-only upscale)");
+    var bad = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 256) { if (dr_frame_get(frame, 0, x, y) != 128) { bad = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "superres frame all flat-128 at 256 wide");
+    # again with CDEF on -> exercises the SEPARATE up-cdef upscale path (all-skip -> CDEF
+    # is a no-op, still flat-128 at 256).
+    var oe2 = alloc(8);
+    var cf = av1_decode_frame(frame_mk_seq(1), fh, out, olen, oe2);
+    assert_eq(load64(oe2), DR_OK, "superres + CDEF decode ok");
+    assert_eq(dr_frame_width(cf), 256, "superres+CDEF output at 256");
+    assert_eq(dr_frame_get(cf, 0, 200, 30), 128, "superres+CDEF still flat-128");
     return 0;
 }
 # 10-bit decode: the same skip-DC keyframe tile bytes (mode-info/partition are
@@ -1128,7 +1147,7 @@ fn main() {
     test_frame_decode_cdef();
     test_frame_decode_2tile();
     test_frame_decode_multigroup();
-    test_frame_decode_superres_rejected();
+    test_frame_decode_superres();
     test_frame_decode_10bit();
     test_frame_decode_12bit();
     test_frame_decode_10bit_cdef();

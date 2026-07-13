@@ -46,11 +46,29 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
         if (rc != DR_OK) { store64(out_err, rc); return 0; }
         result = cdef_frame;
     }
-    # 3. loop restoration.
+    # 2.5 superres upscaling (7.16): between CDEF and loop restoration, lift the
+    #     reconstruction from FrameWidth to UpscaledWidth. LR runs at the upscaled width
+    #     (its params carry UpscaledWidth) and reads BOTH the deblocked (curr) and CDEF
+    #     frames, so both are upscaled — they alias when CDEF is disabled.
+    var sr_curr = frame;
+    var sr_cdef = cdef_frame;
+    if (av1_fh_use_superres(fh) != 0) {
+        var up_w = av1_fh_upscaled_width(fh);
+        sr_curr = av1_superres_upscale_new(frame, up_w, out_err);
+        if (sr_curr == 0) { return 0; }
+        if (cdef_frame == frame) {
+            sr_cdef = sr_curr;
+        } else {
+            sr_cdef = av1_superres_upscale_new(cdef_frame, up_w, out_err);
+            if (sr_cdef == 0) { return 0; }
+        }
+        result = sr_cdef;
+    }
+    # 3. loop restoration (at the upscaled width).
     if ((av1_fh_uses_lr(fh) != 0) && (lr_params != 0)) {
-        var lr_frame = av1_cdef_frame_new(frame, out_err);
+        var lr_frame = av1_cdef_frame_new(sr_cdef, out_err);
         if (lr_frame == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-        av1_lr_process(frame, cdef_frame, lr_frame, lr_params);
+        av1_lr_process(sr_curr, sr_cdef, lr_frame, lr_params);
         result = lr_frame;
     }
     return result;
@@ -276,13 +294,14 @@ enum Av1FrameDec {
 
 # av1_frame_dec_new — begin a frame decode: validate scope, create the reconstruction
 # frame at the header dims (border 8 for CDEF/LR), build the LR params once, and stash
-# the cross-group state. Returns the context (or 0, *out_err set). Superres rejected
-# (7.16 upscale unimplemented) so UpscaledWidth == FrameWidth and the LR geometry stays
-# aligned. dr_frame_new validates BitDepth in {8,10,12} and writes the precise cause.
+# the cross-group state. Returns the context (or 0, *out_err set). The reconstruction
+# frame is created at FrameWidth (the downscaled/coded width); when use_superres is set
+# the in-loop pipeline (av1_apply_loop_filters) upscales it to UpscaledWidth (7.16)
+# between CDEF and LR, and the LR params carry UpscaledWidth. dr_frame_new validates
+# BitDepth in {8,10,12} and writes the precise cause.
 fn av1_frame_dec_new(seq, fh, out_err): i64 {
     store64(out_err, DR_OK);
     if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
-    if (av1_fh_use_superres(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     var num_planes = av1_seq_num_planes(seq);
     var frame = dr_frame_new(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
     num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),
@@ -391,8 +410,8 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
 # the final in-loop-filtered frame (writes *out_err). Thin wrapper over the frame-decode
 # context: new -> group -> finish. A frame split across multiple tile-group OBUs (a
 # partial group here) is driven by av1_decode_obus instead and rejected DR_ERR_UNSUPPORTED
-# by this single-group entry. 8/10/12-bit supported; superres rejected. Returns the
-# filtered frame or 0.
+# by this single-group entry. 8/10/12-bit + superres supported. Returns the
+# filtered (and, under use_superres, upscaled) frame or 0.
 # ================================================================
 fn av1_decode_frame(seq, fh, buf, sz, out_err): i64 {
     store64(out_err, DR_OK);

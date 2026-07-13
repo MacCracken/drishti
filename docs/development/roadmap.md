@@ -203,12 +203,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   the table-free ones first (10-bit landed 0.7.46; **multi-tile is COMPLETE**:
   frame-addressed MI grids 0.7.47, tile-window origins 0.7.48, driver + first 2-tile
   decode 0.7.49, tile-relative coeff-context + intra-reference rebases 0.7.50,
-  multi-tile-**group** frames 0.7.51); **superres** underway (7.16 — the full upscale
-  stack is **reference-confirmed against dav1d**: `Upscale_Filter` table + pixel kernel
-  0.7.52, row driver 0.7.53, `dx`/`mx0` geometry 0.7.54, per-plane frame upscale 0.7.55;
-  only the pipeline wiring (CDEF→superres→LR, lift the reject) remains). The superres +
-  inter tables + the dav1d `resize_c` / `get_upscale_x0` reference (src/tables.c,
-  mc_tmpl.c, decode.c) are in hand. See memory `av1-decode-remaining-tracks`.
+  multi-tile-**group** frames 0.7.51); **superres COMPLETE** (7.16 — table + kernel 0.7.52,
+  row driver 0.7.53, geometry 0.7.54, frame upscale 0.7.55, pipeline wiring
+  CDEF→superres→LR + reject lifted 0.7.56; a use_superres keyframe decodes end-to-end,
+  reference-confirmed against dav1d throughout). **INTER is the last of the four tracks**
+  — its sub-pel interp + warp tables + the dav1d `mc` reference are already in hand. See
+  memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
