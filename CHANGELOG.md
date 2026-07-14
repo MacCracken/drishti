@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.70] - 2026-07-13
+
+**Inter prediction — the compound mode path (spec 5.11.32), completing the inter mode + MV read.** The
+compound analog of 0.7.67's single-prediction mode reads: decode a compound inter block's mode and *both*
+motion vectors. Extends `src/av1_intermode.cyr` with:
+
+- **`Compound_Mode`** — the 8-symbol mode CDF (from §10) added to the inter-mode CDF blob (grew 51→123),
+  plus the `Compound_Mode_Ctx_Map[3][5]` table and `av1_compound_mode_ctx` (the CDF context from
+  `RefMvContext>>1` × `Min(NewMvContext, COMP_NEWMV_CTXS-1)`);
+- **`av1_read_compound_mode`** — the `compound_mode` symbol → `YMode = NEAREST_NEARESTMV + compound_mode`
+  (one of the eight compound modes);
+- **`av1_get_mode`** — the per-list mode split (a compound YMode → NEWMV / NEARESTMV / NEARMV / GLOBALMV
+  for each reference list);
+- **the `assign_mv` refactor** — a per-list `av1_assign_mv_list` (the predictor + `read_mv` for NEWMV,
+  now indexing `RefStackMv[pos][list]` / `GlobalMvs[list]`), with `av1_assign_mv_single` delegating to it
+  (behaviour-preserving) and a new `av1_assign_mv_compound` that fills both lists (the two NEWMV reads in
+  list order);
+- **`av1_has_nearmv`** + `read_drl_idx` / `write_drl_idx` extended to the compound modes (`NEW_NEWMV` in
+  the NEWMV DRL loop, the `has_nearmv` modes in the NEAR loop);
+- the paired `av1_write_compound_mode` encoder.
+
+Verified by 471 assertions (75 new): a `Compound_Mode` CDF + ctx-map check, a `get_mode` truth-table over
+every compound mode × both lists, and a full **compose round-trip** across **all 8 compound modes** (encode
+`compound_mode` + DRL + the NEW MV diffs in list order → decode → assert YMode / RefMvIdx / `Mv[0]` /
+`Mv[1]`), with the refactor confirmed by the still-passing 0.7.67 single-prediction tests. A **4-slice
+adversarial spec review** (compound_mode CDF+ctx / get_mode / assign_mv+drl / tests + libaom-dav1d
+cross-check, each finding adversarially verified) returned **no findings** — because a self-round-trip
+cannot catch a *shared* encode/decode bug, reviewers byte-for-byte diffed the CDF against §10, built the
+full `get_mode` truth table from the spec (asymmetric modes not list-swapped, cross-checked against
+libaom's `compound_ref0/ref1_mode` LUTs), confirmed `assign_mv`'s per-list predictors + read order, and
+proved the two DRL branches are mutually exclusive across all 12 modes (equivalent to the spec's else-if).
+**21,925 suite assertions + 1,140 fuzz assertions, all green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `Compound_Mode` CDF (`av1_imcdf_compmode` + `av1_imcdf_put8`)
+  + `av1_compmode_ctxmap` / `av1_compound_mode_ctx`; `av1_read_compound_mode` / `av1_write_compound_mode`;
+  `av1_get_mode`; `av1_assign_mv_list` / `av1_assign_mv_compound`; `av1_has_nearmv`; the compound
+  extension of `av1_read_drl_idx` / `av1_write_drl_idx`.
+- **`tests/av1_intermode.tcyr`** (extended): `test_compound_mode_cdf`, `test_get_mode`,
+  `test_compound_mode_rt` — 471 assertions total.
+
+### Scope / deferred
+- The compound MODE determination + `get_mode` + the two-list `assign_mv`. `use_intrabc`, the
+  `skip_mode` / segment-forced YMode branches, motion mode, interp filter, and compound type are the
+  caller's concern / later bites (roadmap.md). With this, the inter block's mode + reference + MV
+  bitstream-read layer is complete; the remaining pieces feed the MI-grid population + inter tile decode.
+
 ## [0.7.69] - 2026-07-13
 
 **Inter prediction — the compound reference path (spec 5.11.25).** The else-branch mirror of 0.7.68's

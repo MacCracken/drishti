@@ -234,15 +234,16 @@ Baseline (0.7.0): OBU layer + sequence header.
   `av1_assign_mv_single` 5.11.32 + the New/Zero/Ref/Drl CDFs — composing the find_mv_stack contexts +
   candidate stack + read_mv into a decoded inter YMode + Mv), the **reference-selection reads**
   `av1_intermode.cyr` 0.7.68 (`av1_read_is_inter` 5.11.30 + `av1_read_single_ref` 5.11.25 + the
-  Is_Inter/Single_Ref CDFs — the single RefFrame[0] decode), and the **compound reference path**
+  Is_Inter/Single_Ref CDFs — the single RefFrame[0] decode), the **compound reference path**
   `av1_intermode.cyr` 0.7.69 (`av1_read_comp_mode` + `av1_read_compound_ref` 5.11.25 + the Comp_Mode/
-  Comp_Ref_Type/Comp_Ref/Comp_Bwd_Ref/Uni_Comp_Ref CDFs — all 16 compound reference pairs; all bites'
-  adversarial reviews returned no findings) are in — MV candidate-list construction is complete for
-  use_ref_frame_mvs==0 and the single+compound reference selection + single-pred mode/MV decode are in;
-  next the COMPOUND mode path (compound_mode + the two-list assign_mv) + motion mode + compound type,
-  which populates the MI grid the scans read, then the inter tile decode that lets `av1_decode_stream`
-  decode a genuine inter frame referencing the DPB, then the temporal scan (needs the DPB's deferred
-  saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
+  Comp_Ref_Type/Comp_Ref/Comp_Bwd_Ref/Uni_Comp_Ref CDFs — all 16 compound reference pairs), and the
+  **compound mode path** `av1_intermode.cyr` 0.7.70 (`av1_read_compound_mode` + `av1_get_mode` +
+  `av1_assign_mv_compound` 5.11.32 + the Compound_Mode CDF — the two-list mode/MV decode; all bites'
+  adversarial reviews returned no findings) are in — the inter block's MODE + REFERENCE + MV
+  bitstream-read layer is complete; next motion mode + interp filter + compound type (the remaining inter
+  mode-info reads), which populate the MI grid the scans read, then the inter tile decode that lets
+  `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
+  DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
   `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.

@@ -404,6 +404,110 @@ fn test_single_ref_rt() {
     return 0;
 }
 
+# ================================================================
+# Compound mode reads (5.11.32): compound_mode (8-symbol) + get_mode + the two-list
+# assign_mv, round-tripped. Build an Av1MvCtx with a COMPOUND candidate stack (both
+# lists), GlobalMvs[0..1], and the entropy contexts, then encode (compound_mode +
+# drl + the NEW MV diffs in list order) and decode (mode -> drl -> assign_mv), asserting
+# YMode / RefMvIdx / Mv[0] / Mv[1].
+# ================================================================
+fn cm_ctx(new_ctx, ref_ctx): i64 {
+    var mvctx = av1_mvctx_new();
+    av1_mvctx_set_stack(mvctx, av1_mv_stack_new());
+    store64(mvctx + AV1MVC_NEWMVCTX, new_ctx);
+    store64(mvctx + AV1MVC_REFMVCTX, ref_ctx);
+    var s = load64(mvctx + AV1MVC_STACK);
+    av1_mv_stack_add(s, 10, 20, 110, 120, 1, AV1_NEAREST_NEARESTMV, 4, 1, 0);
+    av1_mv_stack_add(s, 30, 40, 130, 140, 1, AV1_NEAREST_NEARESTMV, 4, 1, 0);
+    av1_mv_stack_add(s, 50, 60, 150, 160, 1, AV1_NEAREST_NEARESTMV, 4, 1, 0);
+    av1_mvctx_set_global(mvctx, 1000, 2000, 3000, 4000, 0, 0);   # GlobalMvs[0]=(1000,2000), [1]=(3000,4000)
+    return mvctx;
+}
+fn cm_rt(mvctx, y_mode, ref_mv_idx, d0r, d0c, d1r, d1c, e0r, e0c, e1r, e1c, tag): i64 {
+    var imcc = av1_imcdf_blob();
+    var mvcc = av1_mvcdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_compound_mode(enc, imcc, mvctx, y_mode);
+    av1_write_drl_idx(enc, imcc, mvctx, y_mode, ref_mv_idx);
+    if (av1_get_mode(y_mode, 0) == AV1_NEWMV) { av1_write_mv(enc, mvcc, 0, 1, 0, d0r, d0c); }
+    if (av1_get_mode(y_mode, 1) == AV1_NEWMV) { av1_write_mv(enc, mvcc, 0, 1, 0, d1r, d1c); }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var dm = av1_read_compound_mode(sd, imcc, mvctx);
+    assert_eq(dm, y_mode, tag);
+    var dridx = av1_read_drl_idx(sd, imcc, mvctx, dm);
+    assert_eq(dridx, ref_mv_idx, tag);
+    var mv0 = av1_mv_new();
+    var mv1 = av1_mv_new();
+    av1_assign_mv_compound(sd, mvcc, mvctx, dm, dridx, 0, 1, 0, mv0, mv1);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, tag);
+    assert_eq(av1_mv_row(mv0), e0r, tag);
+    assert_eq(av1_mv_col(mv0), e0c, tag);
+    assert_eq(av1_mv_row(mv1), e1r, tag);
+    assert_eq(av1_mv_col(mv1), e1c, tag);
+    return 0;
+}
+
+# compound_mode CDF structure + context map.
+fn test_compound_mode_cdf() {
+    var cc = av1_imcdf_blob();
+    assert_eq(load64(av1_imcdf_compmode(cc, 0) + 0), 7760, "compound_mode[0] c0");
+    assert_eq(load64(av1_imcdf_compmode(cc, 0) + 48), 26891, "compound_mode[0] c6");
+    assert_eq(load64(av1_imcdf_compmode(cc, 0) + 56), 32768, "compound_mode ends 32768 (8-sym)");
+    assert_eq(load64(av1_imcdf_compmode(cc, 7) + 0), 13046, "compound_mode[7] c0");
+    # Compound_Mode_Ctx_Map[RefMvContext>>1][Min(NewMvContext,4)].
+    assert_eq(av1_compound_mode_ctx(0, 0), 0, "ctx map [0][0] = 0");
+    assert_eq(av1_compound_mode_ctx(1, 0), 0, "ctx map [0][0] (refmv 1>>1=0)");
+    assert_eq(av1_compound_mode_ctx(2, 2), 3, "ctx map [1][2] = 3");
+    assert_eq(av1_compound_mode_ctx(5, 9), 7, "ctx map [2][min(9,4)=4] = 7");
+    return 0;
+}
+
+# get_mode — the per-list mode split for every compound YMode.
+fn test_get_mode() {
+    # single modes (refList 0 returns YMode).
+    assert_eq(av1_get_mode(AV1_NEWMV, 0), AV1_NEWMV, "get_mode NEWMV/0");
+    # NEW_NEWMV -> both NEWMV.
+    assert_eq(av1_get_mode(AV1_NEW_NEWMV, 0), AV1_NEWMV, "NEW_NEWMV list0");
+    assert_eq(av1_get_mode(AV1_NEW_NEWMV, 1), AV1_NEWMV, "NEW_NEWMV list1");
+    # NEAREST_NEWMV -> list0 NEARESTMV, list1 NEWMV.
+    assert_eq(av1_get_mode(AV1_NEAREST_NEWMV, 0), AV1_NEARESTMV, "NEAREST_NEWMV list0");
+    assert_eq(av1_get_mode(AV1_NEAREST_NEWMV, 1), AV1_NEWMV, "NEAREST_NEWMV list1");
+    # NEW_NEARMV -> list0 NEWMV, list1 NEARMV.
+    assert_eq(av1_get_mode(AV1_NEW_NEARMV, 0), AV1_NEWMV, "NEW_NEARMV list0");
+    assert_eq(av1_get_mode(AV1_NEW_NEARMV, 1), AV1_NEARMV, "NEW_NEARMV list1");
+    # GLOBAL_GLOBALMV -> both GLOBALMV.
+    assert_eq(av1_get_mode(AV1_GLOBAL_GLOBALMV, 0), AV1_GLOBALMV, "GLOBAL_GLOBALMV list0");
+    assert_eq(av1_get_mode(AV1_GLOBAL_GLOBALMV, 1), AV1_GLOBALMV, "GLOBAL_GLOBALMV list1");
+    # NEAR_NEARMV -> both NEARMV.
+    assert_eq(av1_get_mode(AV1_NEAR_NEARMV, 0), AV1_NEARMV, "NEAR_NEARMV list0");
+    assert_eq(av1_get_mode(AV1_NEAR_NEARMV, 1), AV1_NEARMV, "NEAR_NEARMV list1");
+    return 0;
+}
+
+# the eight compound modes, each round-tripped end to end.
+fn test_compound_mode_rt() {
+    var m = cm_ctx(2, 3);
+    # NEAREST_NEARESTMV: both NEARESTMV (pos 0), no DRL, no read_mv.
+    cm_rt(m, AV1_NEAREST_NEARESTMV, 0, 0, 0, 0, 0, 10, 20, 110, 120, "NEAREST_NEARESTMV");
+    # NEAR_NEARMV: both NEARMV, DRL idx 1 -> RefStackMv[1].
+    cm_rt(m, AV1_NEAR_NEARMV, 1, 0, 0, 0, 0, 30, 40, 130, 140, "NEAR_NEARMV idx1");
+    # NEAREST_NEWMV: list0 NEARESTMV(pos0), list1 NEWMV(pos0)+diff1.
+    cm_rt(m, AV1_NEAREST_NEWMV, 0, 0, 0, 5, 0 - 7, 10, 20, 115, 113, "NEAREST_NEWMV");
+    # NEW_NEARESTMV: list0 NEWMV(pos0)+diff0, list1 NEARESTMV(pos0).
+    cm_rt(m, AV1_NEW_NEARESTMV, 0, 5, 0 - 7, 0, 0, 15, 13, 110, 120, "NEW_NEARESTMV");
+    # NEAR_NEWMV: list0 NEARMV(pos1), list1 NEWMV(pos1)+diff1.
+    cm_rt(m, AV1_NEAR_NEWMV, 1, 0, 0, 5, 0 - 7, 30, 40, 135, 133, "NEAR_NEWMV idx1");
+    # NEW_NEARMV: list0 NEWMV(pos1)+diff0, list1 NEARMV(pos1).
+    cm_rt(m, AV1_NEW_NEARMV, 1, 5, 0 - 7, 0, 0, 35, 33, 130, 140, "NEW_NEARMV idx1");
+    # GLOBAL_GLOBALMV: both GlobalMvs.
+    cm_rt(m, AV1_GLOBAL_GLOBALMV, 0, 0, 0, 0, 0, 1000, 2000, 3000, 4000, "GLOBAL_GLOBALMV");
+    # NEW_NEWMV: both NEWMV(pos1) + diffs (DRL idx 1).
+    cm_rt(m, AV1_NEW_NEWMV, 1, 5, 0 - 7, 3, 4, 35, 33, 133, 144, "NEW_NEWMV idx1");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -438,6 +542,11 @@ fn main() {
     test_compound_ref_unidir();
     test_compound_ref_bidir();
     test_compound_ref_adaptive();
+    test_group("compound_mode CDF + ctx map + get_mode (5.11.32)");
+    test_compound_mode_cdf();
+    test_get_mode();
+    test_group("read_compound_mode + two-list assign_mv round-trip (5.11.32)");
+    test_compound_mode_rt();
     return assert_summary();
 }
 
