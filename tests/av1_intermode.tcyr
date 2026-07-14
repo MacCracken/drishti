@@ -271,6 +271,101 @@ fn test_refcdf_structure() {
     assert_eq(load64(av1_refcdf_singleref(cc, 2, 0) + 0), 29744, "single_ref[2][0]");
     assert_eq(load64(av1_refcdf_singleref(cc, 2, 5) + 0), 30304, "single_ref[2][5]");
     assert_eq(load64(av1_refcdf_singleref(cc, 1, 3) + 0), 24773, "single_ref[1][3]");
+    # compound CDFs (spec 10)
+    assert_eq(load64(av1_refcdf_compmode(cc, 0) + 0), 26828, "comp_mode[0]");
+    assert_eq(load64(av1_refcdf_compmode(cc, 4) + 0), 2901, "comp_mode[4]");
+    assert_eq(load64(av1_refcdf_comprftype(cc, 0) + 0), 1198, "comp_ref_type[0]");
+    assert_eq(load64(av1_refcdf_comprftype(cc, 4) + 0), 22475, "comp_ref_type[4]");
+    assert_eq(load64(av1_refcdf_compref(cc, 0, 0) + 0), 4946, "comp_ref[0][0]");
+    assert_eq(load64(av1_refcdf_compref(cc, 2, 2) + 0), 27544, "comp_ref[2][2]");
+    assert_eq(load64(av1_refcdf_compbwdref(cc, 0, 0) + 0), 2235, "comp_bwd_ref[0][0]");
+    assert_eq(load64(av1_refcdf_compbwdref(cc, 2, 1) + 0), 30489, "comp_bwd_ref[2][1]");
+    assert_eq(load64(av1_refcdf_unicompref(cc, 0, 0) + 0), 5284, "uni_comp_ref[0][0]");
+    assert_eq(load64(av1_refcdf_unicompref(cc, 2, 2) + 0), 26710, "uni_comp_ref[2][2]");
+    return 0;
+}
+
+# ================================================================
+# Compound reference reads (5.11.25 compound path): comp_mode + read_compound_ref,
+# round-tripped. All 16 compound reference pairs (4 unidirectional + 12
+# bidirectional) each code a unique tree path.
+# ================================================================
+fn comp_ctxs(): i64 {
+    var cc = alloc(AV1CCTX_SIZE);
+    store64(cc + AV1CCTX_REF_TYPE, 2);   # 0..COMP_REF_TYPE_CONTEXTS-1
+    store64(cc + AV1CCTX_UNI, 0); store64(cc + AV1CCTX_UNI_P1, 1); store64(cc + AV1CCTX_UNI_P2, 2);
+    store64(cc + AV1CCTX_REF, 0); store64(cc + AV1CCTX_REF_P1, 1); store64(cc + AV1CCTX_REF_P2, 2);
+    store64(cc + AV1CCTX_BWDREF, 0); store64(cc + AV1CCTX_BWDREF_P1, 1);
+    return cc;
+}
+# encode the (r0, r1) compound pair, decode, assert both.
+fn cref_rt(r0, r1, disable, tag): i64 {
+    var cce = av1_refcdf_blob();
+    var ccd = av1_refcdf_blob();
+    if (disable == 0) { cce = av1_refcdf_new(); ccd = av1_refcdf_new(); }
+    var cctx = comp_ctxs();
+    var enc = av1_sym_enc_init(64, disable);
+    av1_write_compound_ref(enc, cce, cctx, r0, r1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var outref = alloc(2 * 8);
+    av1_read_compound_ref(sd, ccd, cctx, outref);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, tag);
+    assert_eq(load64(outref + 0), r0, tag);
+    assert_eq(load64(outref + 8), r1, tag);
+    return 0;
+}
+
+# comp_mode round-trip — both values, every context.
+fn test_comp_mode_rt() {
+    var ctx = 0;
+    while (ctx < AV1_COMP_INTER_CONTEXTS) {
+        var cc = av1_refcdf_blob();
+        var enc = av1_sym_enc_init(32, 1);
+        av1_write_comp_mode(enc, cc, ctx, AV1_COMPOUND_REFERENCE);
+        av1_write_comp_mode(enc, cc, ctx, AV1_SINGLE_REFERENCE);
+        var olen = 0;
+        var out = av1_sym_enc_finish(enc, &olen);
+        var sd = av1_sym_dec_init(out, olen, 1);
+        assert_eq(av1_read_comp_mode(sd, cc, ctx), AV1_COMPOUND_REFERENCE, "comp_mode compound");
+        assert_eq(av1_read_comp_mode(sd, cc, ctx), AV1_SINGLE_REFERENCE, "comp_mode single");
+        ctx = ctx + 1;
+    }
+    return 0;
+}
+
+# the four UNIDIRECTIONAL compound pairs.
+fn test_compound_ref_unidir() {
+    cref_rt(AV1_BWDREF_FRAME, AV1_ALTREF_FRAME, 1, "unidir BWDREF+ALTREF (uni=1)");
+    cref_rt(AV1_LAST_FRAME, AV1_LAST2_FRAME, 1, "unidir LAST+LAST2 (uni=0,p1=0)");
+    cref_rt(AV1_LAST_FRAME, AV1_LAST3_FRAME, 1, "unidir LAST+LAST3 (uni=0,p1=1,p2=0)");
+    cref_rt(AV1_LAST_FRAME, AV1_GOLDEN_FRAME, 1, "unidir LAST+GOLDEN (uni=0,p1=1,p2=1)");
+    return 0;
+}
+# the twelve BIDIRECTIONAL pairs: fwd RefFrame[0] x bwd RefFrame[1].
+fn test_compound_ref_bidir() {
+    var fwd = alloc(4 * 8);
+    store64(fwd + 0, AV1_LAST_FRAME); store64(fwd + 8, AV1_LAST2_FRAME);
+    store64(fwd + 16, AV1_LAST3_FRAME); store64(fwd + 24, AV1_GOLDEN_FRAME);
+    var bwd = alloc(3 * 8);
+    store64(bwd + 0, AV1_BWDREF_FRAME); store64(bwd + 8, AV1_ALTREF2_FRAME);
+    store64(bwd + 16, AV1_ALTREF_FRAME);
+    var i = 0;
+    while (i < 4) {
+        var j = 0;
+        while (j < 3) {
+            cref_rt(load64(fwd + (i * 8)), load64(bwd + (j * 8)), 1, "bidir fwd x bwd");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+# adaptive CDFs for a couple of compound pairs.
+fn test_compound_ref_adaptive() {
+    cref_rt(AV1_LAST_FRAME, AV1_GOLDEN_FRAME, 0, "unidir adaptive");
+    cref_rt(AV1_GOLDEN_FRAME, AV1_ALTREF2_FRAME, 0, "bidir adaptive");
     return 0;
 }
 
@@ -337,6 +432,12 @@ fn main() {
     test_is_inter_rt();
     test_group("read_single_ref round-trip (5.11.25)");
     test_single_ref_rt();
+    test_group("read_comp_mode round-trip (5.11.25)");
+    test_comp_mode_rt();
+    test_group("read_compound_ref round-trip (5.11.25)");
+    test_compound_ref_unidir();
+    test_compound_ref_bidir();
+    test_compound_ref_adaptive();
     return assert_summary();
 }
 

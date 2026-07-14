@@ -4,6 +4,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.69] - 2026-07-13
+
+**Inter prediction — the compound reference path (spec 5.11.25).** The else-branch mirror of 0.7.68's
+single-reference path: which *pair* of references a compound inter block uses. Extends
+`src/av1_intermode.cyr` with:
+
+- **the compound CDF families** — `Comp_Mode[5]`, `Comp_Ref_Type[5]`, `Comp_Ref[3][3]`,
+  `Comp_Bwd_Ref[3][2]`, `Uni_Comp_Ref[3][3]`, transcribed per-value from §10 (the reference-CDF blob
+  grew 66 → 168 entries, the +102 exactly the added families);
+- **`av1_read_comp_mode`** — the `@@comp_mode` symbol (`SINGLE_REFERENCE` vs `COMPOUND_REFERENCE`);
+- **`av1_read_compound_ref`** — `comp_ref_type` picks unidirectional vs bidirectional. Unidir yields one
+  of four same-direction pairs (`LAST`+`LAST2`, `LAST`+`LAST3`, `LAST`+`GOLDEN`, `BWDREF`+`ALTREF`) via
+  `uni_comp_ref`/`_p1`/`_p2`; bidir picks a forward `RefFrame[0]` (`comp_ref`/`_p1`/`_p2`) + a backward
+  `RefFrame[1]` (`comp_bwdref`/`_p1`). Per-symbol CDF contexts are a caller input (the neighbour count,
+  spec 8.3, is deferred as in the single-ref bite);
+- the paired `av1_write_comp_mode` / `av1_write_compound_ref` encoders — the latter classifies unidir
+  vs bidir from the `(RefFrame[0], RefFrame[1])` pair and emits the matching tree.
+
+Verified by 396 assertions (74 new): a compound CDF-structure check against §10, a `comp_mode`
+round-trip over every context, and a round-trip of **all 16 compound reference pairs** (4 unidirectional
++ 12 bidirectional), static and adaptive. A **3-slice adversarial spec review** (CDF tables + grown
+layout / decode tree / encoder-inverse + comp_mode + tests + libaom-dav1d cross-check, each finding
+adversarially verified) returned **no findings** — because a self-round-trip cannot catch a *shared*
+encode/decode bug, reviewers byte-for-byte diffed all five CDF families against §10, confirmed the
+66→168 blob bump tiles with no overlap or OOB, verified the decode tree for every leaf (p-senses not
+inverted), and hand-traced the encoder's unidir/bidir classification — including the tricky (`LAST`,
+`BWDREF`/`ALTREF2`/`ALTREF`) pairs, which are *bidir* (the forward `LAST` paired with a backward ref)
+vs the *unidir* (`LAST`, `LAST2`/`LAST3`/`GOLDEN`) — and its inverse for all 16 pairs. **21,850 suite
+assertions + 1,140 fuzz assertions, all green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `Comp_Mode` / `Comp_Ref_Type` / `Comp_Ref` /
+  `Comp_Bwd_Ref` / `Uni_Comp_Ref` CDF families (`av1_refcdf_compmode` / `_comprftype` / `_compref` /
+  `_compbwdref` / `_unicompref`); `av1_read_comp_mode` / `av1_read_compound_ref` (5.11.25) +
+  `av1_write_comp_mode` / `av1_write_compound_ref`; the `Av1CompCtxIdx` context-slot layout.
+- **`tests/av1_intermode.tcyr`** (extended): compound CDF-structure asserts, `test_comp_mode_rt`,
+  `test_compound_ref_unidir` / `_bidir` / `_adaptive` — 396 assertions total.
+
+### Scope / deferred
+- The compound reference SELECTION tree + `comp_mode`. The `comp_mode` gate (`reference_select &&
+  Min(bw4,bh4) >= 2`), the skip_mode / segment branches, and the neighbour-count CDF contexts (spec 8.3)
+  are the caller's concern / caller inputs; the compound MODE path (`compound_mode` + the two-list
+  `assign_mv`), motion mode, interp filter, and compound type are later bites (roadmap.md).
+
 ## [0.7.68] - 2026-07-13
 
 **Inter prediction — the reference-selection reads (spec 5.11.30 + 5.11.25, single prediction).** The
