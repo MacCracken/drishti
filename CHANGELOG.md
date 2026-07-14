@@ -4,6 +4,70 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.75] - 2026-07-14
+
+**Inter prediction — the neighbour CDF contexts (spec 5.11.15 preamble + §9 CDF selection). The first
+un-deferral.** Every inter CDF context is derived from the ABOVE and LEFT neighbours' reference frames. Those
+were caller *inputs* from 0.7.68 onward because the MI grid held no decoded data; 0.7.74's storage loops
+changed that, so the derivations land for real. Extends `src/av1_intermode.cyr` with:
+
+- **`av1_nbctx_setup`** (spec 5.11.15) — snapshots the eight neighbour values from the MI grid:
+  `Above`/`LeftRefFrame[0..1]`, `Above`/`LeftIntra`, `Above`/`LeftSingle`. The unavailable-neighbour defaults
+  are **asymmetric**: `RefFrame[0]` falls back to `INTRA_FRAME` (so an unavailable neighbour reads as intra)
+  but `RefFrame[1]` falls back to `NONE` (so it reads as single) — both are `<= INTRA_FRAME` tests, which is
+  exactly why `NONE = -1` works for Single while `INTRA_FRAME = 0` works for Intra;
+- **`av1_check_backward`** / **`av1_count_refs`** / **`av1_ref_count_ctx`** (§9) — the leaves the `single_ref`
+  / `comp_ref` context family will compose;
+- **`av1_is_inter_ctx`** — now feeds `av1_read_is_inter` (0.7.68) for real;
+- **`av1_comp_mode_ctx`** — now feeds `av1_read_comp_mode` (0.7.69) for real.
+
+Verified by 138 new assertions whose expected values come from a **spec-literal Python port**
+(`scripts/refs/nbctx_ref.py`) transcribed from the spec *text*, never from the Cyrius — so the ground truth is
+independent of the code under test rather than a restatement of it. Coverage: the `setup` preamble (incl. the
+unavailable path proving the grid is *not* consulted, since those cells hold different values);
+`check_backward` across every ref value with both boundaries (`GOLDEN` = 4 is not backward, `BWDREF` = 5 is,
+`ALTREF` = 7 is, 8 is not); `count_refs` + `ref_count_ctx`; **20 branch-covering known answers**; a **full
+5184-combo enumeration** of every `(AvailU, AvailL, aref0, aref1, lref0, lref1)` over a ref set spanning
+NONE/INTRA/forward/backward, checked against the port's exhaustive digest (sums 2736 / 10672 plus per-value
+histograms) and proving no context ever leaves `[0,4)` / `[0,5)` — an out-of-range context would index the
+`Is_Inter[4]` / `Comp_Mode[5]` CDF blob out of bounds; and a derived context driving `av1_read_is_inter`
+end-to-end.
+
+Every test is **mutation-verified**: `is_inter` both-intra 3→2 → 5 failures; `comp_mode` XOR→OR → 4;
+unavailable `aref1` NONE→INTRA → 1; `check_backward` `>=`→`>` → 10; the `<= INTRA_FRAME` Single test →`<` → 6;
+`ref_count_ctx` `<`→`<=` → 2; `comp_mode` neither-avail 1→0 → 4 (all 0 at baseline).
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `Av1NbCtx` record + `av1_nbctx_new` / `av1_nbctx_setup` and its
+  accessors; `av1_check_backward`; `av1_count_refs`; `av1_ref_count_ctx`; `av1_is_inter_ctx`;
+  `av1_comp_mode_ctx`.
+- **`tests/av1_intermode.tcyr`** (extended): `test_nbctx_layout`, `test_nbctx_setup`, `test_check_backward`,
+  `test_count_refs`, `test_nbctx_known_answers`, `test_nbctx_full_enumeration`, `test_nbctx_feeds_the_read`.
+- **`scripts/refs/`** (new): committed spec-literal reference ports + a README on why they belong in the repo.
+  `nbctx_ref.py` is the first. Reference ports were previously written to a temporary scratch path that is
+  wiped between sessions — so the eight ports cited across `CHANGELOG.md` / `docs/sources.md`
+  (`mvscan_ref.py`, `mvdriver_ref.py`, `mv_ref.py`, `mc_driver_ref.py`, `emu_edge.py`, `mc_put8tap.py`,
+  `resize_ref.py`, `upscale_geom.py`) no longer exist and those citations are dead. The AV1 spec remains the
+  actual oracle and the known answers stay re-derivable from it (the 0.7.75 review demonstrated this by
+  re-deriving all 11 digest constants from the spec without the port), but the dead citations are a doc-claim
+  defect — flagged for the 0.7.x doc-claim audit.
+
+### Fixed
+- **The `Av1NbCtx` record's field offsets were unpinned** — the same circularity class as the 0.7.73 CDF-blob
+  finding: `av1_nbctx_setup` stores through the same `AV1NB_*` symbols the accessors read back, so a
+  self-consistent offset error cancels out. `test_nbctx_layout` now pins every offset absolutely, pins the
+  last field's end to `AV1NB_SIZE` (so a field added past the record cannot silently overflow the alloc), and
+  proves no two fields overlap. Mutation-verified: `AV1NB_LSINGLE` overlapping `AV1NB_ASINGLE` → 23 failures,
+  `AV1NB_SIZE` 80→72 → 1, the `aref` list-stride 8→16 → 7 (all 0 before).
+
+### Scope / deferred
+- The two contexts whose inputs the grid already carries. Still caller inputs: the `single_ref` /
+  `comp_ref` / `comp_ref_type` / `uni_comp_ref` / `comp_bwdref` family (derivable now via `count_refs`, a
+  later bite), and the contexts needing grid fields drishti does not carry yet — `comp_group_idx` /
+  `compound_idx` (`CompGroupIdxs` / `CompoundIdxs` + order hints) and `interp_filter` (`InterpFilters`).
+  `AvailU`/`AvailL` remain the caller's, as in the spec (`decode_block` computes them). Then the inter tile
+  decode (roadmap.md).
+
 ## [0.7.74] - 2026-07-14
 
 **Inter prediction — the MI-grid population (spec 5.11.4 `decode_block` storage loops). This closes the

@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.74 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + the COMPLETE inter mode-info read layer + MI-grid population)
+## Status — 0.7.75 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + the COMPLETE inter mode-info read layer + MI-grid population + the first real neighbour CDF contexts)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (21,925 suite assertions + 1,140 fuzz
+derived, and adversarially tested (25,971 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -46,12 +46,18 @@ frame-header + tile-group OBUs) **and** the combined FRAME OBU (type 6 — the c
 real-stream form; it byte-splits off the tile group per spec 5.10). A complete
 keyframe bitstream decodes **from raw bytes all the way to pixels** — both forms
 verified end-to-end, at 8/10/12-bit, single- and multi-tile, with or without
-superres. **Inter prediction** — the last decode track — is **underway**: the
-three leaf motion-compensation pieces have landed (`av1_mc.cyr`: the
-**Subpel_Filters** interpolation table 0.7.57, the **`put_8tap`** 8-tap MC kernel
-0.7.58, the **`emu_edge`** frame-boundary block fetch 0.7.59, each reference-confirmed
-against dav1d); the MC driver, the reference-frame buffer/DPB (needs multi-frame
-decode), MV prediction, and inter mode-info come next — inter frames do not yet decode.
+superres. **Inter prediction** — the last decode track — is **underway**, and most of
+it is now in: the leaf motion-compensation kernels (`av1_mc.cyr`: **Subpel_Filters**
+0.7.57, **`put_8tap`** 0.7.58, **`emu_edge`** 0.7.59, each reference-confirmed against
+dav1d) plus the **MC driver** (0.7.60), the **reference-frame buffer/DPB** + multi-frame
+decode (`av1_dpb.cyr` 0.7.61), the complete **MV-prediction** arc (`av1_mv.cyr`
+0.7.62–0.7.65: `find_mv_stack` — candidate stack, spatial scans, driver, entropy
+contexts), the **complete inter mode-info bitstream-read layer** (`av1_intermode.cyr`
+0.7.66–0.7.73: MV decode, mode/reference/compound reads, interp filter, motion mode,
+inter-intra, compound type), the **MI-grid population** (0.7.74) that closes the
+producer→consumer loop, and the first real **neighbour CDF contexts** (0.7.75). What
+remains before inter frames decode: the rest of the neighbour contexts, the inter tile
+decode, and the temporal scan — **inter frames do not yet decode end-to-end**.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive
@@ -108,10 +114,11 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
 
 A profile-0 AV1 **keyframe** decodes end-to-end to pixels — single- or
 multi-tile, with or without superres, at 8/10/12-bit — through the full
-in-loop filter chain. The remaining AV1 work toward 100% is **inter
-prediction** (the MC driver + reference-frame DPB + MV prediction + inter
-mode-info + compound/OBMC/warp — the leaf MC kernels are in),
-**film-grain synthesis**, conformance, and the encode lane. The road to 1.0
+in-loop filter chain. The remaining AV1 work toward 100% is the rest of **inter
+prediction** (the inter tile decode + the temporal scan + compound/OBMC/warp +
+scaled-reference MC — the MC driver, DPB, MV prediction, the full inter mode-info read
+layer, and the MI-grid population are in), **film-grain synthesis**, conformance, and
+the encode lane. The road to 1.0
 is **one minor arc per codec** —
 **0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
 **0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a

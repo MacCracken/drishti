@@ -760,6 +760,157 @@ enum Av1RefReadConst {
 }
 var AV1_REF_NONE = 0 - 1;         # NONE (enums reject negative literals)
 
+# ================================================================
+# THE NEIGHBOUR CONTEXT (spec 5.11.15 inter_frame_mode_info preamble + 9 CDF selection)
+# ----------------------------------------------------------------
+# Every inter CDF context is derived from the ABOVE and LEFT neighbours' reference
+# frames. Those reads were caller inputs from 0.7.68 onward because the MI grid held no
+# decoded data; 0.7.74's storage loops changed that, so the derivations can land for real.
+#
+# inter_frame_mode_info opens by snapshotting eight values from the grid:
+#   Left/AboveRefFrame[0] = Avail ? RefFrames[nb][0] : INTRA_FRAME
+#   Left/AboveRefFrame[1] = Avail ? RefFrames[nb][1] : NONE
+#   Left/AboveIntra       = RefFrame[0] <= INTRA_FRAME
+#   Left/AboveSingle      = RefFrame[1] <= INTRA_FRAME
+# Note the ASYMMETRY of the unavailable defaults: RefFrame[0] falls back to INTRA_FRAME
+# (so an unavailable neighbour reads as intra) but RefFrame[1] falls back to NONE (so it
+# reads as single). Both are `<= INTRA_FRAME` tests, which is why NONE = -1 works for
+# Single while INTRA_FRAME = 0 works for Intra.
+#
+# AvailU / AvailL are the caller's (decode_block computes them as is_inside(r-1, c) /
+# is_inside(r, c-1) — tile bounds; raster order guarantees an in-tile above/left neighbour
+# is already decoded). The bite lands the foundation + the two contexts that need nothing
+# beyond it and the RefFrames the grid already carries; the single_ref / comp_ref family
+# and the contexts needing new grid fields (CompGroupIdxs / CompoundIdxs / InterpFilters)
+# are later bites (roadmap.md).
+# ================================================================
+enum Av1NbCtxOff {
+    AV1NB_AVAILU  = 0;     # AvailU
+    AV1NB_AVAILL  = 8;     # AvailL
+    AV1NB_AREF0   = 16;    # AboveRefFrame[0]
+    AV1NB_AREF1   = 24;    # AboveRefFrame[1]
+    AV1NB_LREF0   = 32;    # LeftRefFrame[0]
+    AV1NB_LREF1   = 40;    # LeftRefFrame[1]
+    AV1NB_AINTRA  = 48;    # AboveIntra
+    AV1NB_LINTRA  = 56;    # LeftIntra
+    AV1NB_ASINGLE = 64;    # AboveSingle
+    AV1NB_LSINGLE = 72;    # LeftSingle
+    AV1NB_SIZE    = 80;
+}
+fn av1_nbctx_new(): i64 {
+    var nb = alloc(AV1NB_SIZE);
+    if (nb == 0) { return 0; }
+    memset(nb, 0, AV1NB_SIZE);
+    return nb;
+}
+fn av1_nbctx_availu(nb): i64 { return load64(nb + AV1NB_AVAILU); }
+fn av1_nbctx_availl(nb): i64 { return load64(nb + AV1NB_AVAILL); }
+fn av1_nbctx_aref(nb, list): i64 { return load64(nb + AV1NB_AREF0 + (list * 8)); }
+fn av1_nbctx_lref(nb, list): i64 { return load64(nb + AV1NB_LREF0 + (list * 8)); }
+fn av1_nbctx_aintra(nb): i64 { return load64(nb + AV1NB_AINTRA); }
+fn av1_nbctx_lintra(nb): i64 { return load64(nb + AV1NB_LINTRA); }
+fn av1_nbctx_asingle(nb): i64 { return load64(nb + AV1NB_ASINGLE); }
+fn av1_nbctx_lsingle(nb): i64 { return load64(nb + AV1NB_LSINGLE); }
+
+# av1_nbctx_setup (spec 5.11.15) — snapshot the above/left neighbours from the MI grid.
+# avail_u / avail_l are the caller's is_inside(r-1, c) / is_inside(r, c-1).
+fn av1_nbctx_setup(nb, grid, fmi_cols, mi_row, mi_col, avail_u, avail_l): i64 {
+    if (nb == 0) { return DR_ERR_BOUNDS; }
+    store64(nb + AV1NB_AVAILU, avail_u != 0);   # normalize a caller truthy to 0/1
+    store64(nb + AV1NB_AVAILL, avail_l != 0);
+    # unavailable: RefFrame[0] reads as INTRA_FRAME, RefFrame[1] as NONE (spec 5.11.15).
+    var aref0 = AV1_INTRA_FRAME;
+    var aref1 = AV1_REF_NONE;
+    var lref0 = AV1_INTRA_FRAME;
+    var lref1 = AV1_REF_NONE;
+    if (avail_u != 0) {
+        var acell = av1_mv_grid_cell(grid, fmi_cols, mi_row - 1, mi_col);
+        aref0 = load64(acell + AV1MIR_REF0);
+        aref1 = load64(acell + AV1MIR_REF1);
+    }
+    if (avail_l != 0) {
+        var lcell = av1_mv_grid_cell(grid, fmi_cols, mi_row, mi_col - 1);
+        lref0 = load64(lcell + AV1MIR_REF0);
+        lref1 = load64(lcell + AV1MIR_REF1);
+    }
+    store64(nb + AV1NB_AREF0, aref0);
+    store64(nb + AV1NB_AREF1, aref1);
+    store64(nb + AV1NB_LREF0, lref0);
+    store64(nb + AV1NB_LREF1, lref1);
+    # the <= INTRA_FRAME tests. NONE = -1 <= 0, so an unavailable/single neighbour is Single.
+    store64(nb + AV1NB_AINTRA, aref0 <= AV1_INTRA_FRAME);
+    store64(nb + AV1NB_LINTRA, lref0 <= AV1_INTRA_FRAME);
+    store64(nb + AV1NB_ASINGLE, aref1 <= AV1_INTRA_FRAME);
+    store64(nb + AV1NB_LSINGLE, lref1 <= AV1_INTRA_FRAME);
+    return DR_OK;
+}
+
+# check_backward (spec 9) — is refFrame one of the backward references?
+fn av1_check_backward(ref_frame): i64 {
+    return (ref_frame >= AV1_BWDREF_FRAME) && (ref_frame <= AV1_ALTREF_FRAME);
+}
+# count_refs (spec 9) — how many of the (up to 4) neighbour reference slots are frameType.
+fn av1_count_refs(nb, frame_type): i64 {
+    var c = 0;
+    if (av1_nbctx_availu(nb) != 0) {
+        if (av1_nbctx_aref(nb, 0) == frame_type) { c = c + 1; }
+        if (av1_nbctx_aref(nb, 1) == frame_type) { c = c + 1; }
+    }
+    if (av1_nbctx_availl(nb) != 0) {
+        if (av1_nbctx_lref(nb, 0) == frame_type) { c = c + 1; }
+        if (av1_nbctx_lref(nb, 1) == frame_type) { c = c + 1; }
+    }
+    return c;
+}
+# ref_count_ctx (spec 9) — compare two counts into a 3-way context.
+fn av1_ref_count_ctx(counts0, counts1): i64 {
+    if (counts0 < counts1) { return 0; }
+    if (counts0 == counts1) { return 1; }
+    return 2;
+}
+
+# is_inter ctx (spec 9) — feeds av1_read_is_inter (0.7.68).
+fn av1_is_inter_ctx(nb): i64 {
+    var au = av1_nbctx_availu(nb);
+    var al = av1_nbctx_availl(nb);
+    var ai = av1_nbctx_aintra(nb);
+    var li = av1_nbctx_lintra(nb);
+    if ((au != 0) && (al != 0)) {
+        if ((li != 0) && (ai != 0)) { return 3; }
+        return (li != 0) || (ai != 0);
+    }
+    if ((au != 0) || (al != 0)) {
+        if (au != 0) { return 2 * ai; }
+        return 2 * li;
+    }
+    return 0;
+}
+
+# comp_mode ctx (spec 9) — feeds av1_read_comp_mode (0.7.69).
+fn av1_comp_mode_ctx(nb): i64 {
+    var au = av1_nbctx_availu(nb);
+    var al = av1_nbctx_availl(nb);
+    var asg = av1_nbctx_asingle(nb);
+    var lsg = av1_nbctx_lsingle(nb);
+    var abw = av1_check_backward(av1_nbctx_aref(nb, 0));
+    var lbw = av1_check_backward(av1_nbctx_lref(nb, 0));
+    if ((au != 0) && (al != 0)) {
+        if ((asg != 0) && (lsg != 0)) { return abw ^ lbw; }
+        if (asg != 0) { return 2 + ((abw != 0) || (av1_nbctx_aintra(nb) != 0)); }
+        if (lsg != 0) { return 2 + ((lbw != 0) || (av1_nbctx_lintra(nb) != 0)); }
+        return 4;
+    }
+    if (au != 0) {
+        if (asg != 0) { return abw; }
+        return 3;
+    }
+    if (al != 0) {
+        if (lsg != 0) { return lbw; }
+        return 3;
+    }
+    return 1;
+}
+
 # Compound-reference context slots (the caller fills `cctx` with the neighbour-
 # count-derived context for each compound symbol — spec 8.3, deferred).
 enum Av1CompCtxIdx {

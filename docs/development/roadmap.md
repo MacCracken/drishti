@@ -249,9 +249,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   returned no findings), and the **MI-grid population** `av1_mv.cyr` 0.7.74 (`av1_mi_store_mode` /
   `av1_mi_store_final` — the 5.11.4 decode_block storage loops, writing a decoded block's mode info across
   its bw4 x bh4 footprint, clipped to the frame; this CLOSES the producer->consumer loop the scans depend on)
-  are in — **THE INTER MODE-INFO BITSTREAM-READ LAYER IS COMPLETE and the grid it feeds is populated**; next
-  the neighbour-derived CDF contexts the grid can now supply (spec 8.3/9 — add CompGroupIdxs/CompoundIdxs/
-  InterpFilters to the grid, un-deferring the caller-input contexts), then
+  are in, and the **neighbour CDF contexts** `av1_intermode.cyr` 0.7.75 (`av1_nbctx_setup` 5.11.15 +
+  `av1_check_backward`/`av1_count_refs`/`av1_ref_count_ctx` + `av1_is_inter_ctx`/`av1_comp_mode_ctx` — the
+  FIRST un-deferral, feeding the 0.7.68/0.7.69 reads for real now the grid is populated) — **THE INTER
+  MODE-INFO BITSTREAM-READ LAYER IS COMPLETE and the grid it feeds is populated**; next the rest of the
+  neighbour contexts (the single_ref/comp_ref family via count_refs; then CompGroupIdxs/CompoundIdxs/
+  InterpFilters added to the grid for comp_group_idx/compound_idx/interp_filter), then
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d

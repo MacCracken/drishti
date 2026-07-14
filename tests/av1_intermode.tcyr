@@ -1144,6 +1144,269 @@ fn test_comptype_wedge_sweep() {
     return 0;
 }
 
+# ================================================================
+# The neighbour CDF contexts (5.11.15 preamble + spec 9 derivations). Known answers come
+# from the spec-literal Python port scratchpad/nbctx_ref.py — transcribed from the SPEC
+# TEXT, never from the Cyrius, so the expected values are an INDEPENDENT ground truth
+# rather than a restatement of the code under test.
+# ================================================================
+# build a 1-cell-bordered grid, write the above/left neighbour cells, set up the nbctx.
+fn nb_build(avail_u, avail_l, aref0, aref1, lref0, lref1): i64 {
+    var cols = 8;
+    var g = av1_mv_grid_new(cols, 8);
+    # block under test at (3,3); above = (2,3), left = (3,2).
+    av1_mv_grid_set(g, cols, 2, 3, 1, 1, 6, AV1_NEWMV, aref0, aref1, 0, 0, 0, 0);
+    av1_mv_grid_set(g, cols, 3, 2, 1, 1, 6, AV1_NEWMV, lref0, lref1, 0, 0, 0, 0);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, cols, 3, 3, avail_u, avail_l);
+    return nb;
+}
+fn nb_case(avail_u, avail_l, aref0, aref1, lref0, lref1, exp_isinter, exp_compmode, tag): i64 {
+    var nb = nb_build(avail_u, avail_l, aref0, aref1, lref0, lref1);
+    assert_eq(av1_is_inter_ctx(nb), exp_isinter, tag);
+    assert_eq(av1_comp_mode_ctx(nb), exp_compmode, tag);
+    return 0;
+}
+# The Av1NbCtx record layout, pinned ABSOLUTELY. av1_nbctx_setup stores through the same
+# AV1NB_* offsets the accessors read back, so a self-consistent offset error cancels out
+# exactly — the identical circularity that let a CDF stride bug ship green in 0.7.73. Pin
+# the offsets against the documented layout, and pin the last field's end to AV1NB_SIZE so
+# a field added past the record silently overflowing the alloc is caught.
+fn test_nbctx_layout() {
+    assert_eq(AV1NB_AVAILU, 0, "AvailU at 0");
+    assert_eq(AV1NB_AVAILL, 8, "AvailL at 8");
+    assert_eq(AV1NB_AREF0, 16, "AboveRefFrame[0] at 16");
+    assert_eq(AV1NB_AREF1, 24, "AboveRefFrame[1] at 24");
+    assert_eq(AV1NB_LREF0, 32, "LeftRefFrame[0] at 32");
+    assert_eq(AV1NB_LREF1, 40, "LeftRefFrame[1] at 40");
+    assert_eq(AV1NB_AINTRA, 48, "AboveIntra at 48");
+    assert_eq(AV1NB_LINTRA, 56, "LeftIntra at 56");
+    assert_eq(AV1NB_ASINGLE, 64, "AboveSingle at 64");
+    assert_eq(AV1NB_LSINGLE, 72, "LeftSingle at 72");
+    assert_eq(AV1NB_LSINGLE + 8, AV1NB_SIZE, "the last field ends EXACTLY at AV1NB_SIZE");
+    # the aref/lref accessors index by list — pin that arithmetic against the offsets.
+    var nb = av1_nbctx_new();
+    store64(nb + AV1NB_AREF0, 111); store64(nb + AV1NB_AREF1, 222);
+    store64(nb + AV1NB_LREF0, 333); store64(nb + AV1NB_LREF1, 444);
+    assert_eq(av1_nbctx_aref(nb, 0), 111, "aref(0) reads AREF0");
+    assert_eq(av1_nbctx_aref(nb, 1), 222, "aref(1) reads AREF1");
+    assert_eq(av1_nbctx_lref(nb, 0), 333, "lref(0) reads LREF0");
+    assert_eq(av1_nbctx_lref(nb, 1), 444, "lref(1) reads LREF1");
+    # every field is distinct: writing one must not disturb another (no overlap).
+    var n2 = av1_nbctx_new();
+    store64(n2 + AV1NB_AVAILU, 1); store64(n2 + AV1NB_AVAILL, 2);
+    store64(n2 + AV1NB_AREF0, 3); store64(n2 + AV1NB_AREF1, 4);
+    store64(n2 + AV1NB_LREF0, 5); store64(n2 + AV1NB_LREF1, 6);
+    store64(n2 + AV1NB_AINTRA, 7); store64(n2 + AV1NB_LINTRA, 8);
+    store64(n2 + AV1NB_ASINGLE, 9); store64(n2 + AV1NB_LSINGLE, 10);
+    assert_eq(av1_nbctx_availu(n2), 1, "no field overlap: AvailU");
+    assert_eq(av1_nbctx_availl(n2), 2, "no field overlap: AvailL");
+    assert_eq(av1_nbctx_aref(n2, 0), 3, "no field overlap: AREF0");
+    assert_eq(av1_nbctx_aref(n2, 1), 4, "no field overlap: AREF1");
+    assert_eq(av1_nbctx_lref(n2, 0), 5, "no field overlap: LREF0");
+    assert_eq(av1_nbctx_lref(n2, 1), 6, "no field overlap: LREF1");
+    assert_eq(av1_nbctx_aintra(n2), 7, "no field overlap: AboveIntra");
+    assert_eq(av1_nbctx_lintra(n2), 8, "no field overlap: LeftIntra");
+    assert_eq(av1_nbctx_asingle(n2), 9, "no field overlap: AboveSingle");
+    assert_eq(av1_nbctx_lsingle(n2), 10, "no field overlap: LeftSingle");
+    return 0;
+}
+# the 5.11.15 preamble: the unavailable-neighbour defaults are ASYMMETRIC —
+# RefFrame[0] -> INTRA_FRAME, RefFrame[1] -> NONE.
+fn test_nbctx_setup() {
+    # both available: the grid values come through verbatim.
+    var nb = nb_build(1, 1, 4, 5, 1, 0 - 1);
+    assert_eq(av1_nbctx_availu(nb), 1, "AvailU");
+    assert_eq(av1_nbctx_availl(nb), 1, "AvailL");
+    assert_eq(av1_nbctx_aref(nb, 0), 4, "AboveRefFrame[0] from the grid");
+    assert_eq(av1_nbctx_aref(nb, 1), 5, "AboveRefFrame[1] from the grid");
+    assert_eq(av1_nbctx_lref(nb, 0), 1, "LeftRefFrame[0] from the grid");
+    assert_eq(av1_nbctx_lref(nb, 1), AV1_REF_NONE, "LeftRefFrame[1] from the grid");
+    assert_eq(av1_nbctx_aintra(nb), 0, "AboveIntra: ref0=4 > INTRA_FRAME");
+    assert_eq(av1_nbctx_asingle(nb), 0, "AboveSingle: ref1=5 > INTRA_FRAME -> compound");
+    assert_eq(av1_nbctx_lintra(nb), 0, "LeftIntra: ref0=1 > INTRA_FRAME");
+    assert_eq(av1_nbctx_lsingle(nb), 1, "LeftSingle: ref1=NONE <= INTRA_FRAME");
+    # UNAVAILABLE: ref0 defaults INTRA_FRAME (-> Intra), ref1 defaults NONE (-> Single),
+    # and the grid must NOT be consulted (these cells hold 4/5 and 1/-1).
+    var nu = nb_build(0, 0, 4, 5, 1, 0 - 1);
+    assert_eq(av1_nbctx_aref(nu, 0), AV1_INTRA_FRAME, "unavail AboveRefFrame[0] -> INTRA_FRAME");
+    assert_eq(av1_nbctx_aref(nu, 1), AV1_REF_NONE, "unavail AboveRefFrame[1] -> NONE");
+    assert_eq(av1_nbctx_lref(nu, 0), AV1_INTRA_FRAME, "unavail LeftRefFrame[0] -> INTRA_FRAME");
+    assert_eq(av1_nbctx_lref(nu, 1), AV1_REF_NONE, "unavail LeftRefFrame[1] -> NONE");
+    assert_eq(av1_nbctx_aintra(nu), 1, "unavail -> AboveIntra");
+    assert_eq(av1_nbctx_asingle(nu), 1, "unavail -> AboveSingle");
+    assert_eq(av1_nbctx_lintra(nu), 1, "unavail -> LeftIntra");
+    assert_eq(av1_nbctx_lsingle(nu), 1, "unavail -> LeftSingle");
+    # a truthy-but-not-1 avail is normalized.
+    var nt = av1_nbctx_new();
+    av1_nbctx_setup(nt, av1_mv_grid_new(8, 8), 8, 3, 3, 7, 9);
+    assert_eq(av1_nbctx_availu(nt), 1, "avail_u=7 normalized to 1");
+    assert_eq(av1_nbctx_availl(nt), 1, "avail_l=9 normalized to 1");
+    return 0;
+}
+# check_backward (spec 9) — exactly BWDREF..ALTREF, over every ref value.
+fn test_check_backward() {
+    assert_eq(av1_check_backward(AV1_REF_NONE), 0, "NONE not backward");
+    assert_eq(av1_check_backward(AV1_INTRA_FRAME), 0, "INTRA not backward");
+    assert_eq(av1_check_backward(AV1_LAST_FRAME), 0, "LAST not backward");
+    assert_eq(av1_check_backward(AV1_LAST2_FRAME), 0, "LAST2 not backward");
+    assert_eq(av1_check_backward(AV1_LAST3_FRAME), 0, "LAST3 not backward");
+    assert_eq(av1_check_backward(AV1_GOLDEN_FRAME), 0, "GOLDEN not backward (the boundary below)");
+    assert_eq(av1_check_backward(AV1_BWDREF_FRAME), 1, "BWDREF IS backward (lower boundary)");
+    assert_eq(av1_check_backward(AV1_ALTREF2_FRAME), 1, "ALTREF2 IS backward");
+    assert_eq(av1_check_backward(AV1_ALTREF_FRAME), 1, "ALTREF IS backward (upper boundary)");
+    assert_eq(av1_check_backward(8), 0, "past ALTREF not backward (upper boundary)");
+    return 0;
+}
+# count_refs (spec 9) + ref_count_ctx.
+fn test_count_refs() {
+    # above = (LAST, BWDREF), left = (LAST, NONE): LAST appears 2x, BWDREF 1x.
+    var nb = nb_build(1, 1, 1, 5, 1, 0 - 1);
+    assert_eq(av1_count_refs(nb, AV1_LAST_FRAME), 2, "LAST counted in both neighbours");
+    assert_eq(av1_count_refs(nb, AV1_BWDREF_FRAME), 1, "BWDREF counted once");
+    assert_eq(av1_count_refs(nb, AV1_GOLDEN_FRAME), 0, "GOLDEN absent");
+    assert_eq(av1_count_refs(nb, AV1_REF_NONE), 1, "NONE is countable (left ref1)");
+    # unavailable neighbours contribute nothing...
+    var nu = nb_build(0, 0, 1, 5, 1, 0 - 1);
+    assert_eq(av1_count_refs(nu, AV1_LAST_FRAME), 0, "unavail contributes no counts");
+    # ...but the unavailable DEFAULTS are not counted either (they are not read at all).
+    assert_eq(av1_count_refs(nu, AV1_INTRA_FRAME), 0, "unavail INTRA default not counted");
+    # only-above: both above slots count, left contributes nothing.
+    var na = nb_build(1, 0, 4, 4, 4, 4);
+    assert_eq(av1_count_refs(na, AV1_GOLDEN_FRAME), 2, "both above slots count");
+    # ref_count_ctx: <, ==, >.
+    assert_eq(av1_ref_count_ctx(0, 1), 0, "counts0 < counts1 -> 0");
+    assert_eq(av1_ref_count_ctx(1, 1), 1, "counts0 == counts1 -> 1");
+    assert_eq(av1_ref_count_ctx(2, 1), 2, "counts0 > counts1 -> 2");
+    assert_eq(av1_ref_count_ctx(0, 0), 1, "0 == 0 -> 1");
+    assert_eq(av1_ref_count_ctx(4, 0), 2, "max > 0 -> 2");
+    return 0;
+}
+# is_inter / comp_mode ctx — branch-covering known answers from nbctx_ref.py.
+fn test_nbctx_known_answers() {
+    nb_case(0, 0, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0, 1, "neither avail");
+    nb_case(1, 0, 1, 0 - 1, 0 - 1, 0 - 1, 0, 0, "above only, above inter single fwd");
+    nb_case(1, 0, 0, 0 - 1, 0 - 1, 0 - 1, 2, 0, "above only, above INTRA");
+    nb_case(1, 0, 5, 0 - 1, 0 - 1, 0 - 1, 0, 1, "above only, above single BWDREF");
+    nb_case(1, 0, 1, 5, 0 - 1, 0 - 1, 0, 3, "above only, above COMPOUND");
+    nb_case(0, 1, 0 - 1, 0 - 1, 1, 0 - 1, 0, 0, "left only, left inter single fwd");
+    nb_case(0, 1, 0 - 1, 0 - 1, 0, 0 - 1, 2, 0, "left only, left INTRA");
+    nb_case(0, 1, 0 - 1, 0 - 1, 7, 0 - 1, 0, 1, "left only, left single ALTREF");
+    nb_case(0, 1, 0 - 1, 0 - 1, 1, 5, 0, 3, "left only, left COMPOUND");
+    nb_case(1, 1, 1, 0 - 1, 1, 0 - 1, 0, 0, "both single fwd/fwd");
+    nb_case(1, 1, 5, 0 - 1, 1, 0 - 1, 0, 1, "both single bwd/fwd (the XOR)");
+    nb_case(1, 1, 5, 0 - 1, 7, 0 - 1, 0, 0, "both single bwd/bwd (XOR cancels)");
+    nb_case(1, 1, 0, 0 - 1, 0, 0 - 1, 3, 0, "both INTRA");
+    nb_case(1, 1, 0, 0 - 1, 1, 0 - 1, 1, 0, "above intra, left inter");
+    nb_case(1, 1, 1, 5, 1, 0 - 1, 0, 2, "above compound, left single fwd");
+    nb_case(1, 1, 1, 5, 0, 0 - 1, 1, 3, "above compound, left INTRA");
+    nb_case(1, 1, 1, 0 - 1, 1, 5, 0, 2, "above single fwd, left compound");
+    nb_case(1, 1, 5, 0 - 1, 1, 5, 0, 3, "above single bwd, left compound");
+    nb_case(1, 1, 0, 0 - 1, 1, 5, 1, 3, "above INTRA, left compound");
+    nb_case(1, 1, 1, 5, 1, 7, 0, 4, "both compound");
+    # The AboveSingle and LeftSingle branches are MIRRORS (2 + (check_backward(ref0) ||
+    # Intra)). Cover each branch's check_backward term at both values AND both Intra
+    # paths — the above-branch cases alone leave the left mirror's term unexercised.
+    nb_case(1, 1, 1, 5, 1, 0 - 1, 0, 2, "L-single: left fwd, not intra -> 2 + (0||0)");
+    nb_case(1, 1, 1, 5, 5, 0 - 1, 0, 3, "L-single: left BACKWARD -> 2 + (1||0)");
+    nb_case(1, 1, 1, 5, 7, 0 - 1, 0, 3, "L-single: left ALTREF -> 2 + (1||0)");
+    nb_case(1, 1, 1, 5, 0, 0 - 1, 1, 3, "L-single: left INTRA -> 2 + (0||1)");
+    nb_case(1, 1, 5, 0 - 1, 1, 5, 0, 3, "A-single: above BACKWARD -> 2 + (1||0)");
+    nb_case(1, 1, 1, 0 - 1, 1, 5, 0, 2, "A-single: above fwd, not intra -> 2 + (0||0)");
+    nb_case(1, 1, 0, 0 - 1, 1, 5, 1, 3, "A-single: above INTRA -> 2 + (0||1)");
+    return 0;
+}
+# FULL enumeration digest — all 5184 (AvailU, AvailL, aref0, aref1, lref0, lref1) combos
+# over a ref set spanning every semantic class (NONE / INTRA / forward / backward). The
+# sums + per-value counts come from nbctx_ref.py's exhaustive run, so any distributional
+# deviation in the derivations shows up here even where a spot-check would miss it.
+fn test_nbctx_full_enumeration() {
+    var refs = alloc(6 * 8);
+    store64(refs + 0, 0 - 1); store64(refs + 8, 0); store64(refs + 16, 1);
+    store64(refs + 24, 4); store64(refs + 32, 5); store64(refs + 40, 7);
+    var ii_sum = 0;
+    var cm_sum = 0;
+    var ii_bad = 0;
+    var cm_bad = 0;
+    var ii_hist = alloc(4 * 8);
+    memset(ii_hist, 0, 4 * 8);
+    var cm_hist = alloc(5 * 8);
+    memset(cm_hist, 0, 5 * 8);
+    var n = 0;
+    var au = 0;
+    while (au < 2) {
+        var al = 0;
+        while (al < 2) {
+            var ia = 0;
+            while (ia < 6) {
+                var ib = 0;
+                while (ib < 6) {
+                    var ic = 0;
+                    while (ic < 6) {
+                        var id = 0;
+                        while (id < 6) {
+                            var nb = nb_build(au, al, load64(refs + (ia * 8)), load64(refs + (ib * 8)),
+                            load64(refs + (ic * 8)), load64(refs + (id * 8)));
+                            var ii = av1_is_inter_ctx(nb);
+                            var cm = av1_comp_mode_ctx(nb);
+                            # ACCUMULATE range violations rather than asserting per combo:
+                            # the proof is exhaustive either way, but 4 asserts x 5184
+                            # combos would swamp the suite's assertion count for no gain.
+                            if (ii < 0 || ii >= 4) { ii_bad = ii_bad + 1; }
+                            if (cm < 0 || cm >= 5) { cm_bad = cm_bad + 1; }
+                            ii_sum = ii_sum + ii;
+                            cm_sum = cm_sum + cm;
+                            store64(ii_hist + (ii * 8), load64(ii_hist + (ii * 8)) + 1);
+                            store64(cm_hist + (cm * 8), load64(cm_hist + (cm * 8)) + 1);
+                            n = n + 1;
+                            id = id + 1;
+                        }
+                        ic = ic + 1;
+                    }
+                    ib = ib + 1;
+                }
+                ia = ia + 1;
+            }
+            al = al + 1;
+        }
+        au = au + 1;
+    }
+    assert_eq(n, 5184, "enumerated every combo");
+    # an out-of-range ctx would index the Is_Inter[4] / Comp_Mode[5] CDF blob OOB —
+    # proven absent across the ENTIRE input space, not just the sampled cases.
+    assert_eq(ii_bad, 0, "is_inter_ctx in [0,4) for all 5184 combos");
+    assert_eq(cm_bad, 0, "comp_mode_ctx in [0,5) for all 5184 combos");
+    # digests from scratchpad/nbctx_ref.py (the spec-literal port).
+    assert_eq(ii_sum, 2736, "is_inter_ctx sum over all 5184 combos");
+    assert_eq(cm_sum, 10672, "comp_mode_ctx sum over all 5184 combos");
+    assert_eq(load64(ii_hist + 0), 3600, "is_inter_ctx==0 count");
+    assert_eq(load64(ii_hist + 8), 576, "is_inter_ctx==1 count");
+    assert_eq(load64(ii_hist + 16), 864, "is_inter_ctx==2 count");
+    assert_eq(load64(ii_hist + 24), 144, "is_inter_ctx==3 count");
+    assert_eq(load64(cm_hist + 0), 656, "comp_mode_ctx==0 count");
+    assert_eq(load64(cm_hist + 8), 1648, "comp_mode_ctx==1 count");
+    assert_eq(load64(cm_hist + 16), 192, "comp_mode_ctx==2 count");
+    assert_eq(load64(cm_hist + 24), 2112, "comp_mode_ctx==3 count");
+    assert_eq(load64(cm_hist + 32), 576, "comp_mode_ctx==4 count");
+    return 0;
+}
+# the contexts feed the real reads: a derived ctx drives av1_read_is_inter end-to-end.
+fn test_nbctx_feeds_the_read() {
+    var nb = nb_build(1, 1, 0, 0 - 1, 0, 0 - 1);       # both INTRA -> is_inter ctx 3
+    var ctx = av1_is_inter_ctx(nb);
+    assert_eq(ctx, 3, "derived ctx");
+    var cc = av1_refcdf_blob();
+    var enc = av1_sym_enc_init(32, 1);
+    av1_write_is_inter(enc, cc, ctx, 1);
+    av1_write_is_inter(enc, cc, ctx, 0);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_read_is_inter(sd, cc, ctx), 1, "read_is_inter with a DERIVED ctx");
+    assert_eq(av1_read_is_inter(sd, cc, ctx), 0, "read_is_inter with a DERIVED ctx (0)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -1197,6 +1460,14 @@ fn main() {
     test_iicdf_layout();
     test_imcdf_layout();
     test_refcdf_layout();
+    test_group("neighbour CDF contexts (5.11.15 preamble + spec 9)");
+    test_nbctx_layout();
+    test_nbctx_setup();
+    test_check_backward();
+    test_count_refs();
+    test_nbctx_known_answers();
+    test_nbctx_full_enumeration();
+    test_nbctx_feeds_the_read();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();
