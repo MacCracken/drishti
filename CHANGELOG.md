@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.71] - 2026-07-14
+
+**Inter prediction — the remaining inter mode-info reads: `interp_filter` (spec 5.11.30) + `motion_mode`
+(spec 5.11.27).** The last per-symbol reads of the inter mode-info block, closing out the read layer.
+Extends `src/av1_intermode.cyr` with:
+
+- **`Interp_Filter`** — the 3-symbol interpolation-filter CDF (`Interp_Filter[16][4]` from §10, indexed by
+  the 16-way neighbour context) + `av1_read_interp_filter` / `av1_write_interp_filter`
+  (`EIGHTTAP` / `EIGHTTAP_SMOOTH` / `EIGHTTAP_SHARP`);
+- **`Motion_Mode`** + **`Use_Obmc`** — the motion-mode reads (spec 5.11.27), both `MiSize`-indexed:
+  `av1_read_motion_mode` (the 3-symbol `SIMPLE` / `OBMC` / `LOCALWARP` on the warp-allowed path,
+  `Motion_Mode[22][4]`) and `av1_read_use_obmc` (the binary `OBMC`-vs-`SIMPLE` on the warp-disabled path,
+  `Use_Obmc[22][3]`), + their paired writers;
+- the inter-mode CDF blob grew **123 → 341** entries — `interp` `[123,187)` (16×4), `motion_mode`
+  `[187,275)` (22×4), `use_obmc` `[275,341)` (22×3) — exactly filling `AV1IMCDF_SIZE`, with the new
+  `av1_imcdf_interp` / `av1_imcdf_motionmode` / `av1_imcdf_useobmc` accessors + the `av1_imcdf_put3`
+  3-symbol filler.
+
+Verified by 792 assertions (321 new): an **exhaustive** CDF-structure check — **every** row of all three
+tables (16 `Interp_Filter` + 22 `Motion_Mode` + 22 `Use_Obmc`) diffed per-value against §10
+(`Default_Interp_Filter_Cdf` / `Default_Motion_Mode_Cdf` / `Default_Use_Obmc_Cdf`), plus that the
+pre-existing `[0,123)` region (`compound_mode[0]`, `new_mv[0]`) is byte-for-byte unchanged after the blob
+grew — an `interp_filter` round-trip over **all 16 contexts × 3 filters**, a `use_obmc` + `motion_mode`
+round-trip over **all 22 `MiSize` × every value**, and an adaptive-CDF round-trip. A **3-slice adversarial
+spec review** (blob layout + accessor arithmetic / read semantics vs spec / test adequacy, each finding
+adversarially verified) returned **no confirmed defects** — it confirmed the layout fills 341 slots with no
+overlap or OOB, the symbol alphabets (3/2/3) and `AV1_MM_*` ordering match the spec; a refuted
+test-coverage note (that a self-round-trip cannot catch a *shared* CDF value bug) was folded in anyway as
+the exhaustive per-row §10 diff above. **22,246 suite assertions + 1,140 fuzz assertions, all green;
+`make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `Interp_Filter` / `Motion_Mode` / `Use_Obmc` CDFs
+  (`av1_imcdf_interp` / `av1_imcdf_motionmode` / `av1_imcdf_useobmc` + `av1_imcdf_put3`);
+  `av1_read_interp_filter` / `av1_read_use_obmc` / `av1_read_motion_mode` + their paired writers; the
+  `AV1_INTERP_FILTERS` / `AV1_INTERP_FILTER_CONTEXTS` / `AV1_MOTION_MODES` / `AV1_BLOCK_SIZES` /
+  `AV1_MM_SIMPLE` / `AV1_MM_OBMC` / `AV1_MM_LOCALWARP` constants.
+- **`tests/av1_intermode.tcyr`** (extended): `test_interp_motion_cdf` (exhaustive per-row §10 diff via
+  `av1_t_chk3` / `av1_t_chk2`), `test_interp_filter_rt`, `test_motion_mode_rt`,
+  `test_interp_motion_adaptive` — 792 assertions total.
+
+### Scope / deferred
+- The per-symbol `interp_filter` + `motion_mode` / `use_obmc` reads only. The gating that decides whether
+  each is coded (`interpolation_filter == SWITCHABLE` + `needs_interp_filter`; the warp/OBMC
+  eligibility that selects the `motion_mode`-vs-`use_obmc` path) is caller-level. `compound_type` /
+  interintra (5.11.28/5.11.29), then MI-grid population + inter tile decode, are later bites (roadmap.md).
+  With this, the inter block's full mode + reference + MV + interp + motion-mode bitstream-read layer is
+  complete.
+
 ## [0.7.70] - 2026-07-13
 
 **Inter prediction — the compound mode path (spec 5.11.32), completing the inter mode + MV read.** The

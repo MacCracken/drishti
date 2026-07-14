@@ -25,6 +25,10 @@
 #   * (0.7.70) the COMPOUND mode path — read_compound_mode (the 8-symbol compound_mode
 #     → YMode) + get_mode (per-list mode) + the two-list assign_mv; plus read_drl_idx
 #     extended to the compound NEW/NEAR modes.
+#   * (0.7.71) interp_filter (5.11.30) + motion_mode (5.11.27, via use_obmc /
+#     motion_mode) — the remaining per-symbol inter mode-info reads + their CDFs
+#     (Interp_Filter / Motion_Mode / Use_Obmc, §10). The gating that decides whether
+#     each is coded is the caller's concern.
 # Every path round-trips through the symbol encoder.
 #
 # FLAT module — wired after src/av1_mv.cyr (it consumes the find_mv_stack context
@@ -331,27 +335,46 @@ enum Av1InterModeConst {
     AV1_COMPOUND_MODES        = 8;    # COMPOUND_MODES (compound_mode symbol alphabet)
     AV1_COMPOUND_MODE_CONTEXTS = 8;   # COMPOUND_MODE_CONTEXTS
     AV1_COMP_NEWMV_CTXS       = 5;    # COMP_NEWMV_CTXS (NewMvContext clamp for the ctx map)
+    AV1_INTERP_FILTERS        = 3;    # INTERP_FILTERS (interp_filter symbol alphabet)
+    AV1_INTERP_FILTER_CONTEXTS = 16;  # INTERP_FILTER_CONTEXTS
+    AV1_MOTION_MODES          = 3;    # MOTION_MODES (motion_mode symbol alphabet)
+    AV1_BLOCK_SIZES           = 22;   # BLOCK_SIZES (motion_mode / use_obmc are MiSize-indexed)
+    # motion mode values (03 symbols)
+    AV1_MM_SIMPLE             = 0;    # SIMPLE
+    AV1_MM_OBMC               = 1;    # OBMC
+    AV1_MM_LOCALWARP          = 2;    # LOCALWARP
 }
 
-# The inter-mode CDF blob (123 i64): four binary families + the 8-symbol
-# compound_mode, entry offsets —
-#   new_mv       [ctx 0..5]  base 0,  ctx*3   -> [0,18)
-#   zero_mv      [ctx 0..1]  base 18, ctx*3   -> [18,24)
-#   ref_mv       [ctx 0..5]  base 24, ctx*3   -> [24,42)
-#   drl          [ctx 0..2]  base 42, ctx*3   -> [42,51)
-#   compound_mode[ctx 0..7]  base 51, ctx*9   -> [51,123)   (8-sym, 9 slots each)
-enum Av1ImCdfOff { AV1IMCDF_SIZE = 123; }
+# The inter-mode CDF blob (341 i64): four binary + one 8-symbol + interp_filter /
+# motion_mode (3-symbol) + use_obmc (binary), entry offsets —
+#   new_mv       [ctx 0..5]   base 0,   ctx*3   -> [0,18)
+#   zero_mv      [ctx 0..1]   base 18,  ctx*3   -> [18,24)
+#   ref_mv       [ctx 0..5]   base 24,  ctx*3   -> [24,42)
+#   drl          [ctx 0..2]   base 42,  ctx*3   -> [42,51)
+#   compound_mode[ctx 0..7]   base 51,  ctx*9   -> [51,123)   (8-sym, 9 slots)
+#   interp_filter[ctx 0..15]  base 123, ctx*4   -> [123,187)  (3-sym, 4 slots)
+#   motion_mode  [MiSize 0..21] base 187, sz*4  -> [187,275)  (3-sym, 4 slots)
+#   use_obmc     [MiSize 0..21] base 275, sz*3  -> [275,341)  (binary, 3 slots)
+enum Av1ImCdfOff { AV1IMCDF_SIZE = 341; }
 fn av1_imcdf_newmv(cc, ctx): i64 { return cc + ((0 + (ctx * 3)) * 8); }
 fn av1_imcdf_zeromv(cc, ctx): i64 { return cc + ((18 + (ctx * 3)) * 8); }
 fn av1_imcdf_refmv(cc, ctx): i64 { return cc + ((24 + (ctx * 3)) * 8); }
 fn av1_imcdf_drl(cc, ctx): i64 { return cc + ((42 + (ctx * 3)) * 8); }
 fn av1_imcdf_compmode(cc, ctx): i64 { return cc + ((51 + (ctx * 9)) * 8); }
+fn av1_imcdf_interp(cc, ctx): i64 { return cc + ((123 + (ctx * 4)) * 8); }
+fn av1_imcdf_motionmode(cc, mi_size): i64 { return cc + ((187 + (mi_size * 4)) * 8); }
+fn av1_imcdf_useobmc(cc, mi_size): i64 { return cc + ((275 + (mi_size * 3)) * 8); }
 
 # put an 8-symbol cdf {c0..c6, 32768, count=0} (9 i64 slots).
 fn av1_imcdf_put8(p, c0, c1, c2, c3, c4, c5, c6): i64 {
     store64(p + 0, c0); store64(p + 8, c1); store64(p + 16, c2); store64(p + 24, c3);
     store64(p + 32, c4); store64(p + 40, c5); store64(p + 48, c6);
     store64(p + 56, 32768); store64(p + 64, 0);
+    return DR_OK;
+}
+# put a 3-symbol cdf {c0, c1, 32768, count=0} (4 i64 slots).
+fn av1_imcdf_put3(p, c0, c1): i64 {
+    store64(p + 0, c0); store64(p + 8, c1); store64(p + 16, 32768); store64(p + 24, 0);
     return DR_OK;
 }
 
@@ -387,6 +410,69 @@ fn av1_imcdf_fill(cc): i64 {
     av1_imcdf_put8(av1_imcdf_compmode(cc, 5), 10725, 17454, 20124, 22820, 24195, 25168, 26046);
     av1_imcdf_put8(av1_imcdf_compmode(cc, 6), 17125, 24273, 25814, 27492, 28214, 28704, 30592);
     av1_imcdf_put8(av1_imcdf_compmode(cc, 7), 13046, 23214, 24505, 25942, 27435, 28442, 29330);
+    # Default_Interp_Filter_Cdf[16][4] — 3-symbol (EIGHTTAP / _SMOOTH / _SHARP).
+    av1_imcdf_put3(av1_imcdf_interp(cc, 0), 31935, 32720);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 1), 5568, 32719);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 2), 422, 2938);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 3), 28244, 32608);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 4), 31206, 31953);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 5), 4862, 32121);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 6), 770, 1152);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 7), 20889, 25637);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 8), 31910, 32724);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 9), 4120, 32712);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 10), 305, 2247);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 11), 27403, 32636);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 12), 31022, 32009);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 13), 2963, 32093);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 14), 601, 943);
+    av1_imcdf_put3(av1_imcdf_interp(cc, 15), 14969, 21398);
+    # Default_Motion_Mode_Cdf[22][4] — 3-symbol (SIMPLE / OBMC / LOCALWARP), MiSize-indexed.
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 0), 10923, 21845);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 1), 10923, 21845);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 2), 10923, 21845);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 3), 7651, 24760);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 4), 4738, 24765);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 5), 5391, 25528);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 6), 19419, 26810);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 7), 5123, 23606);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 8), 11606, 24308);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 9), 26260, 29116);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 10), 20360, 28062);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 11), 21679, 26830);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 12), 29516, 30701);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 13), 28898, 30397);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 14), 30878, 31335);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 15), 32507, 32558);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 16), 10923, 21845);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 17), 10923, 21845);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 18), 28799, 31390);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 19), 26431, 30774);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 20), 28973, 31594);
+    av1_imcdf_put3(av1_imcdf_motionmode(cc, 21), 29742, 31203);
+    # Default_Use_Obmc_Cdf[22][3] — binary, MiSize-indexed.
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 0), 16384);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 1), 16384);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 2), 16384);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 3), 10437);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 4), 9371);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 5), 9301);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 6), 17432);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 7), 14423);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 8), 15142);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 9), 25817);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 10), 22823);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 11), 22083);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 12), 30128);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 13), 31014);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 14), 31560);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 15), 32638);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 16), 16384);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 17), 16384);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 18), 23664);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 19), 20901);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 20), 24008);
+    av1_mvcdf_put2(av1_imcdf_useobmc(cc, 21), 26879);
     return DR_OK;
 }
 fn av1_imcdf_new(): i64 {
@@ -971,5 +1057,46 @@ fn av1_write_compound_mode(enc, cc, mvctx, y_mode): i64 {
     var ctx = av1_compound_mode_ctx(av1_mvctx_refmv_context(mvctx), av1_mvctx_newmv_context(mvctx));
     av1_sym_encode_symbol(enc, av1_imcdf_compmode(cc, ctx), AV1_COMPOUND_MODES,
     y_mode - AV1_NEAREST_NEARESTMV);
+    return DR_OK;
+}
+
+# ================================================================
+# THE REMAINING INTER MODE-INFO READS — interp_filter (5.11.30) + motion_mode
+# (5.11.27, via use_obmc / motion_mode). These are the per-symbol bitstream reads;
+# the GATING that decides whether each is coded (interpolation_filter == SWITCHABLE
+# + needs_interp_filter; skip_mode / is_motion_mode_switchable / block-size /
+# GLOBALMV-warp / has_overlappable_candidates / find_warp_samples / is_scaled) is
+# the caller's / a later bite's concern (it needs frame + neighbour state). Compound
+# type + interintra are a later bite (roadmap.md).
+# ================================================================
+
+# read_interp_filter (spec 5.11.30) — one 3-symbol interp_filter (EIGHTTAP=0 /
+# EIGHTTAP_SMOOTH=1 / EIGHTTAP_SHARP=2), CDF Interp_Filter[ctx]. `ctx` is a
+# neighbour-derived context (0..INTERP_FILTER_CONTEXTS-1), a caller input.
+fn av1_read_interp_filter(sd, cc, ctx): i64 {
+    return av1_sym_read_symbol(sd, av1_imcdf_interp(cc, ctx), AV1_INTERP_FILTERS);
+}
+fn av1_write_interp_filter(enc, cc, ctx, filt): i64 {
+    av1_sym_encode_symbol(enc, av1_imcdf_interp(cc, ctx), AV1_INTERP_FILTERS, filt);
+    return DR_OK;
+}
+
+# read_use_obmc (spec 5.11.27) — the @@use_obmc binary symbol (motion_mode = OBMC
+# if 1, else SIMPLE), CDF Use_Obmc[MiSize]. Read on the warp-disabled branch.
+fn av1_read_use_obmc(sd, cc, mi_size): i64 {
+    return av1_sym_read_symbol(sd, av1_imcdf_useobmc(cc, mi_size), 2);
+}
+fn av1_write_use_obmc(enc, cc, mi_size, use_obmc): i64 {
+    av1_sym_encode_symbol(enc, av1_imcdf_useobmc(cc, mi_size), 2, use_obmc);
+    return DR_OK;
+}
+
+# read_motion_mode (spec 5.11.27) — the @@motion_mode 3-symbol (SIMPLE / OBMC /
+# LOCALWARP), CDF Motion_Mode[MiSize]. Read on the warp-allowed branch.
+fn av1_read_motion_mode(sd, cc, mi_size): i64 {
+    return av1_sym_read_symbol(sd, av1_imcdf_motionmode(cc, mi_size), AV1_MOTION_MODES);
+}
+fn av1_write_motion_mode(enc, cc, mi_size, motion_mode): i64 {
+    av1_sym_encode_symbol(enc, av1_imcdf_motionmode(cc, mi_size), AV1_MOTION_MODES, motion_mode);
     return DR_OK;
 }

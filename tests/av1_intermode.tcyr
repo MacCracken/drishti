@@ -508,6 +508,154 @@ fn test_compound_mode_rt() {
     return 0;
 }
 
+# ================================================================
+# The remaining inter mode-info reads (5.11.27 motion_mode + 5.11.30 interp_filter),
+# round-tripped through the symbol coder. interp_filter [16 ctx][3-sym]; motion_mode
+# [22 MiSize][3-sym]; use_obmc [22 MiSize][binary].
+# ================================================================
+# 3-symbol row check {c0, c1, 32768}; 2-symbol {c0, 32768}. A self-round-trip passes
+# through ANY monotone CDF ending at 32768, so a wrong default value is invisible to it —
+# every USED default row is diffed per-value against spec 10 here (the sole value ground-truth).
+fn av1_t_chk3(p, c0, c1): i64 {
+    assert_eq(load64(p + 0), c0, "cdf c0");
+    assert_eq(load64(p + 8), c1, "cdf c1");
+    assert_eq(load64(p + 16), 32768, "cdf 3-sym terminator");
+    return 0;
+}
+fn av1_t_chk2(p, c0): i64 {
+    assert_eq(load64(p + 0), c0, "cdf c0");
+    assert_eq(load64(p + 8), 32768, "cdf 2-sym terminator");
+    return 0;
+}
+fn test_interp_motion_cdf() {
+    var cc = av1_imcdf_blob();
+    # Default_Interp_Filter_Cdf[16][3] — exhaustive vs spec 10.additional.tables.md.
+    av1_t_chk3(av1_imcdf_interp(cc, 0), 31935, 32720);
+    av1_t_chk3(av1_imcdf_interp(cc, 1), 5568, 32719);
+    av1_t_chk3(av1_imcdf_interp(cc, 2), 422, 2938);
+    av1_t_chk3(av1_imcdf_interp(cc, 3), 28244, 32608);
+    av1_t_chk3(av1_imcdf_interp(cc, 4), 31206, 31953);
+    av1_t_chk3(av1_imcdf_interp(cc, 5), 4862, 32121);
+    av1_t_chk3(av1_imcdf_interp(cc, 6), 770, 1152);
+    av1_t_chk3(av1_imcdf_interp(cc, 7), 20889, 25637);
+    av1_t_chk3(av1_imcdf_interp(cc, 8), 31910, 32724);
+    av1_t_chk3(av1_imcdf_interp(cc, 9), 4120, 32712);
+    av1_t_chk3(av1_imcdf_interp(cc, 10), 305, 2247);
+    av1_t_chk3(av1_imcdf_interp(cc, 11), 27403, 32636);
+    av1_t_chk3(av1_imcdf_interp(cc, 12), 31022, 32009);
+    av1_t_chk3(av1_imcdf_interp(cc, 13), 2963, 32093);
+    av1_t_chk3(av1_imcdf_interp(cc, 14), 601, 943);
+    av1_t_chk3(av1_imcdf_interp(cc, 15), 14969, 21398);
+    # Default_Motion_Mode_Cdf[22][3] — exhaustive (rows 0-2,16-17 are the never-used defaults).
+    av1_t_chk3(av1_imcdf_motionmode(cc, 0), 10923, 21845);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 1), 10923, 21845);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 2), 10923, 21845);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 3), 7651, 24760);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 4), 4738, 24765);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 5), 5391, 25528);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 6), 19419, 26810);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 7), 5123, 23606);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 8), 11606, 24308);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 9), 26260, 29116);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 10), 20360, 28062);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 11), 21679, 26830);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 12), 29516, 30701);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 13), 28898, 30397);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 14), 30878, 31335);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 15), 32507, 32558);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 16), 10923, 21845);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 17), 10923, 21845);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 18), 28799, 31390);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 19), 26431, 30774);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 20), 28973, 31594);
+    av1_t_chk3(av1_imcdf_motionmode(cc, 21), 29742, 31203);
+    # Default_Use_Obmc_Cdf[22][2] — exhaustive.
+    av1_t_chk2(av1_imcdf_useobmc(cc, 0), 16384);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 1), 16384);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 2), 16384);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 3), 10437);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 4), 9371);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 5), 9301);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 6), 17432);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 7), 14423);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 8), 15142);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 9), 25817);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 10), 22823);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 11), 22083);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 12), 30128);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 13), 31014);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 14), 31560);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 15), 32638);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 16), 16384);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 17), 16384);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 18), 23664);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 19), 20901);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 20), 24008);
+    av1_t_chk2(av1_imcdf_useobmc(cc, 21), 26879);
+    # the [0,123) region (compound_mode / new_mv) is unchanged after the blob grew.
+    assert_eq(load64(av1_imcdf_compmode(cc, 0) + 0), 7760, "compound_mode[0] unchanged");
+    assert_eq(load64(av1_imcdf_newmv(cc, 0) + 0), 24035, "new_mv[0] unchanged");
+    return 0;
+}
+# interp_filter — every value (0..2) round-trips at every context.
+fn test_interp_filter_rt() {
+    var ctx = 0;
+    while (ctx < AV1_INTERP_FILTER_CONTEXTS) {
+        var cc = av1_imcdf_blob();
+        var enc = av1_sym_enc_init(32, 1);
+        av1_write_interp_filter(enc, cc, ctx, 0);
+        av1_write_interp_filter(enc, cc, ctx, 1);
+        av1_write_interp_filter(enc, cc, ctx, 2);
+        var olen = 0;
+        var out = av1_sym_enc_finish(enc, &olen);
+        var sd = av1_sym_dec_init(out, olen, 1);
+        assert_eq(av1_read_interp_filter(sd, cc, ctx), 0, "interp EIGHTTAP");
+        assert_eq(av1_read_interp_filter(sd, cc, ctx), 1, "interp SMOOTH");
+        assert_eq(av1_read_interp_filter(sd, cc, ctx), 2, "interp SHARP");
+        ctx = ctx + 1;
+    }
+    return 0;
+}
+# use_obmc + motion_mode — every value round-trips at every MiSize.
+fn test_motion_mode_rt() {
+    var sz = 0;
+    while (sz < AV1_BLOCK_SIZES) {
+        var cc = av1_imcdf_blob();
+        var enc = av1_sym_enc_init(32, 1);
+        av1_write_use_obmc(enc, cc, sz, 0);
+        av1_write_use_obmc(enc, cc, sz, 1);
+        av1_write_motion_mode(enc, cc, sz, AV1_MM_SIMPLE);
+        av1_write_motion_mode(enc, cc, sz, AV1_MM_OBMC);
+        av1_write_motion_mode(enc, cc, sz, AV1_MM_LOCALWARP);
+        var olen = 0;
+        var out = av1_sym_enc_finish(enc, &olen);
+        var sd = av1_sym_dec_init(out, olen, 1);
+        assert_eq(av1_read_use_obmc(sd, cc, sz), 0, "use_obmc 0 (SIMPLE)");
+        assert_eq(av1_read_use_obmc(sd, cc, sz), 1, "use_obmc 1 (OBMC)");
+        assert_eq(av1_read_motion_mode(sd, cc, sz), AV1_MM_SIMPLE, "motion_mode SIMPLE");
+        assert_eq(av1_read_motion_mode(sd, cc, sz), AV1_MM_OBMC, "motion_mode OBMC");
+        assert_eq(av1_read_motion_mode(sd, cc, sz), AV1_MM_LOCALWARP, "motion_mode LOCALWARP");
+        sz = sz + 1;
+    }
+    return 0;
+}
+# adaptive CDFs — interp_filter + motion_mode adapt in lockstep.
+fn test_interp_motion_adaptive() {
+    var cce = av1_imcdf_new();
+    var ccd = av1_imcdf_new();
+    var enc = av1_sym_enc_init(32, 0);
+    av1_write_interp_filter(enc, cce, 7, 2);
+    av1_write_motion_mode(enc, cce, 9, AV1_MM_LOCALWARP);
+    av1_write_use_obmc(enc, cce, 12, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    assert_eq(av1_read_interp_filter(sd, ccd, 7), 2, "interp adaptive SHARP");
+    assert_eq(av1_read_motion_mode(sd, ccd, 9), AV1_MM_LOCALWARP, "motion_mode adaptive LOCALWARP");
+    assert_eq(av1_read_use_obmc(sd, ccd, 12), 1, "use_obmc adaptive OBMC");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -547,6 +695,11 @@ fn main() {
     test_get_mode();
     test_group("read_compound_mode + two-list assign_mv round-trip (5.11.32)");
     test_compound_mode_rt();
+    test_group("interp_filter + motion_mode reads (5.11.30 / 5.11.27)");
+    test_interp_motion_cdf();
+    test_interp_filter_rt();
+    test_motion_mode_rt();
+    test_interp_motion_adaptive();
     return assert_summary();
 }
 
