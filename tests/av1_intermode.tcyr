@@ -1,0 +1,138 @@
+# tests/av1_intermode.tcyr — inter mode-info: the MV component decode (read_mv /
+# read_mv_component, spec 5.11.32) + its CDF family, verified by ROUND-TRIP through
+# the symbol coder (encode a motion-vector difference, decode it back, assert
+# equality) plus a CDF-structure sanity check. The paired write_mv is the inverse
+# of read_mv, so a matching round-trip cross-validates both directions; the class
+# boundaries (16/17/32/33/...) exercise every mv_class path.
+include "src/main.cyr"
+
+# encode (diff_row, diff_col) through write_mv, decode via read_mv with PredMv 0,
+# assert the reconstructed Mv == the difference. disable selects static (1) vs
+# adaptive (0) CDFs; each side gets its own context (shared blob when static).
+fn mv_rt(diff_row, diff_col, mv_ctx, allow_hp, force_int, disable, tag): i64 {
+    var cce = av1_mvcdf_blob();
+    var ccd = av1_mvcdf_blob();
+    if (disable == 0) { cce = av1_mvcdf_new(); ccd = av1_mvcdf_new(); }
+    var enc = av1_sym_enc_init(64, disable);
+    av1_write_mv(enc, cce, mv_ctx, allow_hp, force_int, diff_row, diff_col);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var mv = av1_mv_new();
+    av1_read_mv(sd, ccd, mv_ctx, allow_hp, force_int, 0, 0, mv);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
+    assert_eq(av1_mv_row(mv), diff_row, tag);
+    assert_eq(av1_mv_col(mv), diff_col, tag);
+    return 0;
+}
+# round-trip in BOTH cdf modes (static + adaptive).
+fn mv_rt_both(dr, dc, allow_hp, force_int, tag): i64 {
+    mv_rt(dr, dc, 0, allow_hp, force_int, 1, tag);
+    mv_rt(dr, dc, 0, allow_hp, force_int, 0, tag);
+    return 0;
+}
+
+# ================================================================
+# CDF structure — the accessors return the §10 default values, well-formed
+# (cumulative, ending 32768, then the adaptation counter).
+# ================================================================
+fn test_mvcdf_structure() {
+    var cc = av1_mvcdf_blob();
+    # joint: {4096, 11264, 19328, 32768, 0}
+    assert_eq(load64(av1_mvcdf_joint(cc, 0) + 0), 4096, "joint c0");
+    assert_eq(load64(av1_mvcdf_joint(cc, 0) + 24), 32768, "joint ends 32768");
+    assert_eq(load64(av1_mvcdf_joint(cc, 0) + 32), 0, "joint counter 0");
+    # sign / class-0 defaults.
+    assert_eq(load64(av1_mvcdf_sign(cc, 0, 0) + 0), 16384, "sign 128*128");
+    assert_eq(load64(av1_mvcdf_class(cc, 1, 1) + 0), 28672, "class c0 (both ctx/comp)");
+    assert_eq(load64(av1_mvcdf_class(cc, 1, 1) + 80), 32768, "class ends 32768 (11-sym)");
+    assert_eq(load64(av1_mvcdf_class0_bit(cc, 0, 0) + 0), 27648, "class0_bit 216*128");
+    assert_eq(load64(av1_mvcdf_class0_fr(cc, 0, 1, 0) + 0), 16384, "class0_fr[bit0] c0");
+    assert_eq(load64(av1_mvcdf_class0_fr(cc, 0, 1, 1) + 0), 12288, "class0_fr[bit1] c0");
+    assert_eq(load64(av1_mvcdf_fr(cc, 0, 0) + 0), 8192, "fr c0");
+    assert_eq(load64(av1_mvcdf_hp(cc, 0, 0) + 0), 16384, "hp 128*128");
+    assert_eq(load64(av1_mvcdf_class0_hp(cc, 0, 0) + 0), 20480, "class0_hp 160*128");
+    # bit i=0 -> 136*128, i=9 -> 240*128 (distinct per offset bit).
+    assert_eq(load64(av1_mvcdf_bit(cc, 0, 0, 0) + 0), 17408, "bit[0] 136*128");
+    assert_eq(load64(av1_mvcdf_bit(cc, 1, 1, 9) + 0), 30720, "bit[9] 240*128 (both ctx/comp)");
+    return 0;
+}
+
+# ================================================================
+# read_mv round-trip — full precision (allow_hp=1, force_int=0): EVERY difference
+# reconstructs exactly.
+# ================================================================
+fn test_mv_roundtrip_full() {
+    mv_rt_both(0, 0, 1, 0, "zero (MV_JOINT_ZERO)");
+    mv_rt_both(5, 0, 1, 0, "row only");
+    mv_rt_both(0, 7, 1, 0, "col only");
+    mv_rt_both(5, 0 - 7, 1, 0, "both, mixed sign");
+    mv_rt_both(0 - 5, 7, 1, 0, "both, mixed sign 2");
+    mv_rt_both(1, 1, 1, 0, "mag 1");
+    mv_rt_both(0 - 1, 0 - 1, 1, 0, "mag -1");
+    return 0;
+}
+# class boundaries: class 0 covers |d| 1..16; class c covers (2^(c+3), 2^(c+4)].
+fn test_mv_roundtrip_classes() {
+    mv_rt_both(16, 0, 1, 0, "class0 max (16)");
+    mv_rt_both(17, 0, 1, 0, "class1 min (17)");
+    mv_rt_both(0 - 31, 0, 1, 0, "class1 (-31)");
+    mv_rt_both(32, 0, 1, 0, "class1 max (32)");
+    mv_rt_both(33, 0, 1, 0, "class2 min (33)");
+    mv_rt_both(0, 64, 1, 0, "class2 max col (64)");
+    mv_rt_both(65, 0, 1, 0, "class3 min (65)");
+    mv_rt_both(100, 0 - 200, 1, 0, "class larger, both");
+    mv_rt_both(1000, 0, 1, 0, "class ~7 (1000)");
+    mv_rt_both(0 - 8000, 8000, 1, 0, "class ~10 (8000)");
+    return 0;
+}
+# precision modes — diffs whose fractional part is consistent with the forced
+# values (fr=3 under force_integer_mv; hp=1 under !allow_high_precision_mv). 16 and
+# 24 both decompose to fr=3, hp=1, so they round-trip in the constrained modes.
+fn test_mv_roundtrip_precision() {
+    mv_rt_both(16, 0 - 16, 0, 1, "force_int, !hp: fr=3 hp=1 (16)");
+    mv_rt_both(24, 0 - 24, 0, 1, "force_int, !hp class1: fr=3 hp=1 (24)");
+    mv_rt_both(16, 24, 1, 1, "force_int, hp coded (16/24)");
+    mv_rt_both(16, 0 - 24, 0, 0, "!hp, fr coded (16/24)");
+    return 0;
+}
+# PredMv add: the decoded Mv is PredMv + diff.
+fn test_mv_predmv_add() {
+    var cc = av1_mvcdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_mv(enc, cc, 0, 1, 0, 5, 0 - 7);        # diff (5,-7)
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var mv = av1_mv_new();
+    av1_read_mv(sd, cc, 0, 1, 0, 100, 200, mv);      # PredMv (100,200)
+    assert_eq(av1_mv_row(mv), 105, "mv row = pred 100 + diff 5");
+    assert_eq(av1_mv_col(mv), 193, "mv col = pred 200 + diff -7");
+    return 0;
+}
+# the intrabc MV context (MvCtx = 1) is a distinct CDF context.
+fn test_mv_intrabc_ctx() {
+    mv_rt(20, 0 - 30, AV1_MV_INTRABC_CTX, 1, 0, 1, "intrabc ctx static");
+    mv_rt(20, 0 - 30, AV1_MV_INTRABC_CTX, 1, 0, 0, "intrabc ctx adaptive");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("MV CDF structure (default tables, spec 10)");
+    test_mvcdf_structure();
+    test_group("read_mv round-trip: full precision (5.11.32)");
+    test_mv_roundtrip_full();
+    test_group("read_mv round-trip: mv_class boundaries");
+    test_mv_roundtrip_classes();
+    test_group("read_mv round-trip: precision modes");
+    test_mv_roundtrip_precision();
+    test_group("read_mv: PredMv add + intrabc context");
+    test_mv_predmv_add();
+    test_mv_intrabc_ctx();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

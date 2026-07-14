@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.66] - 2026-07-13
+
+**Inter prediction — the MV component decode (spec 5.11.32), the first inter mode-info bite.** The
+bitstream-read layer for inter blocks begins: `src/av1_intermode.cyr` decodes a motion-vector
+*difference* from the entropy stream and adds it to the predicted MV (`PredMv`, from `find_mv_stack`)
+to form the block's `Mv`. The leaf-first entry:
+
+- **the MV CDF family** — the nine motion-vector CDF tables (`mv_joint` / `mv_sign` / `mv_class` /
+  `mv_class0_bit` / `mv_class0_fr` / `mv_class0_hp` / `mv_fr` / `mv_hp` / `mv_bit`), transcribed
+  per-value from the spec §10 defaults into a 286-entry mutable `[MvCtx][comp]` runtime context
+  (`av1_mvcdf_new` / `av1_mvcdf_blob` + accessors), with the exact CDF-selection dimensions from the §9
+  parsing process;
+- **`av1_read_mv`** / **`av1_read_mv_component`** (5.11.32) — decode `mv_joint` (which components are
+  non-zero), then for each non-zero component a `mv_sign` + `mv_class` + magnitude split (class 0: a
+  bit/fr/hp triple; class > 0: `mv_class` offset bits + fr/hp), honouring the `force_integer_mv`
+  (fr = 3) and `!allow_high_precision_mv` (hp = 1) defaults, and add the result to `PredMv`;
+- **`av1_write_mv`** / **`av1_write_mv_component`** — the paired encoder (the inverse decomposition:
+  the `mv_class` from the magnitude's bit-length, then the bit/fr/hp fields) for round-trip testing,
+  with a defensive `mv_class ≤ MV_CLASSES-1` clamp (a no-op for every representable difference — the
+  decoder caps `|diff|` at 16384 — that hardens the encoder against an out-of-range future caller).
+
+Verified by 192 assertions: a CDF-structure check against the §10 values, plus **round-trip through the
+real symbol coder** (encode a difference → decode → equal) across every magnitude class, every
+`mv_class` boundary (16/17/32/33/64/65/…), both precision modes, both CDF-adaptation modes, the intrabc
+context, and the `PredMv` add. A **4-slice adversarial spec review** (CDF tables + layout / decode
+fidelity / encoder-inverse / tests + libaom-dav1d cross-check + safety, each finding adversarially
+verified) returned **no findings** — reviewers per-value-diffed all nine CDF families against §10,
+proved the blob layout tiles `[0, 286)` with no overlap or OOB, and checked the decode against the
+5.11.32 magnitude formula *independently of the round-trip* (a self-round-trip cannot catch a shared
+formula bug). The one refuted finding — a latent encoder OOB for the unreachable `|diff| ≥ 16385` — was
+hardened with the clamp above. **21,646 suite assertions + 1,140 fuzz assertions, all green; `make
+lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_intermode.cyr`** (new module, wired after `av1_mv.cyr`): the MV CDF family + `av1_read_mv`
+  / `av1_read_mv_component` (5.11.32) + `av1_write_mv` / `av1_write_mv_component`.
+- **`tests/av1_intermode.tcyr`**: `test_mvcdf_structure`, `test_mv_roundtrip_full` / `_classes` /
+  `_precision`, `test_mv_predmv_add`, `test_mv_intrabc_ctx` — 192 assertions.
+
+### Scope / deferred
+- Only the MV component decode + its CDFs. The rest of inter mode-info — `is_inter`, the reference-frame
+  reads (`read_ref_frames`), the inter mode reads (`new_mv` / `zero_mv` / `ref_mv` / `drl_mode`, which
+  consume the `find_mv_stack` contexts), `assign_mv`, motion mode, interp filter, and compound type —
+  are later bites (roadmap.md). `use_intrabc` is passed as the `MvCtx` by the caller.
+
 ## [0.7.65] - 2026-07-13
 
 **Inter prediction — the `find_mv_stack` driver (spec 7.10.2).** The bite that ties the MV-prediction
