@@ -252,9 +252,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   are in, and the **neighbour CDF contexts** `av1_intermode.cyr` 0.7.75 (`av1_nbctx_setup` 5.11.15 +
   `av1_check_backward`/`av1_count_refs`/`av1_ref_count_ctx` + `av1_is_inter_ctx`/`av1_comp_mode_ctx` — the
   FIRST un-deferral, feeding the 0.7.68/0.7.69 reads for real now the grid is populated) — **THE INTER
-  MODE-INFO BITSTREAM-READ LAYER IS COMPLETE and the grid it feeds is populated**; next the rest of the
-  neighbour contexts (the single_ref/comp_ref family via count_refs; then CompGroupIdxs/CompoundIdxs/
-  InterpFilters added to the grid for comp_group_idx/compound_idx/interp_filter), then
+  MODE-INFO BITSTREAM-READ LAYER IS COMPLETE and the grid it feeds is populated**, and the **reference-context
+  family** `av1_intermode.cyr` 0.7.76 (the seven ref_count_ctx derivations + `av1_comp_ref_type_ctx` + the
+  `av1_single_ref_ctxs` / `av1_comp_ref_ctxs` fillers — the reference reads' contexts are no longer caller
+  inputs) is in too; next the last few contexts (comp_group_idx / compound_idx / interp_filter, which need
+  CompGroupIdxs/CompoundIdxs/InterpFilters added to the grid), then
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d

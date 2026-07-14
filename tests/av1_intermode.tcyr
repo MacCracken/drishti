@@ -1321,9 +1321,14 @@ fn test_nbctx_known_answers() {
 # sums + per-value counts come from nbctx_ref.py's exhaustive run, so any distributional
 # deviation in the derivations shows up here even where a spot-check would miss it.
 fn test_nbctx_full_enumeration() {
-    var refs = alloc(6 * 8);
+    # EVERY ref value: NONE(-1), INTRA(0), and all 7 references. The earlier subset
+    # {-1,0,1,4,5,7} omitted LAST2(2)/LAST3(3)/ALTREF2(6) — exactly the frames the
+    # comp_ref_p1 / comp_ref_p2 / comp_bwdref_p1 / uni_comp_ref_p1 contexts discriminate,
+    # so those contexts had unreachable values under it.
+    var refs = alloc(9 * 8);
     store64(refs + 0, 0 - 1); store64(refs + 8, 0); store64(refs + 16, 1);
-    store64(refs + 24, 4); store64(refs + 32, 5); store64(refs + 40, 7);
+    store64(refs + 24, 2); store64(refs + 32, 3); store64(refs + 40, 4);
+    store64(refs + 48, 5); store64(refs + 56, 6); store64(refs + 64, 7);
     var ii_sum = 0;
     var cm_sum = 0;
     var ii_bad = 0;
@@ -1338,13 +1343,13 @@ fn test_nbctx_full_enumeration() {
         var al = 0;
         while (al < 2) {
             var ia = 0;
-            while (ia < 6) {
+            while (ia < 9) {
                 var ib = 0;
-                while (ib < 6) {
+                while (ib < 9) {
                     var ic = 0;
-                    while (ic < 6) {
+                    while (ic < 9) {
                         var id = 0;
-                        while (id < 6) {
+                        while (id < 9) {
                             var nb = nb_build(au, al, load64(refs + (ia * 8)), load64(refs + (ib * 8)),
                             load64(refs + (ic * 8)), load64(refs + (id * 8)));
                             var ii = av1_is_inter_ctx(nb);
@@ -1371,23 +1376,247 @@ fn test_nbctx_full_enumeration() {
         }
         au = au + 1;
     }
-    assert_eq(n, 5184, "enumerated every combo");
+    assert_eq(n, 26244, "enumerated every combo (2*2*9^4)");
     # an out-of-range ctx would index the Is_Inter[4] / Comp_Mode[5] CDF blob OOB —
     # proven absent across the ENTIRE input space, not just the sampled cases.
-    assert_eq(ii_bad, 0, "is_inter_ctx in [0,4) for all 5184 combos");
-    assert_eq(cm_bad, 0, "comp_mode_ctx in [0,5) for all 5184 combos");
+    assert_eq(ii_bad, 0, "is_inter_ctx in [0,4) for all 26244 combos");
+    assert_eq(cm_bad, 0, "comp_mode_ctx in [0,5) for all 26244 combos");
     # digests from scratchpad/nbctx_ref.py (the spec-literal port).
-    assert_eq(ii_sum, 2736, "is_inter_ctx sum over all 5184 combos");
-    assert_eq(cm_sum, 10672, "comp_mode_ctx sum over all 5184 combos");
-    assert_eq(load64(ii_hist + 0), 3600, "is_inter_ctx==0 count");
-    assert_eq(load64(ii_hist + 8), 576, "is_inter_ctx==1 count");
-    assert_eq(load64(ii_hist + 16), 864, "is_inter_ctx==2 count");
-    assert_eq(load64(ii_hist + 24), 144, "is_inter_ctx==3 count");
-    assert_eq(load64(cm_hist + 0), 656, "comp_mode_ctx==0 count");
-    assert_eq(load64(cm_hist + 8), 1648, "comp_mode_ctx==1 count");
-    assert_eq(load64(cm_hist + 16), 192, "comp_mode_ctx==2 count");
-    assert_eq(load64(cm_hist + 24), 2112, "comp_mode_ctx==3 count");
-    assert_eq(load64(cm_hist + 32), 576, "comp_mode_ctx==4 count");
+    assert_eq(ii_sum, 9072, "is_inter_ctx sum over all 26244 combos");
+    assert_eq(cm_sum, 59967, "comp_mode_ctx sum over all 26244 combos");
+    assert_eq(load64(ii_hist + 0), 20736, "is_inter_ctx==0 count");
+    assert_eq(load64(ii_hist + 8), 2268, "is_inter_ctx==1 count");
+    assert_eq(load64(ii_hist + 16), 2916, "is_inter_ctx==2 count");
+    assert_eq(load64(ii_hist + 24), 324, "is_inter_ctx==3 count");
+    assert_eq(load64(cm_hist + 0), 2124, "comp_mode_ctx==0 count");
+    assert_eq(load64(cm_hist + 8), 7677, "comp_mode_ctx==1 count");
+    assert_eq(load64(cm_hist + 16), 1008, "comp_mode_ctx==2 count");
+    assert_eq(load64(cm_hist + 24), 11466, "comp_mode_ctx==3 count");
+    assert_eq(load64(cm_hist + 32), 3969, "comp_mode_ctx==4 count");
+    return 0;
+}
+# ================================================================
+# The reference-context family (spec 9). Seven ref_count_ctx derivations + comp_ref_type,
+# with single_ref_p2..p6 / uni_comp_ref / uni_comp_ref_p2 as ALIASES. Digests from
+# scripts/refs/nbctx_ref.py over the same exhaustive 26244-combo enumeration.
+# ================================================================
+fn test_is_samedir_ref_pair() {
+    # both forward (< BWDREF=5).
+    assert_eq(av1_is_samedir_ref_pair(AV1_LAST_FRAME, AV1_GOLDEN_FRAME), 1, "LAST/GOLDEN samedir (fwd)");
+    assert_eq(av1_is_samedir_ref_pair(AV1_LAST_FRAME, AV1_LAST_FRAME), 1, "LAST/LAST samedir");
+    # both backward (>= BWDREF).
+    assert_eq(av1_is_samedir_ref_pair(AV1_BWDREF_FRAME, AV1_ALTREF_FRAME), 1, "BWDREF/ALTREF samedir (bwd)");
+    assert_eq(av1_is_samedir_ref_pair(AV1_ALTREF2_FRAME, AV1_BWDREF_FRAME), 1, "ALTREF2/BWDREF samedir");
+    # opposite sides — the GOLDEN(4)/BWDREF(5) boundary.
+    assert_eq(av1_is_samedir_ref_pair(AV1_GOLDEN_FRAME, AV1_BWDREF_FRAME), 0, "GOLDEN/BWDREF opposite");
+    assert_eq(av1_is_samedir_ref_pair(AV1_BWDREF_FRAME, AV1_GOLDEN_FRAME), 0, "BWDREF/GOLDEN opposite");
+    # NONE(-1) and INTRA(0) are both < BWDREF, so they count as "forward" here.
+    assert_eq(av1_is_samedir_ref_pair(AV1_REF_NONE, AV1_LAST_FRAME), 1, "NONE/LAST samedir (both < BWDREF)");
+    assert_eq(av1_is_samedir_ref_pair(AV1_INTRA_FRAME, AV1_ALTREF_FRAME), 0, "INTRA/ALTREF opposite");
+    return 0;
+}
+# each count-based ctx compares the RIGHT pair of counts — build a neighbourhood where
+# only one side of the compared pair is present, so a swapped/wrong frame set shows up.
+fn test_ref_family_pairs() {
+    # above=(LAST,LAST2), left=(LAST3,GOLDEN): last12=2, last3gold=2 -> comp_ref ctx 1.
+    var nb = nb_build(1, 1, 1, 2, 3, 4);
+    assert_eq(av1_comp_ref_ctx(nb), 1, "comp_ref: last12(2) == last3gold(2)");
+    assert_eq(av1_comp_ref_p1_ctx(nb), 1, "comp_ref_p1: LAST(1) == LAST2(1)");
+    assert_eq(av1_comp_ref_p2_ctx(nb), 1, "comp_ref_p2: LAST3(1) == GOLDEN(1)");
+    # above=(LAST,LAST), left=(LAST3,GOLDEN): last12=2, last3gold=2 -> 1; p1: LAST 2 > LAST2 0 -> 2.
+    var n2 = nb_build(1, 1, 1, 1, 3, 4);
+    assert_eq(av1_comp_ref_p1_ctx(n2), 2, "comp_ref_p1: LAST(2) > LAST2(0)");
+    # above=(LAST2,LAST2), left=(NONE,NONE): p1: LAST 0 < LAST2 2 -> 0.
+    var n3 = nb_build(1, 1, 2, 2, 0 - 1, 0 - 1);
+    assert_eq(av1_comp_ref_p1_ctx(n3), 0, "comp_ref_p1: LAST(0) < LAST2(2)");
+    # backward pairs: above=(BWDREF,ALTREF2), left=(ALTREF,ALTREF) -> brfarf2=2, arf=2 -> 1.
+    var n4 = nb_build(1, 1, 5, 6, 7, 7);
+    assert_eq(av1_comp_bwdref_ctx(n4), 1, "comp_bwdref: brfarf2(2) == arf(2)");
+    assert_eq(av1_comp_bwdref_p1_ctx(n4), 1, "comp_bwdref_p1: BWDREF(1) == ALTREF2(1)");
+    # above=(BWDREF,BWDREF), left=(ALTREF,ALTREF): brfarf2=2, arf=2 -> 1; p1: BWDREF 2 > ALTREF2 0 -> 2.
+    var n5 = nb_build(1, 1, 5, 5, 7, 7);
+    assert_eq(av1_comp_bwdref_p1_ctx(n5), 2, "comp_bwdref_p1: BWDREF(2) > ALTREF2(0)");
+    # single_ref_p1: fwd vs bwd. above=(LAST,LAST2) fwd=2, left=(BWDREF,ALTREF) bwd=2 -> 1.
+    assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 1, 2, 5, 7)), 1, "single_ref_p1: fwd(2) == bwd(2)");
+    # all four fwd -> fwd=4 > bwd=0 -> 2.
+    assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 1, 2, 3, 4)), 2, "single_ref_p1: fwd(4) > bwd(0)");
+    # all four bwd -> fwd=0 < bwd=4 -> 0.
+    assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 5, 6, 7, 5)), 0, "single_ref_p1: fwd(0) < bwd(4)");
+    # uni_comp_ref_p1: LAST2 vs LAST3+GOLDEN. above=(LAST2,LAST2)=2, left=(LAST3,GOLDEN)=2 -> 1.
+    assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 2, 2, 3, 4)), 1, "uni_comp_ref_p1: LAST2(2) == l3g(2)");
+    assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 2, 2, 2, 2)), 2, "uni_comp_ref_p1: LAST2(4) > l3g(0)");
+    assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 3, 4, 3, 4)), 0, "uni_comp_ref_p1: LAST2(0) < l3g(4)");
+    return 0;
+}
+# DIRECTIONAL known answers — each ctx driven to BOTH 0 and 2.
+#
+# This is not redundancy. ref_count_ctx(a,b) maps a<b/a==b/a>b to 0/1/2, so SWAPPING a
+# context's count pair inverts 0<->2 — and several of these contexts have a SYMMETRIC
+# histogram (comp_ref [6208,13828,6208], comp_ref_p1 / comp_ref_p2 / comp_bwdref_p1
+# [4213,17818,4213]), which leaves BOTH the sum and the per-value histogram completely
+# unchanged under that swap. The exhaustive digest is blind to it; only asserting the
+# direction catches it. (Found by mutation: swapping comp_ref's pair passed the whole
+# suite until these landed.) Values from scripts/refs/nbctx_ref.py.
+fn test_ref_family_direction() {
+    assert_eq(av1_comp_ref_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 3)), 0, "comp_ref -> 0 (pair order)");
+    assert_eq(av1_comp_ref_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 1)), 2, "comp_ref -> 2 (pair order)");
+    assert_eq(av1_comp_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 2)), 0, "comp_ref_p1 -> 0 (pair order)");
+    assert_eq(av1_comp_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 1)), 2, "comp_ref_p1 -> 2 (pair order)");
+    assert_eq(av1_comp_ref_p2_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 4)), 0, "comp_ref_p2 -> 0 (pair order)");
+    assert_eq(av1_comp_ref_p2_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 3)), 2, "comp_ref_p2 -> 2 (pair order)");
+    assert_eq(av1_comp_bwdref_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 7)), 0, "comp_bwdref -> 0 (pair order)");
+    assert_eq(av1_comp_bwdref_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 5)), 2, "comp_bwdref -> 2 (pair order)");
+    assert_eq(av1_comp_bwdref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 6)), 0,
+    "comp_bwdref_p1 -> 0 (pair order)");
+    assert_eq(av1_comp_bwdref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 5)), 2,
+    "comp_bwdref_p1 -> 2 (pair order)");
+    assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 5)), 0,
+    "single_ref_p1 -> 0 (pair order)");
+    assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 1)), 2,
+    "single_ref_p1 -> 2 (pair order)");
+    assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 3)), 0,
+    "uni_comp_ref_p1 -> 0 (pair order)");
+    assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 2)), 2,
+    "uni_comp_ref_p1 -> 2 (pair order)");
+    return 0;
+}
+# the ALIASES must equal the functions the spec says they are computed as.
+fn test_ref_family_aliases() {
+    var refs = alloc(9 * 8);
+    store64(refs + 0, 0 - 1); store64(refs + 8, 0); store64(refs + 16, 1);
+    store64(refs + 24, 2); store64(refs + 32, 3); store64(refs + 40, 4);
+    store64(refs + 48, 5); store64(refs + 56, 6); store64(refs + 64, 7);
+    var sr = alloc(6 * 8);
+    var cc = alloc(AV1CCTX_SIZE);
+    var i = 0;
+    var mism = 0;
+    while (i < 9) {
+        var j = 0;
+        while (j < 9) {
+            var nb = nb_build(1, 1, load64(refs + (i * 8)), load64(refs + (j * 8)),
+            load64(refs + (j * 8)), load64(refs + (i * 8)));
+            av1_single_ref_ctxs(nb, sr);
+            av1_comp_ref_ctxs(nb, cc);
+            # single_ref_p2..p6 alias comp_bwdref / comp_ref / comp_ref_p1 / comp_ref_p2 / comp_bwdref_p1.
+            if (load64(sr + 0) != av1_single_ref_p1_ctx(nb)) { mism = mism + 1; }
+            if (load64(sr + 8) != av1_comp_bwdref_ctx(nb)) { mism = mism + 1; }
+            if (load64(sr + 16) != av1_comp_ref_ctx(nb)) { mism = mism + 1; }
+            if (load64(sr + 24) != av1_comp_ref_p1_ctx(nb)) { mism = mism + 1; }
+            if (load64(sr + 32) != av1_comp_ref_p2_ctx(nb)) { mism = mism + 1; }
+            if (load64(sr + 40) != av1_comp_bwdref_p1_ctx(nb)) { mism = mism + 1; }
+            # uni_comp_ref = single_ref_p1; uni_comp_ref_p2 = comp_ref_p2.
+            if (load64(cc + AV1CCTX_UNI) != av1_single_ref_p1_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_UNI_P2) != av1_comp_ref_p2_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_REF) != av1_comp_ref_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_REF_P1) != av1_comp_ref_p1_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_REF_P2) != av1_comp_ref_p2_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_BWDREF) != av1_comp_bwdref_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_BWDREF_P1) != av1_comp_bwdref_p1_ctx(nb)) { mism = mism + 1; }
+            if (load64(cc + AV1CCTX_REF_TYPE) != av1_comp_ref_type_ctx(nb)) { mism = mism + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(mism, 0, "every filled slot matches the function the spec aliases it to");
+    return 0;
+}
+# FULL enumeration digest for the family — same 26244 combos, digests from the port.
+fn test_ref_family_enumeration() {
+    var refs = alloc(9 * 8);
+    store64(refs + 0, 0 - 1); store64(refs + 8, 0); store64(refs + 16, 1);
+    store64(refs + 24, 2); store64(refs + 32, 3); store64(refs + 40, 4);
+    store64(refs + 48, 5); store64(refs + 56, 6); store64(refs + 64, 7);
+    var s_cr = 0; var s_cr1 = 0; var s_cr2 = 0; var s_bw = 0;
+    var s_bw1 = 0; var s_sr1 = 0; var s_uni1 = 0; var s_crt = 0;
+    var bad = 0;
+    var n = 0;
+    var au = 0;
+    while (au < 2) {
+        var al = 0;
+        while (al < 2) {
+            var ia = 0;
+            while (ia < 9) {
+                var ib = 0;
+                while (ib < 9) {
+                    var ic = 0;
+                    while (ic < 9) {
+                        var id = 0;
+                        while (id < 9) {
+                            var nb = nb_build(au, al, load64(refs + (ia * 8)), load64(refs + (ib * 8)),
+                            load64(refs + (ic * 8)), load64(refs + (id * 8)));
+                            var v_cr = av1_comp_ref_ctx(nb);
+                            var v_cr1 = av1_comp_ref_p1_ctx(nb);
+                            var v_cr2 = av1_comp_ref_p2_ctx(nb);
+                            var v_bw = av1_comp_bwdref_ctx(nb);
+                            var v_bw1 = av1_comp_bwdref_p1_ctx(nb);
+                            var v_sr1 = av1_single_ref_p1_ctx(nb);
+                            var v_uni1 = av1_uni_comp_ref_p1_ctx(nb);
+                            var v_crt = av1_comp_ref_type_ctx(nb);
+                            # every count ctx indexes a [3] CDF dim; comp_ref_type a [5].
+                            if (v_cr < 0 || v_cr > 2) { bad = bad + 1; }
+                            if (v_cr1 < 0 || v_cr1 > 2) { bad = bad + 1; }
+                            if (v_cr2 < 0 || v_cr2 > 2) { bad = bad + 1; }
+                            if (v_bw < 0 || v_bw > 2) { bad = bad + 1; }
+                            if (v_bw1 < 0 || v_bw1 > 2) { bad = bad + 1; }
+                            if (v_sr1 < 0 || v_sr1 > 2) { bad = bad + 1; }
+                            if (v_uni1 < 0 || v_uni1 > 2) { bad = bad + 1; }
+                            if (v_crt < 0 || v_crt > 4) { bad = bad + 1; }
+                            s_cr = s_cr + v_cr; s_cr1 = s_cr1 + v_cr1; s_cr2 = s_cr2 + v_cr2;
+                            s_bw = s_bw + v_bw; s_bw1 = s_bw1 + v_bw1; s_sr1 = s_sr1 + v_sr1;
+                            s_uni1 = s_uni1 + v_uni1; s_crt = s_crt + v_crt;
+                            n = n + 1;
+                            id = id + 1;
+                        }
+                        ic = ic + 1;
+                    }
+                    ib = ib + 1;
+                }
+                ia = ia + 1;
+            }
+            al = al + 1;
+        }
+        au = au + 1;
+    }
+    assert_eq(n, 26244, "family: enumerated every combo");
+    assert_eq(bad, 0, "NO ctx ever leaves its CDF's range across all 26244 combos");
+    # digests from scripts/refs/nbctx_ref.py.
+    assert_eq(s_cr, 26244, "comp_ref sum");
+    assert_eq(s_cr1, 26244, "comp_ref_p1 sum");
+    assert_eq(s_cr2, 26244, "comp_ref_p2 sum");
+    assert_eq(s_bw, 30537, "comp_bwdref sum");
+    assert_eq(s_bw1, 26244, "comp_bwdref_p1 sum");
+    assert_eq(s_sr1, 29321, "single_ref_p1 sum");
+    assert_eq(s_uni1, 21951, "uni_comp_ref_p1 sum");
+    assert_eq(s_crt, 53210, "comp_ref_type sum");
+    return 0;
+}
+# the filled contexts drive the real 0.7.68/0.7.69 reads end-to-end.
+fn test_ref_ctxs_feed_the_reads() {
+    var nb = nb_build(1, 1, 1, 2, 5, 7);
+    var sr = alloc(6 * 8);
+    av1_single_ref_ctxs(nb, sr);
+    var cc = av1_refcdf_blob();
+    # single_ref with DERIVED contexts: round-trip LAST3 (a p1..p3 path).
+    var enc = av1_sym_enc_init(32, 1);
+    av1_write_single_ref(enc, cc, sr, AV1_LAST3_FRAME);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var refs_out = alloc(16);
+    av1_read_single_ref(sd, cc, sr, refs_out);
+    assert_eq(load64(refs_out + 0), AV1_LAST3_FRAME, "single_ref round-trips on DERIVED contexts");
+    # compound_ref with DERIVED contexts: round-trip a bidir pair.
+    var cctx = alloc(AV1CCTX_SIZE);
+    av1_comp_ref_ctxs(nb, cctx);
+    var enc2 = av1_sym_enc_init(32, 1);
+    av1_write_compound_ref(enc2, cc, cctx, AV1_LAST_FRAME, AV1_ALTREF_FRAME);
+    var olen2 = 0;
+    var out2 = av1_sym_enc_finish(enc2, &olen2);
+    var sd2 = av1_sym_dec_init(out2, olen2, 1);
+    var r2 = alloc(16);
+    av1_read_compound_ref(sd2, cc, cctx, r2);
+    assert_eq(load64(r2 + 0), AV1_LAST_FRAME, "compound_ref[0] on DERIVED contexts");
+    assert_eq(load64(r2 + 8), AV1_ALTREF_FRAME, "compound_ref[1] on DERIVED contexts");
     return 0;
 }
 # the contexts feed the real reads: a derived ctx drives av1_read_is_inter end-to-end.
@@ -1467,6 +1696,12 @@ fn main() {
     test_count_refs();
     test_nbctx_known_answers();
     test_nbctx_full_enumeration();
+    test_is_samedir_ref_pair();
+    test_ref_family_pairs();
+    test_ref_family_direction();
+    test_ref_family_aliases();
+    test_ref_family_enumeration();
+    test_ref_ctxs_feed_the_reads();
     test_nbctx_feeds_the_read();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();

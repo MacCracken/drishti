@@ -125,10 +125,114 @@ def ref_count_ctx(counts0, counts1):
         return 2
 
 
+# --- the reference-context family (09.parsing.process.md), verbatim ---------------
+# comp_ref:        last12Count = count_refs(LAST) + count_refs(LAST2)
+#                  last3GoldCount = count_refs(LAST3) + count_refs(GOLDEN)
+#                  ctx = ref_count_ctx(last12Count, last3GoldCount)
+# comp_ref_p1:     ctx = ref_count_ctx(count_refs(LAST), count_refs(LAST2))
+# comp_ref_p2:     ctx = ref_count_ctx(count_refs(LAST3), count_refs(GOLDEN))
+# comp_bwdref:     brfarf2Count = count_refs(BWDREF) + count_refs(ALTREF2)
+#                  ctx = ref_count_ctx(brfarf2Count, count_refs(ALTREF))
+# comp_bwdref_p1:  ctx = ref_count_ctx(count_refs(BWDREF), count_refs(ALTREF2))
+# single_ref_p1:   fwdCount = LAST + LAST2 + LAST3 + GOLDEN
+#                  bwdCount = BWDREF + ALTREF2 + ALTREF
+#                  ctx = ref_count_ctx(fwdCount, bwdCount)
+# uni_comp_ref_p1: ctx = ref_count_ctx(count_refs(LAST2),
+#                                      count_refs(LAST3) + count_refs(GOLDEN))
+# ALIASES (the spec says "computed as in the CDF selection process for X"):
+#   single_ref_p2 = comp_bwdref     single_ref_p3 = comp_ref
+#   single_ref_p4 = comp_ref_p1     single_ref_p5 = comp_ref_p2
+#   single_ref_p6 = comp_bwdref_p1  uni_comp_ref  = single_ref_p1
+#   uni_comp_ref_p2 = comp_ref_p2
+LAST_FRAME, LAST2_FRAME, LAST3_FRAME, GOLDEN_FRAME = 1, 2, 3, 4
+ALTREF2_FRAME = 6
+
+
+def comp_ref_ctx(n):
+    return ref_count_ctx(count_refs(n, LAST_FRAME) + count_refs(n, LAST2_FRAME),
+                         count_refs(n, LAST3_FRAME) + count_refs(n, GOLDEN_FRAME))
+
+
+def comp_ref_p1_ctx(n):
+    return ref_count_ctx(count_refs(n, LAST_FRAME), count_refs(n, LAST2_FRAME))
+
+
+def comp_ref_p2_ctx(n):
+    return ref_count_ctx(count_refs(n, LAST3_FRAME), count_refs(n, GOLDEN_FRAME))
+
+
+def comp_bwdref_ctx(n):
+    return ref_count_ctx(count_refs(n, BWDREF_FRAME) + count_refs(n, ALTREF2_FRAME),
+                         count_refs(n, ALTREF_FRAME))
+
+
+def comp_bwdref_p1_ctx(n):
+    return ref_count_ctx(count_refs(n, BWDREF_FRAME), count_refs(n, ALTREF2_FRAME))
+
+
+def single_ref_p1_ctx(n):
+    fwd = (count_refs(n, LAST_FRAME) + count_refs(n, LAST2_FRAME)
+           + count_refs(n, LAST3_FRAME) + count_refs(n, GOLDEN_FRAME))
+    bwd = (count_refs(n, BWDREF_FRAME) + count_refs(n, ALTREF2_FRAME)
+           + count_refs(n, ALTREF_FRAME))
+    return ref_count_ctx(fwd, bwd)
+
+
+def uni_comp_ref_p1_ctx(n):
+    return ref_count_ctx(count_refs(n, LAST2_FRAME),
+                         count_refs(n, LAST3_FRAME) + count_refs(n, GOLDEN_FRAME))
+
+
+def is_samedir_ref_pair(ref0, ref1):
+    return int((ref0 >= BWDREF_FRAME) == (ref1 >= BWDREF_FRAME))
+
+
+def comp_ref_type_ctx(n):
+    above0 = n["AboveRefFrame"][0]
+    above1 = n["AboveRefFrame"][1]
+    left0 = n["LeftRefFrame"][0]
+    left1 = n["LeftRefFrame"][1]
+    aboveCompInter = n["AvailU"] and not n["AboveIntra"] and not n["AboveSingle"]
+    leftCompInter = n["AvailL"] and not n["LeftIntra"] and not n["LeftSingle"]
+    aboveUniComp = aboveCompInter and is_samedir_ref_pair(above0, above1)
+    leftUniComp = leftCompInter and is_samedir_ref_pair(left0, left1)
+
+    if n["AvailU"] and not n["AboveIntra"] and n["AvailL"] and not n["LeftIntra"]:
+        samedir = is_samedir_ref_pair(above0, left0)
+        if not aboveCompInter and not leftCompInter:
+            return 1 + 2 * samedir
+        elif not aboveCompInter:
+            return 1 if not leftUniComp else 3 + samedir
+        elif not leftCompInter:
+            return 1 if not aboveUniComp else 3 + samedir
+        else:
+            if not aboveUniComp and not leftUniComp:
+                return 0
+            elif not aboveUniComp or not leftUniComp:
+                return 2
+            else:
+                return 3 + int((above0 == BWDREF_FRAME) == (left0 == BWDREF_FRAME))
+    elif n["AvailU"] and n["AvailL"]:
+        if aboveCompInter:
+            return 1 + 2 * int(bool(aboveUniComp))
+        elif leftCompInter:
+            return 1 + 2 * int(bool(leftUniComp))
+        else:
+            return 2
+    elif aboveCompInter:
+        return 4 * int(bool(aboveUniComp))
+    elif leftCompInter:
+        return 4 * int(bool(leftUniComp))
+    else:
+        return 2
+
+
 if __name__ == "__main__":
-    # Full enumeration over a ref-frame set spanning every semantic class:
-    #   NONE(-1), INTRA(0), forward(1=LAST, 4=GOLDEN), backward(5=BWDREF, 7=ALTREF)
-    REFS = [NONE, INTRA_FRAME, 1, 4, 5, 7]
+    # Full enumeration over EVERY ref value: NONE(-1), INTRA(0), and all 7 references.
+    # The earlier subset {-1,0,1,4,5,7} was inadequate: it omitted LAST2(2), LAST3(3) and
+    # ALTREF2(6), which are exactly the frames comp_ref_p1 / comp_ref_p2 / comp_bwdref_p1 /
+    # uni_comp_ref_p1 discriminate — their histograms had unreachable contexts as a result.
+    REFS = [NONE, INTRA_FRAME, 1, 2, 3, 4, 5, 6, 7]
     rows = []
     for au in (0, 1):
         for al in (0, 1):
@@ -151,3 +255,28 @@ if __name__ == "__main__":
         print(f"  comp_mode_ctx=={v}: {sum(1 for r in rows if r[7]==v)}")
     for v in ii:
         print(f"  is_inter_ctx=={v}: {sum(1 for r in rows if r[6]==v)}")
+
+    # --- the reference-context family, same exhaustive enumeration ----------------
+    FAMILY = [
+        ("comp_ref", comp_ref_ctx, 3),
+        ("comp_ref_p1", comp_ref_p1_ctx, 3),
+        ("comp_ref_p2", comp_ref_p2_ctx, 3),
+        ("comp_bwdref", comp_bwdref_ctx, 3),
+        ("comp_bwdref_p1", comp_bwdref_p1_ctx, 3),
+        ("single_ref_p1", single_ref_p1_ctx, 3),
+        ("uni_comp_ref_p1", uni_comp_ref_p1_ctx, 3),
+        ("comp_ref_type", comp_ref_type_ctx, 5),
+    ]
+    print("\n--- reference-context family (same 5184 combos) ---")
+    for (name, fn, nctx) in FAMILY:
+        vals = []
+        for au in (0, 1):
+            for al in (0, 1):
+                for a0 in REFS:
+                    for a1 in REFS:
+                        for l0 in REFS:
+                            for l1 in REFS:
+                                vals.append(fn(setup(au, al, (a0, a1), (l0, l1))))
+        hist = [sum(1 for v in vals if v == k) for k in range(nctx)]
+        assert all(0 <= v < nctx for v in vals), f"{name} out of range"
+        print(f"{name:16s} sum={sum(vals):6d}  hist={hist}")

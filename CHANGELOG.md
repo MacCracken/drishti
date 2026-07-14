@@ -4,6 +4,58 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.76] - 2026-07-14
+
+**Inter prediction — the reference-context family (spec §9), completing the un-deferral of the reference
+reads.** Fifteen symbols, but the spec defines only **eight** derivations and wires the rest up as aliases
+("ctx is computed as in the CDF selection process for X"). Extends `src/av1_intermode.cyr` with:
+
+- **seven `ref_count_ctx` derivations** — `av1_comp_ref_ctx` (LAST+LAST2 vs LAST3+GOLDEN),
+  `av1_comp_ref_p1_ctx` (LAST vs LAST2), `av1_comp_ref_p2_ctx` (LAST3 vs GOLDEN), `av1_comp_bwdref_ctx`
+  (BWDREF+ALTREF2 vs ALTREF), `av1_comp_bwdref_p1_ctx` (BWDREF vs ALTREF2), `av1_single_ref_p1_ctx`
+  (all forward vs all backward), `av1_uni_comp_ref_p1_ctx` (LAST2 vs LAST3+GOLDEN);
+- **`av1_is_samedir_ref_pair`** + **`av1_comp_ref_type_ctx`** — the eighth, and the only one that is not a
+  count comparison: a deeply nested block over `aboveCompInter` / `leftCompInter` / `aboveUniComp` /
+  `leftUniComp`, whose innermost case compares against `BWDREF_FRAME` *exactly* rather than reusing
+  `is_samedir_ref_pair`;
+- **`av1_single_ref_ctxs`** / **`av1_comp_ref_ctxs`** — the payoff: these fill the six-slot `refctx` and
+  nine-slot `Av1CompCtxIdx` records that `av1_read_single_ref` (0.7.68) and `av1_read_compound_ref` (0.7.69)
+  already take, which were caller inputs *only* because the MI grid was empty until 0.7.74. The aliases are
+  expressed by **calling** the aliased function rather than duplicating its body, so the spec's "same as" is
+  structural and cannot drift.
+
+Verified against the committed spec-literal port (`scripts/refs/nbctx_ref.py`, extended with the family):
+per-pair known answers isolating each context's compared frames; an alias check over 81 neighbourhoods; a
+**26,244-combo exhaustive enumeration** (every `(AvailU, AvailL, aref0, aref1, lref0, lref1)` over **every**
+ref value) matched to the port's per-context sum digests and proving no context ever leaves its CDF's range;
+and the derived contexts driving `av1_read_single_ref` / `av1_read_compound_ref` end-to-end.
+
+### Fixed
+- **The exhaustive digest was blind to a swapped count pair.** `ref_count_ctx(a,b)` maps `a<b`/`a==b`/`a>b`
+  to 0/1/2, so swapping a context's pair inverts 0↔2 — and four of these contexts have a **symmetric**
+  histogram (`comp_ref` `[6208,13828,6208]`; `comp_ref_p1`/`p2`/`comp_bwdref_p1` `[4213,17818,4213]`), which
+  leaves the sum *and* the per-value histogram unchanged. Mutation proved `comp_ref`'s and `comp_ref_p2`'s
+  pair swaps passed the **entire suite**. `test_ref_family_direction` now drives every count context to both
+  0 and 2, asserting the pair *order*; all four swaps now fail (2/2/4/3).
+- **The enumeration's ref set was inadequate** — `{-1,0,1,4,5,7}` omitted `LAST2`(2), `LAST3`(3) and
+  `ALTREF2`(6), exactly the frames `comp_ref_p1` / `comp_ref_p2` / `comp_bwdref_p1` / `uni_comp_ref_p1`
+  discriminate, so those contexts had **unreachable values** under it (`comp_ref_p1`'s histogram was
+  `[0, 3721, 1463]`). Widened to all nine values (5184 → 26,244 combos); the 0.7.75 digests were refreshed
+  accordingly.
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the seven count-based ctx derivations; `av1_is_samedir_ref_pair`;
+  `av1_comp_ref_type_ctx`; `av1_single_ref_ctxs`; `av1_comp_ref_ctxs`.
+- **`tests/av1_intermode.tcyr`** (extended): `test_is_samedir_ref_pair`, `test_ref_family_pairs`,
+  `test_ref_family_direction`, `test_ref_family_aliases`, `test_ref_family_enumeration`,
+  `test_ref_ctxs_feed_the_reads`.
+- **`scripts/refs/nbctx_ref.py`** (extended): the family's derivations + exhaustive per-context digests.
+
+### Scope / deferred
+- Still caller inputs: `comp_group_idx` / `compound_idx` (need `CompGroupIdxs` / `CompoundIdxs` in the grid,
+  plus order-hint distances) and `interp_filter` (needs `InterpFilters`) — the next bite adds those grid
+  fields. `AvailU`/`AvailL` remain the caller's, as in the spec. Then the inter tile decode (roadmap.md).
+
 ## [0.7.75] - 2026-07-14
 
 **Inter prediction — the neighbour CDF contexts (spec 5.11.15 preamble + §9 CDF selection). The first
