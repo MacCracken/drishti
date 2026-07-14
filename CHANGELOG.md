@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.68] - 2026-07-13
+
+**Inter prediction — the reference-selection reads (spec 5.11.30 + 5.11.25, single prediction).** The
+inter block's reference layer: which references the block uses. Extends `src/av1_intermode.cyr` with:
+
+- **the Is_Inter + Single_Ref CDFs** — transcribed per-value from the §10 defaults (`Is_Inter[4]`,
+  `Single_Ref[3][6]`) into a 66-entry blob (`av1_refcdf_new` / `_blob` + accessors);
+- **`av1_read_is_inter`** (5.11.30) — the `@@is_inter` symbol (intra vs inter) via `Is_Inter[ctx]`;
+- **`av1_read_single_ref`** (5.11.25, the single-reference else-branch of `read_ref_frames`) — the
+  `single_ref_p1..p6` binary tree decoding `RefFrame[0]` from the seven references (the four forward
+  `LAST` / `LAST2` / `LAST3` / `GOLDEN` via `p1=0` then `p3`/`p4`/`p5`, the three backward `BWDREF` /
+  `ALTREF2` / `ALTREF` via `p1=1` then `p2`/`p6`), writing `RefFrame[0..1]` (`[1]` = `NONE`);
+- the paired `av1_write_is_inter` / `av1_write_single_ref` encoders.
+
+Each of the six `single_ref_pN` symbols draws its CDF from `Single_Ref[ctx][N-1]` where `ctx` is a
+count of the neighbours' reference usage (spec 8.3) — a caller input here (the neighbour count is
+deferred, as the MV-prediction scans deferred their tile bounds). Verified by 322 assertions (56 new):
+a CDF-structure check against §10, an `is_inter` round-trip over both symbol values × every context,
+and a round-trip of **all seven single references** (each codes a unique `p1..p6` path), in both static
+and adaptive CDF modes. A **3-slice adversarial spec review** (CDF tables + layout / the single_ref
+tree + encoder-inverse / is_inter + safety + tests + libaom-dav1d cross-check, each finding
+adversarially verified) returned **no findings** — because a self-round-trip cannot catch a *shared*
+encode/decode bug, reviewers per-value-diffed all 22 CDF values against §10, verified the `p1..p6` →
+RefFrame tree against the spec pseudocode, confirmed the §9 CDF-index mapping (`p1→j0 … p6→j5`)
+independently, hand-traced the encoder inverse for all seven references, and cross-checked against
+libaom/dav1d. **21,776 suite assertions + 1,140 fuzz assertions, all green; `make lint` + `make
+fmt-check` green.**
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `Is_Inter` / `Single_Ref` CDF family (`av1_refcdf_*`);
+  `av1_read_is_inter` / `av1_read_single_ref` (5.11.30 / 5.11.25) + `av1_write_is_inter` /
+  `av1_write_single_ref`; `AV1_REF_NONE`.
+- **`tests/av1_intermode.tcyr`** (extended): `test_refcdf_structure`, `test_is_inter_rt`,
+  `test_single_ref_rt` — 322 assertions total.
+
+### Scope / deferred
+- The SINGLE-reference path only. `is_inter`'s `skip_mode` / segment-forced branches are the caller's
+  concern; the neighbour-count CDF contexts (spec 8.3) are caller inputs; and the COMPOUND reference
+  path (`comp_mode` / `comp_ref_type` / `uni_comp_ref` / `comp_ref` / `comp_bwdref`) is a later bite
+  (roadmap.md).
+
 ## [0.7.67] - 2026-07-13
 
 **Inter prediction — the single-prediction inter mode reads (spec 5.11.32).** The bite where the

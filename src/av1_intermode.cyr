@@ -15,6 +15,11 @@
 #     GlobalMvs + read_mv for NEWMV → the block's Mv) — plus their four CDFs and
 #     paired encoders. This is where the MV-prediction arc (find_mv_stack contexts
 #     + candidate stack, av1_mv.cyr) and read_mv COMPOSE into a decoded inter MV.
+#   * (0.7.68) the REFERENCE-SELECTION reads (single prediction) — read_is_inter
+#     (the @@is_inter symbol, 5.11.30) and read_single_ref (the single_ref_p1..p6
+#     tree → RefFrame[0] ∈ LAST..ALTREF, 5.11.25) — plus the Is_Inter / Single_Ref
+#     CDFs and paired encoders. The neighbour-count CDF contexts (spec 8.3) are
+#     caller inputs; the COMPOUND reference path is a later bite.
 # Every path round-trips through the symbol encoder.
 #
 # FLAT module — wired after src/av1_mv.cyr (it consumes the find_mv_stack context
@@ -496,6 +501,149 @@ fn av1_write_drl_idx(enc, cc, mvctx, y_mode, ref_mv_idx): i64 {
                 if (bit2 == 0) { break; }
             }
             idx2 = idx2 + 1;
+        }
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# THE REFERENCE-SELECTION READS (single prediction) — read_is_inter (5.11.30) +
+# read_single_ref (the single_ref_p1..p6 tree of read_ref_frames, 5.11.25). is_inter
+# picks intra vs inter for a block; the single_ref tree picks RefFrame[0] from the
+# seven references (the four forward LAST/LAST2/LAST3/GOLDEN + the three backward
+# BWDREF/ALTREF2/ALTREF) via a binary tree of up to three symbols. Two CDF families
+# (Is_Inter[4], Single_Ref[3][6], §10). The per-symbol CDF CONTEXTS derive from a
+# count of the neighbours' reference usage (spec 8.3) — a caller input here (the
+# scans deferred the same neighbour count). COMPOUND references (comp_mode /
+# comp_ref_type / uni_comp_ref / comp_ref / comp_bwdref) are a later bite (roadmap.md).
+# ================================================================
+enum Av1RefReadConst {
+    AV1_IS_INTER_CONTEXTS = 4;    # IS_INTER_CONTEXTS
+    AV1_REF_CONTEXTS      = 3;    # REF_CONTEXTS (single_ref / comp_ref / ...)
+    AV1_SINGLE_REFS       = 7;    # SINGLE_REFS (SINGLE_REFS-1 = 6 sub-CDFs p1..p6)
+}
+var AV1_REF_NONE = 0 - 1;         # NONE (enums reject negative literals)
+
+# The reference CDF blob (66 i64): is_inter [ctx 0..3] base 0 ctx*3 -> [0,12);
+# single_ref [ctx 0..2][j 0..5] base 12 (ctx*6 + j)*3 -> [12,66).
+enum Av1RefCdfOff { AV1REFCDF_SIZE = 66; }
+fn av1_refcdf_isinter(cc, ctx): i64 { return cc + ((0 + (ctx * 3)) * 8); }
+fn av1_refcdf_singleref(cc, ctx, j): i64 { return cc + ((12 + (((ctx * 6) + j) * 3)) * 8); }
+
+fn av1_refcdf_fill(cc): i64 {
+    # Default_Is_Inter_Cdf[4]
+    av1_mvcdf_put2(av1_refcdf_isinter(cc, 0), 806);
+    av1_mvcdf_put2(av1_refcdf_isinter(cc, 1), 16662);
+    av1_mvcdf_put2(av1_refcdf_isinter(cc, 2), 20186);
+    av1_mvcdf_put2(av1_refcdf_isinter(cc, 3), 26538);
+    # Default_Single_Ref_Cdf[3][6] — ctx 0..2, j (p-index-1) 0..5.
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 0, 0), 4897);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 0, 1), 1555);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 0, 2), 4236);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 0, 3), 8650);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 0, 4), 904);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 0, 5), 1444);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 1, 0), 16973);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 1, 1), 16751);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 1, 2), 19647);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 1, 3), 24773);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 1, 4), 11014);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 1, 5), 15087);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 2, 0), 29744);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 2, 1), 30279);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 2, 2), 31194);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 2, 3), 31895);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 2, 4), 26875);
+    av1_mvcdf_put2(av1_refcdf_singleref(cc, 2, 5), 30304);
+    return DR_OK;
+}
+fn av1_refcdf_new(): i64 {
+    var cc = alloc(AV1REFCDF_SIZE * 8);
+    if (cc == 0) { return 0; }
+    av1_refcdf_fill(cc);
+    return cc;
+}
+var AV1_REFCDF_BLOB = 0;
+fn av1_refcdf_blob(): i64 {
+    if (AV1_REFCDF_BLOB != 0) { return AV1_REFCDF_BLOB; }
+    var cc = alloc(AV1REFCDF_SIZE * 8);
+    if (cc == 0) { return 0; }
+    av1_refcdf_fill(cc);
+    AV1_REFCDF_BLOB = cc;
+    return cc;
+}
+
+# read_is_inter (spec 5.11.30) — the @@is_inter symbol (0 = intra, 1 = inter), CDF
+# Is_Inter[ctx]. The skip_mode / segment-forced branches (which bypass this symbol)
+# are the caller's concern.
+fn av1_read_is_inter(sd, cc, ctx): i64 {
+    return av1_sym_read_symbol(sd, av1_refcdf_isinter(cc, ctx), 2);
+}
+fn av1_write_is_inter(enc, cc, ctx, is_inter): i64 {
+    av1_sym_encode_symbol(enc, av1_refcdf_isinter(cc, ctx), 2, is_inter);
+    return DR_OK;
+}
+
+# ================================================================
+# read_single_ref (spec 5.11.25 single-reference path) — decode RefFrame[0] via the
+# single_ref_p1..p6 binary tree; writes RefFrame[0..1] into out_ref (2 i64; [1] =
+# NONE for single prediction) and returns RefFrame[0]. `refctx` points to the six
+# per-symbol contexts (refctx[j] = ctx for single_ref_p(j+1), each in 0..REF_CONTEXTS-1).
+#   p1: forward vs backward     p2: ALTREF vs {BWDREF,ALTREF2}   p6: ALTREF2 vs BWDREF
+#   p3: {LAST3,GOLDEN} vs {LAST,LAST2}   p5: GOLDEN vs LAST3   p4: LAST2 vs LAST
+# ================================================================
+fn av1_read_single_ref(sd, cc, refctx, out_ref): i64 {
+    var rf = AV1_LAST_FRAME;
+    var p1 = av1_sym_read_symbol(sd, av1_refcdf_singleref(cc, load64(refctx + 0), 0), 2);
+    if (p1 != 0) {
+        var p2 = av1_sym_read_symbol(sd, av1_refcdf_singleref(cc, load64(refctx + 8), 1), 2);
+        if (p2 != 0) {
+            rf = AV1_ALTREF_FRAME;
+        } else {
+            var p6 = av1_sym_read_symbol(sd, av1_refcdf_singleref(cc, load64(refctx + 40), 5), 2);
+            if (p6 != 0) { rf = AV1_ALTREF2_FRAME; } else { rf = AV1_BWDREF_FRAME; }
+        }
+    } else {
+        var p3 = av1_sym_read_symbol(sd, av1_refcdf_singleref(cc, load64(refctx + 16), 2), 2);
+        if (p3 != 0) {
+            var p5 = av1_sym_read_symbol(sd, av1_refcdf_singleref(cc, load64(refctx + 32), 4), 2);
+            if (p5 != 0) { rf = AV1_GOLDEN_FRAME; } else { rf = AV1_LAST3_FRAME; }
+        } else {
+            var p4 = av1_sym_read_symbol(sd, av1_refcdf_singleref(cc, load64(refctx + 24), 3), 2);
+            if (p4 != 0) { rf = AV1_LAST2_FRAME; } else { rf = AV1_LAST_FRAME; }
+        }
+    }
+    store64(out_ref + 0, rf);
+    store64(out_ref + 8, AV1_REF_NONE);
+    return rf;
+}
+
+# write_single_ref — the inverse: emit the p1..p6 tree for a given RefFrame[0]
+# (LAST..ALTREF). Forward refs (LAST/LAST2/LAST3/GOLDEN, <BWDREF) code p1=0; the
+# backward refs (BWDREF/ALTREF2/ALTREF) code p1=1.
+fn av1_write_single_ref(enc, cc, refctx, rf): i64 {
+    if (rf >= AV1_BWDREF_FRAME) {
+        av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 0), 0), 2, 1);
+        if (rf == AV1_ALTREF_FRAME) {
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 8), 1), 2, 1);
+        } else {
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 8), 1), 2, 0);
+            var p6 = 0;
+            if (rf == AV1_ALTREF2_FRAME) { p6 = 1; }
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 40), 5), 2, p6);
+        }
+    } else {
+        av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 0), 0), 2, 0);
+        if (rf >= AV1_LAST3_FRAME) {
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 16), 2), 2, 1);
+            var p5 = 0;
+            if (rf == AV1_GOLDEN_FRAME) { p5 = 1; }
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 32), 4), 2, p5);
+        } else {
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 16), 2), 2, 0);
+            var p4 = 0;
+            if (rf == AV1_LAST2_FRAME) { p4 = 1; }
+            av1_sym_encode_symbol(enc, av1_refcdf_singleref(cc, load64(refctx + 24), 3), 2, p4);
         }
     }
     return DR_OK;
