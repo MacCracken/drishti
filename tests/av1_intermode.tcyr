@@ -656,6 +656,177 @@ fn test_interp_motion_adaptive() {
     return 0;
 }
 
+# ================================================================
+# The inter-intra reads (5.11.28): @@interintra / @@interintra_mode (both Size_Group[MiSize]-1
+# indexed) + @@wedge_interintra / @@wedge_index (both MiSize indexed). A self-round-trip is
+# value-blind, so every default CDF row is diffed per-value against spec 10 here.
+# ================================================================
+# 16-symbol row check {c0..c14, 32768}; the uniform default row helper.
+fn av1_t_chk16(p, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14): i64 {
+    assert_eq(load64(p + 0), c0, "wcdf c0");     assert_eq(load64(p + 8), c1, "wcdf c1");
+    assert_eq(load64(p + 16), c2, "wcdf c2");    assert_eq(load64(p + 24), c3, "wcdf c3");
+    assert_eq(load64(p + 32), c4, "wcdf c4");    assert_eq(load64(p + 40), c5, "wcdf c5");
+    assert_eq(load64(p + 48), c6, "wcdf c6");    assert_eq(load64(p + 56), c7, "wcdf c7");
+    assert_eq(load64(p + 64), c8, "wcdf c8");    assert_eq(load64(p + 72), c9, "wcdf c9");
+    assert_eq(load64(p + 80), c10, "wcdf c10");  assert_eq(load64(p + 88), c11, "wcdf c11");
+    assert_eq(load64(p + 96), c12, "wcdf c12");  assert_eq(load64(p + 104), c13, "wcdf c13");
+    assert_eq(load64(p + 112), c14, "wcdf c14"); assert_eq(load64(p + 120), 32768, "wcdf 16-sym term");
+    return 0;
+}
+fn av1_t_chk_wunif(p): i64 {
+    av1_t_chk16(p, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384,
+    18432, 20480, 22528, 24576, 26624, 28672, 30720);
+    return 0;
+}
+# 4-symbol row check {c0, c1, c2, 32768}.
+fn av1_t_chk4(p, c0, c1, c2): i64 {
+    assert_eq(load64(p + 0), c0, "cdf4 c0");
+    assert_eq(load64(p + 8), c1, "cdf4 c1");
+    assert_eq(load64(p + 16), c2, "cdf4 c2");
+    assert_eq(load64(p + 24), 32768, "cdf4 4-sym terminator");
+    return 0;
+}
+fn test_interintra_cdf() {
+    var cc = av1_iicdf_blob();
+    # Default_Inter_Intra_Cdf[3] — binary.
+    av1_t_chk2(av1_iicdf_interintra(cc, 0), 26887);
+    av1_t_chk2(av1_iicdf_interintra(cc, 1), 27597);
+    av1_t_chk2(av1_iicdf_interintra(cc, 2), 30237);
+    # Default_Inter_Intra_Mode_Cdf[3] — 4-symbol {c0,c1,c2,32768} (slot 16 is c2, not the term).
+    av1_t_chk4(av1_iicdf_iimode(cc, 0), 1875, 11082, 27332);
+    av1_t_chk4(av1_iicdf_iimode(cc, 1), 2473, 9996, 26388);
+    av1_t_chk4(av1_iicdf_iimode(cc, 2), 4238, 11537, 25926);
+    # Default_Wedge_Inter_Intra_Cdf[22] — binary (used 3..9; rest 16384).
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 0), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 1), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 2), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 3), 20036);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 4), 24957);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 5), 26704);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 6), 27530);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 7), 29564);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 8), 29444);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 9), 26872);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 10), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 11), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 12), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 13), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 14), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 15), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 16), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 17), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 18), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 19), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 20), 16384);
+    av1_t_chk2(av1_iicdf_wedgeii(cc, 21), 16384);
+    # Default_Wedge_Index_Cdf[22] — 16-symbol (used 3..9, 18..19; rest uniform).
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 0));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 1));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 2));
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 3), 2438, 4440, 6599, 8663, 11005, 12874, 15751, 18094,
+    20359, 22362, 24127, 25702, 27752, 29450, 31171);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 4), 806, 3266, 6005, 6738, 7218, 7367, 7771, 14588,
+    16323, 17367, 18452, 19422, 22839, 26127, 29629);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 5), 2779, 3738, 4683, 7213, 7775, 8017, 8655, 14357,
+    17939, 21332, 24520, 27470, 29456, 30529, 31656);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 6), 1684, 3625, 5675, 7108, 9302, 11274, 14429, 17144,
+    19163, 20961, 22884, 24471, 26719, 28714, 30877);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 7), 1142, 3491, 6277, 7314, 8089, 8355, 9023, 13624,
+    15369, 16730, 18114, 19313, 22521, 26012, 29550);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 8), 2742, 4195, 5727, 8035, 8980, 9336, 10146, 14124,
+    17270, 20533, 23434, 25972, 27944, 29570, 31416);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 9), 1727, 3948, 6101, 7796, 9841, 12344, 15766, 18944,
+    20638, 22038, 23963, 25311, 26988, 28766, 31012);
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 10));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 11));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 12));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 13));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 14));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 15));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 16));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 17));
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 18), 154, 987, 1925, 2051, 2088, 2111, 2151, 23033,
+    23703, 24284, 24985, 25684, 27259, 28883, 30911);
+    av1_t_chk16(av1_iicdf_wedgeidx(cc, 19), 1135, 1322, 1493, 2635, 2696, 2737, 2770, 21016,
+    22935, 25057, 27251, 29173, 30089, 30960, 31933);
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 20));
+    av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 21));
+    return 0;
+}
+# interintra + interintra_mode round-trip over the three size groups (MiSize 3/6/9 → ctx 0/1/2).
+fn test_interintra_rt() {
+    var szs = alloc(3 * 8);
+    store64(szs + 0, 3); store64(szs + 8, 6); store64(szs + 16, 9);   # BLOCK_8X8 / 16X16 / 32X32
+    var i = 0;
+    while (i < 3) {
+        var sz = load64(szs + (i * 8));
+        var cc = av1_iicdf_blob();
+        var enc = av1_sym_enc_init(32, 1);
+        av1_write_interintra(enc, cc, sz, 0);
+        av1_write_interintra(enc, cc, sz, 1);
+        av1_write_interintra_mode(enc, cc, sz, AV1_II_DC_PRED);
+        av1_write_interintra_mode(enc, cc, sz, AV1_II_V_PRED);
+        av1_write_interintra_mode(enc, cc, sz, AV1_II_H_PRED);
+        av1_write_interintra_mode(enc, cc, sz, AV1_II_SMOOTH_PRED);
+        var olen = 0;
+        var out = av1_sym_enc_finish(enc, &olen);
+        var sd = av1_sym_dec_init(out, olen, 1);
+        assert_eq(av1_read_interintra(sd, cc, sz), 0, "interintra 0");
+        assert_eq(av1_read_interintra(sd, cc, sz), 1, "interintra 1");
+        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_DC_PRED, "iimode DC");
+        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_V_PRED, "iimode V");
+        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_H_PRED, "iimode H");
+        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_SMOOTH_PRED, "iimode SMOOTH");
+        i = i + 1;
+    }
+    return 0;
+}
+# wedge_interintra (binary) + wedge_index (16-way) round-trip over every MiSize.
+fn test_wedge_rt() {
+    var sz = 0;
+    while (sz < AV1_BLOCK_SIZES) {
+        var cc = av1_iicdf_blob();
+        var enc = av1_sym_enc_init(64, 1);
+        av1_write_wedge_interintra(enc, cc, sz, 0);
+        av1_write_wedge_interintra(enc, cc, sz, 1);
+        var w = 0;
+        while (w < AV1_WEDGE_TYPES) {
+            av1_write_wedge_index(enc, cc, sz, w);
+            w = w + 1;
+        }
+        var olen = 0;
+        var out = av1_sym_enc_finish(enc, &olen);
+        var sd = av1_sym_dec_init(out, olen, 1);
+        assert_eq(av1_read_wedge_interintra(sd, cc, sz), 0, "wedge_ii 0");
+        assert_eq(av1_read_wedge_interintra(sd, cc, sz), 1, "wedge_ii 1");
+        var r = 0;
+        while (r < AV1_WEDGE_TYPES) {
+            assert_eq(av1_read_wedge_index(sd, cc, sz), r, "wedge_index rt");
+            r = r + 1;
+        }
+        sz = sz + 1;
+    }
+    return 0;
+}
+# adaptive CDFs — interintra family adapts in lockstep.
+fn test_interintra_adaptive() {
+    var cce = av1_iicdf_new();
+    var ccd = av1_iicdf_new();
+    var enc = av1_sym_enc_init(32, 0);
+    av1_write_interintra(enc, cce, 6, 1);
+    av1_write_interintra_mode(enc, cce, 6, AV1_II_SMOOTH_PRED);
+    av1_write_wedge_interintra(enc, cce, 5, 1);
+    av1_write_wedge_index(enc, cce, 5, 11);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    assert_eq(av1_read_interintra(sd, ccd, 6), 1, "interintra adaptive");
+    assert_eq(av1_read_interintra_mode(sd, ccd, 6), AV1_II_SMOOTH_PRED, "iimode adaptive SMOOTH");
+    assert_eq(av1_read_wedge_interintra(sd, ccd, 5), 1, "wedge_ii adaptive");
+    assert_eq(av1_read_wedge_index(sd, ccd, 5), 11, "wedge_index adaptive");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -700,6 +871,11 @@ fn main() {
     test_interp_filter_rt();
     test_motion_mode_rt();
     test_interp_motion_adaptive();
+    test_group("inter-intra reads (5.11.28: interintra / mode / wedge_interintra / wedge_index)");
+    test_interintra_cdf();
+    test_interintra_rt();
+    test_wedge_rt();
+    test_interintra_adaptive();
     return assert_summary();
 }
 

@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.72] - 2026-07-14
+
+**Inter prediction — the inter-intra reads (spec 5.11.28 `read_interintra_mode`).** The inter-intra
+prediction signalling: a single-prediction inter block (`BLOCK_8X8`..`BLOCK_32X32`) may additionally blend
+with an INTRA predictor. Adds the four entropy-coded reads to `src/av1_intermode.cyr`:
+
+- **`av1_read_interintra`** — the binary `@@interintra` symbol (blend with intra or not), CDF
+  `Inter_Intra[Size_Group[MiSize]-1]`;
+- **`av1_read_interintra_mode`** — the 4-symbol `@@interintra_mode` (`II_DC_PRED` / `II_V_PRED` /
+  `II_H_PRED` / `II_SMOOTH_PRED`), CDF `Inter_Intra_Mode[Size_Group[MiSize]-1]`;
+- **`av1_read_wedge_interintra`** — the binary `@@wedge_interintra` (wedge vs intra blending), CDF
+  `Wedge_Inter_Intra[MiSize]`;
+- **`av1_read_wedge_index`** — the 16-symbol `@@wedge_index` (the wedge mask direction/offset), CDF
+  `Wedge_Index[MiSize]` — shared with the compound_type wedge (5.11.29, a later bite);
+- a **new CDF blob `av1_iicdf`** (464 i64) tiling the four §10 tables — `inter_intra` `[0,9)`,
+  `inter_intra_mode` `[9,24)`, `wedge_interintra` `[24,90)`, `wedge_index` `[90,464)` — with the
+  `av1_iicdf_interintra`/`iimode`/`wedgeii`/`wedgeidx` accessors, an `av1_iicdf_put16` 16-symbol filler +
+  `av1_iicdf_wedge_unif` for the uniform default rows, reusing the existing `av1_size_group`
+  ([av1_modeinfo.cyr](src/av1_modeinfo.cyr)) for the `Size_Group[MiSize]-1` context;
+- the paired `av1_write_*` encoders.
+
+Verified by exhaustive assertions: an **exhaustive** per-row §10 diff of all four tables
+(`Default_Inter_Intra_Cdf` / `Default_Inter_Intra_Mode_Cdf` / `Default_Wedge_Inter_Intra_Cdf` /
+`Default_Wedge_Index_Cdf`, incl. all 15 cumulative freqs of every `Wedge_Index` row), an
+`interintra` + `interintra_mode` round-trip over **all 3 size groups** (`MiSize` 3/6/9 → ctx 0/1/2), a
+`wedge_interintra` + `wedge_index` round-trip over **all 22 `MiSize` × every value** (16 wedge indices
+each), and an adaptive-CDF round-trip.
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `av1_iicdf` blob (`av1_iicdf_new`/`blob`/`fill` +
+  `av1_iicdf_interintra`/`iimode`/`wedgeii`/`wedgeidx` + `av1_iicdf_put16` / `av1_iicdf_wedge_unif`);
+  `av1_read_interintra` / `av1_read_interintra_mode` / `av1_read_wedge_interintra` /
+  `av1_read_wedge_index` + their paired writers; the `AV1_INTERINTRA_MODES` / `AV1_BLOCK_SIZE_GROUPS` /
+  `AV1_WEDGE_TYPES` / `AV1_II_*` constants.
+- **`tests/av1_intermode.tcyr`** (extended): `test_interintra_cdf` (exhaustive per-row §10 diff via
+  `av1_t_chk16` / `av1_t_chk4` / `av1_t_chk_wunif`), `test_interintra_rt`, `test_wedge_rt`,
+  `test_interintra_adaptive`.
+
+### Scope / deferred
+- The four per-symbol inter-intra reads only. The gating (`!skip_mode && enable_interintra_compound &&
+  !isCompound && BLOCK_8X8 <= MiSize <= BLOCK_32X32`) and the side-effects it drives
+  (`RefFrame[1] = INTRA_FRAME`, `AngleDeltaY/UV = 0`, `wedge_sign = 0`) are caller-level. `read_compound_type`
+  (5.11.29 — `comp_group_idx` / `compound_idx` / `compound_type` + `wedge_sign`/`mask_type` literals, which
+  reuses the `Wedge_Index` CDF here) is the next bite; then MI-grid population + inter tile decode
+  (roadmap.md).
+
 ## [0.7.71] - 2026-07-14
 
 **Inter prediction — the remaining inter mode-info reads: `interp_filter` (spec 5.11.30) + `motion_mode`
