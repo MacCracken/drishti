@@ -246,8 +246,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   `av1_intermode.cyr` 0.7.73 (the full 5.11.29 driver — `av1_read_comp_group_idx`/`_compound_idx`/
   `_compound_type_sym` + `av1_read_compound_type` composing them with the shared wedge_index +
   wedge_sign/mask_type literals, Wedge_Bits, the av1_comptype_* record; all bites' adversarial reviews
-  returned no findings) are in — **THE INTER MODE-INFO BITSTREAM-READ LAYER IS COMPLETE**; next the MI-grid
-  population (writing the decoded RefFrames/Mvs/YModes/MiSizes/IsInter into the grid the scans read), then
+  returned no findings), and the **MI-grid population** `av1_mv.cyr` 0.7.74 (`av1_mi_store_mode` /
+  `av1_mi_store_final` — the 5.11.4 decode_block storage loops, writing a decoded block's mode info across
+  its bw4 x bh4 footprint, clipped to the frame; this CLOSES the producer->consumer loop the scans depend on)
+  are in — **THE INTER MODE-INFO BITSTREAM-READ LAYER IS COMPLETE and the grid it feeds is populated**; next
+  the neighbour-derived CDF contexts the grid can now supply (spec 8.3/9 — add CompGroupIdxs/CompoundIdxs/
+  InterpFilters to the grid, un-deferring the caller-input contexts), then
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d

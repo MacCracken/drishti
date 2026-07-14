@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.74] - 2026-07-14
+
+**Inter prediction — the MI-grid population (spec 5.11.4 `decode_block` storage loops). This closes the
+producer→consumer loop.** The MV-prediction scans (0.7.64) read a per-4×4 `Av1MiRec` grid; until now that
+grid was caller/test-built. These write a *decoded* block's mode info across its `bw4 × bh4` footprint, so
+the next block's scans see the previous block's decoded values — the premise spatial MV prediction rests on.
+Extends `src/av1_mv.cyr` with:
+
+- **`av1_mi_store_mode`** — the spec's first storage loop (post-`mode_info`): `YModes` / `RefFrames` /
+  `Mvs` across the footprint. `Mvs` are stored only for an inter block, and `Mvs[..][1]` only when compound
+  (the spec's `refList < 1 + isCompound`, `isCompound = RefFrame[1] > INTRA_FRAME`);
+- **`av1_mi_store_final`** — the spec's second storage loop (post-`residual`): `IsInters` / `MiSizes`, plus
+  drishti's own `avail` marker (the per-cell "decoded this frame" flag the scan-point check reads), which
+  belongs here rather than in loop 1 because it is only true once the block is fully decoded.
+
+The two loops are transcribed faithfully rather than merged: the fields the grid carries happen to be
+disjoint across them, so merging would be equivalent today, but keeping them apart lets the inter tile decode
+place each exactly where the spec does once `compute_prediction`/OBMC lands between them.
+
+Writes are **clipped** to the grid: an AV1 block may legitimately extend past the frame edge (the frame is
+padded to superblock multiples) and the spec's arrays are sized for that, but drishti's grid is frame-sized.
+The overhanging cells are never read back — `is_inside` gates every scan read to the tile. The clip, plus a
+`MiSize` range guard placed before the 22-entry `Num_4x4_Blocks_*` table load, is what keeps a hostile
+`MiSize`/`MiRow` from writing out of bounds.
+
+Verified by 1,210 new assertions (946 → 1,465 in the suite), each **mutation-verified** rather than assumed.
+`test_mi_grid_addressing` pins `av1_mv_grid_cell`'s absolute mapping (base, column stride, row stride =
+`fmi_cols` cells, last cell ending exactly at the grid end) so the footprint tests built on it are not
+circular. `test_mi_store_footprint` and `test_mi_store_mode_footprint` walk **every** grid cell asserting the
+touched set is exactly the expected rectangle — separately for each storage loop, and for a square block *and*
+a non-square 2×4 one, so width/height cannot be transposed undetected. Plus field-mapping (incl. the real
+single-ref `RefFrame[1] = NONE = -1`, not just the `INTRA_FRAME = 0` boundary), clipping (incl. no row-wrap),
+bad-arg rejection, and **`test_mi_store_closes_the_loop`** — store a decoded neighbour through the real
+storage loops, run `av1_mv_scan_row`, and assert the scan finds the stored MV.
+
+Measured mutation results against the 1,465-assertion baseline: transposing `bw4`/`bh4` in both loops → **18**
+failures; in `av1_mi_store_mode` only → **10**; dropping the column clip → **2**; dropping the `MiSize` guard
+→ **1**; changing `isCompound` from `ref1 > INTRA_FRAME` to `!= INTRA_FRAME` → **2**. The last two were each
+**0** before the review-driven tests were added — i.e. `av1_mi_store_mode`'s footprint and the `NONE`-vs-
+`INTRA_FRAME` distinction were genuinely unverified until then.
+
+### Added
+- **`src/av1_mv.cyr`** (extended): `av1_mi_store_mode` / `av1_mi_store_final`; the `AV1_MV_BLOCK_SIZES`
+  constant (this module is wired before `av1_intermode.cyr`, which carries its own `AV1_BLOCK_SIZES`).
+- **`tests/av1_mv.tcyr`** (extended): `test_mi_grid_addressing`, `test_mi_store_footprint`,
+  `test_mi_store_mode_footprint`, `test_mi_store_fields`, `test_mi_store_clip`, `test_mi_store_badargs`,
+  `test_mi_store_closes_the_loop` — 1,465 assertions total.
+
+### Scope / deferred
+- The grid carries the scan-consumed subset only. The spec's `UVModes` / `CompGroupIdxs` / `CompoundIdxs` /
+  `InterpFilters` (loop 1) and `Skips` / `SkipModes` / `TxSizes` / `SegmentIds` / `Palette*` / `DeltaLFs`
+  (loop 2) are not carried yet — `CompGroupIdxs`/`CompoundIdxs`/`InterpFilters` are exactly what the deferred
+  neighbour CDF contexts (spec 8.3/9) need, so wiring them is the natural next step, followed by the inter
+  tile decode (roadmap.md).
+
 ## [0.7.73] - 2026-07-14
 
 **Inter prediction — `read_compound_type` (spec 5.11.29), completing the inter mode-info read layer.** How a

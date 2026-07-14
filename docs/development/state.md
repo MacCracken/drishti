@@ -6,52 +6,52 @@
 
 ## Version
 
-**0.7.73** — cut 2026-07-14, not yet tagged (user's git). **Inter prediction — read_compound_type (spec
-5.11.29), COMPLETING THE INTER MODE-INFO READ LAYER.** How a compound block's two predictors are BLENDED.
-Unlike the preceding leaf-read bites this is the full spec DRIVER. `src/av1_intermode.cyr` adds
-**av1_read_comp_group_idx** / **av1_read_compound_idx** (binary, 6 ctx each) + **av1_read_compound_type_sym**
-(binary — COMPOUND_TYPES is 2 and the symbol value IS the enum: COMPOUND_WEDGE=0/COMPOUND_DIFFWTD=1, no
-remap, MiSize-indexed), and **av1_read_compound_type**, the driver: skip_mode → COMPOUND_AVERAGE with nothing
-coded; the isCompound path reads comp_group_idx (when enable_masked_compound) then either the jnt-comp branch
-(compound_idx → AVERAGE/DISTANCE) or the masked branch (**Wedge_Bits[MiSize]==0 FORCES COMPOUND_DIFFWTD**,
-else the compound_type symbol), then wedge_index + wedge_sign L(1) for WEDGE or mask_type L(1) for DIFFWTD;
-the NON-compound path reads NO symbol — compound_type falls out of interintra/wedge_interintra, and notably
-does NOT re-read wedge_index/wedge_sign (5.11.28 already read them — the spec's wedge block nests INSIDE
-isCompound). Adds Wedge_Bits[22] (§10) + the av1_comptype_* output record (compound_type/comp_group_idx/
-compound_idx/wedge_index/wedge_sign/mask_type); the av1_iicdf blob grew **464→566** (comp_group_idx [464,482),
-compound_idx [482,500), compound_type [500,566), exactly filling AV1IICDF_SIZE); paired encoder-inverse
-av1_write_compound_type. Verified by 1,545 new assertions — an EXHAUSTIVE per-row §10 diff of all three new
-tables (6+6+22) + the pre-existing [0,464) region byte-for-byte unchanged, the full Wedge_Bits table, and a
-ROUND-TRIP OVER EVERY DRIVER BRANCH (skip_mode; the three non-compound outcomes incl. wedge-fields-stay-0;
-comp_group_idx==0 with jnt on/off + both compound_idx values + !enable_masked_compound; comp_group_idx==1
-with WEDGE→index+sign, DIFFWTD→both mask_type values, and the n==0 forced-DIFFWTD case) plus a sweep over ALL
-9 wedge-capable MiSize × ALL 16 wedge_index values, each static + adaptive; plus a RECORD-REUSE test (decode
-into a deliberately dirtied record; assert the spec's comp_group_idx=0/compound_idx=1 init + every
-not-written field reset, so nothing leaks between blocks). A **4-slice adversarial spec review** (driver
-control flow vs spec / encoder-inverse + desync / blob layout + values-vs-§10 / test adequacy, each finding
-adversarially verified) returned **2 CONFIRMED of 4** — the driver-flow and encoder-inverse slices (the
-highest-risk surfaces) found NOTHING, but the tests slice landed a **major** one that MATTERED: the
-"exhaustive per-row §10 diff" was **CIRCULAR** — fill writes each row through the same accessor the check
-reads it back through, so a self-consistent base/stride error cancels out, and the row-checkers never
-asserted the adaptation-count slot (exactly what an ascending fill clobbers on overlap). The reviewer PROVED
-it by mutation: av1_iicdf_compidx / av1_iicdf_comptype stride 3→2 left the WHOLE SUITE GREEN. Fixed by
-asserting the count slot in every row-checker + adding test_iicdf/imcdf/refcdf_layout, which pin each group's
-ABSOLUTE offset/stride/row-count (derived from the documented layout, not the accessors), each group's end
-pinned to the next group's base and the last to AV1*CDF_SIZE. Re-verified by re-running the mutations:
-7/23/23/2/23 failures where all were previously 0 — the hole is closed RETROACTIVELY for the av1_imcdf
-(0.7.71), av1_refcdf (0.7.68) and av1_iicdf (0.7.72) blobs too. The other CONFIRMED (nit) was a field comment
-overclaiming wedge_index validity on the non-compound interintra-wedge path (0 is a legal wedge_index, so it
-was a trap for the MC stage) — both fixed. **THE INTER MODE-INFO BITSTREAM-READ
-LAYER IS COMPLETE** — every inter syntax element is read; what remains is wiring it into the MI grid + the
-inter tile decode. **Prior: inter-intra reads `av1_intermode.cyr` 0.7.72; interp filter + motion mode
+**0.7.74** — cut 2026-07-14, not yet tagged (user's git). **Inter prediction — the MI-GRID POPULATION (spec
+5.11.4 decode_block storage loops). THIS CLOSES THE PRODUCER->CONSUMER LOOP.** The MV-prediction scans
+(0.7.64) read a per-4x4 Av1MiRec grid; until now that grid was caller/test-built. `src/av1_mv.cyr` adds
+**av1_mi_store_mode** (the spec's FIRST storage loop, post-mode_info: YModes/RefFrames/Mvs across the block's
+bw4 x bh4 footprint — Mvs only for an inter block, Mvs[..][1] only when compound per the spec's
+`refList < 1 + isCompound`, isCompound = RefFrame[1] > INTRA_FRAME) and **av1_mi_store_final** (the SECOND
+loop, post-residual: IsInters/MiSizes + drishti's own `avail` marker — the per-cell "decoded this frame" flag
+the scan-point check reads, which belongs here since it is only true once the block is fully decoded). The
+two loops are transcribed FAITHFULLY rather than merged: the grid's fields are disjoint across them so
+merging would be equivalent today, but the split lets the inter tile decode place each exactly where the spec
+does once compute_prediction/OBMC lands between them. Writes are CLIPPED to the grid (an AV1 block may
+legitimately overhang the frame edge — the frame is padded to SB multiples — and the spec's arrays are sized
+for that, but drishti's grid is frame-sized; the overhanging cells are never read back since is_inside gates
+every scan read to the tile). The clip + a MiSize range guard BEFORE the 22-entry Num_4x4_Blocks_* table load
+are what keep a hostile MiSize/MiRow from writing OOB. Verified by 1,210 new assertions (946 -> 1,465), each
+MUTATION-VERIFIED rather than assumed: test_mi_grid_addressing pins av1_mv_grid_cell's ABSOLUTE mapping (base
+/ col stride / row stride = fmi_cols cells / last cell ending exactly at the grid end) so the footprint tests
+built on it are NOT circular; test_mi_store_footprint + test_mi_store_mode_footprint walk EVERY cell asserting
+the touched set is exactly the expected rectangle — SEPARATELY PER STORAGE LOOP, for a square block AND a
+non-square 2x4 one, so w/h cannot be transposed undetected; plus field mapping (incl. the REAL single-ref
+RefFrame[1] = NONE = -1, not just the INTRA_FRAME=0 boundary), clipping (incl. no row-wrap), bad-arg
+rejection, and **test_mi_store_closes_the_loop** (store a decoded neighbour through the real storage loops ->
+run av1_mv_scan_row -> assert the scan finds the stored MV). MEASURED mutation results vs the 1,465 baseline:
+transposing bw4/bh4 in both loops -> 18 failures; in store_mode only -> 10; dropping the column clip -> 2;
+dropping the MiSize guard -> 1; isCompound `>` -> `!=` -> 2. A **4-slice adversarial spec review** (spec
+fidelity / bounds safety / producer-consumer contract / test adequacy, each finding adversarially verified)
+returned **NO confirmed defects** (6 findings, all refuted) — the spec-fidelity and bounds-safety slices found
+nothing real, but the tests slice landed two REAL VERIFICATION GAPS that the refute pass, while rejecting them
+as code defects, confirmed factually: av1_mi_store_mode's footprint was entirely unverified (only store_final's
+was walked), and isCompound was only exercised at the ref1=0 boundary, never at the real single-ref NONE=-1.
+Both tests were added; PROVEN to close real gaps by re-running the mutations with them disabled — store_mode
+transpose and `>`-vs-`!=` BOTH passed silently (0 failures) before, 10 and 2 after. A refuted finding also
+caught STALE MUTATION COUNTS in this file's own draft (claimed 8/1, actual 18/18 at the time) — the numbers
+above are re-measured with no review workflow in flight (see [[review-agents-need-worktree-isolation]]).
+Next: the neighbour CDF contexts the grid can now feed (CompGroupIdxs/CompoundIdxs/InterpFilters), then the
+inter tile decode. **Prior: read_compound_type `av1_intermode.cyr` 0.7.73 (the inter mode-info read layer is
+COMPLETE); inter-intra reads 0.7.72; interp filter + motion mode
 0.7.71; compound mode path 0.7.70; compound reference path 0.7.69; reference-selection
 reads (single) 0.7.68; single-prediction inter mode reads
 0.7.67; MV component decode 0.7.66; find_mv_stack driver `av1_mv.cyr` 0.7.65; spatial neighbour scans 0.7.64;
 MV candidate stack 0.7.63; MV-prediction foundation 0.7.62; DPB / ref-frame buffer `av1_dpb.cyr` 0.7.61; MC
 driver `av1_mc_pred_block` 0.7.60; `emu_edge` 0.7.59; `put_8tap` 0.7.58; Subpel_Filters 0.7.57; superres
 0.7.52–0.7.56; multi-tile 0.7.47–0.7.51; 10-bit 0.7.46 — 3 of 4 decode tracks done, inter underway.** Next
-on the inter track: the MI-grid population (writing the decoded RefFrames/Mvs/YModes/MiSizes/IsInter into the
-grid the MV scans read) + the inter tile decode that lets `av1_decode_stream` decode a genuine inter frame
+on the inter track: the neighbour-derived CDF contexts the populated grid can now feed (spec 8.3/9 — needs
+CompGroupIdxs/CompoundIdxs/InterpFilters added to the grid), then the inter tile decode that lets
+`av1_decode_stream` decode a genuine inter frame
 referencing the DPB through the MC driver, then the temporal scan (needs the DPB's deferred saved MVs) +
 scaled-reference/BILINEAR MC + OBMC/warp; plus film-grain synthesis; then conformance + the encode-lane
 completion. The remaining distance to 1.0 is inter + conformance + the encode-lane completion (finishing
@@ -105,7 +105,7 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 | `src/av1_tile.cyr` | `av1_` | tile/frame loop (5.11.2) — decode_tile (clear_above/left + SB loop: clear_cdef + clear_block_decoded_flags + read_lr + decode_partition) + av1_decode_intra_tile driver (CDF-context + init_symbol wiring, qbucket) + paired encode driver — **the first fully decoded keyframe** |
 | `src/av1_deblock.cyr` | `av1_` | deblocking loop filter (7.14) — kernels (filter-size / strength / limits + mask + narrow/wide sample filters) + the edge loop (av1_lf_edge) + main driver (av1_deblock: 7.14.1 frame-level gate + all vertical then horizontal boundaries, in place) |
 | `src/av1_decode.cyr` | `av1_` | AV1 decode spine (raw bytes → pixels) — **av1_decode_obus**: OBU-stream walk (av1_obu_next dispatch: SEQUENCE_HEADER→av1_seq_parse, FRAME_HEADER→uncompressed_header, FRAME OBU type 6→parse fh + byte-split tile group 5.10, TILE_GROUP→accumulate into a frame-decode context). **Av1FrameDec** frame-decode context (av1_frame_dec_new/group/finish): begins a frame, decodes each tile group's tiles into the SHARED frame grids (in-order/contiguous guard; dim-bomb → error), filters once when complete — supports **multi-tile + multi-tile-group + superres** frames at 8/10/12-bit. **av1_decode_frame**: thin single-group wrapper (new→group→finish; partial group → DR_ERR_UNSUPPORTED), used by the FRAME OBU path. av1_apply_loop_filters: in-loop pipeline (deblock 7.14 → CDEF 7.15 → **superres 7.16** → LR 7.17; superres upscales FrameWidth→UpscaledWidth, LR at the upscaled width); **filter activation** (av1_lr_params_from_fh 5.9.20/7.17 + av1_activate_intra_filters); **tile-group parse** (av1_tile_group_parse 5.11.1 + av1_read_le 4.10.4) |
-| `src/av1_mv.cyr` | `av1_` | motion-vector prediction (spec 7.10.2) — **foundation** (0.7.62): **Av1Mv** (row,col) MV representation (1/8-luma-sample units; av1_mv_new/row/col/set); **av1_lower_mv_precision** + **av1_lower_mv_comp** (7.10.2.10); **av1_setup_global_mv** (7.10.2.1 — the global-motion MV candidate: 2×3 affine projection of the block center through gm_type/gm_params, rounded with the symmetric av1_round2_signed). **candidate stack** (0.7.63): **Av1MvStack** (RefStackMv[8][2][2] + WeightStack[8] + NumMvFound/NewMvCount; av1_mv_stack_new/reset/num/newmv_count/weight/row/col); **av1_mv_stack_add** (dedup-or-append core of search stack 7.10.2.8/9 — lower + weight-accumulate-or-append capped at 8 + NewMvCount); **av1_mv_stack_sort** + **_swap** (stable descending sort 7.10.2.13); **av1_has_newmv**. **spatial scans** (0.7.64): **Av1MiRec** per-4×4 MI grid (av1_mv_grid_new/cell/set) + **Av1MvCtx** scan context (av1_mvctx_* + is_inside); **av1_mv_scan_row**/**_scan_col** (7.10.2.2/3 — end4/parity/len-step/useStep16/is_inside break); **av1_mv_scan_point** (7.10.2.4 — corner probe gated on is_inside+avail); **av1_add_ref_mv_candidate** (7.10.2.7) + **av1_mv_search_stack**/**_compound_search_stack** (7.10.2.8/9 — is_inter + single/compound ref-match dispatch + GLOBALMV substitution). **find_mv_stack** (0.7.65): **av1_find_mv_stack** (7.10.2 driver — scan sequence + REF_CAT_LEVEL bonus + Close/TotalMatches + two-region sort); **av1_mv_extra_search**/**_add_extra_mv_candidate**/**_store_combined** (7.10.2.11/12 — fill-to-2 + sign-bias + global fill + compound combine); **av1_mv_context_and_clamping** (7.10.2.14 — DrlCtxStack/New/Ref/ZeroMvContext); **av1_clamp_mv_row**/**_col** (spec 6). The MI grid is populated by inter mode-info; the temporal scan is the sole deferral (needs the DPB saved MVs) |
+| `src/av1_mv.cyr` | `av1_` | motion-vector prediction (spec 7.10.2) — **foundation** (0.7.62): **Av1Mv** (row,col) MV representation (1/8-luma-sample units; av1_mv_new/row/col/set); **av1_lower_mv_precision** + **av1_lower_mv_comp** (7.10.2.10); **av1_setup_global_mv** (7.10.2.1 — the global-motion MV candidate: 2×3 affine projection of the block center through gm_type/gm_params, rounded with the symmetric av1_round2_signed). **candidate stack** (0.7.63): **Av1MvStack** (RefStackMv[8][2][2] + WeightStack[8] + NumMvFound/NewMvCount; av1_mv_stack_new/reset/num/newmv_count/weight/row/col); **av1_mv_stack_add** (dedup-or-append core of search stack 7.10.2.8/9 — lower + weight-accumulate-or-append capped at 8 + NewMvCount); **av1_mv_stack_sort** + **_swap** (stable descending sort 7.10.2.13); **av1_has_newmv**. **spatial scans** (0.7.64): **Av1MiRec** per-4×4 MI grid (av1_mv_grid_new/cell/set) + **Av1MvCtx** scan context (av1_mvctx_* + is_inside); **av1_mv_scan_row**/**_scan_col** (7.10.2.2/3 — end4/parity/len-step/useStep16/is_inside break); **av1_mv_scan_point** (7.10.2.4 — corner probe gated on is_inside+avail); **av1_add_ref_mv_candidate** (7.10.2.7) + **av1_mv_search_stack**/**_compound_search_stack** (7.10.2.8/9 — is_inter + single/compound ref-match dispatch + GLOBALMV substitution). **find_mv_stack** (0.7.65): **av1_find_mv_stack** (7.10.2 driver — scan sequence + REF_CAT_LEVEL bonus + Close/TotalMatches + two-region sort); **av1_mv_extra_search**/**_add_extra_mv_candidate**/**_store_combined** (7.10.2.11/12 — fill-to-2 + sign-bias + global fill + compound combine); **av1_mv_context_and_clamping** (7.10.2.14 — DrlCtxStack/New/Ref/ZeroMvContext); **av1_clamp_mv_row**/**_col** (spec 6). The MI grid is populated by inter mode-info; the temporal scan is the sole deferral (needs the DPB saved MVs)  **MI-GRID POPULATION** (0.7.74): **av1_mi_store_mode** (5.11.4 storage loop 1 — YModes/RefFrames/Mvs across the block's bw4 x bh4 footprint; Mvs only when inter, Mvs[1] only when compound) + **av1_mi_store_final** (loop 2 — IsInters/MiSizes + the `avail` marker); writes CLIPPED to the grid (blocks may overhang the frame edge) + a MiSize guard before the Num_4x4_Blocks_* table load. This CLOSES the producer->consumer loop: the scans above now read what the decoder stored |
 | `src/av1_intermode.cyr` | `av1_` | inter mode-info (spec 5.11.23+), bitstream-read layer — **MV component decode** (0.7.66): the nine MV CDF tables (mv_joint/sign/class/class0_bit/class0_fr/class0_hp/fr/hp/bit, §10 defaults in a 286-entry [MvCtx][comp] context; av1_mvcdf_new/blob + accessors); **av1_read_mv**/**_read_mv_component** (5.11.32 — mv_joint dispatch → per-component sign/class/magnitude split, force_int/allow_hp defaults, PredMv add) + paired encoder. **single-prediction mode reads** (0.7.67): the New_Mv/Zero_Mv/Ref_Mv/Drl_Mode CDFs (§10, 51-entry blob av1_imcdf_new/blob); **av1_read_inter_mode** (new_mv/zero_mv/ref_mv → NEWMV/GLOBALMV/NEARESTMV/NEARMV via the find_mv_stack contexts); **av1_read_drl_idx** (RefMvIdx via drl_mode + DrlCtxStack + NumMvFound); **av1_assign_mv_single** (PredMv from RefStackMv[pos]/GlobalMvs + read_mv for NEWMV → the block's Mv) + paired encoders — composes find_mv_stack (0.7.65) + read_mv (0.7.66). **reference-selection reads** (0.7.68): the Is_Inter[4]/Single_Ref[3][6] CDFs (§10, 66-entry blob av1_refcdf_new/blob); **av1_read_is_inter** (the @@is_inter symbol 5.11.30) + **av1_read_single_ref** (the single_ref_p1..p6 tree → RefFrame[0]∈LAST..ALTREF 5.11.25, RefFrame[1]=NONE) + paired encoders; the neighbour-count CDF contexts (8.3) are caller inputs. **compound references** (0.7.69): the Comp_Mode[5]/Comp_Ref_Type[5]/Comp_Ref[3][3]/Comp_Bwd_Ref[3][2]/Uni_Comp_Ref[3][3] CDFs (§10, blob 66→168); **av1_read_comp_mode** (single vs compound) + **av1_read_compound_ref** (comp_ref_type → unidir 4 same-direction pairs / bidir fwd RefFrame[0] + bwd RefFrame[1], all 16 pairs 5.11.25) + paired encoders. **compound mode path** (0.7.70): the 8-symbol **Compound_Mode** CDF (§10, blob 51→123) + Compound_Mode_Ctx_Map; **av1_read_compound_mode** (compound_mode → YMode); **av1_get_mode** (per-list mode split); **av1_assign_mv_compound** (two-list assign via per-list av1_assign_mv_list) + read_drl_idx extended to compound. **interp filter + motion mode** (0.7.71): the 3-symbol **Interp_Filter[16][4]** CDF (§10, blob 123→341) + **av1_read_interp_filter**; the MiSize-indexed motion-mode reads **av1_read_motion_mode** (SIMPLE/OBMC/LOCALWARP, Motion_Mode[22][4]) + **av1_read_use_obmc** (binary, Use_Obmc[22][3]) + paired writers (av1_imcdf_interp/motionmode/useobmc accessors + av1_imcdf_put3). **inter-intra reads** (0.7.72): a NEW **av1_iicdf** blob (464 i64) tiling the Inter_Intra[3]/Inter_Intra_Mode[3]/Wedge_Inter_Intra[22]/Wedge_Index[22][16] CDFs (§10); **av1_read_interintra** (binary) + **av1_read_interintra_mode** (4-sym II_DC/V/H/SMOOTH), both ctx=Size_Group[MiSize]-1 (reusing av1_size_group); **av1_read_wedge_interintra** (binary) + **av1_read_wedge_index** (16-sym, MiSize-indexed, shared with compound_type) + paired writers (av1_iicdf_put16 + av1_iicdf_wedge_unif). **read_compound_type** (0.7.73): the full 5.11.29 DRIVER — **av1_read_comp_group_idx**/**av1_read_compound_idx** (binary, 6 ctx) + **av1_read_compound_type_sym** (binary, COMPOUND_TYPES=2, symbol IS the enum) + **av1_read_compound_type** composing them with the shared wedge_index + wedge_sign/mask_type L(1) literals (Wedge_Bits[MiSize]==0 forces DIFFWTD; the non-compound path reads NO symbol — compound_type falls out of interintra/wedge_interintra); Wedge_Bits[22] + the av1_comptype_* record; blob 464→566; paired encoder-inverse. THE INTER MODE-INFO READ LAYER IS COMPLETE |
 | `src/av1_dpb.cyr` | `av1_` | decoded-picture buffer / ref-frame ring (spec 7.20 + 7.21) — **Av1Dpb** 8-slot pixel FrameStore (av1_dpb_new/frame/valid/count); **reference frame update** (7.20): av1_dpb_store (pixel half — stores a decoded frame into every refresh_frame_flags slot) + av1_dpb_update (full process: pixel store + the metadata half av1_frame_update_refs); **reference frame loading** (7.21): av1_dpb_load (serves show_existing_frame from FrameStore[frame_to_show_map_idx]); **av1_dpb_ref_frame** (the inter/MC hook: LAST..ALTREF → ref_frame_idx → the stored DrFrame av1_mc_pred_block reads); **av1_decode_stream** (multi-frame OBU walk — decodes every coded frame into the DPB, serves show_existing, returns the last shown frame; av1_decode_obus stays the single-frame entry). PIXEL ring only; saved-CDF/MV/segment-id + full 7.21 metadata reload are inter-only later bites |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
@@ -125,13 +125,13 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 ## Gates (all green, 2026-07-13)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 37 suites / **24,623 assertions**: drishti 51 · bits
+- `make test` — 37 suites / **25,833 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 255 · av1_intermode 3,169 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,465 · av1_intermode 3,169 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
@@ -285,7 +285,15 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
   a spec-mandated caller-gated precondition — interintra is only read for
   BLOCK_8X8..BLOCK_32X32 (all Size_Group≥1), matching the file's caller-trusted leaf
   convention, and a clamp would DEVIATE from the spec formula; a refuted Wedge_Inter_Intra
-  coverage note was folded in anyway as an all-22-row check), and read_compound_type
+  coverage note was folded in anyway as an all-22-row check), the MI-grid population
+  (`av1_mv.cyr` 0.7.74, 4 slices, each finding adversarially verified: spec fidelity /
+  bounds safety / producer-consumer contract / test adequacy → **6 findings, ALL refuted,
+  0 confirmed** — but the tests slice's two refuted findings were FACTUALLY right and
+  closed real verification gaps: av1_mi_store_mode's footprint was unverified, and
+  isCompound was never exercised at the real single-ref NONE=-1. Both tests added and
+  PROVEN to bite by re-running the mutations with them disabled: 0 failures before, 10
+  and 2 after. A third refuted finding caught STALE MUTATION COUNTS in the draft docs,
+  re-measured), and read_compound_type
   (`av1_intermode.cyr` 0.7.73, 4 slices, each finding adversarially verified: driver
   control flow vs spec / encoder-inverse + desync / blob layout + values-vs-§10 / test
   adequacy → **4 findings, 2 CONFIRMED** — the two highest-risk slices (driver flow,

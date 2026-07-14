@@ -740,6 +740,208 @@ fn test_driver_clamp_negative() {
     return 0;
 }
 
+# ================================================================
+# MI-grid addressing — pinned in ABSOLUTE terms. The footprint tests below read cells
+# back through av1_mv_grid_cell, the same accessor av1_mi_store_* writes through, so a
+# self-consistent addressing bug would cancel out there. Pin the mapping here, once,
+# against arithmetic derived from the documented layout instead of from the accessor.
+# ================================================================
+fn test_mi_grid_addressing() {
+    var cols = 7;
+    var rows = 5;
+    var g = av1_mv_grid_new(cols, rows);
+    assert_nonnull(g, "grid alloc");
+    assert_eq(av1_mv_grid_cell(g, cols, 0, 0) - g, 0, "cell(0,0) at base");
+    assert_eq(av1_mv_grid_cell(g, cols, 0, 1) - g, AV1MIR_SIZE, "col stride = AV1MIR_SIZE");
+    assert_eq(av1_mv_grid_cell(g, cols, 1, 0) - g, cols * AV1MIR_SIZE, "row stride = fmi_cols cells");
+    assert_eq(av1_mv_grid_cell(g, cols, 3, 4) - g, ((3 * 7) + 4) * AV1MIR_SIZE, "cell(3,4)");
+    assert_eq(av1_mv_grid_cell(g, cols, rows - 1, cols - 1) + AV1MIR_SIZE - g,
+    rows * cols * AV1MIR_SIZE, "last cell ends EXACTLY at the grid end");
+    return 0;
+}
+
+# ================================================================
+# MI-grid population (5.11.4) — a decoded block's mode info written across its
+# bw4 x bh4 footprint, so the NEXT block's scans see it.
+# ================================================================
+fn mi_avail(g, cols, r, c): i64 { return load64(av1_mv_grid_cell(g, cols, r, c) + AV1MIR_AVAIL); }
+fn mi_fld(g, cols, r, c, off): i64 { return load64(av1_mv_grid_cell(g, cols, r, c) + off); }
+# Walk EVERY cell and assert avail==1 exactly on the expected (clipped) rectangle — this
+# catches both over-write (cells outside the block) and under-write (cells inside it).
+fn mi_assert_rect(g, cols, rows, r0, c0, bw4, bh4, tag): i64 {
+    var r = 0;
+    while (r < rows) {
+        var c = 0;
+        while (c < cols) {
+            var want = 0;
+            if (r >= r0 && r < r0 + bh4 && c >= c0 && c < c0 + bw4) { want = 1; }
+            assert_eq(mi_avail(g, cols, r, c), want, tag);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return 0;
+}
+# BLOCK_16X16 (MiSize 6) is 4x4 MI cells; BLOCK_8X16 (MiSize 4) is 2x4 (bw4=2, bh4=4).
+fn test_mi_store_footprint() {
+    var cols = 16;
+    var rows = 16;
+    var g = av1_mv_grid_new(cols, rows);
+    # a 4x4-cell block at (2,3): exactly those 16 cells go avail.
+    assert_eq(av1_num_4x4_w(6), 4, "BLOCK_16X16 bw4");
+    assert_eq(av1_num_4x4_h(6), 4, "BLOCK_16X16 bh4");
+    av1_mi_store_final(g, cols, rows, 2, 3, 6, 1);
+    mi_assert_rect(g, cols, rows, 2, 3, 4, 4, "16x16 block footprint");
+    # a NON-square block (BLOCK_8X16, bw4=2 bh4=4) proves w/h are not swapped.
+    var g2 = av1_mv_grid_new(cols, rows);
+    var bw = av1_num_4x4_w(4);
+    var bh = av1_num_4x4_h(4);
+    assert_eq(bw, 2, "BLOCK_8X16 bw4=2");
+    assert_eq(bh, 4, "BLOCK_8X16 bh4=4");
+    av1_mi_store_final(g2, cols, rows, 5, 5, 4, 1);
+    mi_assert_rect(g2, cols, rows, 5, 5, bw, bh, "8x16 block footprint (w/h not swapped)");
+    return 0;
+}
+# av1_mi_store_mode has its OWN footprint loop — verify it independently of store_final's.
+# Cells start memset-0, so a distinctive YMode marks exactly the cells it touched.
+fn mi_assert_rect_ymode(g, cols, rows, r0, c0, bw4, bh4, mark, tag): i64 {
+    var r = 0;
+    while (r < rows) {
+        var c = 0;
+        while (c < cols) {
+            var want = 0;
+            if (r >= r0 && r < r0 + bh4 && c >= c0 && c < c0 + bw4) { want = mark; }
+            assert_eq(mi_fld(g, cols, r, c, AV1MIR_YMODE), want, tag);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return 0;
+}
+fn test_mi_store_mode_footprint() {
+    var cols = 16;
+    var rows = 16;
+    # square 4x4-cell block (BLOCK_16X16).
+    var g = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g, cols, rows, 2, 3, 6, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0);
+    mi_assert_rect_ymode(g, cols, rows, 2, 3, 4, 4, AV1_NEWMV, "store_mode 16x16 footprint");
+    # NON-square (BLOCK_8X16: bw4=2, bh4=4) — catches a bw4/bh4 transpose in store_mode.
+    var g2 = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g2, cols, rows, 5, 5, 4, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0);
+    mi_assert_rect_ymode(g2, cols, rows, 5, 5, av1_num_4x4_w(4), av1_num_4x4_h(4), AV1_NEWMV,
+    "store_mode 8x16 footprint (w/h not swapped)");
+    # the MVs must reach EVERY cell of the footprint, not just the top-left.
+    assert_eq(mi_fld(g2, cols, 8, 6, AV1MIR_MV0ROW), 5, "mv reaches the far corner of the footprint");
+    assert_eq(mi_fld(g2, cols, 8, 6, AV1MIR_MV0COL), 6, "mv col reaches the far corner");
+    return 0;
+}
+# field mapping: ymode/refs always; Mvs only when inter; Mvs[1] only when compound.
+fn test_mi_store_fields() {
+    var cols = 8;
+    var rows = 8;
+    # INTER, single ref (ref1 = INTRA_FRAME -> not compound): Mv[0] stored, Mv[1] NOT.
+    var g = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 11, 22, 77, 88);
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_YMODE), AV1_NEWMV, "ymode stored");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_REF0), 1, "ref0 stored");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_REF1), AV1_INTRA_FRAME, "ref1 stored");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_MV0ROW), 11, "mv0 row stored (inter)");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_MV0COL), 22, "mv0 col stored (inter)");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_MV1ROW), 0, "mv1 row NOT stored (single ref)");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_MV1COL), 0, "mv1 col NOT stored (single ref)");
+    assert_eq(mi_avail(g, cols, 1, 1), 0, "store_mode does NOT raise avail");
+    # SINGLE-REF INTER with the REAL RefFrame[1] value, NONE = -1 (the case above uses the
+    # INTRA_FRAME=0 boundary). isCompound is `ref1 > INTRA_FRAME`; a `!= INTRA_FRAME` bug
+    # would wrongly treat NONE as compound and is only visible here.
+    var gn = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(gn, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 11, 22, 77, 88);
+    assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_REF1), AV1_REF_NONE, "ref1 = NONE stored");
+    assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_MV0ROW), 11, "mv0 stored (single-ref inter)");
+    assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_MV1ROW), 0, "mv1 NOT stored (ref1 = NONE is not compound)");
+    assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_MV1COL), 0, "mv1 col NOT stored (ref1 = NONE)");
+    # COMPOUND (ref1 > INTRA_FRAME): both MVs stored.
+    var g2 = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g2, cols, rows, 1, 1, 3, AV1_NEW_NEWMV, 1, 4, 1, 11, 22, 77, 88);
+    assert_eq(mi_fld(g2, cols, 1, 1, AV1MIR_MV1ROW), 77, "mv1 row stored (compound)");
+    assert_eq(mi_fld(g2, cols, 1, 1, AV1MIR_MV1COL), 88, "mv1 col stored (compound)");
+    # the LOWEST compound ref (LAST_FRAME = 1) — one past the INTRA_FRAME=0 boundary.
+    var g4 = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g4, cols, rows, 1, 1, 3, AV1_NEW_NEWMV, 1, 1, 1, 11, 22, 77, 88);
+    assert_eq(mi_fld(g4, cols, 1, 1, AV1MIR_MV1ROW), 77, "mv1 stored (ref1 = LAST_FRAME = 1, compound)");
+    # INTRA (is_inter=0): no MV is stored even though mv args are non-zero.
+    var g3 = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g3, cols, rows, 1, 1, 3, 0, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 11, 22, 77, 88);
+    assert_eq(mi_fld(g3, cols, 1, 1, AV1MIR_MV0ROW), 0, "mv0 NOT stored (intra)");
+    assert_eq(mi_fld(g3, cols, 1, 1, AV1MIR_MV1ROW), 0, "mv1 NOT stored (intra)");
+    assert_eq(mi_fld(g3, cols, 1, 1, AV1MIR_REF0), AV1_INTRA_FRAME, "intra ref0 still stored");
+    # store_final writes is_inter/MiSize/avail.
+    av1_mi_store_final(g, cols, rows, 1, 1, 3, 1);
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_ISINTER), 1, "is_inter stored by final");
+    assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_MISIZE), 3, "mi_size stored by final");
+    assert_eq(mi_avail(g, cols, 1, 1), 1, "avail raised by final");
+    return 0;
+}
+# a block overhanging the frame edge writes only the in-grid cells (no OOB, no wrap).
+fn test_mi_store_clip() {
+    var cols = 6;
+    var rows = 6;
+    # 4x4-cell block at (4,4) overhangs both edges: only the 2x2 corner is in-grid.
+    var g = av1_mv_grid_new(cols, rows);
+    assert_eq(av1_mi_store_final(g, cols, rows, 4, 4, 6, 1), DR_OK, "overhang store ok");
+    mi_assert_rect(g, cols, rows, 4, 4, 2, 2, "right+bottom overhang clipped to 2x2");
+    # a row-only overhang: block at (5,0) has 1 row in-grid, full 4 cols.
+    var g2 = av1_mv_grid_new(cols, rows);
+    av1_mi_store_final(g2, cols, rows, 5, 0, 6, 1);
+    mi_assert_rect(g2, cols, rows, 5, 0, 4, 1, "bottom overhang clipped to 1 row");
+    # the clip must not WRAP into the next row: cell(4, cols-1) stays untouched.
+    assert_eq(mi_avail(g2, cols, 4, cols - 1), 0, "no wrap into the previous row");
+    # store_mode clips identically.
+    var g3 = av1_mv_grid_new(cols, rows);
+    assert_eq(av1_mi_store_mode(g3, cols, rows, 4, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 9, 9, 0, 0),
+    DR_OK, "store_mode overhang ok");
+    assert_eq(mi_fld(g3, cols, 4, 5, AV1MIR_MV0ROW), 9, "in-grid corner written");
+    assert_eq(mi_fld(g3, cols, 5, 5, AV1MIR_MV0ROW), 9, "in-grid corner written 2");
+    return 0;
+}
+fn test_mi_store_badargs() {
+    var cols = 8;
+    var rows = 8;
+    var g = av1_mv_grid_new(cols, rows);
+    assert_eq(av1_mi_store_final(0, cols, rows, 0, 0, 6, 1), DR_ERR_BOUNDS, "null grid rejected");
+    assert_eq(av1_mi_store_final(g, cols, rows, 0 - 1, 0, 6, 1), DR_ERR_BOUNDS, "negative r rejected");
+    assert_eq(av1_mi_store_final(g, cols, rows, 0, 0 - 1, 6, 1), DR_ERR_BOUNDS, "negative c rejected");
+    # MiSize indexes a 22-entry table — out-of-range must be rejected BEFORE the load.
+    assert_eq(av1_mi_store_final(g, cols, rows, 0, 0, 22, 1), DR_ERR_BOUNDS, "MiSize 22 rejected");
+    assert_eq(av1_mi_store_final(g, cols, rows, 0, 0, 0 - 1, 1), DR_ERR_BOUNDS, "MiSize -1 rejected");
+    assert_eq(av1_mi_store_mode(g, cols, rows, 0, 0, 22, 0, 1, 2, 1, 0, 0, 0, 0), DR_ERR_BOUNDS,
+    "store_mode MiSize 22 rejected");
+    # a rejected call must not have written anything.
+    mi_assert_rect(g, cols, rows, 0, 0, 0, 0, "rejected calls wrote nothing");
+    return 0;
+}
+# THE POINT OF THE BITE: store a decoded block, then run the NEXT block's scan and see
+# it pick the stored MV up. Producer (5.11.4 storage) -> consumer (7.10.2 scans).
+fn test_mi_store_closes_the_loop() {
+    # block under test at (4,4), BLOCK_8X8 (MiSize 3, 2x2 cells), refs 1/2.
+    var ctx = mvs_ctx(3, 4, 4);
+    var g = load64(ctx + AV1MVC_GRID);
+    var cols = load64(ctx + AV1MVC_FMI_COLS);
+    # decode a BLOCK_16X16 inter neighbour ABOVE it, at (2,4) with ref0=1, Mv (24, -16),
+    # written through the real storage loops rather than the test's cell setter.
+    av1_mi_store_mode(g, cols, 16, 2, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 24, 0 - 16, 0, 0);
+    av1_mi_store_final(g, cols, 16, 2, 4, 6, 1);
+    # the stored block covers rows 2..5 x cols 4..7, so row 3 (the scan's r-1) is covered.
+    assert_eq(mi_avail(g, cols, 3, 4), 1, "the neighbour row the scan reads is populated");
+    assert_eq(mi_fld(g, cols, 3, 4, AV1MIR_MISIZE), 6, "MiSize propagated across the footprint");
+    # scan_row(-1) must now find the stored MV as a candidate.
+    av1_mv_scan_row(ctx, 0 - 1, 0);
+    assert_eq(mvs_num(ctx), 1, "scan found the stored neighbour");
+    assert_eq(mvs_row(ctx, 0, 0), 24, "candidate row == the stored Mv row");
+    assert_eq(mvs_col(ctx, 0, 0), 0 - 16, "candidate col == the stored Mv col");
+    assert_eq(mvs_nmv(ctx), 1, "NEWMV neighbour counted");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -791,6 +993,15 @@ fn main() {
     test_driver_drl_z2();
     test_driver_signbias_append();
     test_driver_clamp_negative();
+    test_group("MI-grid addressing (absolute — accessor-independent)");
+    test_mi_grid_addressing();
+    test_group("MI-grid population (5.11.4 storage loops)");
+    test_mi_store_footprint();
+    test_mi_store_mode_footprint();
+    test_mi_store_fields();
+    test_mi_store_clip();
+    test_mi_store_badargs();
+    test_mi_store_closes_the_loop();
     return assert_summary();
 }
 
