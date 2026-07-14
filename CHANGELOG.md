@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.67] - 2026-07-13
+
+**Inter prediction — the single-prediction inter mode reads (spec 5.11.32).** The bite where the
+MV-prediction arc **composes**: given a `find_mv_stack` context (the entropy contexts + the candidate
+stack + `GlobalMvs`, all from `av1_mv.cyr`), decode an inter block's mode and motion vector. Extends
+`src/av1_intermode.cyr` with:
+
+- **the inter-mode CDF family** — `New_Mv` / `Zero_Mv` / `Ref_Mv` / `Drl_Mode`, transcribed per-value
+  from the §10 defaults into a 51-entry blob (`av1_imcdf_new` / `_blob` + accessors);
+- **`av1_read_inter_mode`** — the single-prediction YMode: `new_mv` (→ NEWMV) else `zero_mv`
+  (→ GLOBALMV) else `ref_mv` (→ NEARESTMV / NEARMV), each read with its `find_mv_stack` context
+  (`NewMvContext` / `ZeroMvContext` / `RefMvContext`);
+- **`av1_read_drl_idx`** — the DRL predictor index `RefMvIdx`: NEWMV scans `drl_mode` over idx 0..1,
+  NEARMV starts at 1 and scans idx 1..2, each read only when `NumMvFound > idx + 1`, indexed by
+  `DrlCtxStack[idx]`;
+- **`av1_assign_mv_single`** — the block's `Mv`: `GLOBALMV` takes `GlobalMvs[0]`, else the predictor is
+  `RefStackMv[pos][0]` (pos = 0 for NEARESTMV, `RefMvIdx` for NEARMV, `RefMvIdx`-or-0-if-`NumMvFound≤1`
+  for NEWMV), and NEWMV adds the `read_mv` (0.7.66) difference — so `find_mv_stack` (0.7.65) and
+  `read_mv` (0.7.66) compose into a decoded inter MV;
+- the paired `av1_write_inter_mode` / `av1_write_drl_idx` encoders.
+
+Verified by 266 assertions (74 new): a CDF-structure check against §10, plus a full **compose
+round-trip** — build an `Av1MvCtx` carrying the contexts + a candidate stack + `GlobalMvs`, encode
+(mode + DRL + the NEWMV difference), decode (mode → DRL → assign_mv), and assert YMode / RefMvIdx /
+Mv — across all four modes, the DRL index over `NumMvFound`/`RefMvIdx` combinations (both the DRL-break
+and DRL-advance branches at each idx), the single-candidate `pos = 0` path, and adaptive CDFs. A
+**4-slice adversarial spec review** (read_inter_mode + CDFs / read_drl_idx / assign_mv + safety / tests
++ libaom-dav1d cross-check, each finding adversarially verified) returned **no findings** — because a
+self-round-trip cannot catch a *shared* encode/decode bug, reviewers per-value-diffed the four CDF
+families against §10, verified the decode against the 5.11.32 pseudocode independently, hand-traced the
+DRL encoder-inverse pairs, and confirmed the `assign_mv` `pos` never OOBs (`RefMvIdx < NumMvFound`, and
+`find_mv_stack` pads slots 0/1 with `GlobalMvs`). **21,720 suite assertions + 1,140 fuzz assertions,
+all green; `make lint` + `make fmt-check` green.**
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): the `New_Mv` / `Zero_Mv` / `Ref_Mv` / `Drl_Mode` CDF family
+  (`av1_imcdf_*`); `av1_read_inter_mode` / `av1_read_drl_idx` / `av1_assign_mv_single` (5.11.32) +
+  `av1_write_inter_mode` / `av1_write_drl_idx`.
+- **`tests/av1_intermode.tcyr`** (extended): `test_imcdf_structure`, `test_inter_mode_rt`,
+  `test_drl_idx_rt`, `test_drl_single_candidate`, `test_inter_mode_adaptive` — 266 assertions total.
+
+### Scope / deferred
+- SINGLE prediction only. COMPOUND prediction (`compound_mode` + `get_mode` + the two-list `assign_mv`),
+  `use_intrabc` (intra block copy), and the `skip_mode` / segment-forced YMode branches are the caller's
+  concern / later bites, as are `read_ref_frames` (which sets `RefFrame` / `isCompound`), motion mode,
+  interp filter, and compound type (roadmap.md).
+
 ## [0.7.66] - 2026-07-13
 
 **Inter prediction — the MV component decode (spec 5.11.32), the first inter mode-info bite.** The

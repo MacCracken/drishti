@@ -3,23 +3,30 @@
 # coder, producing the Mv[] + RefFrame[] + YMode the MI grid holds (which the
 # MV-prediction scans in av1_mv.cyr then read for the NEXT block).
 #
-# This is its LEAF-FIRST first bite: the MOTION-VECTOR component decode —
-# read_mv / read_mv_component (spec 5.11.32) — plus its small CDF family and the
-# paired encoder. read_mv decodes a motion-vector DIFFERENCE from the bitstream
-# (a joint symbol, then per non-zero component a sign / class / magnitude split
-# through nine CDFs) and adds it to the predicted MV (PredMv, from find_mv_stack)
-# to form the block's Mv. Every path round-trips through the symbol encoder.
+# Bites so far:
+#   * (0.7.66) the MOTION-VECTOR component decode — read_mv / read_mv_component
+#     (spec 5.11.32) — plus its nine-CDF family and the paired encoder. read_mv
+#     decodes a motion-vector DIFFERENCE (a joint symbol, then per non-zero
+#     component a sign / class / magnitude split) and adds it to the predicted MV.
+#   * (0.7.67) the SINGLE-PREDICTION inter mode reads — read_inter_mode
+#     (new_mv / zero_mv / ref_mv → NEWMV / GLOBALMV / NEARESTMV / NEARMV, from the
+#     find_mv_stack contexts), read_drl_idx (the DRL predictor index from
+#     DrlCtxStack + NumMvFound), and assign_mv (compose PredMv from RefStackMv /
+#     GlobalMvs + read_mv for NEWMV → the block's Mv) — plus their four CDFs and
+#     paired encoders. This is where the MV-prediction arc (find_mv_stack contexts
+#     + candidate stack, av1_mv.cyr) and read_mv COMPOSE into a decoded inter MV.
+# Every path round-trips through the symbol encoder.
 #
-# FLAT module — wired after src/av1_mv.cyr (it produces the Mv the grid stores).
-# Family av1_. Depends on: av1_symbol (av1_sym_read_symbol / av1_sym_encode_symbol),
-# av1_mv (AV1MV_ROW / AV1MV_COL), drishti (DR_OK).
+# FLAT module — wired after src/av1_mv.cyr (it consumes the find_mv_stack context
+# + candidate stack and produces the Mv the grid stores). Family av1_. Depends on:
+# av1_symbol (av1_sym_read_symbol / av1_sym_encode_symbol), av1_mv (AV1MV_ROW /
+# AV1MV_COL, the Av1MvCtx accessors + AV1_NEARESTMV..AV1_NEWMV modes), drishti (DR_OK).
 #
-# Derived from the AV1 spec §5.11.32 (MV syntax) + the MV-component CDF selection
-# (§9 parsing process: TileMv*Cdf[MvCtx][comp]) + the default MV CDF tables
-# (§10 additional-tables annex). Cross-checked against libaom entropymv.c
-# (read_mv_component / encode_mv_component) + dav1d decode.c (read_mv). The rest
-# of inter mode-info (is_inter, ref frames, the inter mode reads, DRL, motion
-# mode, compound type) grows here in later bites (roadmap.md).
+# Derived from the AV1 spec §5.11.32 (MV syntax + inter_block_mode_info + assign_mv)
+# + the CDF selection (§9 parsing process) + the default CDF tables (§10 annex).
+# Cross-checked against libaom (entropymv.c / decodemv.c) + dav1d (decode.c). The
+# rest of inter mode-info (is_inter, ref frames, the COMPOUND mode path, motion
+# mode, interp filter, compound type) grows here in later bites (roadmap.md).
 
 # ================================================================
 # MV syntax constants (spec 3 symbols + 07 semantics enum).
@@ -287,6 +294,209 @@ fn av1_write_mv(enc, cc, mv_ctx, allow_hp, force_int, diff_row, diff_col): i64 {
     }
     if ((joint == AV1_MV_JOINT_HNZVZ) || (joint == AV1_MV_JOINT_HNZVNZ)) {
         av1_write_mv_component(enc, cc, mv_ctx, 1, allow_hp, force_int, diff_col);
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# THE SINGLE-PREDICTION INTER MODE READS (spec 5.11.32 inter_block_mode_info +
+# assign_mv). Given a find_mv_stack context (av1_mv.cyr's Av1MvCtx — the entropy
+# contexts + the candidate stack RefStackMv + GlobalMvs + NumMvFound), decode:
+#   1. read_inter_mode — the inter YMode via new_mv / zero_mv / ref_mv;
+#   2. read_drl_idx    — the DRL predictor index (RefMvIdx) via drl_mode;
+#   3. assign_mv       — the block's Mv: PredMv from RefStackMv[RefMvIdx] (or
+#      GlobalMvs), then read_mv for NEWMV (else Mv = PredMv).
+# Four small binary CDF families (New_Mv / Zero_Mv / Ref_Mv / Drl_Mode, §10),
+# each indexed by its find_mv_stack context. COMPOUND prediction (compound_mode +
+# the two-list assign_mv) is a later bite (roadmap.md); use_intrabc likewise.
+# ================================================================
+enum Av1InterModeConst {
+    AV1_NEW_MV_CONTEXTS  = 6;
+    AV1_ZERO_MV_CONTEXTS = 2;
+    AV1_REF_MV_CONTEXTS  = 6;
+    AV1_DRL_MODE_CONTEXTS = 3;
+}
+
+# The inter-mode CDF blob (51 i64): four binary families, entry offsets —
+#   new_mv  [ctx 0..5]  base 0,  ctx*3   -> [0,18)
+#   zero_mv [ctx 0..1]  base 18, ctx*3   -> [18,24)
+#   ref_mv  [ctx 0..5]  base 24, ctx*3   -> [24,42)
+#   drl     [ctx 0..2]  base 42, ctx*3   -> [42,51)
+enum Av1ImCdfOff { AV1IMCDF_SIZE = 51; }
+fn av1_imcdf_newmv(cc, ctx): i64 { return cc + ((0 + (ctx * 3)) * 8); }
+fn av1_imcdf_zeromv(cc, ctx): i64 { return cc + ((18 + (ctx * 3)) * 8); }
+fn av1_imcdf_refmv(cc, ctx): i64 { return cc + ((24 + (ctx * 3)) * 8); }
+fn av1_imcdf_drl(cc, ctx): i64 { return cc + ((42 + (ctx * 3)) * 8); }
+
+# fill the inter-mode CDF blob with the §10 defaults (each row {v, 32768, 0}).
+fn av1_imcdf_fill(cc): i64 {
+    # Default_New_Mv_Cdf[6]
+    av1_mvcdf_put2(av1_imcdf_newmv(cc, 0), 24035);
+    av1_mvcdf_put2(av1_imcdf_newmv(cc, 1), 16630);
+    av1_mvcdf_put2(av1_imcdf_newmv(cc, 2), 15339);
+    av1_mvcdf_put2(av1_imcdf_newmv(cc, 3), 8386);
+    av1_mvcdf_put2(av1_imcdf_newmv(cc, 4), 12222);
+    av1_mvcdf_put2(av1_imcdf_newmv(cc, 5), 4676);
+    # Default_Zero_Mv_Cdf[2]
+    av1_mvcdf_put2(av1_imcdf_zeromv(cc, 0), 2175);
+    av1_mvcdf_put2(av1_imcdf_zeromv(cc, 1), 1054);
+    # Default_Ref_Mv_Cdf[6]
+    av1_mvcdf_put2(av1_imcdf_refmv(cc, 0), 23974);
+    av1_mvcdf_put2(av1_imcdf_refmv(cc, 1), 24188);
+    av1_mvcdf_put2(av1_imcdf_refmv(cc, 2), 17848);
+    av1_mvcdf_put2(av1_imcdf_refmv(cc, 3), 28622);
+    av1_mvcdf_put2(av1_imcdf_refmv(cc, 4), 24312);
+    av1_mvcdf_put2(av1_imcdf_refmv(cc, 5), 19923);
+    # Default_Drl_Mode_Cdf[3]
+    av1_mvcdf_put2(av1_imcdf_drl(cc, 0), 13104);
+    av1_mvcdf_put2(av1_imcdf_drl(cc, 1), 24560);
+    av1_mvcdf_put2(av1_imcdf_drl(cc, 2), 18945);
+    return DR_OK;
+}
+fn av1_imcdf_new(): i64 {
+    var cc = alloc(AV1IMCDF_SIZE * 8);
+    if (cc == 0) { return 0; }
+    av1_imcdf_fill(cc);
+    return cc;
+}
+var AV1_IMCDF_BLOB = 0;
+fn av1_imcdf_blob(): i64 {
+    if (AV1_IMCDF_BLOB != 0) { return AV1_IMCDF_BLOB; }
+    var cc = alloc(AV1IMCDF_SIZE * 8);
+    if (cc == 0) { return 0; }
+    av1_imcdf_fill(cc);
+    AV1_IMCDF_BLOB = cc;
+    return cc;
+}
+
+# ================================================================
+# read_inter_mode (spec 5.11.32) — the SINGLE-prediction inter YMode. Reads
+# new_mv (NewMvContext); if set, GLOBALMV/NEARESTMV/NEARMV via zero_mv
+# (ZeroMvContext) then ref_mv (RefMvContext). skip_mode / segment-forced modes
+# are the caller's concern (handled before this is invoked).
+# ================================================================
+fn av1_read_inter_mode(sd, cc, mvctx): i64 {
+    var new_mv = av1_sym_read_symbol(sd, av1_imcdf_newmv(cc, av1_mvctx_newmv_context(mvctx)), 2);
+    if (new_mv == 0) { return AV1_NEWMV; }
+    var zero_mv = av1_sym_read_symbol(sd, av1_imcdf_zeromv(cc, av1_mvctx_zero_context(mvctx)), 2);
+    if (zero_mv == 0) { return AV1_GLOBALMV; }
+    var ref_mv = av1_sym_read_symbol(sd, av1_imcdf_refmv(cc, av1_mvctx_refmv_context(mvctx)), 2);
+    if (ref_mv == 0) { return AV1_NEARESTMV; }
+    return AV1_NEARMV;
+}
+
+# read_drl_idx (spec 5.11.32) — the DRL predictor index (RefMvIdx). NEWMV scans
+# drl_mode over idx 0..1; NEARMV (has_nearmv, single) starts at 1 and scans idx
+# 1..2. Each drl_mode is read only when the stack has a candidate past idx
+# (NumMvFound > idx + 1); a 0 selects that idx (stop), a 1 advances.
+fn av1_read_drl_idx(sd, cc, mvctx, y_mode): i64 {
+    var mvs = load64(mvctx + AV1MVC_STACK);
+    var num = av1_mv_stack_num(mvs);
+    var ref_mv_idx = 0;
+    if (y_mode == AV1_NEWMV) {
+        var idx = 0;
+        while (idx < 2) {
+            if (num > (idx + 1)) {
+                var drl = av1_sym_read_symbol(sd, av1_imcdf_drl(cc, av1_mvctx_drl_context(mvctx, idx)), 2);
+                if (drl == 0) { ref_mv_idx = idx; break; }
+                ref_mv_idx = idx + 1;
+            }
+            idx = idx + 1;
+        }
+    }
+    if (y_mode == AV1_NEARMV) {
+        ref_mv_idx = 1;
+        var idx2 = 1;
+        while (idx2 < 3) {
+            if (num > (idx2 + 1)) {
+                var drl2 = av1_sym_read_symbol(sd, av1_imcdf_drl(cc, av1_mvctx_drl_context(mvctx, idx2)), 2);
+                if (drl2 == 0) { ref_mv_idx = idx2; break; }
+                ref_mv_idx = idx2 + 1;
+            }
+            idx2 = idx2 + 1;
+        }
+    }
+    return ref_mv_idx;
+}
+
+# ================================================================
+# assign_mv (spec 5.11.32, SINGLE prediction) — the block's Mv. GLOBALMV takes
+# GlobalMvs[0]; otherwise the predictor is RefStackMv[pos][0] with pos = 0 for
+# NEARESTMV, RefMvIdx for NEARMV, and RefMvIdx (or 0 if NumMvFound <= 1) for NEWMV.
+# NEWMV adds the decoded MV difference (read_mv, MV CDF `mvcc`); every other mode
+# copies the predictor. Writes into out_mv (an Av1Mv). mv_ctx = 0 (non-intrabc).
+# ================================================================
+fn av1_assign_mv_single(sd, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, allow_hp, force_int, out_mv): i64 {
+    var mvs = load64(mvctx + AV1MVC_STACK);
+    var num = av1_mv_stack_num(mvs);
+    var pred_row = 0;
+    var pred_col = 0;
+    if (y_mode == AV1_GLOBALMV) {
+        pred_row = load64(mvctx + AV1MVC_GMV0_ROW);
+        pred_col = load64(mvctx + AV1MVC_GMV0_COL);
+    } else {
+        var pos = ref_mv_idx;
+        if (y_mode == AV1_NEARESTMV) { pos = 0; }
+        if ((y_mode == AV1_NEWMV) && (num <= 1)) { pos = 0; }
+        pred_row = av1_mv_stack_row(mvs, pos, 0);
+        pred_col = av1_mv_stack_col(mvs, pos, 0);
+    }
+    if (y_mode == AV1_NEWMV) {
+        av1_read_mv(sd, mvcc, mv_ctx, allow_hp, force_int, pred_row, pred_col, out_mv);
+    } else {
+        store64(out_mv + AV1MV_ROW, pred_row);
+        store64(out_mv + AV1MV_COL, pred_col);
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# Paired encoders (round-trip). write_inter_mode emits new_mv/zero_mv/ref_mv for a
+# given single-prediction YMode; write_drl_idx emits the drl_mode bits selecting
+# RefMvIdx; assign_mv's encode is av1_write_mv (for NEWMV).
+# ================================================================
+fn av1_write_inter_mode(enc, cc, mvctx, y_mode): i64 {
+    var new_mv = 1;
+    if (y_mode == AV1_NEWMV) { new_mv = 0; }
+    av1_sym_encode_symbol(enc, av1_imcdf_newmv(cc, av1_mvctx_newmv_context(mvctx)), 2, new_mv);
+    if (new_mv != 0) {
+        var zero_mv = 1;
+        if (y_mode == AV1_GLOBALMV) { zero_mv = 0; }
+        av1_sym_encode_symbol(enc, av1_imcdf_zeromv(cc, av1_mvctx_zero_context(mvctx)), 2, zero_mv);
+        if (zero_mv != 0) {
+            var ref_mv = 1;
+            if (y_mode == AV1_NEARESTMV) { ref_mv = 0; }
+            av1_sym_encode_symbol(enc, av1_imcdf_refmv(cc, av1_mvctx_refmv_context(mvctx)), 2, ref_mv);
+        }
+    }
+    return DR_OK;
+}
+fn av1_write_drl_idx(enc, cc, mvctx, y_mode, ref_mv_idx): i64 {
+    var mvs = load64(mvctx + AV1MVC_STACK);
+    var num = av1_mv_stack_num(mvs);
+    if (y_mode == AV1_NEWMV) {
+        var idx = 0;
+        while (idx < 2) {
+            if (num > (idx + 1)) {
+                var bit = 1;
+                if (ref_mv_idx == idx) { bit = 0; }
+                av1_sym_encode_symbol(enc, av1_imcdf_drl(cc, av1_mvctx_drl_context(mvctx, idx)), 2, bit);
+                if (bit == 0) { break; }
+            }
+            idx = idx + 1;
+        }
+    }
+    if (y_mode == AV1_NEARMV) {
+        var idx2 = 1;
+        while (idx2 < 3) {
+            if (num > (idx2 + 1)) {
+                var bit2 = 1;
+                if (ref_mv_idx == idx2) { bit2 = 0; }
+                av1_sym_encode_symbol(enc, av1_imcdf_drl(cc, av1_mvctx_drl_context(mvctx, idx2)), 2, bit2);
+                if (bit2 == 0) { break; }
+            }
+            idx2 = idx2 + 1;
+        }
     }
     return DR_OK;
 }

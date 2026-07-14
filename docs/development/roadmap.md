@@ -227,17 +227,20 @@ Baseline (0.7.0): OBU layer + sequence header.
   search-stack selection preambles, over the `Av1MvCtx`/`Av1MiRec` grid), and the **`find_mv_stack`
   driver** `av1_mv.cyr` 0.7.65 (`av1_find_mv_stack` 7.10.2 + `av1_mv_extra_search`/`_add_extra`
   7.10.2.11/12 + `av1_mv_context_and_clamping` 7.10.2.14 + `av1_clamp_mv_row`/`_col` — the full
-  candidate list + entropy contexts, temporal deferred), and the **inter mode-info MV component
+  candidate list + entropy contexts, temporal deferred), the **inter mode-info MV component
   decode** `av1_intermode.cyr` 0.7.66 (the MV CDF family + `av1_read_mv`/`_read_mv_component` 5.11.32 +
-  the paired encoder — the bitstream-read layer turning the entropy stream + PredMv into the block's
-  Mv; all bites' adversarial reviews returned no findings) are in — MV candidate-list construction is
-  complete for use_ref_frame_mvs==0 and MV-difference decode is in; next the rest of inter mode-info
-  (`is_inter` / ref-frame reads / the inter mode reads — new_mv/zero_mv/ref_mv/drl, consuming the
-  find_mv_stack contexts — + assign_mv calling read_mv + motion mode + compound type), which populates
-  the MI grid the scans read, then the inter tile decode that lets `av1_decode_stream` decode a genuine
-  inter frame referencing the DPB, then the temporal scan (needs the DPB's deferred saved MVs), then
-  compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d `mc_tmpl.c` / `decode.c`
-  references in hand). See memory `av1-decode-remaining-tracks`.
+  the paired encoder — turning the entropy stream + PredMv into a Mv), and the **single-prediction
+  inter mode reads** `av1_intermode.cyr` 0.7.67 (`av1_read_inter_mode`/`_read_drl_idx`/
+  `av1_assign_mv_single` 5.11.32 + the New/Zero/Ref/Drl CDFs — composing the find_mv_stack contexts +
+  candidate stack + read_mv into a decoded inter YMode + Mv; all bites' adversarial reviews returned no
+  findings) are in — MV candidate-list construction is complete for use_ref_frame_mvs==0 and the
+  single-prediction inter mode/MV decode is in; next the rest of inter mode-info (`is_inter` / the
+  ref-frame reads `read_ref_frames` — which set RefFrame/isCompound — + the COMPOUND mode path
+  `compound_mode` + the two-list assign_mv + motion mode + compound type), which populates the MI grid
+  the scans read, then the inter tile decode that lets `av1_decode_stream` decode a genuine inter frame
+  referencing the DPB, then the temporal scan (needs the DPB's deferred saved MVs), then compound/OBMC/
+  warp + scaled-reference/BILINEAR MC; all table-free, dav1d `mc_tmpl.c` / `decode.c` references in
+  hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
