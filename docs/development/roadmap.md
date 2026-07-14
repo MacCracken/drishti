@@ -242,10 +242,13 @@ Baseline (0.7.0): OBU layer + sequence header.
   filter + motion mode reads** `av1_intermode.cyr` 0.7.71 (`av1_read_interp_filter` 5.11.30 +
   `av1_read_motion_mode`/`av1_read_use_obmc` 5.11.27 + the Interp_Filter/Motion_Mode/Use_Obmc CDFs), and the
   **inter-intra reads** `av1_intermode.cyr` 0.7.72 (`av1_read_interintra`/`_interintra_mode`/
-  `_wedge_interintra`/`_wedge_index` 5.11.28 + the new av1_iicdf blob; all bites' adversarial reviews
-  returned no findings) are in — the inter block's full MODE + REFERENCE + MV + interp + motion-mode +
-  inter-intra bitstream-read layer is complete; next compound_type (5.11.29 — the last inter mode-info
-  read), which populates the MI grid the scans read, then the inter tile decode that lets
+  `_wedge_interintra`/`_wedge_index` 5.11.28 + the new av1_iicdf blob), and **read_compound_type**
+  `av1_intermode.cyr` 0.7.73 (the full 5.11.29 driver — `av1_read_comp_group_idx`/`_compound_idx`/
+  `_compound_type_sym` + `av1_read_compound_type` composing them with the shared wedge_index +
+  wedge_sign/mask_type literals, Wedge_Bits, the av1_comptype_* record; all bites' adversarial reviews
+  returned no findings) are in — **THE INTER MODE-INFO BITSTREAM-READ LAYER IS COMPLETE**; next the MI-grid
+  population (writing the decoded RefFrames/Mvs/YModes/MiSizes/IsInter into the grid the scans read), then
+  the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
   `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.

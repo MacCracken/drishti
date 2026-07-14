@@ -18,7 +18,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.72 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + full inter mode/ref/MV + interp/motion-mode + inter-intra read layer)
+## Status — 0.7.73 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + the COMPLETE inter mode-info bitstream-read layer)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (21,925 suite assertions + 1,140 fuzz

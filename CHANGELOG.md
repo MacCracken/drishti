@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.73] - 2026-07-14
+
+**Inter prediction — `read_compound_type` (spec 5.11.29), completing the inter mode-info read layer.** How a
+compound block's two predictors are BLENDED. Unlike the preceding leaf-read bites this is the full spec
+**driver**: it composes three new symbols with 0.7.72's shared `@@wedge_index` and two `L(1)` literals, and
+resolves `compound_type` across every branch. Extends `src/av1_intermode.cyr` with:
+
+- **`av1_read_comp_group_idx`** / **`av1_read_compound_idx`** (binary, 6 contexts each) +
+  **`av1_read_compound_type_sym`** (binary — `COMPOUND_TYPES` is 2, and the symbol value *is* the enum:
+  `COMPOUND_WEDGE` = 0 / `COMPOUND_DIFFWTD` = 1, no remap), `MiSize`-indexed;
+- **`av1_read_compound_type`** — the driver: `skip_mode` → `COMPOUND_AVERAGE` with nothing coded; the
+  `isCompound` path reads `comp_group_idx` (when `enable_masked_compound`), then either the jnt-comp branch
+  (`compound_idx` → `COMPOUND_AVERAGE` / `COMPOUND_DISTANCE`) or the masked branch
+  (`Wedge_Bits[MiSize] == 0` **forces** `COMPOUND_DIFFWTD`, else the `compound_type` symbol), then
+  `wedge_index` + `wedge_sign` for `COMPOUND_WEDGE` or `mask_type` for `COMPOUND_DIFFWTD`; the **non-compound**
+  path reads *no symbol at all* — `compound_type` falls out of `interintra` / `wedge_interintra`
+  (`COMPOUND_WEDGE` / `COMPOUND_INTRA` / `COMPOUND_AVERAGE`), and notably does **not** re-read
+  `wedge_index`/`wedge_sign` (5.11.28 already read them — the spec's wedge block nests inside `isCompound`);
+- **`Wedge_Bits[22]`** (§10) + the `av1_comptype_*` output record (`compound_type`, `comp_group_idx`,
+  `compound_idx`, `wedge_index`, `wedge_sign`, `mask_type`);
+- the `av1_iicdf` blob grew **464 → 566** — `comp_group_idx` `[464,482)`, `compound_idx` `[482,500)`,
+  `compound_type` `[500,566)` — exactly filling `AV1IICDF_SIZE`;
+- the paired `av1_write_compound_type` encoder-inverse (emits exactly the symbols the reader consumes, in
+  the same order).
+
+Verified by 1,343 new assertions: an **exhaustive** per-row §10 diff of all three new tables (6 + 6 + 22)
+plus a check that the pre-existing `[0,464)` inter-intra region is byte-for-byte unchanged, the full
+`Wedge_Bits` table, and a **round-trip over every driver branch** — `skip_mode`; the three non-compound
+outcomes (incl. the wedge-fields-stay-0 case); the `comp_group_idx == 0` branch (jnt on/off, both
+`compound_idx` values, `!enable_masked_compound`); the `comp_group_idx == 1` branch (`WEDGE` → index+sign,
+`DIFFWTD` → both `mask_type` values, and the `n == 0` forced-`DIFFWTD` case); plus a sweep over **all 9
+wedge-capable `MiSize` × all 16 `wedge_index` values** — each static + adaptive. A **record-reuse** test
+decodes into a deliberately dirtied record and asserts the spec's `comp_group_idx = 0` / `compound_idx = 1`
+initialization and every not-written field are reset, so no state leaks between blocks.
+
+### Added
+- **`src/av1_intermode.cyr`** (extended): `av1_read_compound_type` / `av1_write_compound_type` +
+  `av1_read_comp_group_idx` / `av1_read_compound_idx` / `av1_read_compound_type_sym` + paired writers; the
+  `av1_iicdf_groupidx` / `compidx` / `comptype` accessors; `av1_wedge_bits`; the `av1_comptype_new` record +
+  `av1_comptype_type`/`group_idx`/`comp_idx`/`wedge_idx`/`wedge_sign`/`mask_type` accessors; the
+  `AV1_COMPOUND_TYPES` / `AV1_COMP_GROUP_IDX_CONTEXTS` / `AV1_COMPOUND_IDX_CONTEXTS` / `AV1_COMPOUND_*` /
+  `AV1_UNIFORM_45*` constants.
+- **`tests/av1_intermode.tcyr`** (extended): `test_comptype_cdf`, `test_wedge_bits`, `test_comptype_nosym`,
+  `test_comptype_group0`, `test_comptype_group1`, `test_comptype_wedge_sweep`.
+
+### Fixed
+- **CDF-blob verification was circular** (found by the 0.7.73 adversarial review, which *proved* it by
+  mutation rather than argument). `av1_*cdf_fill` writes each row through the same accessor the "exhaustive
+  per-row §10 diff" reads it back through, so any self-consistent base/stride error cancelled out exactly;
+  and the row-checkers asserted only `c0` + the terminator, never the adaptation-count slot — which is
+  precisely the slot an ascending fill clobbers when rows overlap. Two shipping-breaking mutations
+  (`av1_iicdf_compidx` and `av1_iicdf_comptype` stride 3→2) left the **entire suite green**. This silently
+  weakened the per-row verification claimed since 0.7.71. Fixed by (a) asserting the trailing count slot in
+  every row-checker (`av1_t_chk2`/`chk3`/`chk4`/`chk16`), making row overlap destructive and therefore
+  detectable, and (b) adding `test_iicdf_layout` / `test_imcdf_layout` / `test_refcdf_layout`, which pin each
+  group's **absolute** byte offset, stride, and row count — derived from the documented layout, not from the
+  accessors — with each group's end pinned to the next group's base and the final group's end pinned to
+  `AV1*CDF_SIZE`. Verified by re-running the mutations: `compidx` stride → 7 failures, `comptype` stride → 23,
+  `av1_imcdf_motionmode` stride → 23, `av1_refcdf_singleref` base → 2, `av1_iicdf_wedgeidx` stride → 23
+  (all previously 0). The hole is closed retroactively for the `av1_imcdf` (0.7.71), `av1_refcdf` (0.7.68)
+  and `av1_iicdf` (0.7.72) blobs, not just this bite's.
+- An `Av1CompTypeRec` field comment overclaimed: `wedge_index`/`wedge_sign` are valid only when
+  `isCompound && compound_type == COMPOUND_WEDGE` — a *non*-compound block can also resolve to
+  `COMPOUND_WEDGE` (via `wedge_interintra`) and there both stay 0, since 5.11.28 already read the interintra
+  wedge. Since 0 is a legal `wedge_index`, the unqualified comment was a trap for the MC stage that will
+  consume this record.
+
+### Scope / deferred
+- The `comp_group_idx` / `compound_idx` CDF contexts (spec 9 — neighbour + order-hint derived) remain caller
+  inputs, as with the single-ref / compound-ref neighbour counts (0.7.68/0.7.69). **With this the inter
+  mode-info bitstream-read layer is COMPLETE**; next is the MI-grid population (writing the decoded
+  RefFrames/Mvs/YModes/MiSizes/IsInter into the grid the MV scans read), then the inter tile decode
+  (roadmap.md).
+
 ## [0.7.72] - 2026-07-14
 
 **Inter prediction — the inter-intra reads (spec 5.11.28 `read_interintra_mode`).** The inter-intra

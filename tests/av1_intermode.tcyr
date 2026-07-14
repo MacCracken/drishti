@@ -516,15 +516,21 @@ fn test_compound_mode_rt() {
 # 3-symbol row check {c0, c1, 32768}; 2-symbol {c0, 32768}. A self-round-trip passes
 # through ANY monotone CDF ending at 32768, so a wrong default value is invisible to it —
 # every USED default row is diffed per-value against spec 10 here (the sole value ground-truth).
+# Each checker also asserts the trailing ADAPTATION-COUNT slot == 0. That is not
+# decoration: if a base/stride were wrong such that rows overlap, the count slot is the
+# one an ascending fill would clobber — leaving c0 and the terminator intact. Without
+# this assert a stride bug is invisible (proven: stride 3->2 passed the whole suite).
 fn av1_t_chk3(p, c0, c1): i64 {
     assert_eq(load64(p + 0), c0, "cdf c0");
     assert_eq(load64(p + 8), c1, "cdf c1");
     assert_eq(load64(p + 16), 32768, "cdf 3-sym terminator");
+    assert_eq(load64(p + 24), 0, "cdf 3-sym count slot");
     return 0;
 }
 fn av1_t_chk2(p, c0): i64 {
     assert_eq(load64(p + 0), c0, "cdf c0");
     assert_eq(load64(p + 8), 32768, "cdf 2-sym terminator");
+    assert_eq(load64(p + 16), 0, "cdf 2-sym count slot");
     return 0;
 }
 fn test_interp_motion_cdf() {
@@ -671,6 +677,7 @@ fn av1_t_chk16(p, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c1
     assert_eq(load64(p + 80), c10, "wcdf c10");  assert_eq(load64(p + 88), c11, "wcdf c11");
     assert_eq(load64(p + 96), c12, "wcdf c12");  assert_eq(load64(p + 104), c13, "wcdf c13");
     assert_eq(load64(p + 112), c14, "wcdf c14"); assert_eq(load64(p + 120), 32768, "wcdf 16-sym term");
+    assert_eq(load64(p + 128), 0, "wcdf 16-sym count slot");
     return 0;
 }
 fn av1_t_chk_wunif(p): i64 {
@@ -678,12 +685,13 @@ fn av1_t_chk_wunif(p): i64 {
     18432, 20480, 22528, 24576, 26624, 28672, 30720);
     return 0;
 }
-# 4-symbol row check {c0, c1, c2, 32768}.
+# 4-symbol row check {c0, c1, c2, 32768, count}.
 fn av1_t_chk4(p, c0, c1, c2): i64 {
     assert_eq(load64(p + 0), c0, "cdf4 c0");
     assert_eq(load64(p + 8), c1, "cdf4 c1");
     assert_eq(load64(p + 16), c2, "cdf4 c2");
     assert_eq(load64(p + 24), 32768, "cdf4 4-sym terminator");
+    assert_eq(load64(p + 32), 0, "cdf4 4-sym count slot");
     return 0;
 }
 fn test_interintra_cdf() {
@@ -827,6 +835,315 @@ fn test_interintra_adaptive() {
     return 0;
 }
 
+# ================================================================
+# read_compound_type (5.11.29) — the full driver: @@comp_group_idx / @@compound_idx /
+# @@compound_type + the shared @@wedge_index and the wedge_sign / mask_type L(1)
+# literals, resolving compound_type across EVERY branch. Round-tripped through the
+# paired writer; every default CDF row is diffed per-value vs spec 10.
+# ================================================================
+# ================================================================
+# CDF BLOB LAYOUT — pinned in ABSOLUTE terms, independent of the accessors.
+#
+# The per-row §10 value checks CANNOT catch a base/stride error on their own: the fill
+# writes each row through the same accessor the check reads it back through, so a
+# self-consistent error cancels out exactly (demonstrated: setting av1_iicdf_compidx's
+# stride to 2 left the entire suite green). These tests close that hole by asserting the
+# byte offsets the accessors must produce, derived from the documented layout rather than
+# from the accessors themselves. `group(cc, N)` for N == the row count yields the offset
+# one past the last row, i.e. the next group's base — which pins base AND stride AND the
+# row count, and for the final group pins the blob end.
+# ================================================================
+fn test_iicdf_layout() {
+    var cc = av1_iicdf_blob();
+    assert_eq(av1_iicdf_interintra(cc, 0) - cc, 0, "interintra base 0");
+    assert_eq(av1_iicdf_interintra(cc, 1) - av1_iicdf_interintra(cc, 0), 3 * 8, "interintra stride 3");
+    assert_eq(av1_iicdf_interintra(cc, 3) - cc, 9 * 8, "interintra[3 rows] ends at 9");
+    assert_eq(av1_iicdf_iimode(cc, 0) - cc, 9 * 8, "iimode base 9");
+    assert_eq(av1_iicdf_iimode(cc, 1) - av1_iicdf_iimode(cc, 0), 5 * 8, "iimode stride 5");
+    assert_eq(av1_iicdf_iimode(cc, 3) - cc, 24 * 8, "iimode[3 rows] ends at 24");
+    assert_eq(av1_iicdf_wedgeii(cc, 0) - cc, 24 * 8, "wedgeii base 24");
+    assert_eq(av1_iicdf_wedgeii(cc, 1) - av1_iicdf_wedgeii(cc, 0), 3 * 8, "wedgeii stride 3");
+    assert_eq(av1_iicdf_wedgeii(cc, AV1_BLOCK_SIZES) - cc, 90 * 8, "wedgeii[22 rows] ends at 90");
+    assert_eq(av1_iicdf_wedgeidx(cc, 0) - cc, 90 * 8, "wedgeidx base 90");
+    assert_eq(av1_iicdf_wedgeidx(cc, 1) - av1_iicdf_wedgeidx(cc, 0), 17 * 8, "wedgeidx stride 17");
+    assert_eq(av1_iicdf_wedgeidx(cc, AV1_BLOCK_SIZES) - cc, 464 * 8, "wedgeidx[22 rows] ends at 464");
+    assert_eq(av1_iicdf_groupidx(cc, 0) - cc, 464 * 8, "groupidx base 464");
+    assert_eq(av1_iicdf_groupidx(cc, 1) - av1_iicdf_groupidx(cc, 0), 3 * 8, "groupidx stride 3");
+    assert_eq(av1_iicdf_groupidx(cc, AV1_COMP_GROUP_IDX_CONTEXTS) - cc, 482 * 8,
+    "groupidx[6 rows] ends at 482");
+    assert_eq(av1_iicdf_compidx(cc, 0) - cc, 482 * 8, "compidx base 482");
+    assert_eq(av1_iicdf_compidx(cc, 1) - av1_iicdf_compidx(cc, 0), 3 * 8, "compidx stride 3");
+    assert_eq(av1_iicdf_compidx(cc, AV1_COMPOUND_IDX_CONTEXTS) - cc, 500 * 8, "compidx[6 rows] ends at 500");
+    assert_eq(av1_iicdf_comptype(cc, 0) - cc, 500 * 8, "comptype base 500");
+    assert_eq(av1_iicdf_comptype(cc, 1) - av1_iicdf_comptype(cc, 0), 3 * 8, "comptype stride 3");
+    assert_eq(av1_iicdf_comptype(cc, AV1_BLOCK_SIZES) - cc, AV1IICDF_SIZE * 8,
+    "comptype[22 rows] ends EXACTLY at the blob end");
+    return 0;
+}
+fn test_imcdf_layout() {
+    var cc = av1_imcdf_blob();
+    assert_eq(av1_imcdf_newmv(cc, 0) - cc, 0, "newmv base 0");
+    assert_eq(av1_imcdf_newmv(cc, 1) - av1_imcdf_newmv(cc, 0), 3 * 8, "newmv stride 3");
+    assert_eq(av1_imcdf_newmv(cc, 6) - cc, 18 * 8, "newmv[6 rows] ends at 18");
+    assert_eq(av1_imcdf_zeromv(cc, 0) - cc, 18 * 8, "zeromv base 18");
+    assert_eq(av1_imcdf_zeromv(cc, 2) - cc, 24 * 8, "zeromv[2 rows] ends at 24");
+    assert_eq(av1_imcdf_refmv(cc, 0) - cc, 24 * 8, "refmv base 24");
+    assert_eq(av1_imcdf_refmv(cc, 6) - cc, 42 * 8, "refmv[6 rows] ends at 42");
+    assert_eq(av1_imcdf_drl(cc, 0) - cc, 42 * 8, "drl base 42");
+    assert_eq(av1_imcdf_drl(cc, 3) - cc, 51 * 8, "drl[3 rows] ends at 51");
+    assert_eq(av1_imcdf_compmode(cc, 0) - cc, 51 * 8, "compmode base 51");
+    assert_eq(av1_imcdf_compmode(cc, 1) - av1_imcdf_compmode(cc, 0), 9 * 8, "compmode stride 9");
+    assert_eq(av1_imcdf_compmode(cc, 8) - cc, 123 * 8, "compmode[8 rows] ends at 123");
+    assert_eq(av1_imcdf_interp(cc, 0) - cc, 123 * 8, "interp base 123");
+    assert_eq(av1_imcdf_interp(cc, 1) - av1_imcdf_interp(cc, 0), 4 * 8, "interp stride 4");
+    assert_eq(av1_imcdf_interp(cc, AV1_INTERP_FILTER_CONTEXTS) - cc, 187 * 8, "interp[16 rows] ends at 187");
+    assert_eq(av1_imcdf_motionmode(cc, 0) - cc, 187 * 8, "motionmode base 187");
+    assert_eq(av1_imcdf_motionmode(cc, 1) - av1_imcdf_motionmode(cc, 0), 4 * 8, "motionmode stride 4");
+    assert_eq(av1_imcdf_motionmode(cc, AV1_BLOCK_SIZES) - cc, 275 * 8, "motionmode[22 rows] ends at 275");
+    assert_eq(av1_imcdf_useobmc(cc, 0) - cc, 275 * 8, "useobmc base 275");
+    assert_eq(av1_imcdf_useobmc(cc, 1) - av1_imcdf_useobmc(cc, 0), 3 * 8, "useobmc stride 3");
+    assert_eq(av1_imcdf_useobmc(cc, AV1_BLOCK_SIZES) - cc, AV1IMCDF_SIZE * 8,
+    "useobmc[22 rows] ends EXACTLY at the blob end");
+    return 0;
+}
+fn test_refcdf_layout() {
+    var cc = av1_refcdf_blob();
+    assert_eq(av1_refcdf_isinter(cc, 0) - cc, 0, "isinter base 0");
+    assert_eq(av1_refcdf_isinter(cc, 4) - cc, 12 * 8, "isinter[4 rows] ends at 12");
+    assert_eq(av1_refcdf_singleref(cc, 0, 0) - cc, 12 * 8, "singleref base 12");
+    assert_eq(av1_refcdf_singleref(cc, 0, 1) - av1_refcdf_singleref(cc, 0, 0), 3 * 8, "singleref j-stride 3");
+    assert_eq(av1_refcdf_singleref(cc, 1, 0) - av1_refcdf_singleref(cc, 0, 0), 18 * 8,
+    "singleref ctx-stride 6*3");
+    assert_eq(av1_refcdf_singleref(cc, 3, 0) - cc, 66 * 8, "singleref[3x6 rows] ends at 66");
+    assert_eq(av1_refcdf_compmode(cc, 0) - cc, 66 * 8, "comp_mode base 66");
+    assert_eq(av1_refcdf_compmode(cc, 5) - cc, 81 * 8, "comp_mode[5 rows] ends at 81");
+    assert_eq(av1_refcdf_comprftype(cc, 0) - cc, 81 * 8, "comp_ref_type base 81");
+    assert_eq(av1_refcdf_comprftype(cc, 5) - cc, 96 * 8, "comp_ref_type[5 rows] ends at 96");
+    assert_eq(av1_refcdf_compref(cc, 0, 0) - cc, 96 * 8, "comp_ref base 96");
+    assert_eq(av1_refcdf_compref(cc, 3, 0) - cc, 123 * 8, "comp_ref[3x3 rows] ends at 123");
+    assert_eq(av1_refcdf_compbwdref(cc, 0, 0) - cc, 123 * 8, "comp_bwdref base 123");
+    assert_eq(av1_refcdf_compbwdref(cc, 3, 0) - cc, 141 * 8, "comp_bwdref[3x2 rows] ends at 141");
+    assert_eq(av1_refcdf_unicompref(cc, 0, 0) - cc, 141 * 8, "uni_comp_ref base 141");
+    assert_eq(av1_refcdf_unicompref(cc, 3, 0) - cc, AV1REFCDF_SIZE * 8,
+    "uni_comp_ref[3x3 rows] ends EXACTLY at the blob end");
+    return 0;
+}
+fn test_comptype_cdf() {
+    var cc = av1_iicdf_blob();
+    # Default_Comp_Group_Idx_Cdf[6] — exhaustive.
+    av1_t_chk2(av1_iicdf_groupidx(cc, 0), 26607);
+    av1_t_chk2(av1_iicdf_groupidx(cc, 1), 22891);
+    av1_t_chk2(av1_iicdf_groupidx(cc, 2), 18840);
+    av1_t_chk2(av1_iicdf_groupidx(cc, 3), 24594);
+    av1_t_chk2(av1_iicdf_groupidx(cc, 4), 19934);
+    av1_t_chk2(av1_iicdf_groupidx(cc, 5), 22674);
+    # Default_Compound_Idx_Cdf[6] — exhaustive.
+    av1_t_chk2(av1_iicdf_compidx(cc, 0), 18244);
+    av1_t_chk2(av1_iicdf_compidx(cc, 1), 12865);
+    av1_t_chk2(av1_iicdf_compidx(cc, 2), 7053);
+    av1_t_chk2(av1_iicdf_compidx(cc, 3), 13259);
+    av1_t_chk2(av1_iicdf_compidx(cc, 4), 9334);
+    av1_t_chk2(av1_iicdf_compidx(cc, 5), 4644);
+    # Default_Compound_Type_Cdf[22] — exhaustive (used 3..9, 18..19; rest 16384).
+    av1_t_chk2(av1_iicdf_comptype(cc, 0), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 1), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 2), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 3), 23431);
+    av1_t_chk2(av1_iicdf_comptype(cc, 4), 13171);
+    av1_t_chk2(av1_iicdf_comptype(cc, 5), 11470);
+    av1_t_chk2(av1_iicdf_comptype(cc, 6), 9770);
+    av1_t_chk2(av1_iicdf_comptype(cc, 7), 9100);
+    av1_t_chk2(av1_iicdf_comptype(cc, 8), 8233);
+    av1_t_chk2(av1_iicdf_comptype(cc, 9), 6172);
+    av1_t_chk2(av1_iicdf_comptype(cc, 10), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 11), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 12), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 13), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 14), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 15), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 16), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 17), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 18), 11820);
+    av1_t_chk2(av1_iicdf_comptype(cc, 19), 7701);
+    av1_t_chk2(av1_iicdf_comptype(cc, 20), 16384);
+    av1_t_chk2(av1_iicdf_comptype(cc, 21), 16384);
+    # the pre-existing [0,464) inter-intra region is unchanged after the blob grew.
+    assert_eq(load64(av1_iicdf_interintra(cc, 0) + 0), 26887, "inter_intra[0] unchanged");
+    assert_eq(load64(av1_iicdf_wedgeidx(cc, 4) + 0), 806, "wedge_index[4] unchanged");
+    return 0;
+}
+# Wedge_Bits[22] (spec 10) — 4 for the wedge-capable sizes (3..9, 18..19), else 0.
+fn test_wedge_bits() {
+    var sz = 0;
+    while (sz < AV1_BLOCK_SIZES) {
+        var exp = 0;
+        if (sz >= 3 && sz <= 9) { exp = 4; }
+        if (sz == 18 || sz == 19) { exp = 4; }
+        assert_eq(av1_wedge_bits(sz), exp, "Wedge_Bits row");
+        sz = sz + 1;
+    }
+    return 0;
+}
+# build a compound-type record.
+fn ct_mk(ctype, gidx, cidx, widx, wsign, mask): i64 {
+    var r = av1_comptype_new();
+    store64(r + AV1CT_TYPE, ctype);
+    store64(r + AV1CT_GROUPIDX, gidx);
+    store64(r + AV1CT_COMPIDX, cidx);
+    store64(r + AV1CT_WEDGEIDX, widx);
+    store64(r + AV1CT_WEDGESIGN, wsign);
+    store64(r + AV1CT_MASKTYPE, mask);
+    return r;
+}
+fn ct_assert(got, exp, tag): i64 {
+    assert_eq(av1_comptype_type(got), av1_comptype_type(exp), tag);
+    assert_eq(av1_comptype_group_idx(got), av1_comptype_group_idx(exp), tag);
+    assert_eq(av1_comptype_comp_idx(got), av1_comptype_comp_idx(exp), tag);
+    assert_eq(av1_comptype_wedge_idx(got), av1_comptype_wedge_idx(exp), tag);
+    assert_eq(av1_comptype_wedge_sign(got), av1_comptype_wedge_sign(exp), tag);
+    assert_eq(av1_comptype_mask_type(got), av1_comptype_mask_type(exp), tag);
+    return 0;
+}
+# encode `exp` through write_compound_type, decode via read_compound_type, assert equal.
+fn ct_rt(is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx, exp, disable, tag): i64 {
+    var cce = av1_iicdf_blob();
+    var ccd = av1_iicdf_blob();
+    if (disable == 0) { cce = av1_iicdf_new(); ccd = av1_iicdf_new(); }
+    var enc = av1_sym_enc_init(64, disable);
+    av1_write_compound_type(enc, cce, exp, is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var got = av1_comptype_new();
+    av1_read_compound_type(sd, ccd, got, is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, tag);
+    ct_assert(got, exp, tag);
+    return 0;
+}
+fn ct_rt_both(is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx, exp, tag): i64 {
+    ct_rt(is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx, exp, 1, tag);
+    ct_rt(is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx, exp, 0, tag);
+    return 0;
+}
+# the NO-SYMBOL branches: skip_mode, and non-compound (compound_type falls out of interintra).
+fn test_comptype_nosym() {
+    # skip_mode -> COMPOUND_AVERAGE, nothing coded (even though is_compound=1).
+    ct_rt_both(1, 1, 6, 1, 1, 0, 0, 2, 2, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
+    "skip_mode -> AVERAGE");
+    # non-compound, no interintra -> COMPOUND_AVERAGE.
+    ct_rt_both(0, 0, 6, 1, 1, 0, 0, 2, 2, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
+    "single, !interintra -> AVERAGE");
+    # non-compound + interintra, intra blending -> COMPOUND_INTRA.
+    ct_rt_both(0, 0, 6, 1, 1, 1, 0, 2, 2, ct_mk(AV1_COMPOUND_INTRA, 0, 1, 0, 0, 0),
+    "single, interintra, !wedge_ii -> INTRA");
+    # non-compound + interintra + wedge_interintra -> COMPOUND_WEDGE, and NO wedge_index /
+    # wedge_sign is re-read here (5.11.28 already read them) — wedge fields stay 0.
+    ct_rt_both(0, 0, 6, 1, 1, 1, 1, 2, 2, ct_mk(AV1_COMPOUND_WEDGE, 0, 1, 0, 0, 0),
+    "single, interintra, wedge_ii -> WEDGE (no wedge re-read)");
+    return 0;
+}
+# the comp_group_idx == 0 branch: jnt-comp on/off.
+fn test_comptype_group0() {
+    # enable_jnt_comp, compound_idx=1 -> COMPOUND_AVERAGE.
+    ct_rt_both(1, 0, 6, 1, 1, 0, 0, 0, 0, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
+    "group0, jnt, compound_idx=1 -> AVERAGE");
+    # enable_jnt_comp, compound_idx=0 -> COMPOUND_DISTANCE.
+    ct_rt_both(1, 0, 6, 1, 1, 0, 0, 3, 3, ct_mk(AV1_COMPOUND_DISTANCE, 0, 0, 0, 0, 0),
+    "group0, jnt, compound_idx=0 -> DISTANCE");
+    # !enable_jnt_comp -> COMPOUND_AVERAGE, compound_idx stays at its default 1.
+    ct_rt_both(1, 0, 6, 1, 0, 0, 0, 5, 5, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
+    "group0, !jnt -> AVERAGE (compound_idx defaults 1)");
+    # !enable_masked_compound -> comp_group_idx not coded, stays 0.
+    ct_rt_both(1, 0, 6, 0, 1, 0, 0, 1, 1, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
+    "!masked -> group_idx defaults 0");
+    return 0;
+}
+# the comp_group_idx == 1 branch: WEDGE / DIFFWTD, incl. the n==0 forced-DIFFWTD case.
+fn test_comptype_group1() {
+    # wedge-capable MiSize (Wedge_Bits=4): compound_type coded. WEDGE -> wedge_index + sign.
+    ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, 11, 1, 0),
+    "group1, WEDGE -> wedge_index+sign");
+    ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, 0, 0, 0),
+    "group1, WEDGE idx 0 sign 0");
+    ct_rt_both(1, 0, 9, 1, 1, 0, 0, 2, 2, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, 15, 1, 0),
+    "group1, WEDGE idx 15 (MiSize 9)");
+    # DIFFWTD -> mask_type literal, both values.
+    ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
+    "group1, DIFFWTD mask UNIFORM_45");
+    ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45_INV),
+    "group1, DIFFWTD mask UNIFORM_45_INV");
+    # n == 0 (Wedge_Bits[10]=0): compound_type NOT coded, forced COMPOUND_DIFFWTD.
+    ct_rt_both(1, 0, 10, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45_INV),
+    "group1, n==0 -> forced DIFFWTD");
+    ct_rt_both(1, 0, 0, 1, 1, 0, 0, 0, 0, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
+    "group1, n==0 (MiSize 0) -> forced DIFFWTD");
+    return 0;
+}
+# The spec opens read_compound_type with `comp_group_idx = 0; compound_idx = 1`, and every
+# field the taken branch does not write must not leak from a previous block. Decode into a
+# REUSED, deliberately dirtied record and assert every stale field is reset.
+fn ct_dirty(): i64 {
+    return ct_mk(AV1_COMPOUND_WEDGE, 1, 0, 15, 1, AV1_UNIFORM_45_INV);
+}
+fn ct_decode_into(got, is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx): i64 {
+    var cc = av1_iicdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    var src = ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0);
+    av1_write_compound_type(enc, cc, src, is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    av1_read_compound_type(sd, cc, got, is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx);
+    return 0;
+}
+fn test_comptype_reset() {
+    # skip_mode into a dirty record: every field resets (the early return must not leak).
+    var r = ct_dirty();
+    ct_decode_into(r, 1, 1, 6, 1, 1, 0, 0, 2, 2);
+    ct_assert(r, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0), "skip_mode resets a dirty record");
+    # non-compound into a dirty record: the early return must reset too.
+    r = ct_dirty();
+    ct_decode_into(r, 0, 0, 6, 1, 1, 0, 0, 2, 2);
+    ct_assert(r, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0), "single resets a dirty record");
+    # !enable_jnt_comp: compound_idx must be the spec default 1, NOT the dirty 0.
+    r = ct_dirty();
+    ct_decode_into(r, 1, 0, 6, 0, 0, 0, 0, 1, 1);
+    ct_assert(r, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0), "!jnt/!masked resets group+compound_idx");
+    # a WEDGE decode must clear the stale mask_type; a DIFFWTD decode the stale wedge fields.
+    r = ct_dirty();
+    var cc = av1_iicdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_compound_type(enc, cc, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
+    1, 0, 6, 1, 1, 0, 0, 4, 4);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    av1_read_compound_type(sd, cc, r, 1, 0, 6, 1, 1, 0, 0, 4, 4);
+    ct_assert(r, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
+    "DIFFWTD clears stale wedge_index/sign");
+    return 0;
+}
+# every wedge-capable MiSize round-trips a WEDGE compound_type over every wedge_index.
+fn test_comptype_wedge_sweep() {
+    var szs = alloc(9 * 8);
+    store64(szs + 0, 3);  store64(szs + 8, 4);  store64(szs + 16, 5);
+    store64(szs + 24, 6); store64(szs + 32, 7); store64(szs + 40, 8);
+    store64(szs + 48, 9); store64(szs + 56, 18); store64(szs + 64, 19);
+    var i = 0;
+    while (i < 9) {
+        var sz = load64(szs + (i * 8));
+        assert_eq(av1_wedge_bits(sz), 4, "sweep size is wedge-capable");
+        var w = 0;
+        while (w < AV1_WEDGE_TYPES) {
+            ct_rt(1, 0, sz, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, w, w & 1, 0), 1,
+            "wedge sweep");
+            w = w + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -876,6 +1193,18 @@ fn main() {
     test_interintra_rt();
     test_wedge_rt();
     test_interintra_adaptive();
+    test_group("CDF blob layout (absolute offsets — accessor-independent)");
+    test_iicdf_layout();
+    test_imcdf_layout();
+    test_refcdf_layout();
+    test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
+    test_comptype_cdf();
+    test_wedge_bits();
+    test_comptype_nosym();
+    test_comptype_group0();
+    test_comptype_group1();
+    test_comptype_reset();
+    test_comptype_wedge_sweep();
     return assert_summary();
 }
 
