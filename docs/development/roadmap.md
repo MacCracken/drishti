@@ -255,8 +255,9 @@ Baseline (0.7.0): OBU layer + sequence header.
   MODE-INFO BITSTREAM-READ LAYER IS COMPLETE and the grid it feeds is populated**, and the **reference-context
   family** `av1_intermode.cyr` 0.7.76 (the seven ref_count_ctx derivations + `av1_comp_ref_type_ctx` + the
   `av1_single_ref_ctxs` / `av1_comp_ref_ctxs` fillers — the reference reads' contexts are no longer caller
-  inputs) is in too; next the last few contexts (comp_group_idx / compound_idx / interp_filter, which need
-  CompGroupIdxs/CompoundIdxs/InterpFilters added to the grid), then
+  inputs) is in too, and the **last three contexts** `av1_intermode.cyr` 0.7.77 (comp_group_idx /
+  compound_idx / interp_filter + the Av1MiRec grid fields they read — **every inter CDF context is now
+  derived**; the caller supplies only AvailU/AvailL + the order-hint distances, as the spec does); next
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d

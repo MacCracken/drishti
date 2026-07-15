@@ -1183,7 +1183,19 @@ fn test_nbctx_layout() {
     assert_eq(AV1NB_LINTRA, 56, "LeftIntra at 56");
     assert_eq(AV1NB_ASINGLE, 64, "AboveSingle at 64");
     assert_eq(AV1NB_LSINGLE, 72, "LeftSingle at 72");
-    assert_eq(AV1NB_LSINGLE + 8, AV1NB_SIZE, "the last field ends EXACTLY at AV1NB_SIZE");
+    # (0.7.77) the cached neighbour grid values.
+    assert_eq(AV1NB_ACOMPGRP, 80, "AboveCompGroupIdx at 80");
+    assert_eq(AV1NB_LCOMPGRP, 88, "LeftCompGroupIdx at 88");
+    assert_eq(AV1NB_ACOMPIDX, 96, "AboveCompoundIdx at 96");
+    assert_eq(AV1NB_LCOMPIDX, 104, "LeftCompoundIdx at 104");
+    assert_eq(AV1NB_AINTERP0, 112, "AboveInterpFilters[0] at 112");
+    assert_eq(AV1NB_AINTERP1, 120, "AboveInterpFilters[1] at 120");
+    assert_eq(AV1NB_LINTERP0, 128, "LeftInterpFilters[0] at 128");
+    assert_eq(AV1NB_LINTERP1, 136, "LeftInterpFilters[1] at 136");
+    assert_eq(AV1NB_LINTERP1 + 8, AV1NB_SIZE, "the last field ends EXACTLY at AV1NB_SIZE");
+    # the interp accessors index by dir off their own base — pin that arithmetic.
+    assert_eq(AV1NB_AINTERP0 + 8, AV1NB_AINTERP1, "above interp dir stride");
+    assert_eq(AV1NB_LINTERP0 + 8, AV1NB_LINTERP1, "left interp dir stride");
     # the aref/lref accessors index by list — pin that arithmetic against the offsets.
     var nb = av1_nbctx_new();
     store64(nb + AV1NB_AREF0, 111); store64(nb + AV1NB_AREF1, 222);
@@ -1619,6 +1631,263 @@ fn test_ref_ctxs_feed_the_reads() {
     assert_eq(load64(r2 + 8), AV1_ALTREF_FRAME, "compound_ref[1] on DERIVED contexts");
     return 0;
 }
+# ================================================================
+# The last three contexts (spec 9): comp_group_idx / compound_idx / interp_filter. These
+# read the grid fields Av1MiRec only started carrying in 0.7.77. Known answers from
+# scripts/refs/nbctx_ref.py.
+# ================================================================
+# build an nbctx whose neighbour cells also carry the new grid fields.
+fn nb_build_g(avail_u, avail_l, aref0, aref1, lref0, lref1, agrp, aidx, ai0, ai1,
+lgrp, lidx, li0, li1): i64 {
+    var cols = 8;
+    var g = av1_mv_grid_new(cols, 8);
+    var acell = av1_mv_grid_cell(g, cols, 2, 3);      # above of the block at (3,3)
+    var lcell = av1_mv_grid_cell(g, cols, 3, 2);      # left
+    store64(acell + AV1MIR_REF0, aref0); store64(acell + AV1MIR_REF1, aref1);
+    store64(acell + AV1MIR_COMPGRP, agrp); store64(acell + AV1MIR_COMPIDX, aidx);
+    store64(acell + AV1MIR_INTERP0, ai0); store64(acell + AV1MIR_INTERP1, ai1);
+    store64(lcell + AV1MIR_REF0, lref0); store64(lcell + AV1MIR_REF1, lref1);
+    store64(lcell + AV1MIR_COMPGRP, lgrp); store64(lcell + AV1MIR_COMPIDX, lidx);
+    store64(lcell + AV1MIR_INTERP0, li0); store64(lcell + AV1MIR_INTERP1, li1);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, cols, 3, 3, avail_u, avail_l);
+    return nb;
+}
+# NOTE the deliberate DE-ALIASING. comp_group_idx reads CompGroupIdxs and compound_idx
+# reads CompoundIdxs; if a case gave a cell the same value for both, a context reading the
+# WRONG field would be invisible. So each helper POISONS the field its context must not
+# read (1 - v), and it_case poisons the OTHER interp dir — a dir-indexing bug cannot hide
+# behind two equal values.
+fn cg_case(au, al, a0, a1, l0, l1, agrp, lgrp, exp, tag): i64 {
+    assert_eq(av1_comp_group_idx_ctx(nb_build_g(au, al, a0, a1, l0, l1, agrp, 1 - agrp, 0, 0,
+    lgrp, 1 - lgrp, 0, 0)), exp, tag);
+    return 0;
+}
+fn ci_case(au, al, a0, a1, l0, l1, aidx, lidx, fe, exp, tag): i64 {
+    assert_eq(av1_compound_idx_ctx(nb_build_g(au, al, a0, a1, l0, l1, 1 - aidx, aidx, 0, 0,
+    1 - lidx, lidx, 0, 0), fe), exp, tag);
+    return 0;
+}
+fn it_case(au, al, a0, l0, ai, li, dir, r0, r1, exp, tag): i64 {
+    var nb = nb_build_g(au, al, a0, 0 - 1, l0, 0 - 1, 0, 0, ai, 3 - ai, 0, 0, li, 3 - li);
+    if (dir != 0) {
+        nb = nb_build_g(au, al, a0, 0 - 1, l0, 0 - 1, 0, 0, 3 - ai, ai, 0, 0, 3 - li, li);
+    }
+    assert_eq(av1_interp_filter_ctx(nb, dir, r0, r1), exp, tag);
+    return 0;
+}
+# the nbctx must CACHE the new neighbour grid values, and not consult an unavailable cell.
+fn test_nbctx_caches_grid_fields() {
+    var nb = nb_build_g(1, 1, 1, 5, 2, 6, 1, 1, 2, 1, 0, 1, 1, 2);
+    assert_eq(av1_nbctx_acompgrp(nb), 1, "above CompGroupIdx cached");
+    assert_eq(av1_nbctx_acompidx(nb), 1, "above CompoundIdx cached");
+    assert_eq(av1_nbctx_ainterp(nb, 0), 2, "above InterpFilters[0] cached");
+    assert_eq(av1_nbctx_ainterp(nb, 1), 1, "above InterpFilters[1] cached (dir indexes)");
+    assert_eq(av1_nbctx_lcompgrp(nb), 0, "left CompGroupIdx cached");
+    assert_eq(av1_nbctx_lcompidx(nb), 1, "left CompoundIdx cached");
+    assert_eq(av1_nbctx_linterp(nb, 0), 1, "left InterpFilters[0] cached");
+    assert_eq(av1_nbctx_linterp(nb, 1), 2, "left InterpFilters[1] cached");
+    # UNAVAILABLE: the cells hold the same values, but nothing may be read from them.
+    var nu = nb_build_g(0, 0, 1, 5, 2, 6, 1, 1, 2, 1, 0, 1, 1, 2);
+    assert_eq(av1_nbctx_acompgrp(nu), 0, "unavail above CompGroupIdx not consulted");
+    assert_eq(av1_nbctx_acompidx(nu), 0, "unavail above CompoundIdx not consulted");
+    assert_eq(av1_nbctx_ainterp(nu, 0), 0, "unavail above InterpFilters not consulted");
+    assert_eq(av1_nbctx_lcompgrp(nu), 0, "unavail left CompGroupIdx not consulted");
+    assert_eq(av1_nbctx_linterp(nu, 1), 0, "unavail left InterpFilters not consulted");
+    return 0;
+}
+# av1_nbctx_setup is called once PER BLOCK on a REUSED record (the tile decode holds one),
+# so every field must be written unconditionally — an unavailable neighbour must NOT
+# inherit the previous block's. The eight cached grid values were the gap: they were only
+# written inside the avail branches, so a reused record leaked them.
+fn test_nbctx_setup_reuse() {
+    var cols = 8;
+    var g = av1_mv_grid_new(cols, 8);
+    var acell = av1_mv_grid_cell(g, cols, 2, 3);
+    var lcell = av1_mv_grid_cell(g, cols, 3, 2);
+    store64(acell + AV1MIR_REF0, 1); store64(acell + AV1MIR_REF1, 5);
+    store64(acell + AV1MIR_COMPGRP, 1); store64(acell + AV1MIR_COMPIDX, 1);
+    store64(acell + AV1MIR_INTERP0, 2); store64(acell + AV1MIR_INTERP1, 2);
+    store64(lcell + AV1MIR_REF0, 1); store64(lcell + AV1MIR_REF1, 5);
+    store64(lcell + AV1MIR_COMPGRP, 1); store64(lcell + AV1MIR_COMPIDX, 1);
+    store64(lcell + AV1MIR_INTERP0, 2); store64(lcell + AV1MIR_INTERP1, 2);
+    var nb = av1_nbctx_new();
+    # block 1: both neighbours available — the record fills with non-zero cached values.
+    av1_nbctx_setup(nb, g, cols, 3, 3, 1, 1);
+    assert_eq(av1_nbctx_acompgrp(nb), 1, "reuse: first setup caches above CompGroupIdx");
+    assert_eq(av1_nbctx_linterp(nb, 0), 2, "reuse: first setup caches left InterpFilters[0]");
+    # block 2: SAME record, neither neighbour available -> every cached value must reset.
+    av1_nbctx_setup(nb, g, cols, 3, 3, 0, 0);
+    assert_eq(av1_nbctx_acompgrp(nb), 0, "reuse: above CompGroupIdx reset when unavail");
+    assert_eq(av1_nbctx_acompidx(nb), 0, "reuse: above CompoundIdx reset when unavail");
+    assert_eq(av1_nbctx_ainterp(nb, 0), 0, "reuse: above InterpFilters[0] reset when unavail");
+    assert_eq(av1_nbctx_ainterp(nb, 1), 0, "reuse: above InterpFilters[1] reset when unavail");
+    assert_eq(av1_nbctx_lcompgrp(nb), 0, "reuse: left CompGroupIdx reset when unavail");
+    assert_eq(av1_nbctx_lcompidx(nb), 0, "reuse: left CompoundIdx reset when unavail");
+    assert_eq(av1_nbctx_linterp(nb, 0), 0, "reuse: left InterpFilters[0] reset when unavail");
+    assert_eq(av1_nbctx_linterp(nb, 1), 0, "reuse: left InterpFilters[1] reset when unavail");
+    # and the refs/derived flags reset too (these already did).
+    assert_eq(av1_nbctx_aref(nb, 0), AV1_INTRA_FRAME, "reuse: above ref0 reset");
+    assert_eq(av1_nbctx_aref(nb, 1), AV1_REF_NONE, "reuse: above ref1 reset");
+    assert_eq(av1_nbctx_asingle(nb), 1, "reuse: AboveSingle reset");
+    # the derived contexts on the reused record must equal a FRESH record's.
+    var fresh = av1_nbctx_new();
+    av1_nbctx_setup(fresh, g, cols, 3, 3, 0, 0);
+    assert_eq(av1_comp_group_idx_ctx(nb), av1_comp_group_idx_ctx(fresh),
+    "reuse: comp_group_idx ctx == a fresh record's");
+    assert_eq(av1_compound_idx_ctx(nb, 1), av1_compound_idx_ctx(fresh, 1),
+    "reuse: compound_idx ctx == a fresh record's");
+    assert_eq(av1_interp_filter_ctx(nb, 0, 1, 0 - 1), av1_interp_filter_ctx(fresh, 0, 1, 0 - 1),
+    "reuse: interp_filter ctx == a fresh record's");
+    return 0;
+}
+fn test_comp_group_idx_ctx() {
+    cg_case(0, 0, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0, 0, 0, "neither avail -> 0");
+    cg_case(1, 0, 1, 5, 0 - 1, 0 - 1, 1, 0, 1, "above COMPOUND, its compgrp=1 -> +1");
+    cg_case(1, 0, 1, 5, 0 - 1, 0 - 1, 0, 0, 0, "above COMPOUND, its compgrp=0 -> +0");
+    cg_case(1, 0, 7, 0 - 1, 0 - 1, 0 - 1, 0, 0, 3, "above SINGLE + ALTREF -> +3");
+    cg_case(1, 0, 1, 0 - 1, 0 - 1, 0 - 1, 0, 0, 0, "above SINGLE, not ALTREF -> +0");
+    cg_case(0, 1, 0 - 1, 0 - 1, 7, 0 - 1, 0, 0, 3, "left SINGLE + ALTREF -> +3");
+    cg_case(0, 1, 0 - 1, 0 - 1, 1, 5, 0, 1, 1, "left COMPOUND, its compgrp=1 -> +1");
+    cg_case(1, 1, 7, 0 - 1, 7, 0 - 1, 0, 0, 5, "both SINGLE ALTREF -> 3+3=6 CLAMPED to 5");
+    cg_case(1, 1, 1, 5, 1, 5, 1, 1, 2, "both COMPOUND compgrp=1 -> 2");
+    cg_case(1, 1, 7, 0 - 1, 1, 5, 0, 1, 4, "above ALTREF(+3) + left compound(+1) -> 4");
+    return 0;
+}
+fn test_compound_idx_ctx() {
+    ci_case(0, 0, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0, 0, 0, 0, "neither avail, fwd!=bck -> 0");
+    ci_case(0, 0, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0, 0, 1, 3, "neither avail, fwd==bck -> 3");
+    ci_case(1, 0, 7, 0 - 1, 0 - 1, 0 - 1, 0, 0, 0, 1, "above SINGLE ALTREF -> +1 (NOT 3)");
+    ci_case(1, 0, 1, 5, 0 - 1, 0 - 1, 1, 0, 0, 1, "above COMPOUND compidx=1 -> +1");
+    ci_case(1, 1, 7, 0 - 1, 7, 0 - 1, 0, 0, 1, 5, "fwd==bck(3) + both ALTREF -> 5, NO clamp");
+    ci_case(1, 1, 1, 5, 1, 5, 1, 1, 1, 5, "fwd==bck(3) + both compound compidx=1 -> 5");
+    return 0;
+}
+fn test_interp_filter_ctx() {
+    # the base: ((dir&1)*2 + isCompound) * 4 selects one of four 4-wide banks.
+    it_case(0, 0, 0 - 1, 0 - 1, 0, 0, 0, 1, 0 - 1, 3, "no nb, dir0, single -> base 0 + 3");
+    it_case(0, 0, 0 - 1, 0 - 1, 0, 0, 1, 1, 0 - 1, 11, "no nb, dir1, single -> base 8 + 3");
+    it_case(0, 0, 0 - 1, 0 - 1, 0, 0, 0, 1, 5, 7, "no nb, dir0, COMPOUND -> base 4 + 3");
+    it_case(0, 0, 0 - 1, 0 - 1, 0, 0, 1, 1, 5, 15, "no nb, dir1, COMPOUND -> base 12 + 3");
+    # the ref0-sharing guard.
+    it_case(0, 1, 0 - 1, 1, 0, 2, 0, 1, 0 - 1, 2, "left shares ref0, filter 2 -> 0 + 2");
+    it_case(0, 1, 0 - 1, 4, 0, 2, 0, 1, 0 - 1, 3, "left does NOT share ref0 -> stays 3");
+    it_case(1, 0, 1, 0 - 1, 1, 0, 0, 1, 0 - 1, 1, "above shares ref0, filter 1 -> 0 + 1");
+    # the leftType/aboveType resolution ladder.
+    it_case(1, 1, 1, 1, 2, 2, 0, 1, 0 - 1, 2, "both share, AGREE on 2 -> 0 + 2");
+    it_case(1, 1, 1, 1, 1, 2, 0, 1, 0 - 1, 3, "both share, DISAGREE -> 0 + 3");
+    it_case(1, 1, 1, 4, 1, 2, 0, 1, 0 - 1, 1, "only above shares (filter 1) -> 0 + 1");
+    it_case(1, 1, 4, 1, 1, 2, 0, 1, 0 - 1, 2, "only left shares (filter 2) -> 0 + 2");
+    it_case(1, 1, 4, 4, 1, 2, 0, 1, 0 - 1, 3, "neither shares -> 0 + 3");
+    it_case(1, 1, 1, 1, 0, 0, 1, 1, 5, 12, "both agree 0, dir1 compound -> base 12 + 0");
+    # ref1 == INTRA_FRAME (0) is the ONLY input separating the spec's `RefFrame[1] >
+    # INTRA_FRAME` from `>=`. It is LIVE, not dead: spec 5.11.28 sets RefFrame[1] =
+    # INTRA_FRAME on an interintra block and interp_filter (5.11.30) is read after it —
+    # which is exactly why the spec writes `>`. Such a block is SINGLE (bank 0/8), not
+    # compound. Without these, a `>`/`>=` slip picks the wrong 4-wide CDF bank silently.
+    it_case(0, 0, 0 - 1, 0 - 1, 0, 0, 0, 1, 0, 3, "interintra ref1=INTRA_FRAME -> single bank, dir0");
+    it_case(0, 0, 0 - 1, 0 - 1, 0, 0, 1, 1, 0, 11, "interintra ref1=INTRA_FRAME -> single bank, dir1");
+    it_case(1, 1, 1, 1, 2, 2, 0, 1, 0, 2, "interintra ref1=INTRA_FRAME, both share, agree 2");
+    # a neighbour matching this block's ref0 in its SECOND slot also counts.
+    var nb = nb_build_g(0, 1, 0 - 1, 0 - 1, 4, 1, 0, 0, 0, 0, 0, 0, 2, 2);
+    assert_eq(av1_interp_filter_ctx(nb, 0, 1, 0 - 1), 2, "left shares ref0 via its ref1 slot");
+    return 0;
+}
+# Exhaustive enumeration of comp_group_idx and compound_idx ONLY (both index a [6] CDF):
+# every (AvailU, AvailL, aref0, aref1, lref0, lref1, CompGroupIdxs, CompoundIdxs) combo,
+# checked against the port's sum digests and proving neither ctx leaves [0,6).
+# interp_filter is NOT enumerated here — its input space adds InterpFilters x dir x
+# ref0 x ref1; it is covered by the branch-covering it_case vectors above (all four bank
+# bases, both ref1 boundaries, the sharing guard, every rung of the ladder).
+fn test_last_ctx_enumeration() {
+    var refs = alloc(9 * 8);
+    store64(refs + 0, 0 - 1); store64(refs + 8, 0); store64(refs + 16, 1);
+    store64(refs + 24, 2); store64(refs + 32, 3); store64(refs + 40, 4);
+    store64(refs + 48, 5); store64(refs + 56, 6); store64(refs + 64, 7);
+    var cg_sum = 0; var ci_sum = 0; var bad = 0; var n_cg = 0; var n_ci = 0;
+    var au = 0;
+    while (au < 2) {
+        var al = 0;
+        while (al < 2) {
+            var ia = 0;
+            while (ia < 9) {
+                var ib = 0;
+                while (ib < 9) {
+                    var ic = 0;
+                    while (ic < 9) {
+                        var id = 0;
+                        while (id < 9) {
+                            var ag = 0;
+                            while (ag < 2) {
+                                var lg = 0;
+                                while (lg < 2) {
+                                    # DE-ALIASED: CompoundIdxs = 1-ag so a context
+                                    # reading the wrong field shifts the digest.
+                                    var nb = nb_build_g(au, al, load64(refs + (ia * 8)),
+                                    load64(refs + (ib * 8)), load64(refs + (ic * 8)),
+                                    load64(refs + (id * 8)), ag, 1 - ag, 0, 0, lg, 1 - lg, 0, 0);
+                                    var v = av1_comp_group_idx_ctx(nb);
+                                    if (v < 0 || v > 5) { bad = bad + 1; }
+                                    cg_sum = cg_sum + v; n_cg = n_cg + 1;
+                                    var fe = 0;
+                                    while (fe < 2) {
+                                        var w = av1_compound_idx_ctx(nb, fe);
+                                        if (w < 0 || w > 5) { bad = bad + 1; }
+                                        ci_sum = ci_sum + w; n_ci = n_ci + 1;
+                                        fe = fe + 1;
+                                    }
+                                    lg = lg + 1;
+                                }
+                                ag = ag + 1;
+                            }
+                            id = id + 1;
+                        }
+                        ic = ic + 1;
+                    }
+                    ib = ib + 1;
+                }
+                ia = ia + 1;
+            }
+            al = al + 1;
+        }
+        au = au + 1;
+    }
+    assert_eq(n_cg, 104976, "comp_group_idx: enumerated every combo");
+    assert_eq(n_ci, 209952, "compound_idx: enumerated every combo");
+    assert_eq(bad, 0, "comp_group_idx / compound_idx never leave [0,6)");
+    # digests from scripts/refs/nbctx_ref.py.
+    assert_eq(cg_sum, 48584, "comp_group_idx sum");
+    assert_eq(ci_sum, 401760, "compound_idx sum");
+    return 0;
+}
+# the derived ctx drives the real 0.7.71/0.7.73 reads end-to-end.
+fn test_last_ctxs_feed_the_reads() {
+    var nb = nb_build_g(1, 1, 1, 5, 1, 5, 1, 1, 2, 2, 1, 1, 2, 2);
+    var gctx = av1_comp_group_idx_ctx(nb);
+    var cctx = av1_compound_idx_ctx(nb, 1);
+    var ictx = av1_interp_filter_ctx(nb, 0, 1, 5);
+    assert_lt(gctx, AV1_COMP_GROUP_IDX_CONTEXTS, "derived comp_group_idx ctx in range");
+    assert_lt(cctx, AV1_COMPOUND_IDX_CONTEXTS, "derived compound_idx ctx in range");
+    assert_lt(ictx, AV1_INTERP_FILTER_CONTEXTS, "derived interp_filter ctx in range");
+    var cc = av1_iicdf_blob();
+    var enc = av1_sym_enc_init(32, 1);
+    av1_write_comp_group_idx(enc, cc, gctx, 1);
+    av1_write_compound_idx(enc, cc, cctx, 0);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_read_comp_group_idx(sd, cc, gctx), 1, "comp_group_idx on a DERIVED ctx");
+    assert_eq(av1_read_compound_idx(sd, cc, cctx), 0, "compound_idx on a DERIVED ctx");
+    # interp_filter through its own blob.
+    var icc = av1_imcdf_blob();
+    var enc2 = av1_sym_enc_init(32, 1);
+    av1_write_interp_filter(enc2, icc, ictx, 2);
+    var olen2 = 0;
+    var out2 = av1_sym_enc_finish(enc2, &olen2);
+    var sd2 = av1_sym_dec_init(out2, olen2, 1);
+    assert_eq(av1_read_interp_filter(sd2, icc, ictx), 2, "interp_filter on a DERIVED ctx");
+    return 0;
+}
 # the contexts feed the real reads: a derived ctx drives av1_read_is_inter end-to-end.
 fn test_nbctx_feeds_the_read() {
     var nb = nb_build(1, 1, 0, 0 - 1, 0, 0 - 1);       # both INTRA -> is_inter ctx 3
@@ -1702,6 +1971,13 @@ fn main() {
     test_ref_family_aliases();
     test_ref_family_enumeration();
     test_ref_ctxs_feed_the_reads();
+    test_nbctx_caches_grid_fields();
+    test_nbctx_setup_reuse();
+    test_comp_group_idx_ctx();
+    test_compound_idx_ctx();
+    test_interp_filter_ctx();
+    test_last_ctx_enumeration();
+    test_last_ctxs_feed_the_reads();
     test_nbctx_feeds_the_read();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();

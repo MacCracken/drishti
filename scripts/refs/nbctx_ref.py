@@ -52,8 +52,17 @@ BWDREF_FRAME = 5
 ALTREF_FRAME = 7
 
 
-def setup(avail_u, avail_l, cell_a, cell_l):
-    """cell_* = (ref0, ref1) of the above/left MI cell (ignored when unavailable)."""
+def setup(avail_u, avail_l, cell_a, cell_l, grid_a=None, grid_l=None):
+    """cell_* = (ref0, ref1) of the above/left MI cell (ignored when unavailable).
+
+    grid_* = the extra per-cell grid values the 0.7.77 contexts read, as
+    (CompGroupIdxs, CompoundIdxs, InterpFilters[0], InterpFilters[1]). Cells start
+    memset-0, so the default models an untouched cell.
+    """
+    if grid_a is None:
+        grid_a = (0, 0, 0, 0)
+    if grid_l is None:
+        grid_l = (0, 0, 0, 0)
     a_ref0 = cell_a[0] if avail_u else INTRA_FRAME
     a_ref1 = cell_a[1] if avail_u else NONE
     l_ref0 = cell_l[0] if avail_l else INTRA_FRAME
@@ -67,6 +76,14 @@ def setup(avail_u, avail_l, cell_a, cell_l):
         "LeftIntra": int(l_ref0 <= INTRA_FRAME),
         "AboveSingle": int(a_ref1 <= INTRA_FRAME),
         "LeftSingle": int(l_ref1 <= INTRA_FRAME),
+        # unavailable neighbours' cached grid values are never consulted (every read is
+        # Avail-guarded), so 0 is as good as anything there.
+        "AboveCompGroupIdx": grid_a[0] if avail_u else 0,
+        "AboveCompoundIdx": grid_a[1] if avail_u else 0,
+        "AboveInterp": [grid_a[2], grid_a[3]] if avail_u else [0, 0],
+        "LeftCompGroupIdx": grid_l[0] if avail_l else 0,
+        "LeftCompoundIdx": grid_l[1] if avail_l else 0,
+        "LeftInterp": [grid_l[2], grid_l[3]] if avail_l else [0, 0],
     }
 
 
@@ -227,6 +244,79 @@ def comp_ref_type_ctx(n):
         return 2
 
 
+# --- the last three contexts (09.parsing.process.md), verbatim --------------------
+# comp_group_idx:
+#   ctx = 0
+#   if ( AvailU ) { if ( !AboveSingle ) ctx += CompGroupIdxs[MiRow-1][MiCol]
+#                   else if ( AboveRefFrame[0] == ALTREF_FRAME ) ctx += 3 }
+#   if ( AvailL ) { if ( !LeftSingle )  ctx += CompGroupIdxs[MiRow][MiCol-1]
+#                   else if ( LeftRefFrame[0] == ALTREF_FRAME ) ctx += 3 }
+#   ctx = Min( 5, ctx )
+# compound_idx:  same shape, ALTREF bump is 1 not 3, base is (fwd == bck) ? 3 : 0, NO clamp.
+# interp_filter:
+#   ctx = ( ( dir & 1 ) * 2 + ( RefFrame[1] > INTRA_FRAME ) ) * 4
+#   leftType = 3; aboveType = 3
+#   if ( AvailL ) { if ( RefFrames[MiRow][MiCol-1][0] == RefFrame[0] ||
+#                        RefFrames[MiRow][MiCol-1][1] == RefFrame[0] )
+#                       leftType = InterpFilters[MiRow][MiCol-1][dir] }
+#   if ( AvailU ) { ... aboveType = InterpFilters[MiRow-1][MiCol][dir] }
+#   if ( leftType == aboveType ) ctx += leftType
+#   else if ( leftType == 3 )    ctx += aboveType
+#   else if ( aboveType == 3 )   ctx += leftType
+#   else                         ctx += 3
+ALTREF_FRAME_ = 7
+
+
+def comp_group_idx_ctx(n):
+    ctx = 0
+    if n["AvailU"]:
+        if not n["AboveSingle"]:
+            ctx += n["AboveCompGroupIdx"]
+        elif n["AboveRefFrame"][0] == ALTREF_FRAME_:
+            ctx += 3
+    if n["AvailL"]:
+        if not n["LeftSingle"]:
+            ctx += n["LeftCompGroupIdx"]
+        elif n["LeftRefFrame"][0] == ALTREF_FRAME_:
+            ctx += 3
+    return min(5, ctx)
+
+
+def compound_idx_ctx(n, fwd_eq_bck):
+    ctx = 3 if fwd_eq_bck else 0
+    if n["AvailU"]:
+        if not n["AboveSingle"]:
+            ctx += n["AboveCompoundIdx"]
+        elif n["AboveRefFrame"][0] == ALTREF_FRAME_:
+            ctx += 1
+    if n["AvailL"]:
+        if not n["LeftSingle"]:
+            ctx += n["LeftCompoundIdx"]
+        elif n["LeftRefFrame"][0] == ALTREF_FRAME_:
+            ctx += 1
+    return ctx
+
+
+def interp_filter_ctx(n, dir_, ref0, ref1):
+    ctx = ((dir_ & 1) * 2 + int(ref1 > INTRA_FRAME)) * 4
+    left_type = 3
+    above_type = 3
+    if n["AvailL"]:
+        if n["LeftRefFrame"][0] == ref0 or n["LeftRefFrame"][1] == ref0:
+            left_type = n["LeftInterp"][dir_ & 1]
+    if n["AvailU"]:
+        if n["AboveRefFrame"][0] == ref0 or n["AboveRefFrame"][1] == ref0:
+            above_type = n["AboveInterp"][dir_ & 1]
+    if left_type == above_type:
+        return ctx + left_type
+    elif left_type == 3:
+        return ctx + above_type
+    elif above_type == 3:
+        return ctx + left_type
+    else:
+        return ctx + 3
+
+
 if __name__ == "__main__":
     # Full enumeration over EVERY ref value: NONE(-1), INTRA(0), and all 7 references.
     # The earlier subset {-1,0,1,4,5,7} was inadequate: it omitted LAST2(2), LAST3(3) and
@@ -280,3 +370,50 @@ if __name__ == "__main__":
         hist = [sum(1 for v in vals if v == k) for k in range(nctx)]
         assert all(0 <= v < nctx for v in vals), f"{name} out of range"
         print(f"{name:16s} sum={sum(vals):6d}  hist={hist}")
+
+    # --- the last three contexts -------------------------------------------------
+    # Their input space adds the neighbour GRID values, so they get their own sweep.
+    # comp_group_idx / compound_idx read CompGroupIdxs / CompoundIdxs (0/1 each);
+    # interp_filter reads InterpFilters[dir] (0..2) and the current block's RefFrame[0..1].
+    print("\n--- the last three contexts ---")
+    cg, ci3 = [], []
+    for au in (0, 1):
+        for al in (0, 1):
+            for a0 in REFS:
+                for a1 in REFS:
+                    for l0 in REFS:
+                        for l1 in REFS:
+                            for ag in (0, 1):
+                                for lg in (0, 1):
+                                    # DE-ALIASED (CompoundIdxs = 1-ag): comp_group_idx
+                                    # and compound_idx are independent syntax elements,
+                                    # and equal values would make a context reading the
+                                    # WRONG plane invisible to the digests.
+                                    n = setup(au, al, (a0, a1), (l0, l1),
+                                              (ag, 1 - ag, 0, 0), (lg, 1 - lg, 0, 0))
+                                    cg.append(comp_group_idx_ctx(n))
+                                    for fe in (0, 1):
+                                        ci3.append(compound_idx_ctx(n, fe))
+    assert all(0 <= v <= 5 for v in cg), "comp_group_idx out of range"
+    assert all(0 <= v <= 5 for v in ci3), "compound_idx out of range"
+    print(f"comp_group_idx   n={len(cg):6d} sum={sum(cg):7d} "
+          f"hist={[sum(1 for v in cg if v == k) for k in range(6)]}")
+    print(f"compound_idx     n={len(ci3):6d} sum={sum(ci3):7d} "
+          f"hist={[sum(1 for v in ci3 if v == k) for k in range(6)]}")
+
+    itp = []
+    for au in (0, 1):
+        for al in (0, 1):
+            for a0 in REFS:
+                for l0 in REFS:
+                    for ai in (0, 1, 2):
+                        for li in (0, 1, 2):
+                            for d in (0, 1):
+                                for r0 in REFS:
+                                    for r1 in (NONE, INTRA_FRAME, 5):
+                                        n = setup(au, al, (a0, NONE), (l0, NONE),
+                                                  (0, 0, ai, ai), (0, 0, li, li))
+                                        itp.append(interp_filter_ctx(n, d, r0, r1))
+    assert all(0 <= v < 16 for v in itp), "interp_filter out of range"
+    print(f"interp_filter    n={len(itp):6d} sum={sum(itp):7d} "
+          f"hist={[sum(1 for v in itp if v == k) for k in range(16)]}")

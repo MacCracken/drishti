@@ -823,11 +823,11 @@ fn test_mi_store_mode_footprint() {
     var rows = 16;
     # square 4x4-cell block (BLOCK_16X16).
     var g = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(g, cols, rows, 2, 3, 6, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0);
+    av1_mi_store_mode(g, cols, rows, 2, 3, 6, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0, 0, 0, 0, 0, 0);
     mi_assert_rect_ymode(g, cols, rows, 2, 3, 4, 4, AV1_NEWMV, "store_mode 16x16 footprint");
     # NON-square (BLOCK_8X16: bw4=2, bh4=4) — catches a bw4/bh4 transpose in store_mode.
     var g2 = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(g2, cols, rows, 5, 5, 4, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0);
+    av1_mi_store_mode(g2, cols, rows, 5, 5, 4, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0, 0, 0, 0, 0, 0);
     mi_assert_rect_ymode(g2, cols, rows, 5, 5, av1_num_4x4_w(4), av1_num_4x4_h(4), AV1_NEWMV,
     "store_mode 8x16 footprint (w/h not swapped)");
     # the MVs must reach EVERY cell of the footprint, not just the top-left.
@@ -841,7 +841,7 @@ fn test_mi_store_fields() {
     var rows = 8;
     # INTER, single ref (ref1 = INTRA_FRAME -> not compound): Mv[0] stored, Mv[1] NOT.
     var g = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(g, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 11, 22, 77, 88);
+    av1_mi_store_mode(g, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 11, 22, 77, 88, 0, 0, 1, 0, 0);
     assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_YMODE), AV1_NEWMV, "ymode stored");
     assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_REF0), 1, "ref0 stored");
     assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_REF1), AV1_INTRA_FRAME, "ref1 stored");
@@ -854,23 +854,23 @@ fn test_mi_store_fields() {
     # INTRA_FRAME=0 boundary). isCompound is `ref1 > INTRA_FRAME`; a `!= INTRA_FRAME` bug
     # would wrongly treat NONE as compound and is only visible here.
     var gn = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(gn, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 11, 22, 77, 88);
+    av1_mi_store_mode(gn, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 11, 22, 77, 88, 0, 0, 1, 0, 0);
     assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_REF1), AV1_REF_NONE, "ref1 = NONE stored");
     assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_MV0ROW), 11, "mv0 stored (single-ref inter)");
     assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_MV1ROW), 0, "mv1 NOT stored (ref1 = NONE is not compound)");
     assert_eq(mi_fld(gn, cols, 1, 1, AV1MIR_MV1COL), 0, "mv1 col NOT stored (ref1 = NONE)");
     # COMPOUND (ref1 > INTRA_FRAME): both MVs stored.
     var g2 = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(g2, cols, rows, 1, 1, 3, AV1_NEW_NEWMV, 1, 4, 1, 11, 22, 77, 88);
+    av1_mi_store_mode(g2, cols, rows, 1, 1, 3, AV1_NEW_NEWMV, 1, 4, 1, 11, 22, 77, 88, 0, 0, 1, 0, 0);
     assert_eq(mi_fld(g2, cols, 1, 1, AV1MIR_MV1ROW), 77, "mv1 row stored (compound)");
     assert_eq(mi_fld(g2, cols, 1, 1, AV1MIR_MV1COL), 88, "mv1 col stored (compound)");
     # the LOWEST compound ref (LAST_FRAME = 1) — one past the INTRA_FRAME=0 boundary.
     var g4 = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(g4, cols, rows, 1, 1, 3, AV1_NEW_NEWMV, 1, 1, 1, 11, 22, 77, 88);
+    av1_mi_store_mode(g4, cols, rows, 1, 1, 3, AV1_NEW_NEWMV, 1, 1, 1, 11, 22, 77, 88, 0, 0, 1, 0, 0);
     assert_eq(mi_fld(g4, cols, 1, 1, AV1MIR_MV1ROW), 77, "mv1 stored (ref1 = LAST_FRAME = 1, compound)");
     # INTRA (is_inter=0): no MV is stored even though mv args are non-zero.
     var g3 = av1_mv_grid_new(cols, rows);
-    av1_mi_store_mode(g3, cols, rows, 1, 1, 3, 0, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 11, 22, 77, 88);
+    av1_mi_store_mode(g3, cols, rows, 1, 1, 3, 0, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 11, 22, 77, 88, 0, 1, 1, 2, 2);
     assert_eq(mi_fld(g3, cols, 1, 1, AV1MIR_MV0ROW), 0, "mv0 NOT stored (intra)");
     assert_eq(mi_fld(g3, cols, 1, 1, AV1MIR_MV1ROW), 0, "mv1 NOT stored (intra)");
     assert_eq(mi_fld(g3, cols, 1, 1, AV1MIR_REF0), AV1_INTRA_FRAME, "intra ref0 still stored");
@@ -879,6 +879,54 @@ fn test_mi_store_fields() {
     assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_ISINTER), 1, "is_inter stored by final");
     assert_eq(mi_fld(g, cols, 1, 1, AV1MIR_MISIZE), 3, "mi_size stored by final");
     assert_eq(mi_avail(g, cols, 1, 1), 1, "avail raised by final");
+    return 0;
+}
+# (0.7.77) the inter-only grid fields the neighbour CDF contexts read. Per spec 5.11.4:
+# CompGroupIdxs/CompoundIdxs only when is_inter && !use_intrabc; InterpFilters for every
+# inter block (both dirs); none of them for an intra block.
+fn test_mi_store_inter_fields() {
+    var cols = 8;
+    var rows = 8;
+    # inter, !use_intrabc: everything stored, across the WHOLE footprint (MiSize 3 = 2x2).
+    # comp_group_idx=1 but compound_idx=0 — DISTINCT, so swapping the two store payloads
+    # (they are independent binary syntax elements) cannot hide behind equal values.
+    var g = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(g, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 0, 0, 0, 0,
+    0, 1, 0, 2, 1);
+    var r = 1;
+    while (r < 3) {
+        var c = 1;
+        while (c < 3) {
+            assert_eq(mi_fld(g, cols, r, c, AV1MIR_COMPGRP), 1, "comp_group_idx across the footprint");
+            assert_eq(mi_fld(g, cols, r, c, AV1MIR_COMPIDX), 0, "compound_idx across the footprint (DISTINCT)");
+            assert_eq(mi_fld(g, cols, r, c, AV1MIR_INTERP0), 2, "InterpFilters[0] across the footprint");
+            assert_eq(mi_fld(g, cols, r, c, AV1MIR_INTERP1), 1, "InterpFilters[1] across the footprint");
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    # use_intrabc=1: CompGroupIdxs/CompoundIdxs suppressed, InterpFilters STILL written.
+    var gb = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(gb, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 0, 0, 0, 0,
+    1, 1, 0, 2, 1);
+    assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_COMPGRP), 0, "use_intrabc suppresses comp_group_idx");
+    assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_COMPIDX), 0, "use_intrabc suppresses compound_idx");
+    assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_INTERP0), 2, "use_intrabc still stores InterpFilters[0]");
+    assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_INTERP1), 1, "use_intrabc still stores InterpFilters[1]");
+    # INTRA: none of the inter-only fields are stored even though non-zero args are passed.
+    var gi = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(gi, cols, rows, 1, 1, 3, 0, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0, 0,
+    0, 1, 1, 2, 2);
+    assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_COMPGRP), 0, "intra stores no comp_group_idx");
+    assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_COMPIDX), 0, "intra stores no compound_idx");
+    assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_INTERP0), 0, "intra stores no InterpFilters[0]");
+    assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_INTERP1), 0, "intra stores no InterpFilters[1]");
+    # the two interp dirs are DISTINCT slots (not aliased).
+    var gd = av1_mv_grid_new(cols, rows);
+    av1_mi_store_mode(gd, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 0, 0, 0, 0,
+    0, 0, 0, 0, 2);
+    assert_eq(mi_fld(gd, cols, 1, 1, AV1MIR_INTERP0), 0, "InterpFilters[0] independent of [1]");
+    assert_eq(mi_fld(gd, cols, 1, 1, AV1MIR_INTERP1), 2, "InterpFilters[1] independent of [0]");
     return 0;
 }
 # a block overhanging the frame edge writes only the in-grid cells (no OOB, no wrap).
@@ -897,7 +945,7 @@ fn test_mi_store_clip() {
     assert_eq(mi_avail(g2, cols, 4, cols - 1), 0, "no wrap into the previous row");
     # store_mode clips identically.
     var g3 = av1_mv_grid_new(cols, rows);
-    assert_eq(av1_mi_store_mode(g3, cols, rows, 4, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 9, 9, 0, 0),
+    assert_eq(av1_mi_store_mode(g3, cols, rows, 4, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 9, 9, 0, 0, 0, 0, 0, 0, 0),
     DR_OK, "store_mode overhang ok");
     assert_eq(mi_fld(g3, cols, 4, 5, AV1MIR_MV0ROW), 9, "in-grid corner written");
     assert_eq(mi_fld(g3, cols, 5, 5, AV1MIR_MV0ROW), 9, "in-grid corner written 2");
@@ -913,7 +961,7 @@ fn test_mi_store_badargs() {
     # MiSize indexes a 22-entry table — out-of-range must be rejected BEFORE the load.
     assert_eq(av1_mi_store_final(g, cols, rows, 0, 0, 22, 1), DR_ERR_BOUNDS, "MiSize 22 rejected");
     assert_eq(av1_mi_store_final(g, cols, rows, 0, 0, 0 - 1, 1), DR_ERR_BOUNDS, "MiSize -1 rejected");
-    assert_eq(av1_mi_store_mode(g, cols, rows, 0, 0, 22, 0, 1, 2, 1, 0, 0, 0, 0), DR_ERR_BOUNDS,
+    assert_eq(av1_mi_store_mode(g, cols, rows, 0, 0, 22, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_ERR_BOUNDS,
     "store_mode MiSize 22 rejected");
     # a rejected call must not have written anything.
     mi_assert_rect(g, cols, rows, 0, 0, 0, 0, "rejected calls wrote nothing");
@@ -928,7 +976,7 @@ fn test_mi_store_closes_the_loop() {
     var cols = load64(ctx + AV1MVC_FMI_COLS);
     # decode a BLOCK_16X16 inter neighbour ABOVE it, at (2,4) with ref0=1, Mv (24, -16),
     # written through the real storage loops rather than the test's cell setter.
-    av1_mi_store_mode(g, cols, 16, 2, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 24, 0 - 16, 0, 0);
+    av1_mi_store_mode(g, cols, 16, 2, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 24, 0 - 16, 0, 0, 0, 0, 0, 0, 0);
     av1_mi_store_final(g, cols, 16, 2, 4, 6, 1);
     # the stored block covers rows 2..5 x cols 4..7, so row 3 (the scan's r-1) is covered.
     assert_eq(mi_avail(g, cols, 3, 4), 1, "the neighbour row the scan reads is populated");
@@ -999,6 +1047,7 @@ fn main() {
     test_mi_store_footprint();
     test_mi_store_mode_footprint();
     test_mi_store_fields();
+    test_mi_store_inter_fields();
     test_mi_store_clip();
     test_mi_store_badargs();
     test_mi_store_closes_the_loop();

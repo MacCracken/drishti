@@ -398,7 +398,14 @@ enum Av1MiRecOff {
     AV1MIR_MV0COL  = 56;    # Mvs[r][c][0] col
     AV1MIR_MV1ROW  = 64;    # Mvs[r][c][1] row
     AV1MIR_MV1COL  = 72;    # Mvs[r][c][1] col
-    AV1MIR_SIZE    = 80;
+    # (0.7.77) the inter-only fields spec 5.11.4 loop 1 writes alongside the above. The
+    # neighbour CDF contexts read these: comp_group_idx / compound_idx consult the
+    # matching grid, interp_filter consults InterpFilters[..][dir].
+    AV1MIR_COMPGRP = 80;    # CompGroupIdxs[r][c]
+    AV1MIR_COMPIDX = 88;    # CompoundIdxs[r][c]
+    AV1MIR_INTERP0 = 96;    # InterpFilters[r][c][0]
+    AV1MIR_INTERP1 = 104;   # InterpFilters[r][c][1]
+    AV1MIR_SIZE    = 112;
 }
 enum Av1MiGridConst {
     # BLOCK_SIZES — the row count of the Num_4x4_Blocks_* tables a MiSize indexes.
@@ -461,11 +468,21 @@ fn av1_mv_grid_set(grid, fmi_cols, r, c, avail, is_inter, mi_size, ymode, ref0, 
 # never read back, since is_inside gates every scan read to the tile. The clip (plus the
 # MiSize table-index guard) is what keeps a hostile MiSize/MiRow from writing OOB.
 
-# av1_mi_store_mode — spec 5.11.4 storage loop 1: YModes / RefFrames / Mvs. Mvs are
-# stored only for an inter block, and Mvs[..][1] only when compound (the spec's
-# `refList < 1 + isCompound`, isCompound = RefFrame[1] > INTRA_FRAME).
+# av1_mi_store_mode — spec 5.11.4 storage loop 1: YModes / RefFrames / Mvs, plus (0.7.77)
+# the inter-only CompGroupIdxs / CompoundIdxs / InterpFilters the neighbour CDF contexts
+# read. Mvs are stored only for an inter block, and Mvs[..][1] only when compound (the
+# spec's `refList < 1 + isCompound`, isCompound = RefFrame[1] > INTRA_FRAME).
+# The spec's nesting, transcribed exactly:
+#     if ( is_inter ) {
+#         if ( !use_intrabc ) { CompGroupIdxs[..] = comp_group_idx
+#                               CompoundIdxs[..]  = compound_idx }
+#         for ( dir = 0; dir < 2; dir++ ) InterpFilters[..][dir] = interp_filter[dir]
+#         for ( refList = 0; refList < 1 + isCompound; refList++ ) Mvs[..][refList] = Mv[refList]
+#     }
+# Note InterpFilters is written for EVERY inter block but CompGroupIdxs/CompoundIdxs only
+# when !use_intrabc — an intrabc block is is_inter with no compound signalling.
 fn av1_mi_store_mode(grid, fmi_cols, fmi_rows, r, c, mi_size, ymode, ref0, ref1, is_inter,
-mv0r, mv0c, mv1r, mv1c): i64 {
+mv0r, mv0c, mv1r, mv1c, use_intrabc, comp_group_idx, compound_idx, interp0, interp1): i64 {
     if (grid == 0) { return DR_ERR_BOUNDS; }
     if (r < 0 || c < 0) { return DR_ERR_BOUNDS; }
     # MiSize indexes the 22-entry Num_4x4_Blocks_* tables — guard before the load.
@@ -487,6 +504,12 @@ mv0r, mv0c, mv1r, mv1c): i64 {
             store64(cell + AV1MIR_REF0, ref0);
             store64(cell + AV1MIR_REF1, ref1);
             if (is_inter != 0) {
+                if (use_intrabc == 0) {
+                    store64(cell + AV1MIR_COMPGRP, comp_group_idx);
+                    store64(cell + AV1MIR_COMPIDX, compound_idx);
+                }
+                store64(cell + AV1MIR_INTERP0, interp0);
+                store64(cell + AV1MIR_INTERP1, interp1);
                 store64(cell + AV1MIR_MV0ROW, mv0r);
                 store64(cell + AV1MIR_MV0COL, mv0c);
                 if (is_compound != 0) {

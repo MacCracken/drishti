@@ -795,7 +795,20 @@ enum Av1NbCtxOff {
     AV1NB_LINTRA  = 56;    # LeftIntra
     AV1NB_ASINGLE = 64;    # AboveSingle
     AV1NB_LSINGLE = 72;    # LeftSingle
-    AV1NB_SIZE    = 80;
+    # (0.7.77) the neighbour grid values the last three contexts read. The spec reads
+    # these straight from the grid at ctx time rather than snapshotting them in the
+    # 5.11.15 preamble; caching them here keeps every ctx a pure function of the record
+    # (as 0.7.75/0.7.76 established) and is equivalent — each read is Avail-guarded, so an
+    # unavailable neighbour's cached value is never consulted.
+    AV1NB_ACOMPGRP = 80;   # CompGroupIdxs[MiRow-1][MiCol]
+    AV1NB_LCOMPGRP = 88;   # CompGroupIdxs[MiRow][MiCol-1]
+    AV1NB_ACOMPIDX = 96;   # CompoundIdxs[MiRow-1][MiCol]
+    AV1NB_LCOMPIDX = 104;  # CompoundIdxs[MiRow][MiCol-1]
+    AV1NB_AINTERP0 = 112;  # InterpFilters[MiRow-1][MiCol][0]
+    AV1NB_AINTERP1 = 120;  # InterpFilters[MiRow-1][MiCol][1]
+    AV1NB_LINTERP0 = 128;  # InterpFilters[MiRow][MiCol-1][0]
+    AV1NB_LINTERP1 = 136;  # InterpFilters[MiRow][MiCol-1][1]
+    AV1NB_SIZE    = 144;
 }
 fn av1_nbctx_new(): i64 {
     var nb = alloc(AV1NB_SIZE);
@@ -823,16 +836,39 @@ fn av1_nbctx_setup(nb, grid, fmi_cols, mi_row, mi_col, avail_u, avail_l): i64 {
     var aref1 = AV1_REF_NONE;
     var lref0 = AV1_INTRA_FRAME;
     var lref1 = AV1_REF_NONE;
+    # The cached grid values default to 0 and are written UNCONDITIONALLY below. They must
+    # not be left to the `avail` branches: setup is called once PER BLOCK on a REUSED
+    # record (the tile decode holds one), so an unavailable neighbour would otherwise
+    # inherit the PREVIOUS block's neighbour — the stale-field class read_compound_type
+    # guards against too.
+    var agrp = 0; var aidx = 0; var ai0 = 0; var ai1 = 0;
+    var lgrp = 0; var lidx = 0; var li0 = 0; var li1 = 0;
     if (avail_u != 0) {
         var acell = av1_mv_grid_cell(grid, fmi_cols, mi_row - 1, mi_col);
         aref0 = load64(acell + AV1MIR_REF0);
         aref1 = load64(acell + AV1MIR_REF1);
+        agrp = load64(acell + AV1MIR_COMPGRP);
+        aidx = load64(acell + AV1MIR_COMPIDX);
+        ai0 = load64(acell + AV1MIR_INTERP0);
+        ai1 = load64(acell + AV1MIR_INTERP1);
     }
     if (avail_l != 0) {
         var lcell = av1_mv_grid_cell(grid, fmi_cols, mi_row, mi_col - 1);
         lref0 = load64(lcell + AV1MIR_REF0);
         lref1 = load64(lcell + AV1MIR_REF1);
+        lgrp = load64(lcell + AV1MIR_COMPGRP);
+        lidx = load64(lcell + AV1MIR_COMPIDX);
+        li0 = load64(lcell + AV1MIR_INTERP0);
+        li1 = load64(lcell + AV1MIR_INTERP1);
     }
+    store64(nb + AV1NB_ACOMPGRP, agrp);
+    store64(nb + AV1NB_ACOMPIDX, aidx);
+    store64(nb + AV1NB_AINTERP0, ai0);
+    store64(nb + AV1NB_AINTERP1, ai1);
+    store64(nb + AV1NB_LCOMPGRP, lgrp);
+    store64(nb + AV1NB_LCOMPIDX, lidx);
+    store64(nb + AV1NB_LINTERP0, li0);
+    store64(nb + AV1NB_LINTERP1, li1);
     store64(nb + AV1NB_AREF0, aref0);
     store64(nb + AV1NB_AREF1, aref1);
     store64(nb + AV1NB_LREF0, lref0);
@@ -1026,6 +1062,97 @@ fn av1_comp_ref_ctxs(nb, out): i64 {
     store64(out + AV1CCTX_BWDREF, av1_comp_bwdref_ctx(nb));
     store64(out + AV1CCTX_BWDREF_P1, av1_comp_bwdref_p1_ctx(nb));
     return DR_OK;
+}
+
+# ----------------------------------------------------------------
+# THE LAST THREE CONTEXTS (spec 9) — comp_group_idx / compound_idx / interp_filter.
+# These read grid fields the MI record only started carrying in 0.7.77, which is why they
+# outlived the other un-deferrals.
+# ----------------------------------------------------------------
+fn av1_nbctx_acompgrp(nb): i64 { return load64(nb + AV1NB_ACOMPGRP); }
+fn av1_nbctx_lcompgrp(nb): i64 { return load64(nb + AV1NB_LCOMPGRP); }
+fn av1_nbctx_acompidx(nb): i64 { return load64(nb + AV1NB_ACOMPIDX); }
+fn av1_nbctx_lcompidx(nb): i64 { return load64(nb + AV1NB_LCOMPIDX); }
+# dir is masked to 0/1: the spec's own ctx term is `(dir & 1)`, and callers only ever loop
+# dir = 0..1, so masking the array index too is faithful for every legal input and keeps a
+# stray dir from reading a neighbouring field of the record.
+fn av1_nbctx_ainterp(nb, dir): i64 { return load64(nb + AV1NB_AINTERP0 + ((dir & 1) * 8)); }
+fn av1_nbctx_linterp(nb, dir): i64 { return load64(nb + AV1NB_LINTERP0 + ((dir & 1) * 8)); }
+
+# comp_group_idx ctx (spec 9) — feeds av1_read_comp_group_idx (0.7.73). A COMPOUND
+# neighbour contributes its own comp_group_idx; a SINGLE neighbour contributes 3 only when
+# its RefFrame[0] is ALTREF. Clamped to 5 (COMP_GROUP_IDX_CONTEXTS = 6).
+fn av1_comp_group_idx_ctx(nb): i64 {
+    var ctx = 0;
+    if (av1_nbctx_availu(nb) != 0) {
+        if (av1_nbctx_asingle(nb) == 0) {
+            ctx = ctx + av1_nbctx_acompgrp(nb);
+        } else {
+            if (av1_nbctx_aref(nb, 0) == AV1_ALTREF_FRAME) { ctx = ctx + 3; }
+        }
+    }
+    if (av1_nbctx_availl(nb) != 0) {
+        if (av1_nbctx_lsingle(nb) == 0) {
+            ctx = ctx + av1_nbctx_lcompgrp(nb);
+        } else {
+            if (av1_nbctx_lref(nb, 0) == AV1_ALTREF_FRAME) { ctx = ctx + 3; }
+        }
+    }
+    return av1_min(5, ctx);
+}
+
+# compound_idx ctx (spec 9) — feeds av1_read_compound_idx (0.7.73). Same neighbour shape as
+# comp_group_idx but the single-neighbour ALTREF bump is 1 rather than 3, and there is NO
+# Min clamp — the spec relies on the maximum falling out at 5 (3 + 1 + 1).
+#
+# `fwd_eq_bck` is the caller's: the spec computes
+#     fwd = Abs(get_relative_dist(OrderHints[RefFrame[0]], OrderHint))
+#     bck = Abs(get_relative_dist(OrderHints[RefFrame[1]], OrderHint))
+#     ctx = (fwd == bck) ? 3 : 0
+# which is FRAME-level order-hint state, not neighbour state — deferred to the caller
+# exactly like AvailU/AvailL (roadmap.md).
+fn av1_compound_idx_ctx(nb, fwd_eq_bck): i64 {
+    var ctx = 0;
+    if (fwd_eq_bck != 0) { ctx = 3; }
+    if (av1_nbctx_availu(nb) != 0) {
+        if (av1_nbctx_asingle(nb) == 0) {
+            ctx = ctx + av1_nbctx_acompidx(nb);
+        } else {
+            if (av1_nbctx_aref(nb, 0) == AV1_ALTREF_FRAME) { ctx = ctx + 1; }
+        }
+    }
+    if (av1_nbctx_availl(nb) != 0) {
+        if (av1_nbctx_lsingle(nb) == 0) {
+            ctx = ctx + av1_nbctx_lcompidx(nb);
+        } else {
+            if (av1_nbctx_lref(nb, 0) == AV1_ALTREF_FRAME) { ctx = ctx + 1; }
+        }
+    }
+    return ctx;
+}
+
+# interp_filter ctx (spec 9) — feeds av1_read_interp_filter (0.7.71), per direction.
+# The base picks one of four 4-wide banks from (dir, is-compound); the offset is the
+# neighbours' agreed filter type, where 3 means "no usable neighbour". A neighbour only
+# counts if it SHARES this block's RefFrame[0] in either of its own reference slots.
+fn av1_interp_filter_ctx(nb, dir, ref0, ref1): i64 {
+    var ctx = (((dir & 1) * 2) + (ref1 > AV1_INTRA_FRAME)) * 4;
+    var left_type = 3;
+    var above_type = 3;
+    if (av1_nbctx_availl(nb) != 0) {
+        if ((av1_nbctx_lref(nb, 0) == ref0) || (av1_nbctx_lref(nb, 1) == ref0)) {
+            left_type = av1_nbctx_linterp(nb, dir);
+        }
+    }
+    if (av1_nbctx_availu(nb) != 0) {
+        if ((av1_nbctx_aref(nb, 0) == ref0) || (av1_nbctx_aref(nb, 1) == ref0)) {
+            above_type = av1_nbctx_ainterp(nb, dir);
+        }
+    }
+    if (left_type == above_type) { return ctx + left_type; }
+    if (left_type == 3) { return ctx + above_type; }
+    if (above_type == 3) { return ctx + left_type; }
+    return ctx + 3;
 }
 
 # Compound-reference context slots — filled by av1_comp_ref_ctxs (0.7.76) from an

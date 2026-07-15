@@ -18,10 +18,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.76 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + the COMPLETE inter mode-info read layer + MI-grid population + the neighbour/reference CDF contexts)
+## Status — 0.7.77 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + the COMPLETE inter mode-info read layer + MI-grid population + ALL the neighbour CDF contexts)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (26,021 suite assertions + 1,140 fuzz
+derived, and adversarially tested (26,130 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -55,10 +55,11 @@ decode (`av1_dpb.cyr` 0.7.61), the complete **MV-prediction** arc (`av1_mv.cyr`
 contexts), the **complete inter mode-info bitstream-read layer** (`av1_intermode.cyr`
 0.7.66–0.7.73: MV decode, mode/reference/compound reads, interp filter, motion mode,
 inter-intra, compound type), the **MI-grid population** (0.7.74) that closes the
-producer→consumer loop, and the **neighbour + reference CDF contexts** (0.7.75–0.7.76), which un-defer the
-contexts the reference reads had taken as caller inputs. What
-remains before inter frames decode: the rest of the neighbour contexts, the inter tile
-decode, and the temporal scan — **inter frames do not yet decode end-to-end**.
+producer→consumer loop, and **ALL the neighbour CDF contexts** (0.7.75–0.7.77), which un-defer every
+context the inter reads had taken as a caller input — only frame-level state (AvailU/AvailL, the
+order-hint distances) is still supplied by the caller, exactly as the spec has it. What remains before
+inter frames decode: the **inter tile decode** and the temporal scan — **inter frames do not yet decode
+end-to-end**.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive

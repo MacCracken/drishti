@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.77] - 2026-07-14
+
+**Inter prediction — the last three CDF contexts (spec §9) and the grid fields they need. Every inter
+context is now derived.** `comp_group_idx` / `compound_idx` / `interp_filter` outlived the other
+un-deferrals because they read per-cell state the MI record did not carry. This bite adds the fields, writes
+them, and derives the contexts.
+
+- **`Av1MiRec` grew 80 → 112** — `CompGroupIdxs`, `CompoundIdxs`, `InterpFilters[0..1]` — and
+  **`av1_mi_store_mode`** now writes them exactly where spec 5.11.4 loop 1 does: `CompGroupIdxs`/
+  `CompoundIdxs` inside `if (!use_intrabc)` inside `if (is_inter)`, but `InterpFilters` inside `if (is_inter)`
+  and *outside* the intrabc guard — an intrabc block is inter with no compound signalling.
+- **`Av1NbCtx` grew 80 → 144**, caching those neighbour values in `av1_nbctx_setup`. The spec re-reads the
+  grid at ctx time; caching keeps every context a pure function of the record (as 0.7.75/0.7.76 established)
+  and is equivalent, since every read is `Avail`-guarded.
+- **`av1_comp_group_idx_ctx`** — a compound neighbour contributes its own `comp_group_idx`, a single
+  neighbour contributes 3 only when its `RefFrame[0]` is `ALTREF`; clamped to 5.
+- **`av1_compound_idx_ctx`** — the same neighbour shape, but the ALTREF bump is **1, not 3**, and there is
+  **no clamp**: the spec relies on the maximum falling out at 5 (3 + 1 + 1). `fwd_eq_bck` (the order-hint
+  distance comparison) stays a caller input — frame state, not neighbour state.
+- **`av1_interp_filter_ctx`** — a 4-wide bank chosen by `(dir, is-compound)`, offset by the neighbours'
+  agreed filter type, where a neighbour only counts if it shares this block's `RefFrame[0]` in **either** of
+  its own reference slots, and 3 means "no usable neighbour".
+
+Verified against the committed spec-literal port (`scripts/refs/nbctx_ref.py`, extended): the cache
+(including the unavailable path proving the cell is *not* consulted); 10 + 6 + 13 branch-covering known
+answers — the `3+3=6 → clamped to 5` case, the no-clamp max-5 case, all four `interp_filter` bank bases,
+sharing via the neighbour's *second* ref slot, and every rung of the resolution ladder; a **314,928-combo
+enumeration** matched to the port's digests and proving no context leaves `[0,6)`; the derived contexts
+driving the real reads end-to-end; and the storage fields across the whole footprint, the `use_intrabc` gate,
+the intra case, and dir independence.
+
+All **mutation-verified** (0 at baseline): dropping the `Min(5)` clamp → 3 failures; `comp_group_idx`'s
+ALTREF bump 3→1 → 4; `compound_idx`'s base 3→1 → 4; its ALTREF bump 1→3 → 4; `interp_filter`'s base `*4`→`*2`
+→ 4; a wrong rung in the ladder → 2; dropping the ref1-slot share → 1; defeating the `use_intrabc` gate → 2.
+`test_nbctx_layout` also caught the `Av1NbCtx` growth itself — its "last field ends at `AV1NB_SIZE`"
+assertion failed until updated, which is exactly what it exists for.
+
+### Fixed
+- **`av1_nbctx_setup` was not idempotent.** The eight cached grid values were written only *inside* the
+  `avail_u`/`avail_l` branches, so a **reused** record — which the inter tile decode will hold, one per block
+  — let an unavailable neighbour inherit the *previous* block's values. They are now written unconditionally,
+  like the reference fields already were. `test_nbctx_setup_reuse` pins it (8 failures without the fix).
+- **`CompGroupIdxs` and `CompoundIdxs` were aliased in every test** — the context cases, the enumeration,
+  every `av1_mi_store_mode` call site, *and* the reference port all passed the two planes equal, so reading
+  the **wrong plane** was invisible in both the readers and the writer (found by the adversarial review;
+  three such mutations survived the whole suite). Each context case now **poisons** the plane it must not
+  read, and the store payloads are distinct: the reader swaps fail 5/2 and the store-payload swap 8. Note the
+  enumeration digest cannot catch this even de-aliased — sweeping both planes over {0,1} leaves the sum
+  invariant — so the poisoned known answers carry it.
+- **`InterpFilters[0]`/`[1]` were aliased** in every `interp_filter` case, hiding a dir-indexing bug; the
+  other direction is now poisoned (6 failures).
+- **`ref1 == INTRA_FRAME` was never exercised** — the only input separating the spec's `RefFrame[1] >
+  INTRA_FRAME` from `>=`, and a live one: 5.11.28 sets `RefFrame[1] = INTRA_FRAME` on an interintra block and
+  `interp_filter` is read after it, which is exactly *why* the spec writes `>`. The slip silently selected a
+  wrong 4-wide CDF bank; three vectors added (3 failures).
+- An overclaiming test comment (`interp_filter indexes [16]`) on an enumeration that never enumerated
+  `interp_filter` — narrowed to what the body actually covers.
+
+### Added
+- **`src/av1_mv.cyr`**: the four `Av1MiRec` inter fields; `av1_mi_store_mode`'s five new parameters.
+- **`src/av1_intermode.cyr`**: the eight `Av1NbCtx` cache fields + their accessors;
+  `av1_comp_group_idx_ctx`; `av1_compound_idx_ctx`; `av1_interp_filter_ctx`.
+- **`tests/av1_intermode.tcyr`**: `test_nbctx_caches_grid_fields`, `test_comp_group_idx_ctx`,
+  `test_compound_idx_ctx`, `test_interp_filter_ctx`, `test_last_ctx_enumeration`,
+  `test_last_ctxs_feed_the_reads`.
+- **`tests/av1_mv.tcyr`**: `test_mi_store_inter_fields`.
+- **`scripts/refs/nbctx_ref.py`** (extended): the three derivations + their exhaustive digests.
+
+### Scope / deferred
+- **Every inter CDF context is now derived from the grid.** What the caller still supplies is frame-level
+  state the spec also treats that way: `AvailU`/`AvailL` (`decode_block` computes them) and the order-hint
+  distances behind `fwd_eq_bck`. Next is the **inter tile decode** — wiring the read layer, the contexts, the
+  MI grid and the MC driver into a genuine inter frame — then the temporal scan (roadmap.md).
+
 ## [0.7.76] - 2026-07-14
 
 **Inter prediction — the reference-context family (spec §9), completing the un-deferral of the reference
