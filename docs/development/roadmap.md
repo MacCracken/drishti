@@ -257,7 +257,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   `av1_single_ref_ctxs` / `av1_comp_ref_ctxs` fillers — the reference reads' contexts are no longer caller
   inputs) is in too, and the **last three contexts** `av1_intermode.cyr` 0.7.77 (comp_group_idx /
   compound_idx / interp_filter + the Av1MiRec grid fields they read — **every inter CDF context is now
-  derived**; the caller supplies only AvailU/AvailL + the order-hint distances, as the spec does); next
+  derived**; the caller supplies only AvailU/AvailL + the order-hint distances, as the spec does), and the
+  **gating orchestrators** `av1_intermode.cyr` 0.7.78 (`av1_read_interintra_mode` 5.11.28 +
+  `av1_needs_interp_filter` / `av1_read_interp_filters` 5.11.23 — the gating 0.7.71/0.7.72 deferred to "the
+  caller") are in; next `read_motion_mode`'s gating (needs `find_warp_samples` 7.10.4 +
+  `has_overlappable_candidates`), then `read_ref_frames` + the `inter_block_mode_info` orchestrator,
+  `inter_frame_mode_info`, and
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d

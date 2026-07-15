@@ -4,6 +4,58 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.78] - 2026-07-14
+
+**Inter prediction — the gating orchestrators (spec 5.11.28 `read_interintra_mode` + the 5.11.23
+`interp_filter` tail).** 0.7.71 and 0.7.72 landed these symbols' *leaf* reads and left the gating that
+decides whether each is coded "the caller's concern". This is that caller — the first bite of the
+`inter_block_mode_info` arc.
+
+- **`av1_read_interintra_mode`** — the full 5.11.28 function. The gate is `!skip_mode &&
+  enable_interintra_compound && !isCompound && BLOCK_8X8 <= MiSize <= BLOCK_32X32`; outside it `interintra`
+  is 0 and **nothing** is read. Inside, it composes the four leaf reads and surfaces the spec's block-level
+  side-effects (`RefFrame[1] = INTRA_FRAME`, `AngleDeltaY/UV = 0`, `use_filter_intra = 0`) via an
+  `Av1InterIntraRec`, since this layer owns no block record yet. `wedge_sign` is forced to 0 per the spec.
+- **`av1_needs_interp_filter`** — `skip_mode` or `LOCALWARP` suppress the filter; a *large* block in
+  `GLOBALMV`/`GLOBAL_GLOBALMV` needs one only when the global model is a plain `TRANSLATION` (a warp model
+  carries its own filtering); everything else needs one.
+- **`av1_read_interp_filters`** — the per-direction loop: a non-`SWITCHABLE` frame gives both directions the
+  frame's filter with nothing coded; `SWITCHABLE` codes `enable_dual_filter ? 2 : 1` directions, each gated
+  by `needs_interp_filter` (an ungated direction is `EIGHTTAP`), and without dual filter direction 1 mirrors
+  direction 0.
+- Paired encoder-inverses for both.
+
+Verified by 75 new assertions. Every gated round-trip writes a **marker symbol after the gated block**, so a
+reader/writer disagreement about *how many* symbols a closed gate consumes fails loudly rather than silently
+desyncing. Coverage: all five gate-closing conditions and both `MiSize` bounds (`BLOCK_8X8` and `BLOCK_32X32`
+are *in* the gate); `needs_interp_filter` across `skip_mode`/`LOCALWARP`/both global modes/either `GmType`
+being `TRANSLATION`/the `>= 8` large boundary (incl. a small block where the `large` guard means `GLOBALMV`
+*still* needs a filter); and the filter loop across non-switchable, switchable+dual, switchable+mirror, and
+both suppression paths. Mutation-verified (0 at baseline): the interintra gate's `>`→`>=` → 3 failures;
+inverting `isCompound` → 18; forcing `wedge_sign` to 1 → 2; `LOCALWARP`→`OBMC` → 1; `TRANSLATION`→`IDENTITY`
+→ 2; `large >= 8`→`> 8` → 1; inverting the dual mirror → 3; inverting the needs gate → 13.
+
+### Fixed
+- **A duplicate function name.** The new 5.11.28 driver collided with 0.7.72's leaf `av1_read_interintra_mode`
+  — and Cyrius *silently shadows* duplicate names (last-def-wins, warn-only), so this would have swapped one
+  for the other without an error. The leaf is renamed `av1_read_interintra_mode_sym`, matching the
+  `av1_read_compound_type_sym` precedent (leaf = `_sym`, driver = plain name).
+- **A stale deferral comment** claiming the compound-reference CDF contexts are "a caller input here" — untrue
+  since 0.7.76, when `av1_comp_ref_ctxs` began deriving them. (Surfaced by `make lint`, which flags an
+  untracked deferral; the comment was wrong, not merely unreferenced.)
+
+### Added
+- **`src/av1_intermode.cyr`**: `av1_read_interintra_mode` / `av1_write_interintra_mode` + the
+  `Av1InterIntraRec` record and accessors; `av1_needs_interp_filter`; `av1_read_interp_filters` /
+  `av1_write_interp_filters`; the `AV1_BLOCK_8X8` / `AV1_BLOCK_32X32` / `AV1_EIGHTTAP` constants.
+- **`tests/av1_intermode.tcyr`**: `test_read_interintra_mode_gate`, `test_needs_interp_filter`,
+  `test_read_interp_filters`.
+
+### Scope / deferred
+- `read_motion_mode`'s full gating (5.11.27) still waits on `find_warp_samples` (7.10.4) and
+  `has_overlappable_candidates` — its own bite. Then `read_ref_frames` + the `inter_block_mode_info`
+  orchestrator, `inter_frame_mode_info`, and the inter tile decode (roadmap.md).
+
 ## [0.7.77] - 2026-07-14
 
 **Inter prediction — the last three CDF contexts (spec §9) and the grid fields they need. Every inter

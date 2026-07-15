@@ -772,19 +772,19 @@ fn test_interintra_rt() {
         var enc = av1_sym_enc_init(32, 1);
         av1_write_interintra(enc, cc, sz, 0);
         av1_write_interintra(enc, cc, sz, 1);
-        av1_write_interintra_mode(enc, cc, sz, AV1_II_DC_PRED);
-        av1_write_interintra_mode(enc, cc, sz, AV1_II_V_PRED);
-        av1_write_interintra_mode(enc, cc, sz, AV1_II_H_PRED);
-        av1_write_interintra_mode(enc, cc, sz, AV1_II_SMOOTH_PRED);
+        av1_write_interintra_mode_sym(enc, cc, sz, AV1_II_DC_PRED);
+        av1_write_interintra_mode_sym(enc, cc, sz, AV1_II_V_PRED);
+        av1_write_interintra_mode_sym(enc, cc, sz, AV1_II_H_PRED);
+        av1_write_interintra_mode_sym(enc, cc, sz, AV1_II_SMOOTH_PRED);
         var olen = 0;
         var out = av1_sym_enc_finish(enc, &olen);
         var sd = av1_sym_dec_init(out, olen, 1);
         assert_eq(av1_read_interintra(sd, cc, sz), 0, "interintra 0");
         assert_eq(av1_read_interintra(sd, cc, sz), 1, "interintra 1");
-        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_DC_PRED, "iimode DC");
-        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_V_PRED, "iimode V");
-        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_H_PRED, "iimode H");
-        assert_eq(av1_read_interintra_mode(sd, cc, sz), AV1_II_SMOOTH_PRED, "iimode SMOOTH");
+        assert_eq(av1_read_interintra_mode_sym(sd, cc, sz), AV1_II_DC_PRED, "iimode DC");
+        assert_eq(av1_read_interintra_mode_sym(sd, cc, sz), AV1_II_V_PRED, "iimode V");
+        assert_eq(av1_read_interintra_mode_sym(sd, cc, sz), AV1_II_H_PRED, "iimode H");
+        assert_eq(av1_read_interintra_mode_sym(sd, cc, sz), AV1_II_SMOOTH_PRED, "iimode SMOOTH");
         i = i + 1;
     }
     return 0;
@@ -822,14 +822,14 @@ fn test_interintra_adaptive() {
     var ccd = av1_iicdf_new();
     var enc = av1_sym_enc_init(32, 0);
     av1_write_interintra(enc, cce, 6, 1);
-    av1_write_interintra_mode(enc, cce, 6, AV1_II_SMOOTH_PRED);
+    av1_write_interintra_mode_sym(enc, cce, 6, AV1_II_SMOOTH_PRED);
     av1_write_wedge_interintra(enc, cce, 5, 1);
     av1_write_wedge_index(enc, cce, 5, 11);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 0);
     assert_eq(av1_read_interintra(sd, ccd, 6), 1, "interintra adaptive");
-    assert_eq(av1_read_interintra_mode(sd, ccd, 6), AV1_II_SMOOTH_PRED, "iimode adaptive SMOOTH");
+    assert_eq(av1_read_interintra_mode_sym(sd, ccd, 6), AV1_II_SMOOTH_PRED, "iimode adaptive SMOOTH");
     assert_eq(av1_read_wedge_interintra(sd, ccd, 5), 1, "wedge_ii adaptive");
     assert_eq(av1_read_wedge_index(sd, ccd, 5), 11, "wedge_index adaptive");
     return 0;
@@ -1905,6 +1905,128 @@ fn test_nbctx_feeds_the_read() {
     return 0;
 }
 
+# ================================================================
+# The gating orchestrators (5.11.28 read_interintra_mode + the 5.11.23 interp_filter tail)
+# — the gating 0.7.71/0.7.72 left to "the caller". Round-tripped through the writers.
+# ================================================================
+# round-trip an interintra record through the gate; assert the decode matches AND that the
+# gated-off cases consume NOTHING (a following marker symbol must still decode).
+fn ii_rt(is_comp, skip, sz, en_ii, src, exp_on, tag): i64 {
+    var cc = av1_iicdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_interintra_mode(enc, cc, src, is_comp, skip, sz, en_ii);
+    # a MARKER after the gated block: if the gate read/wrote a different number of symbols
+    # than its inverse, this decodes wrong — catching a reader/writer desync.
+    av1_write_interintra(enc, cc, 6, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_interintra_new();
+    av1_read_interintra_mode(sd, cc, got, is_comp, skip, sz, en_ii);
+    assert_eq(av1_interintra_on(got), exp_on, tag);
+    if (exp_on != 0) {
+        assert_eq(av1_interintra_mode(got), av1_interintra_mode(src), tag);
+        assert_eq(av1_interintra_wedge(got), av1_interintra_wedge(src), tag);
+        if (av1_interintra_wedge(src) != 0) {
+            assert_eq(av1_interintra_wedge_idx(got), av1_interintra_wedge_idx(src), tag);
+            assert_eq(av1_interintra_wedge_sign(got), 0, "the spec forces wedge_sign = 0");
+        }
+        assert_eq(av1_interintra_set_ref1(got), 1, "interintra flags RefFrame[1]=INTRA_FRAME");
+    } else {
+        assert_eq(av1_interintra_set_ref1(got), 0, "no interintra -> no side-effects");
+    }
+    assert_eq(av1_read_interintra(sd, cc, 6), 1, "marker: reader consumed exactly the writer's symbols");
+    return 0;
+}
+fn ii_mk(on, mode, wedge, widx): i64 {
+    var r = av1_interintra_new();
+    store64(r + AV1II_INTERINTRA, on); store64(r + AV1II_MODE, mode);
+    store64(r + AV1II_WEDGE, wedge); store64(r + AV1II_WEDGEIDX, widx);
+    return r;
+}
+fn test_read_interintra_mode_gate() {
+    # OPEN gate (not skip, enabled, single, BLOCK_8X8..BLOCK_32X32): every path round-trips.
+    ii_rt(0, 0, 6, 1, ii_mk(0, 0, 0, 0), 0, "gate open, interintra=0");
+    ii_rt(0, 0, 6, 1, ii_mk(1, AV1_II_DC_PRED, 0, 0), 1, "gate open, interintra + no wedge");
+    ii_rt(0, 0, 6, 1, ii_mk(1, AV1_II_SMOOTH_PRED, 1, 11), 1, "gate open, interintra + wedge");
+    ii_rt(0, 0, 3, 1, ii_mk(1, AV1_II_V_PRED, 1, 0), 1, "BLOCK_8X8 (lower bound) is IN the gate");
+    ii_rt(0, 0, 9, 1, ii_mk(1, AV1_II_H_PRED, 0, 0), 1, "BLOCK_32X32 (upper bound) is IN the gate");
+    # CLOSED gate: interintra = 0, and NOTHING is coded (the marker proves it).
+    ii_rt(0, 1, 6, 1, ii_mk(1, 1, 1, 5), 0, "skip_mode closes the gate");
+    ii_rt(0, 0, 6, 0, ii_mk(1, 1, 1, 5), 0, "!enable_interintra_compound closes the gate");
+    ii_rt(1, 0, 6, 1, ii_mk(1, 1, 1, 5), 0, "isCompound closes the gate");
+    ii_rt(0, 0, 2, 1, ii_mk(1, 1, 1, 5), 0, "MiSize 2 (below BLOCK_8X8) closes the gate");
+    ii_rt(0, 0, 10, 1, ii_mk(1, 1, 1, 5), 0, "MiSize 10 (above BLOCK_32X32) closes the gate");
+    return 0;
+}
+# needs_interp_filter (5.11.23): the GLOBAL(_GLOBAL)MV + large-block + TRANSLATION logic.
+fn test_needs_interp_filter() {
+    # skip_mode / LOCALWARP always suppress.
+    assert_eq(av1_needs_interp_filter(1, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0), 0, "skip_mode -> no filter");
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_LOCALWARP, 6, AV1_NEWMV, 0, 0), 0, "LOCALWARP -> no filter");
+    # an ordinary mode always needs one.
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0), 1, "NEWMV -> needs filter");
+    # large + GLOBALMV: only when the model is a plain TRANSLATION.
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_TRANSLATION, 0), 1,
+    "large GLOBALMV + TRANSLATION -> needs filter");
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0), 0,
+    "large GLOBALMV + ROTZOOM -> no filter");
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_IDENTITY, 0), 0,
+    "large GLOBALMV + IDENTITY -> no filter");
+    # GLOBAL_GLOBALMV: EITHER model being TRANSLATION suffices.
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBAL_GLOBALMV, AV1_GM_TRANSLATION,
+    AV1_GM_ROTZOOM), 1, "GLOBAL_GLOBALMV + gm0 TRANSLATION -> needs filter");
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBAL_GLOBALMV, AV1_GM_ROTZOOM,
+    AV1_GM_TRANSLATION), 1, "GLOBAL_GLOBALMV + gm1 TRANSLATION -> needs filter");
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBAL_GLOBALMV, AV1_GM_ROTZOOM,
+    AV1_GM_AFFINE), 0, "GLOBAL_GLOBALMV + neither TRANSLATION -> no filter");
+    # SMALL block: the `large` guard means GLOBALMV still needs a filter. MiSize 0 = 4x4.
+    assert_eq(av1_block_width(0), 4, "MiSize 0 is 4 wide");
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 0, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0), 1,
+    "SMALL GLOBALMV + ROTZOOM -> STILL needs a filter (the large guard)");
+    # MiSize 3 (8x8) is exactly the `>= 8` boundary -> large.
+    assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 3, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0), 0,
+    "8x8 IS large (the >= 8 boundary)");
+    return 0;
+}
+# the interp_filter loop (5.11.23 tail).
+fn if_rt(fh_filt, en_dual, skip, mm, sz, ymode, gm0, gm1, f0, f1, e0, e1, tag): i64 {
+    var cc = av1_imcdf_blob();
+    var src = alloc(16);
+    store64(src + 0, f0); store64(src + 8, f1);
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_interp_filters(enc, cc, src, fh_filt, en_dual, 3, 7, skip, mm, sz, ymode, gm0, gm1);
+    av1_write_interp_filter(enc, cc, 0, 2);        # marker
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = alloc(16);
+    av1_read_interp_filters(sd, cc, got, fh_filt, en_dual, 3, 7, skip, mm, sz, ymode, gm0, gm1);
+    assert_eq(load64(got + 0), e0, tag);
+    assert_eq(load64(got + 8), e1, tag);
+    assert_eq(av1_read_interp_filter(sd, cc, 0), 2, "marker: reader consumed the writer's symbols");
+    return 0;
+}
+fn test_read_interp_filters() {
+    # NOT switchable: both dirs take the frame's filter, nothing is coded.
+    if_rt(0, 1, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 1, 0, 0, "!SWITCHABLE -> both dirs = fh filter");
+    if_rt(2, 0, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 1, 1, 2, 2, "!SWITCHABLE (2) -> both dirs = 2");
+    # SWITCHABLE + dual: both dirs coded independently.
+    if_rt(AV1_INTERP_SWITCHABLE, 1, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 1, 2, 1,
+    "SWITCHABLE + dual -> both dirs coded");
+    if_rt(AV1_INTERP_SWITCHABLE, 1, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 0, 2, 0, 2,
+    "SWITCHABLE + dual -> dirs are independent");
+    # SWITCHABLE, NO dual: only dir 0 is coded and dir 1 MIRRORS it.
+    if_rt(AV1_INTERP_SWITCHABLE, 0, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 0, 2, 2,
+    "SWITCHABLE, !dual -> dir1 mirrors dir0 (the src's dir1 is ignored)");
+    # SWITCHABLE but needs_interp_filter false -> EIGHTTAP, nothing coded.
+    if_rt(AV1_INTERP_SWITCHABLE, 1, 1, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 2, AV1_EIGHTTAP,
+    AV1_EIGHTTAP, "SWITCHABLE + skip_mode -> EIGHTTAP, nothing coded");
+    if_rt(AV1_INTERP_SWITCHABLE, 1, 0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0, 2, 2,
+    AV1_EIGHTTAP, AV1_EIGHTTAP, "SWITCHABLE + large GLOBALMV/ROTZOOM -> EIGHTTAP");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -1979,6 +2101,10 @@ fn main() {
     test_last_ctx_enumeration();
     test_last_ctxs_feed_the_reads();
     test_nbctx_feeds_the_read();
+    test_group("the gating orchestrators (5.11.28 interintra + 5.11.23 interp_filter)");
+    test_read_interintra_mode_gate();
+    test_needs_interp_filter();
+    test_read_interp_filters();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();

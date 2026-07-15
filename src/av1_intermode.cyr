@@ -365,6 +365,10 @@ enum Av1InterModeConst {
     AV1_II_V_PRED             = 1;    # II_V_PRED
     AV1_II_H_PRED             = 2;    # II_H_PRED
     AV1_II_SMOOTH_PRED        = 3;    # II_SMOOTH_PRED
+    # block-size bounds of the interintra gate (07 semantics) + the default interp filter
+    AV1_BLOCK_8X8             = 3;    # BLOCK_8X8
+    AV1_BLOCK_32X32           = 9;    # BLOCK_32X32
+    AV1_EIGHTTAP              = 0;    # EIGHTTAP (the filter an ungated dir takes)
     # compound type (5.11.29)
     AV1_COMPOUND_TYPES        = 2;    # COMPOUND_TYPES (the @@compound_type alphabet: WEDGE/DIFFWTD)
     AV1_COMP_GROUP_IDX_CONTEXTS = 6;  # COMP_GROUP_IDX_CONTEXTS
@@ -740,7 +744,9 @@ fn av1_write_drl_idx(enc, cc, mvctx, y_mode, ref_mv_idx): i64 {
 # CDF families (all §10): Is_Inter[4], Single_Ref[3][6], Comp_Mode[5],
 # Comp_Ref_Type[5], Comp_Ref[3][3], Comp_Bwd_Ref[3][2], Uni_Comp_Ref[3][3]. Every
 # per-symbol CDF CONTEXT derives from a count of the neighbours' reference usage
-# (spec 8.3) — a caller input here (the scans deferred the same neighbour count).
+# (spec 8.3/9). Those were caller inputs when this landed at 0.7.69 because the MI grid
+# held nothing; av1_comp_ref_ctxs (0.7.76) now derives them from an Av1NbCtx, and the
+# records below are still accepted directly for tests and bespoke callers.
 # ================================================================
 enum Av1RefReadConst {
     AV1_IS_INTER_CONTEXTS      = 4;    # IS_INTER_CONTEXTS
@@ -1109,7 +1115,7 @@ fn av1_comp_group_idx_ctx(nb): i64 {
 #     fwd = Abs(get_relative_dist(OrderHints[RefFrame[0]], OrderHint))
 #     bck = Abs(get_relative_dist(OrderHints[RefFrame[1]], OrderHint))
 #     ctx = (fwd == bck) ? 3 : 0
-# which is FRAME-level order-hint state, not neighbour state — deferred to the caller
+# which is FRAME-level order-hint state, not neighbour state — deferred to the caller (roadmap.md)
 # exactly like AvailU/AvailL (roadmap.md).
 fn av1_compound_idx_ctx(nb, fwd_eq_bck): i64 {
     var ctx = 0;
@@ -1509,7 +1515,7 @@ fn av1_write_compound_mode(enc, cc, mvctx, y_mode): i64 {
 # the GATING that decides whether each is coded (interpolation_filter == SWITCHABLE
 # + needs_interp_filter; skip_mode / is_motion_mode_switchable / block-size /
 # GLOBALMV-warp / has_overlappable_candidates / find_warp_samples / is_scaled) is
-# the caller's / a later bite's concern (it needs frame + neighbour state). Compound
+# the caller's / a later bite's concern (roadmap.md — it needs frame + neighbour state). Compound
 # type + interintra are a later bite (roadmap.md).
 # ================================================================
 
@@ -1724,13 +1730,15 @@ fn av1_write_interintra(enc, cc, mi_size, interintra): i64 {
     return DR_OK;
 }
 
-# read_interintra_mode (spec 5.11.28) — the @@interintra_mode 4-symbol (II_DC_PRED /
-# II_V_PRED / II_H_PRED / II_SMOOTH_PRED), CDF Inter_Intra_Mode[Size_Group[MiSize]-1].
-fn av1_read_interintra_mode(sd, cc, mi_size): i64 {
+# the @@interintra_mode 4-symbol LEAF read (II_DC_PRED / II_V_PRED / II_H_PRED /
+# II_SMOOTH_PRED), CDF Inter_Intra_Mode[Size_Group[MiSize]-1]. The `_sym` suffix keeps it
+# distinct from av1_read_interintra_mode, the 5.11.28 DRIVER below that calls it — cyrius
+# silently shadows duplicate fn names (last-def-wins), so the names must not collide.
+fn av1_read_interintra_mode_sym(sd, cc, mi_size): i64 {
     var ctx = av1_size_group(mi_size) - 1;
     return av1_sym_read_symbol(sd, av1_iicdf_iimode(cc, ctx), AV1_INTERINTRA_MODES);
 }
-fn av1_write_interintra_mode(enc, cc, mi_size, ii_mode): i64 {
+fn av1_write_interintra_mode_sym(enc, cc, mi_size, ii_mode): i64 {
     var ctx = av1_size_group(mi_size) - 1;
     av1_sym_encode_symbol(enc, av1_iicdf_iimode(cc, ctx), AV1_INTERINTRA_MODES, ii_mode);
     return DR_OK;
@@ -1770,7 +1778,7 @@ fn av1_write_wedge_index(enc, cc, mi_size, wedge_idx): i64 {
 # enable_masked_compound + enable_jnt_comp (sequence header), interintra +
 # wedge_interintra (from read_interintra_mode), and the two neighbour-derived CDF
 # contexts (spec 9: comp_group_idx ctx from CompGroupIdxs/AboveRefFrame + Min(5,..);
-# compound_idx ctx from the order-hint distances + CompoundIdxs) — deferred as caller
+# compound_idx ctx from the order-hint distances + CompoundIdxs) — deferred as caller (roadmap.md)
 # inputs exactly like the single-ref / compound-ref neighbour counts (0.7.68/0.7.69).
 # ================================================================
 
@@ -1912,6 +1920,140 @@ interintra, wedge_ii, group_ctx, comp_ctx): i64 {
     }
     if (load64(out + AV1CT_TYPE) == AV1_COMPOUND_DIFFWTD) {
         av1_sym_encode_literal(enc, load64(out + AV1CT_MASKTYPE), 1);
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# THE GATING ORCHESTRATORS (spec 5.11.28 read_interintra_mode + the 5.11.23 interp_filter
+# tail). 0.7.71/0.7.72 landed these symbols' LEAF reads and left the gating that decides
+# whether each is coded "the caller's concern"; this is that caller.
+# ================================================================
+
+# The read_interintra_mode output record. RefFrame[1] / AngleDelta* / use_filter_intra are
+# the block-level side-effects the spec assigns inside the interintra branch — surfaced
+# here rather than written through, since this layer owns no block record yet.
+enum Av1InterIntraRec {
+    AV1II_INTERINTRA = 0;    # interintra
+    AV1II_MODE       = 8;    # interintra_mode (valid when interintra)
+    AV1II_WEDGE      = 16;   # wedge_interintra (valid when interintra)
+    AV1II_WEDGEIDX   = 24;   # wedge_index     (valid when interintra && wedge_interintra)
+    AV1II_WEDGESIGN  = 32;   # wedge_sign — the spec forces 0 on this path
+    AV1II_SETREF1    = 40;   # 1 = the caller must set RefFrame[1] = INTRA_FRAME,
+    #     AngleDeltaY = AngleDeltaUV = 0, use_filter_intra = 0
+    AV1II_SIZE       = 48;
+}
+fn av1_interintra_new(): i64 {
+    var r = alloc(AV1II_SIZE);
+    if (r == 0) { return 0; }
+    memset(r, 0, AV1II_SIZE);
+    return r;
+}
+fn av1_interintra_on(r): i64 { return load64(r + AV1II_INTERINTRA); }
+fn av1_interintra_mode(r): i64 { return load64(r + AV1II_MODE); }
+fn av1_interintra_wedge(r): i64 { return load64(r + AV1II_WEDGE); }
+fn av1_interintra_wedge_idx(r): i64 { return load64(r + AV1II_WEDGEIDX); }
+fn av1_interintra_wedge_sign(r): i64 { return load64(r + AV1II_WEDGESIGN); }
+fn av1_interintra_set_ref1(r): i64 { return load64(r + AV1II_SETREF1); }
+
+# read_interintra_mode (spec 5.11.28) — the full function. The gate is
+# !skip_mode && enable_interintra_compound && !isCompound && BLOCK_8X8 <= MiSize <= BLOCK_32X32;
+# everything outside it leaves interintra = 0 and reads NOTHING.
+fn av1_read_interintra_mode(sd, cc, out, is_compound, skip_mode, mi_size, en_interintra): i64 {
+    if (out == 0) { return DR_ERR_BOUNDS; }
+    memset(out, 0, AV1II_SIZE);
+    if (skip_mode != 0) { return DR_OK; }
+    if (en_interintra == 0) { return DR_OK; }
+    if (is_compound != 0) { return DR_OK; }
+    if (mi_size < AV1_BLOCK_8X8 || mi_size > AV1_BLOCK_32X32) { return DR_OK; }
+    var ii = av1_read_interintra(sd, cc, mi_size);
+    store64(out + AV1II_INTERINTRA, ii);
+    if (ii == 0) { return DR_OK; }
+    store64(out + AV1II_MODE, av1_read_interintra_mode_sym(sd, cc, mi_size));
+    # the spec's side-effects: RefFrame[1] = INTRA_FRAME, AngleDeltaY/UV = 0,
+    # use_filter_intra = 0. Flagged for the caller that owns the block record.
+    store64(out + AV1II_SETREF1, 1);
+    var w = av1_read_wedge_interintra(sd, cc, mi_size);
+    store64(out + AV1II_WEDGE, w);
+    if (w != 0) {
+        store64(out + AV1II_WEDGEIDX, av1_read_wedge_index(sd, cc, mi_size));
+        store64(out + AV1II_WEDGESIGN, 0);      # the spec forces wedge_sign = 0 here
+    }
+    return DR_OK;
+}
+# the encoder inverse — emits exactly the symbols the reader consumes, in order.
+fn av1_write_interintra_mode(enc, cc, out, is_compound, skip_mode, mi_size, en_interintra): i64 {
+    if (skip_mode != 0) { return DR_OK; }
+    if (en_interintra == 0) { return DR_OK; }
+    if (is_compound != 0) { return DR_OK; }
+    if (mi_size < AV1_BLOCK_8X8 || mi_size > AV1_BLOCK_32X32) { return DR_OK; }
+    var ii = load64(out + AV1II_INTERINTRA);
+    av1_write_interintra(enc, cc, mi_size, ii);
+    if (ii == 0) { return DR_OK; }
+    av1_write_interintra_mode_sym(enc, cc, mi_size, load64(out + AV1II_MODE));
+    var w = load64(out + AV1II_WEDGE);
+    av1_write_wedge_interintra(enc, cc, mi_size, w);
+    if (w != 0) { av1_write_wedge_index(enc, cc, mi_size, load64(out + AV1II_WEDGEIDX)); }
+    return DR_OK;
+}
+
+# needs_interp_filter (spec 5.11.23) — whether interp_filter[dir] is actually coded.
+# GLOBAL(_GLOBAL)MV on a large block only needs a filter when the global model is a plain
+# TRANSLATION; a warp model carries its own filtering. gm0/gm1 are GmType[RefFrame[0..1]].
+fn av1_needs_interp_filter(skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
+    if (skip_mode != 0) { return 0; }
+    if (motion_mode == AV1_MM_LOCALWARP) { return 0; }
+    var large = av1_min(av1_block_width(mi_size), av1_block_height(mi_size)) >= 8;
+    if (large != 0) {
+        if (y_mode == AV1_GLOBALMV) { return gm0 == AV1_GM_TRANSLATION; }
+        if (y_mode == AV1_GLOBAL_GLOBALMV) {
+            return (gm0 == AV1_GM_TRANSLATION) || (gm1 == AV1_GM_TRANSLATION);
+        }
+    }
+    return 1;
+}
+
+# read_interp_filters (spec 5.11.23 tail) — the per-direction loop. Fills out[0..1].
+#   interpolation_filter != SWITCHABLE -> both dirs take it, nothing is coded.
+#   SWITCHABLE -> code (enable_dual_filter ? 2 : 1) dirs, each gated by needs_interp_filter;
+#                 an ungated dir is EIGHTTAP, and without dual filter dir 1 mirrors dir 0.
+fn av1_read_interp_filters(sd, cc, out, interp_filter_fh, en_dual, ctx0, ctx1,
+skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
+    if (out == 0) { return DR_ERR_BOUNDS; }
+    if (interp_filter_fh != AV1_INTERP_SWITCHABLE) {
+        store64(out + 0, interp_filter_fh);
+        store64(out + 8, interp_filter_fh);
+        return DR_OK;
+    }
+    var ndirs = 1;
+    if (en_dual != 0) { ndirs = 2; }
+    var needs = av1_needs_interp_filter(skip_mode, motion_mode, mi_size, y_mode, gm0, gm1);
+    var dir = 0;
+    while (dir < ndirs) {
+        var ctx = ctx0;
+        if (dir != 0) { ctx = ctx1; }
+        var v = AV1_EIGHTTAP;
+        if (needs != 0) { v = av1_read_interp_filter(sd, cc, ctx); }
+        store64(out + (dir * 8), v);
+        dir = dir + 1;
+    }
+    if (en_dual == 0) { store64(out + 8, load64(out + 0)); }
+    return DR_OK;
+}
+fn av1_write_interp_filters(enc, cc, out, interp_filter_fh, en_dual, ctx0, ctx1,
+skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
+    if (interp_filter_fh != AV1_INTERP_SWITCHABLE) { return DR_OK; }   # nothing is coded
+    if (av1_needs_interp_filter(skip_mode, motion_mode, mi_size, y_mode, gm0, gm1) == 0) {
+        return DR_OK;                                                   # every dir is EIGHTTAP
+    }
+    var ndirs = 1;
+    if (en_dual != 0) { ndirs = 2; }
+    var dir = 0;
+    while (dir < ndirs) {
+        var ctx = ctx0;
+        if (dir != 0) { ctx = ctx1; }
+        av1_write_interp_filter(enc, cc, ctx, load64(out + (dir * 8)));
+        dir = dir + 1;
     }
     return DR_OK;
 }
