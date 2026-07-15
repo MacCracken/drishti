@@ -990,6 +990,254 @@ fn test_mi_store_closes_the_loop() {
     return 0;
 }
 
+# ================================================================
+# The warp-sample leaves (7.10.4 find_warp_samples / add_sample + has_overlappable_
+# candidates). Known answers from scripts/refs/warp_samples_ref.py — a spec-literal port.
+# The grid is laid with the REAL av1_mi_store_mode, so the fixture is a genuine MI grid
+# (add_sample reads Mvs at the candidate BLOCK's top-left, which only exists if the whole
+# footprint was written — a hand-poked fixture gets this wrong).
+# ================================================================
+# tile 16x16 with MiSize-6 (16x16 luma = 4x4 cells) inter blocks carrying (mv, ref0, ref1).
+fn warp_grid(mvr, mvc, ref0, ref1): i64 {
+    var cols = 16;
+    var g = av1_mv_grid_new(cols, 16);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            av1_mi_store_mode(g, cols, 16, r, c, 6, AV1_NEWMV, ref0, ref1, 1, mvr, mvc, 0, 0,
+            0, 0, 0, 0, 0);
+            av1_mi_store_final(g, cols, 16, r, c, 6, 1);
+            c = c + 4;
+        }
+        r = r + 4;
+    }
+    return g;
+}
+fn warp_ctx(g): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, g, 16, 16);
+    av1_mvctx_set_tile(ctx, 0, 16, 0, 16);
+    av1_mvctx_set_block(ctx, 4, 4, 6);       # the block under test at (4,4), MiSize 6
+    av1_mvctx_set_refs(ctx, 1, AV1_REF_NONE);
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+fn test_has_overlappable_candidates() {
+    # inter neighbours above and left -> 1.
+    assert_eq(av1_has_overlappable_candidates(warp_ctx(warp_grid(8, 8, 1, AV1_REF_NONE))), 1,
+    "inter neighbours -> overlappable");
+    # an INTRA grid (ref0 = INTRA_FRAME) -> 0: the check is RefFrames[..][0] > INTRA_FRAME.
+    assert_eq(av1_has_overlappable_candidates(warp_ctx(warp_grid(8, 8, AV1_INTRA_FRAME,
+    AV1_REF_NONE))), 0, "intra neighbours -> NOT overlappable");
+    # a block at (0,0) has neither neighbour inside the tile -> 0.
+    var g = warp_grid(8, 8, 1, AV1_REF_NONE);
+    var c0 = av1_mvctx_new();
+    av1_mvctx_set_grid(c0, g, 16, 16);
+    av1_mvctx_set_tile(c0, 0, 16, 0, 16);
+    av1_mvctx_set_block(c0, 0, 0, 6);
+    av1_mvctx_set_refs(c0, 1, AV1_REF_NONE);
+    av1_mvctx_set_precision(c0, 1, 0);
+    av1_mvctx_set_stack(c0, av1_mv_stack_new());
+    assert_eq(av1_has_overlappable_candidates(c0), 0, "block at (0,0): no neighbours -> 0");
+    # a COMPOUND neighbour still counts (the test is on RefFrame[0] only).
+    assert_eq(av1_has_overlappable_candidates(warp_ctx(warp_grid(8, 8, 1, 5))), 1,
+    "compound neighbour still overlappable (ref0 test only)");
+    return 0;
+}
+fn test_find_warp_samples() {
+    # neighbour MV == the block's -> every sample valid. 4 scanned: above, left, top-left,
+    # top-right. cand0 = {midY*8, midX*8, +mv} from the port.
+    var ws = av1_warp_new();
+    assert_eq(av1_find_warp_samples(warp_ctx(warp_grid(8, 8, 1, AV1_REF_NONE)), ws, 8, 8),
+    DR_OK, "find_warp_samples ok");
+    assert_eq(av1_warp_num(ws), 4, "4 valid samples");
+    assert_eq(av1_warp_scanned(ws), 4, "4 scanned");
+    assert_eq(av1_warp_cand(ws, 0, 0), 56, "cand[0][0] = midY*8");
+    assert_eq(av1_warp_cand(ws, 0, 1), 184, "cand[0][1] = midX*8");
+    assert_eq(av1_warp_cand(ws, 0, 2), 64, "cand[0][2] = midY*8 + mvRow");
+    assert_eq(av1_warp_cand(ws, 0, 3), 192, "cand[0][3] = midX*8 + mvCol");
+    # neighbour MV FAR from the block's -> every sample INVALID. The spec's special case
+    # keeps the FIRST one and reports NumSamples = 1, with NumSamplesScanned still 4.
+    var w2 = av1_warp_new();
+    av1_find_warp_samples(warp_ctx(warp_grid(900, 900, 1, AV1_REF_NONE)), w2, 8, 8);
+    assert_eq(av1_warp_num(w2), 1, "no valid samples -> the first large one is kept (num=1)");
+    assert_eq(av1_warp_scanned(w2), 4, "but all 4 were scanned");
+    assert_eq(av1_warp_cand(w2, 0, 2), 956, "the kept sample carries its real (large) MV");
+    assert_eq(av1_warp_cand(w2, 0, 3), 1084, "...both components");
+    # a neighbour whose ref0 differs from the block's is not a candidate at all.
+    var w3 = av1_warp_new();
+    av1_find_warp_samples(warp_ctx(warp_grid(8, 8, 4, AV1_REF_NONE)), w3, 8, 8);
+    assert_eq(av1_warp_num(w3), 0, "ref0 mismatch -> no samples");
+    assert_eq(av1_warp_scanned(w3), 0, "ref0 mismatch -> nothing even scanned");
+    # a COMPOUND neighbour (RefFrame[1] != NONE) is not a warp candidate.
+    var w4 = av1_warp_new();
+    av1_find_warp_samples(warp_ctx(warp_grid(8, 8, 1, 5)), w4, 8, 8);
+    assert_eq(av1_warp_num(w4), 0, "compound neighbour -> no samples");
+    assert_eq(av1_warp_scanned(w4), 0, "compound neighbour -> nothing scanned");
+    # an UNWRITTEN grid (avail=0) yields nothing: "RefFrames has not been written".
+    var w5 = av1_warp_new();
+    var empty = av1_mv_grid_new(16, 16);
+    var ec = av1_mvctx_new();
+    av1_mvctx_set_grid(ec, empty, 16, 16);
+    av1_mvctx_set_tile(ec, 0, 16, 0, 16);
+    av1_mvctx_set_block(ec, 4, 4, 6);
+    av1_mvctx_set_refs(ec, 1, AV1_REF_NONE);
+    av1_mvctx_set_precision(ec, 1, 0);
+    av1_mvctx_set_stack(ec, av1_mv_stack_new());
+    av1_find_warp_samples(ec, w5, 8, 8);
+    assert_eq(av1_warp_num(w5), 0, "unwritten grid (avail=0) -> no samples");
+    return 0;
+}
+fn test_warp_samples_badargs() {
+    var g = warp_grid(8, 8, 1, AV1_REF_NONE);
+    assert_eq(av1_find_warp_samples(warp_ctx(g), 0, 8, 8), DR_ERR_BOUNDS, "null ws rejected");
+    # a corrupt MiSize must be rejected BEFORE it indexes the 22-entry Num_4x4 tables.
+    var ctx = warp_ctx(g);
+    av1_mvctx_set_block(ctx, 4, 4, 22);
+    var ws = av1_warp_new();
+    assert_eq(av1_find_warp_samples(ctx, ws, 8, 8), DR_ERR_BOUNDS, "MiSize 22 rejected");
+    return 0;
+}
+
+# The three cases a uniform, square fixture cannot see (found by mutation: each of these
+# mutants passed until the matching case landed).
+fn warp_grid_sz(sz, mvr, mvc, ref0, ref1, step_r, step_c): i64 {
+    var cols = 16;
+    var g = av1_mv_grid_new(cols, 16);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            av1_mi_store_mode(g, cols, 16, r, c, sz, AV1_NEWMV, ref0, ref1, 1, mvr, mvc, 0, 0,
+            0, 0, 0, 0, 0);
+            av1_mi_store_final(g, cols, 16, r, c, sz, 1);
+            c = c + step_c;
+        }
+        r = r + step_r;
+    }
+    return g;
+}
+fn warp_ctx_sz(g, sz, dim): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, g, dim, dim);
+    av1_mvctx_set_tile(ctx, 0, dim, 0, dim);
+    av1_mvctx_set_block(ctx, 4, 4, sz);
+    av1_mvctx_set_refs(ctx, 1, AV1_REF_NONE);
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+fn test_warp_nonsquare_and_clamp() {
+    # (1) NON-SQUARE block: MiSize 4 = BLOCK_8X16 -> w4=2, h4=4. A square fixture cannot
+    # tell add_sample(-1, w4) from add_sample(-1, h4) for the top-right probe.
+    assert_eq(av1_num_4x4_w(4), 2, "MiSize 4 w4=2");
+    assert_eq(av1_num_4x4_h(4), 4, "MiSize 4 h4=4 (NON-square)");
+    var ws = av1_warp_new();
+    av1_find_warp_samples(warp_ctx_sz(warp_grid_sz(4, 8, 8, 1, AV1_REF_NONE, 4, 2), 4, 16), ws, 8, 8);
+    assert_eq(av1_warp_num(ws), 4, "non-square block: 4 valid samples");
+    assert_eq(av1_warp_scanned(ws), 4, "non-square block: 4 scanned");
+    assert_eq(av1_warp_cand(ws, 0, 1), 152, "non-square cand[0][1] = midX*8");
+    # cand[3] IS the top-right sample, taken at add_sample(-1, w4). With w4 != h4 this is
+    # the ONLY slot that distinguishes w4 from h4 there — asserting cand[0] alone hid it.
+    assert_eq(av1_warp_cand(ws, 3, 0), 56, "top-right cand[3][0]");
+    assert_eq(av1_warp_cand(ws, 3, 1), 216, "top-right cand[3][1] — pins add_sample(-1, w4)");
+    assert_eq(av1_warp_cand(ws, 3, 2), 64, "top-right cand[3][2]");
+    assert_eq(av1_warp_cand(ws, 3, 3), 224, "top-right cand[3][3]");
+    # (2) the threshold's 112 UPPER clamp. A 16x16 block clips to 16 and never reaches it;
+    # MiSize 15 is 128x128 luma, so Clip3(16, 112, 128) = 112 vs an unclamped 128. A
+    # neighbour mvDiff of 120 sits strictly between -> valid ONLY without the clamp.
+    assert_eq(av1_block_width(15), 128, "MiSize 15 is 128 luma wide");
+    var big = av1_mv_grid_new(64, 64);
+    var r = 0;
+    while (r < 64) {
+        var c = 0;
+        while (c < 64) {
+            av1_mi_store_mode(big, 64, 64, r, c, 15, AV1_NEWMV, 1, AV1_REF_NONE, 1, 128, 8, 0, 0,
+            0, 0, 0, 0, 0);
+            av1_mi_store_final(big, 64, 64, r, c, 15, 1);
+            c = c + 32;
+        }
+        r = r + 32;
+    }
+    var bctx = av1_mvctx_new();
+    av1_mvctx_set_grid(bctx, big, 64, 64);
+    av1_mvctx_set_tile(bctx, 0, 64, 0, 64);
+    av1_mvctx_set_block(bctx, 32, 32, 15);
+    av1_mvctx_set_refs(bctx, 1, AV1_REF_NONE);
+    av1_mvctx_set_precision(bctx, 1, 0);
+    av1_mvctx_set_stack(bctx, av1_mv_stack_new());
+    var wb = av1_warp_new();
+    av1_find_warp_samples(bctx, wb, 8, 8);      # mvDiff = |128-8| = 120 > 112 -> invalid
+    assert_eq(av1_warp_num(wb), 1, "mvDiff 120 exceeds the CLAMPED threshold 112 -> only the first kept");
+    assert_eq(av1_warp_scanned(wb), 3, "3 scanned at 128x128 (top-right needs max(w4,h4) <= 16)");
+    return 0;
+}
+# (3) the 8x8-granularity probe: has_overlappable_candidates steps by 2 and probes x4|1,
+# i.e. ODD columns only. Inter on EVEN columns alone must NOT register.
+fn test_overlappable_granularity() {
+    var cols = 16;
+    var geven = av1_mv_grid_new(cols, 16);
+    var godd = av1_mv_grid_new(cols, 16);
+    var c = 0;
+    while (c < 16) {
+        var ref_even = AV1_INTRA_FRAME;
+        if (c - ((c / 2) * 2) == 0) { ref_even = 1; }          # inter on EVEN cols
+        var ref_odd = AV1_INTRA_FRAME;
+        if (c - ((c / 2) * 2) == 1) { ref_odd = 1; }           # inter on ODD cols
+        av1_mi_store_mode(geven, cols, 16, 3, c, 0, AV1_NEWMV, ref_even, AV1_REF_NONE, 1, 8, 8, 0, 0,
+        0, 0, 0, 0, 0);
+        av1_mi_store_final(geven, cols, 16, 3, c, 0, 1);
+        av1_mi_store_mode(godd, cols, 16, 3, c, 0, AV1_NEWMV, ref_odd, AV1_REF_NONE, 1, 8, 8, 0, 0,
+        0, 0, 0, 0, 0);
+        av1_mi_store_final(godd, cols, 16, 3, c, 0, 1);
+        c = c + 1;
+    }
+    # left column intra in both, so only the above row decides.
+    var r = 0;
+    while (r < 16) {
+        av1_mi_store_mode(geven, cols, 16, r, 3, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 1,
+        8, 8, 0, 0, 0, 0, 0, 0, 0);
+        av1_mi_store_final(geven, cols, 16, r, 3, 0, 1);
+        av1_mi_store_mode(godd, cols, 16, r, 3, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 1,
+        8, 8, 0, 0, 0, 0, 0, 0, 0);
+        av1_mi_store_final(godd, cols, 16, r, 3, 0, 1);
+        r = r + 1;
+    }
+    assert_eq(av1_has_overlappable_candidates(warp_ctx_sz(geven, 6, 16)), 0,
+    "inter on EVEN cols only: the x4|1 ODD probe finds nothing");
+    assert_eq(av1_has_overlappable_candidates(warp_ctx_sz(godd, 6, 16)), 1,
+    "inter on ODD cols only: the x4|1 ODD probe finds it");
+    # The `x4 += 2` step is ONLY observable at an ODD MiCol: at an even one, x4|1 maps
+    # both x and x+1 to the same odd column, so stepping by 1 probes the same SET. At
+    # MiCol=5 with w4=4 the range is [5,9): step 2 probes {5,7}, step 1 probes {5,7,9}.
+    # So inter at column 9 ALONE separates them.
+    var g9 = av1_mv_grid_new(16, 16);
+    var k = 0;
+    while (k < 16) {
+        var rf = AV1_INTRA_FRAME;
+        if (k == 9) { rf = 1; }
+        av1_mi_store_mode(g9, 16, 16, 3, k, 0, AV1_NEWMV, rf, AV1_REF_NONE, 1, 8, 8, 0, 0,
+        0, 0, 0, 0, 0);
+        av1_mi_store_final(g9, 16, 16, 3, k, 0, 1);
+        av1_mi_store_mode(g9, 16, 16, k, 4, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 1,
+        8, 8, 0, 0, 0, 0, 0, 0, 0);
+        av1_mi_store_final(g9, 16, 16, k, 4, 0, 1);
+        k = k + 1;
+    }
+    var c9 = av1_mvctx_new();
+    av1_mvctx_set_grid(c9, g9, 16, 16);
+    av1_mvctx_set_tile(c9, 0, 16, 0, 16);
+    av1_mvctx_set_block(c9, 4, 5, 6);           # ODD MiCol
+    av1_mvctx_set_refs(c9, 1, AV1_REF_NONE);
+    av1_mvctx_set_precision(c9, 1, 0);
+    av1_mvctx_set_stack(c9, av1_mv_stack_new());
+    assert_eq(av1_has_overlappable_candidates(c9), 0,
+    "ODD MiCol=5, inter only at col 9: the 8x8 step-2 probe must NOT reach it");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -1051,6 +1299,12 @@ fn main() {
     test_mi_store_clip();
     test_mi_store_badargs();
     test_mi_store_closes_the_loop();
+    test_group("warp samples (7.10.4) + has_overlappable_candidates");
+    test_has_overlappable_candidates();
+    test_find_warp_samples();
+    test_warp_samples_badargs();
+    test_warp_nonsquare_and_clamp();
+    test_overlappable_granularity();
     return assert_summary();
 }
 

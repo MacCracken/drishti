@@ -260,8 +260,10 @@ Baseline (0.7.0): OBU layer + sequence header.
   derived**; the caller supplies only AvailU/AvailL + the order-hint distances, as the spec does), and the
   **gating orchestrators** `av1_intermode.cyr` 0.7.78 (`av1_read_interintra_mode` 5.11.28 +
   `av1_needs_interp_filter` / `av1_read_interp_filters` 5.11.23 — the gating 0.7.71/0.7.72 deferred to "the
-  caller") are in; next `read_motion_mode`'s gating (needs `find_warp_samples` 7.10.4 +
-  `has_overlappable_candidates`), then `read_ref_frames` + the `inter_block_mode_info` orchestrator,
+  caller") and the **warp-sample leaves** `av1_mv.cyr` 0.7.79 (`find_warp_samples` / `add_sample` 7.10.4 +
+  `has_overlappable_candidates` — what read_motion_mode's OBMC/LOCALWARP gating needs) are in; next
+  `read_motion_mode`'s full 5.11.27 gating (+ `is_scaled`), then `warp_estimation` (7.11.3.8) turns the
+  samples into a model, and `read_ref_frames` + the `inter_block_mode_info` orchestrator,
   `inter_frame_mode_info`, and
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the

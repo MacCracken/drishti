@@ -16,6 +16,7 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 
 | Port | Covers | Asserted by |
 |------|--------|-------------|
+| `warp_samples_ref.py` | `find_warp_samples` / `add_sample` (7.10.4) + `has_overlappable_candidates` | `tests/av1_mv.tcyr` (`test_find_warp_samples`, `test_has_overlappable_candidates`, `test_warp_nonsquare_and_clamp`) |
 | `nbctx_ref.py` | neighbour CDF contexts — the 5.11.15 `inter_frame_mode_info` preamble + §9 `is_inter` / `comp_mode` ctx, `check_backward`, `count_refs`, `ref_count_ctx` | `tests/av1_intermode.tcyr` (`test_nbctx_known_answers`, `test_nbctx_full_enumeration`) |
 
 ## Why these live in the repo

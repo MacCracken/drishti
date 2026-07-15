@@ -4,6 +4,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.79] - 2026-07-14
+
+**Inter prediction — the warp-sample leaves (spec 7.10.4 `find_warp_samples` / `add_sample`, and
+`has_overlappable_candidates`).** `read_motion_mode` (5.11.27) gates on both: OBMC needs an overlappable
+neighbour, LOCALWARP needs `NumSamples > 0`. Extends `src/av1_mv.cyr` with:
+
+- **`av1_has_overlappable_candidates`** — is there an inter block above or left? Checked at 8×8 granularity
+  (the `+= 2` step with an `x4 | 1` odd-column probe) and clipped to the **frame**, not the tile.
+- **`av1_warp_add_sample`** (7.10.4.2) — considers one neighbour: skipped unless inside, written this frame,
+  sharing `RefFrame[0]`, and single-ref. It snaps to the candidate **block's** top-left, computes the block
+  centre, and validates the MV delta against `Clip3(16, 112, Max(Block_Width, Block_Height))`. An invalid
+  sample is kept only if it is the *first* scanned — the spec's "if no small motion vectors are found, return
+  the first large one".
+- **`av1_find_warp_samples`** (7.10.4.1) — scans the above row and left column (one sample if the neighbour
+  is at least as large, else stepping across smaller ones), then the top-left and top-right corners, and
+  applies the `NumSamples = 1` special case.
+- The `Av1WarpSamples` record (`CandList[8][4]` + `NumSamples` + `NumSamplesScanned`).
+
+Verified against a new committed spec-literal port (`scripts/refs/warp_samples_ref.py`), with the fixture
+grid laid down by the **real `av1_mi_store_mode`** rather than poked by hand — which matters, because
+`add_sample` reads `Mvs` at the candidate block's *top-left*, a cell that only exists if the whole footprint
+was written. (My first hand-built fixture got this wrong and reported 4 valid samples for MVs 900 apart; the
+tell was a candidate whose source and destination were identical.)
+
+All **mutation-verified** (0 at baseline): inverting the compound test → 12 failures; removing the `candRow`
+snap → 3; removing the first-large special case → 2; removing the `NumSamples = 1` case → 1; `>` → `>=` in
+the overlappable probe → 1; the 8×8 step 2 → 1 → 1; the threshold's 112 clamp → 999 → 1; the top-right
+`w4` → `h4` → 2.
+
+### Fixed
+- **Three mutations initially survived, all from one cause: a uniform, square fixture** — the same aliasing
+  lesson as 0.7.76/0.7.77. A 16×16 block has `w4 == h4`, so the top-right probe's `w4` was
+  indistinguishable from `h4`; it never reaches the threshold's 112 clamp; and at an *even* `MiCol` the
+  `x4 | 1` probe maps both `x` and `x+1` to the same column, so the 8×8 step is unobservable. Closed with a
+  non-square block (`BLOCK_8X16`) asserting the **top-right** candidate slot specifically, a 128×128 block
+  with an MV delta of 120 (strictly between the clamped 112 and an unclamped 128), and an **odd** `MiCol`
+  case where only column 9 carries an inter block.
+- Guarded every `MiSizes` read before it indexes the 22-entry `Num_4x4_Blocks_*` tables (the grid's writer
+  guards `MiSize`, but the reader shouldn't rely on that alone), and documented that the spec's
+  `& ~(candH4 - 1)` is transcribed as `& (0 - candH4)` — equal in two's complement, verified exhaustively.
+
+### Added
+- **`src/av1_mv.cyr`**: `av1_has_overlappable_candidates`; `av1_warp_add_sample`; `av1_find_warp_samples`;
+  the `Av1WarpSamples` record + accessors; `AV1_LEAST_SQUARES_SAMPLES_MAX`.
+- **`tests/av1_mv.tcyr`**: `test_has_overlappable_candidates`, `test_find_warp_samples`,
+  `test_warp_samples_badargs`, `test_warp_nonsquare_and_clamp`, `test_overlappable_granularity`.
+- **`scripts/refs/warp_samples_ref.py`** — the spec-literal port.
+
+### Scope / deferred
+- The samples themselves; `warp_estimation` (7.11.3.8) — turning `CandList` into a warp model — is a later
+  bite. Next: `read_motion_mode`'s full 5.11.27 gating (these leaves + `is_scaled`), then `read_ref_frames`
+  and the `inter_block_mode_info` orchestrator (roadmap.md).
+
 ## [0.7.78] - 2026-07-14
 
 **Inter prediction — the gating orchestrators (spec 5.11.28 `read_interintra_mode` + the 5.11.23
