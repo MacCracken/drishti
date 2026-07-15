@@ -63,7 +63,18 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - Build with `cyrius build`, not raw `cat file | cycc` — the manifest auto-resolves deps and prepends includes
 - Every buffer declaration is a contract: function-local `var buf[N]` = N **bytes**; module-global `var buf[N]` in an INCLUDED module = N × u64 (8N bytes) — comment the unit at every declaration
 - `&&` / `||` short-circuit; mixed expressions require explicit parens
+- **`>>` is LOGICAL; `>>>` is arithmetic (sign-preserving)** — the reverse of JS/Java, and
+  the single easiest way to silently corrupt signed maths (transforms, `Round2`, MV
+  projection). `&` is two's-complement, so the spec's `~(x - 1)` transcribes as `(0 - x)`.
+  Comparisons yield exactly 0/1, so the spec's arithmetic on booleans (`2 * AboveIntra`,
+  `a ^ b`) transcribes directly
+- Cyrius **silently shadows duplicate `fn` names** (last-def-wins, warn-only) — there is no
+  module-private scoping, so grep before naming a driver over an existing leaf; the
+  convention is leaf = `_sym` suffix, driver = plain name. `grep -hoE '^fn [a-z0-9_]+'
+  src/*.cyr | sort | uniq -d` must be empty. A wrong ARG COUNT also does not hard-fail —
+  changing a signature needs every call site checked by hand
 - Hand-built test vectors comment EVERY field's bit packing; anything with a writer gets a round-trip test; adversarial cases (truncation, lying sizes, forbidden bits) are part of the definition of done
+- **A test you have not seen fail is not evidence** — mutation-verify: break the code on purpose, confirm the suite goes red, restore. Known answers come from a spec-literal port in `scripts/refs/`, never from the Cyrius. See [`docs/guides/verification.md`](docs/guides/verification.md) for the loop and the failure modes (circular tests, aliased fixtures, digest blindness, silent name shadowing)
 
 ## Rules (Hard Constraints)
 
@@ -79,7 +90,7 @@ cyrius test                          # run [build].test + tests/*.tcyr
 
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records (*why X over Y?*)
 - [`docs/architecture/`](docs/architecture/) — Non-obvious constraints (*what's true about the code?*)
-- [`docs/guides/`](docs/guides/) — Task-oriented how-tos
+- [`docs/guides/`](docs/guides/) — Task-oriented how-tos; **[`verification.md`](docs/guides/verification.md) is the one to read first** — the spec-derive → reference-port → mutation-verify → adversarial-review loop, and the failure modes that shipped green without it
 - [`docs/examples/`](docs/examples/) — Runnable examples
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0

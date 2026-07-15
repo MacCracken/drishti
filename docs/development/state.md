@@ -44,8 +44,8 @@ neighbour CDF contexts 0.7.75
 MI-grid population `av1_mv.cyr` 0.7.74
 (closes the
 producer→consumer loop); read_compound_type `av1_intermode.cyr` 0.7.73
-(the inter mode-info read layer is
-COMPLETE); inter-intra reads 0.7.72; interp filter + motion mode
+(every inter mode-info SYMBOL READ is in —
+the read_ref_frames / inter_block_mode_info orchestrators that compose them are not); inter-intra reads 0.7.72; interp filter + motion mode
 0.7.71; compound mode path 0.7.70; compound reference path 0.7.69; reference-selection
 reads (single) 0.7.68; single-prediction inter mode reads
 0.7.67; MV component decode 0.7.66; find_mv_stack driver `av1_mv.cyr` 0.7.65; spatial neighbour scans 0.7.64;
@@ -60,6 +60,12 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs
 (0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
 
+> **Start here if you are new**: [`docs/guides/verification.md`](../guides/verification.md)
+> — the verification loop every AV1 bite follows and, more importantly, the failure modes
+> that shipped green without it (circular tests, aliased fixtures, digest blindness,
+> silently-shadowed duplicate names). Build/test cleanly with
+> `CYRIUS_NO_WARN_PIN_DRIFT=1 CYRIUS_NO_WARN_SHADOW_LIB=1`.
+>
 > **Gate discipline** (2026-07-11): `make lint` is part of the green bar and is
 > reported by its actual exit code — never folded into "green" while red. A
 > >120-char line had silently failed it since the entropy-decoder work; fixed in
@@ -70,11 +76,13 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 - **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
   version for the arithmetic-shift operator `>>>`. The pin is the
-  *minimum*; a newer installed `cycc` (currently **6.4.62**) compiles
-  clean and only emits a harmless drift note. **Set
+  *minimum*; any newer installed `cycc` (**6.4.64** at the 0.7.79 cut, and it
+  moves) compiles clean and only emits a harmless drift note — do not chase
+  the number, the contract is that drift is expected and benign. **Set
   `CYRIUS_NO_WARN_PIN_DRIFT=1`** in the env for clean build/test/lint
-  output. Bump the pin only when a new toolchain feature is actually used
-  (none needed so far past 6.4.46).
+  output; a local `./lib/` also shadows the pinned stdlib and warns, so
+  **`CYRIUS_NO_WARN_SHADOW_LIB=1`** too. Bump the pin only when a new
+  toolchain feature is actually used (none needed so far past 6.4.46).
 - **`lib/`**: materialized by `cyrius deps` — real directory, never a
   symlink, never committed.
 
@@ -82,7 +90,7 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 759, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 779, format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |
@@ -136,10 +144,13 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
   av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 3,515 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
-- `make fmt-check` — clean; `make lint` — clean for the AV1 modules.
-  Three pre-existing deferrals surfaced by toolchain drift are tracked
-  separately: `h264_ps.cyr:59`, `vpx_bool.cyr:104`, and a >120-char line
-  in `tests/av1_frame.tcyr:55` (none touched by this cut)
+- `make fmt-check` — exit 0; `make lint` — exit 0, clean for **every** module
+  (78/78 targets report 0 untracked deferrals + 0 warnings), not just the AV1
+  ones. No tracked lint deferrals are outstanding and no line in the tree
+  exceeds 120 chars. (An earlier note here named three "pre-existing deferrals"
+  at `h264_ps.cyr:59` / `vpx_bool.cyr:104` / `tests/av1_frame.tcyr:55` — none is
+  a deferral or a length violation. The note was wrong; removed by the 0.7.79
+  doc-claim audit.)
 - `cyrius distlib` — `dist/drishti.cyr` verified compile-clean via a
   consumer-style build
 - **adversarial spec reviews** — field-by-field cross-checks against the
@@ -320,6 +331,40 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 ## In-flight / next
 
+> ### Picking this up cold — the next task, concretely
+>
+> **Where we are (0.7.79):** keyframes decode end-to-end. **Inter frames do NOT** — the
+> tile decoder is still intra-only. Everything inter *below* the orchestrators is built:
+> the MC driver + DPB, the whole `find_mv_stack` arc, the complete inter mode-info
+> bitstream-read layer, the MI-grid population, every CDF context, and the warp samples.
+> What is missing is the **composition** that turns those into a decoded inter frame.
+>
+> **Do these in order** (each is one bite; read
+> [`docs/guides/verification.md`](../guides/verification.md) first):
+>
+> 1. **`read_motion_mode`** (5.11.27) — the last gating orchestrator. Its leaves are all
+>    in (0.7.79's `av1_find_warp_samples` / `av1_has_overlappable_candidates`); it still
+>    needs **`is_scaled`** (06.bitstream.syntax.md, just below `read_motion_mode`).
+> 2. **`read_ref_frames`** (5.11.25) — the dispatcher over the single/compound reads.
+> 3. **`inter_block_mode_info`** (5.11.23) — composes ref frames → `find_mv_stack` → the
+>    mode reads → `assign_mv` → interintra / motion mode / compound type / interp filter.
+>    Pure composition; every part exists.
+> 4. **`inter_frame_mode_info`** (5.11.15) — the outer dispatch (segment id, skip_mode,
+>    skip, `is_inter` → inter or intra block mode info).
+> 5. **The inter tile decode** — wire the above + `compute_prediction` (the MC driver)
+>    into `decode_block`/`decode_tile`, so `av1_decode_stream` decodes a real inter
+>    frame. **This is the milestone.**
+> 6. Then: the temporal scan (7.10.2.5/6 — needs the DPB to save MVs, currently a pixel-
+>    only ring), `warp_estimation` (7.11.3.8), compound blending, OBMC, scaled-ref MC.
+>
+> **Remaining to AV1 100%:** ~35–55 patches (inter 15–22 · film grain 2–3 · the deferred
+> feature-gated list 7–10 · conformance 3–8 · the encode lane 5–10 · close-out audit 1–2).
+> The conformance and encode numbers are the soft ones — conformance because you cannot
+> know what fails until the vectors run, and encode because *mode decision has no spec
+> answer* (the 37 `av1_write_*` inverses already exist; choosing modes is a design
+> problem the spec does not adjudicate, and the stated 1.0 gate is round-trip-clean,
+> not compression-competitive).
+
 The **intra still-picture decode MILESTONE is COMPLETE (0.7.25)** — profile-0
 AV1 keyframes decode end-to-end to pixels. Per-release history is in
 [`CHANGELOG.md`](../../CHANGELOG.md); the current picture:
@@ -418,9 +463,12 @@ filter + motion mode reads** (`av1_intermode.cyr` 0.7.71 — `av1_read_interp_fi
 `av1_read_motion_mode`/`av1_read_use_obmc` 5.11.27 + the Interp_Filter/Motion_Mode/Use_Obmc CDFs), and the
 **inter-intra reads** (`av1_intermode.cyr` 0.7.72 — `av1_read_interintra`/`_interintra_mode`/
 `_wedge_interintra`/`_wedge_index` 5.11.28 + the new av1_iicdf blob of Inter_Intra/Inter_Intra_Mode/
-Wedge_Inter_Intra/Wedge_Index CDFs) are in — the inter block's full MODE + REFERENCE + MV + interp +
-motion-mode + inter-intra bitstream-read layer is complete; next compound_type (5.11.29 — the last inter
-mode-info read), then the MI-grid population + the inter tile decode
+Wedge_Inter_Intra/Wedge_Index CDFs) are in, as are read_compound_type (0.7.73), the MI-grid population
+(0.7.74), every neighbour CDF context (0.7.75-0.7.77), the interintra/interp gating orchestrators (0.7.78)
+and the warp samples (0.7.79) — so every inter mode-info SYMBOL READ is in, and the MI grid that feeds the
+contexts is populated. What is NOT in: the orchestrators that compose them — read_ref_frames (5.11.25),
+read_motion_mode's gating (5.11.27, needs is_scaled), inter_block_mode_info (5.11.23), inter_frame_mode_info
+(5.11.15) — and the inter tile decode
 that lets `av1_decode_stream` decode a genuine inter frame referencing the DPB through the MC driver, then
 the temporal scan (which needs the DPB's deferred saved MVs) + scaled-reference/BILINEAR MC + OBMC/warp;
 plus film-grain synthesis; then conformance + the encode-lane completion. (In-loop filters — deblocking,

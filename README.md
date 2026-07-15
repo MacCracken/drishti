@@ -8,17 +8,21 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | `src/av1_obu.cyr`, `src/av1_seq.cyr` |
-| **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` |
-| **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` |
-| **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` |
+| **AV1** | decode + encode | dav1d + rav1e | 28 × `src/av1_*.cyr` — keyframes decode to pixels; inter underway |
+| **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
+| **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
+| **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
+
+Per-module surface: [`docs/development/state.md`](docs/development/state.md). Only AV1 has
+gone past the header layer so far — the other three are at their 0.7.0 baseline, awaiting
+their arcs (0.8.x–0.10.x).
 
 Shared core (`src/drishti.cyr`, `src/bits.cyr`, `src/ivf.cyr`): error
 records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.79 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + the COMPLETE inter mode-info read layer + MI-grid population + all CDF contexts + warp samples)
+## Status — 0.7.79 (AV1 decode: raw bytes → pixels; 8/10/12-bit; multi-tile; superres; inter: MC driver + DPB + find_mv_stack + every inter mode-info symbol read + MI-grid population + all CDF contexts + warp samples)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (26,242 suite assertions + 1,140 fuzz

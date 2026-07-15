@@ -27,21 +27,34 @@
 #     extended to the compound NEW/NEAR modes.
 #   * (0.7.71) interp_filter (5.11.30) + motion_mode (5.11.27, via use_obmc /
 #     motion_mode) — the remaining per-symbol inter mode-info reads + their CDFs
-#     (Interp_Filter / Motion_Mode / Use_Obmc, §10). The gating that decides whether
-#     each is coded is the caller's concern.
+#     (Interp_Filter / Motion_Mode / Use_Obmc, §10). (The gating that decides whether
+#     each is coded landed in 0.7.78 for interp_filter; motion_mode's is still open.)
 #   * (0.7.72) the INTER-INTRA reads (5.11.28) — read_interintra (binary),
 #     read_interintra_mode (INTERINTRA_MODES=4), read_wedge_interintra (binary),
 #     read_wedge_index (WEDGE_TYPES=16) + their CDFs (Inter_Intra / Inter_Intra_Mode /
 #     Wedge_Inter_Intra / Wedge_Index, §10). interintra / mode ctx = Size_Group[MiSize]-1;
-#     wedge* are MiSize-indexed. The gating is the caller's concern.
+#     wedge* are MiSize-indexed. (Their gating landed in 0.7.78.)
 #   * (0.7.73) read_compound_type (5.11.29) — the LAST inter mode-info read, and the
 #     first full spec DRIVER here: @@comp_group_idx / @@compound_idx / @@compound_type
 #     (+ their §10 CDFs) composed with 5.11.28's @@wedge_index and the @@wedge_sign /
 #     @@mask_type L(1) literals, resolving compound_type on every branch — including the
 #     non-compound one, where it falls out of interintra / wedge_interintra with no
 #     symbol read. Wedge_Bits[MiSize]==0 forces COMPOUND_DIFFWTD.
-# Every path round-trips through the symbol encoder. THE INTER MODE-INFO BITSTREAM-READ
-# LAYER IS COMPLETE — what remains is wiring it into the MI grid + the inter tile decode.
+#   * (0.7.75-0.7.77) THE NEIGHBOUR CDF CONTEXTS — av1_nbctx_setup (the 5.11.15
+#     preamble) + check_backward / count_refs / ref_count_ctx + is_inter / comp_mode +
+#     the reference-context family (seven ref_count_ctx derivations + comp_ref_type, with
+#     single_ref_p2..p6 / uni_comp_ref / uni_comp_ref_p2 as the spec's ALIASES) +
+#     comp_group_idx / compound_idx / interp_filter. EVERY inter CDF context is now
+#     derived from the MI grid; the caller supplies only frame-level state the spec also
+#     treats that way (AvailU/AvailL, the order-hint distances).
+#   * (0.7.78) THE GATING ORCHESTRATORS — read_interintra_mode (the full 5.11.28 gate)
+#     + needs_interp_filter / read_interp_filters (the 5.11.23 tail).
+# Every path round-trips through the symbol encoder.
+#
+# STATUS: every inter mode-info SYMBOL READ is in, and so are the CDF contexts. What is
+# NOT: the ORCHESTRATORS that compose them — read_ref_frames (5.11.25), read_motion_mode's
+# gating (5.11.27, needs is_scaled + 0.7.79's warp samples), inter_block_mode_info
+# (5.11.23) and inter_frame_mode_info (5.11.15) — and the inter tile decode (roadmap.md).
 #
 # FLAT module — wired after src/av1_mv.cyr (it consumes the find_mv_stack context
 # + candidate stack and produces the Mv the grid stores). Family av1_. Depends on:
@@ -785,10 +798,9 @@ var AV1_REF_NONE = 0 - 1;         # NONE (enums reject negative literals)
 #
 # AvailU / AvailL are the caller's (decode_block computes them as is_inside(r-1, c) /
 # is_inside(r, c-1) — tile bounds; raster order guarantees an in-tile above/left neighbour
-# is already decoded). The bite lands the foundation + the two contexts that need nothing
-# beyond it and the RefFrames the grid already carries; the single_ref / comp_ref family
-# and the contexts needing new grid fields (CompGroupIdxs / CompoundIdxs / InterpFilters)
-# are later bites (roadmap.md).
+# is already decoded). 0.7.75 landed the foundation + is_inter / comp_mode; the single_ref
+# / comp_ref family followed in 0.7.76, and comp_group_idx / compound_idx / interp_filter
+# (with the grid fields they read) in 0.7.77 — all below.
 # ================================================================
 enum Av1NbCtxOff {
     AV1NB_AVAILU  = 0;     # AvailU

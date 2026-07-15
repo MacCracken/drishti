@@ -68,16 +68,30 @@ hostile input — that's tested, and fuzzed.
 
 ## Adding a feature
 
-1. Pick the roadmap bite ([`../development/roadmap.md`](../development/roadmap.md)).
-2. Derive from the spec; cite sections inline; extend
-   [`../sources.md`](../sources.md).
-3. Keep modules flat (no includes); wire new modules in `src/main.cyr`
-   AND `cyrius.cyml [lib].modules`, dependency order; prefix every
-   symbol with the family prefix.
-4. Hand-build test vectors (comment every field), including the
-   adversarial ones. `make test` after every change.
-5. `make dist` to regenerate the bundle; update CHANGELOG +
-   `docs/development/state.md`.
+> **Read [`verification.md`](verification.md) first.** It is the loop below in detail,
+> plus the failure modes that shipped green without it — circular tests, aliased
+> fixtures, digest blindness, silently-shadowed names. Every one cost a real defect.
+
+1. Pick the bite — [`../development/state.md`](../development/state.md)'s "Picking this
+   up cold" block names the next task concretely; the arc plan is in
+   [`../development/roadmap.md`](../development/roadmap.md).
+2. Derive from the spec; cite sections inline; cross-check ≥2 implementations (dav1d +
+   libaom), never port from one; extend [`../sources.md`](../sources.md).
+3. Write a **spec-literal reference port** in [`../../scripts/refs/`](../../scripts/refs/)
+   — transcribed from the spec *text*, never from the Cyrius — and generate the known
+   answers from it. This is what keeps the oracle independent of the code.
+4. Keep modules flat (no includes); wire new modules in `src/main.cyr` AND
+   `cyrius.cyml [lib].modules`, dependency order; prefix every symbol with the family
+   prefix. Grep for the name first — cyrius silently shadows duplicates.
+5. Test, then **mutation-verify**: break the code on purpose, confirm the suite goes red,
+   restore, confirm green and byte-identical. *A test you have not seen fail is not
+   evidence.*
+6. Run an adversarial review (a `Workflow` of refute-by-default slices) for anything
+   non-trivial.
+7. Gate — `make build test fuzz lint fmt-check version-check`, reporting each exit code.
+   Set `CYRIUS_NO_WARN_PIN_DRIFT=1 CYRIUS_NO_WARN_SHADOW_LIB=1` for clean output.
+8. `make dist` to regenerate the bundle; update CHANGELOG + `../development/state.md` +
+   the roadmap.
 
 See [`../adr/template.md`](../adr/template.md) when a non-trivial
 design choice deserves an ADR.

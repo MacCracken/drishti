@@ -20,9 +20,13 @@
 #   * (0.7.74) THE MI-GRID POPULATION — av1_mi_store_mode / av1_mi_store_final, the
 #     spec 5.11.4 decode_block storage loops. This closes the producer->consumer
 #     loop: until now the grid the scans read was caller/test-built.
-# Still ahead: the temporal scan (7.10.2.5/6 — needs the DPB's saved MVs) and the
-# neighbour-derived entropy contexts (spec 8.3), which the grid can now feed
-# (roadmap.md).
+#   * (0.7.79) THE WARP-SAMPLE LEAVES — find_warp_samples / add_sample (7.10.4) +
+#     has_overlappable_candidates, what read_motion_mode's OBMC / LOCALWARP gating
+#     consumes.
+# Still ahead here: the TEMPORAL scan (7.10.2.5/6) — the sole find_mv_stack deferral,
+# and it needs the DPB to save MVs (it is a pixel-only ring today) — and warp_estimation
+# (7.11.3.8), which turns CandList into a model (roadmap.md). The neighbour-derived
+# entropy contexts landed in av1_intermode.cyr (0.7.75-0.7.77), fed by the grid below.
 #
 # The 0.7.62 foundation, composed by the rest of the process:
 #
@@ -51,9 +55,9 @@
 #
 # Derived from the AV1 spec §7.10.2.1 (setup global MV) + §7.10.2.10 (lower
 # precision) + §4 (Round2Signed) + §7.10.2.8/9 (search stack) + §7.10.2.13
-# (sorting) + §7.10.2.2/3/4 (spatial scans) + §7.10.2.7 (add ref MV). The MI grid
-# the scans read is populated by inter mode-info (a later bite, roadmap.md); the temporal scan
-# + find_mv_stack driver + entropy contexts are also later bites (roadmap.md).
+# (sorting) + §7.10.2.2/3/4 (spatial scans) + §7.10.2.7 (add ref MV) + §7.10.4 (warp
+# samples). The MI grid the scans read is populated by av1_mi_store_mode / _final below
+# (0.7.74). The TEMPORAL scan (7.10.2.5/6) remains the one deferral (roadmap.md).
 
 # ================================================================
 # Av1Mv — a motion vector: two i64 components, mv[0] = row (vertical) then
