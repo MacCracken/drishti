@@ -4,6 +4,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.80] - 2026-07-16
+
+**Inter prediction — `read_motion_mode` (spec 5.11.27), the full gating driver + `is_scaled`.** The last
+gating orchestrator: composes the 0.7.71 leaf reads (`av1_read_motion_mode_sym` / `av1_read_use_obmc`) with
+the 0.7.79 warp-sample leaves into the complete 5.11.27 decision.
+
+- **`av1_is_scaled`** (`src/av1_frame.cyr`) — does a reference frame use scaling? The stored ref's
+  `RefUpscaledWidth` / `RefFrameHeight` are compared against the current `FrameWidth` / `FrameHeight` as
+  14-bit ratios (`REF_SCALE_SHIFT = 14`), rounded with `+ FrameWidth/2`; "unscaled" is exactly `1 << 14` on
+  **both** axes. The width/height asymmetry is the spec's: the ref contributes its *upscaled* width
+  (superres never changes height). Hostile guards: a refFrame outside LAST..ALTREF, a lying
+  `ref_frame_idx` slot, or zero frame dims report "scaled" instead of reading OOB — conservative, since
+  scaled-ref MC is rejected anyway.
+- **`av1_read_motion_mode`** (`src/av1_intermode.cyr`) — the driver. Early SIMPLE **without a symbol** on:
+  `skip_mode` / `!is_motion_mode_switchable` / `min(w, h) < 8` / a GLOBALMV-family block whose global model
+  is beyond TRANSLATION (only tested when `!force_integer_mv`) / compound / inter-intra
+  (`RefFrame[1] == INTRA_FRAME`) / no overlappable inter neighbour. Then `find_warp_samples` runs
+  (NumSamples also feeds `warp_estimation` later), and
+  `force_integer_mv || NumSamples == 0 || !allow_warped_motion || is_scaled(RefFrame[0])` picks
+  `@@use_obmc` (OBMC/SIMPLE) over `@@motion_mode` (3-symbol). The paired `av1_write_motion_mode` replays
+  the gate and emits exactly the symbols the reader consumes.
+- The 0.7.71 leaves take the `_sym` suffix (`av1_read/write_motion_mode_sym`) so the driver owns the plain
+  name — the leaf = `_sym` / driver = plain convention (cyrius silently shadows duplicate fn names).
+
+Verified against a new committed spec-literal port (`scripts/refs/motion_mode_ref.py`: the 5.11.27 branch
+decision + `is_scaled`). Tests: per-gate round-trips driven **both** ways ending in an 8-bit `0xA5` literal
+marker; decode-side **conformance** cases whose symbol streams are hand-built with the *leaf* writers — a
+gate bug shared by the driver and its inverse round-trips cleanly, and these cases are what catch it;
+driver side-effects (ws zeroed on gated paths, filled on the warp branch) + hostile inputs
+(ref0 / MiSize / null out|ws → bounds error, no symbol consumed).
+
+All **mutation-verified — 21 mutations, 0 survivors**: each of the 7 early gates dropped (skip_mode → 6
+failures), `<8` → `<=8` → 2, GmType `>` → `>=` → 2, the global gate ignoring force_integer_mv → 5, each of
+the isCompound/ref1/overlappable terms → 4/2/4, find_warp_samples skipped → 14, each of the 4 OBMC triggers
+dropped → 5/5/4/4, use_obmc mapping inverted → 10, the warp branch reading the wrong symbol → 13, the
+writer inverse against SIMPLE → 6, a **paired** reader+writer is_scaled drop → 2 (killed only by the
+conformance tests — the round-trip alone is blind to it), the is_scaled rounding dropped → 2,
+FRAME_W-for-UPSCALED_W → 11, the y-denominator swap → 3, and both index guards → 1/1 (made observable by
+planting matching dims at the exact aliased offsets an unguarded read hits).
+
+### Fixed
+- Two mutants initially survived — both **test** weaknesses, not code defects: (1) a single binary marker
+  symbol can decode correctly by luck after a one-symbol desync — replaced with an 8-bit `0xA5` literal
+  (1/256 survival); (2) the slot `-1` guard-alias test planted its y-axis value at the wrong offset
+  (`UPSCALED_W[7]` instead of `FRAME_H - 8` = `FRAME_W[7]`), so the unguarded read returned "scaled" anyway
+  and the guard was unfalsifiable. Both fixed and re-run to kills.
+- The first mutation-harness pattern for the skip_mode gate silently matched `av1_write_compound_type`'s
+  identical line earlier in the file (first-occurrence replace) — mutations must be anchored on unique
+  context. The accident exposed a real pre-existing gap: the compound-type **writer's** skip gate had no
+  killing test (0.7.73 scope). **Closed in this cut** via a spawned follow-up session, merged back in:
+  `ct_marker_rt` / `test_comptype_nosym_marker` trail the compound-type write with the 0xA5 literal marker
+  in both CDF modes for both no-symbol gates (skip_mode and !is_compound) — the reader consumes zero
+  symbols on those paths regardless, so only a marker can prove the writer leaked nothing.
+  Mutation-verified: the original surviving mutant now fails 2 assertions.
+
+4-slice adversarial review (isolated worktrees with the uncommitted bite copied in, `sawCode` tripwires,
+every finding verified by two reproduce-in-worktree refute agents): **6 findings, 5 confirmed — all fixed
+in this cut.** A mid-review-stale `dist/` (regenerated + re-verified); **two majors in test adequacy** —
+the global gate's y_mode restriction was untested (an `if (1)` mutant for the GLOBALMV-family check
+survived the whole suite; closed with NEWMV + ROTZOOM/AFFINE warp-branch cases) and the hostile guards'
+boundaries were unpinned (three off-by-one mutants survived together; closed with ALTREF / MiSize 21 / 22 /
+negative / slot-7 boundary cases); a minor (the divide-by-zero backstop had zero coverage — its deletion
+now crashes the suite red); and a stale marker comment. The one refuted finding died to the best kind of
+evidence: the refute agent fetched the spec's own YMode table, proving the ref port's numbering is
+spec-faithful. All five review mutants re-run post-fix and killed (4 / 3 / 1 / 1 / SIGFPE), 0 survivors.
+Also folded in as self-hardening: the test scan-ctx now carries the compound ref pair for compound cases
+(`NONE` otherwise — faithful to `find_mv_stack` running before 5.11.28's `RefFrame[1]` mutation).
+Details in `docs/development/state.md`.
+
 ## [0.7.79] - 2026-07-14
 
 **Inter prediction — the warp-sample leaves (spec 7.10.4 `find_warp_samples` / `add_sample`, and

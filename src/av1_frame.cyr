@@ -338,6 +338,34 @@ fn av1_ref_saved_gm(r, i, ref, idx): i64 {
 }
 
 # ================================================================
+# is_scaled (spec 5.11.27) — does refFrame use a scaled reference? The stored ref's
+# UpscaledWidth / FrameHeight are compared against the CURRENT frame's FrameWidth /
+# FrameHeight as ratios at REF_SCALE_SHIFT precision; "unscaled" is exactly
+# 1 << REF_SCALE_SHIFT on BOTH axes. The width/height asymmetry is the spec's:
+# the ref contributes its UPSCALED width (superres never changes height, and MC
+# reads the upscaled plane) while the current frame contributes its pre-superres
+# FrameWidth. No overflow: dims are parse-capped at 2^16, << 14 stays under 2^31.
+# ================================================================
+enum Av1RefScale {
+    AV1_REF_SCALE_SHIFT = 14;    # REF_SCALE_SHIFT (spec section 3 symbols)
+}
+fn av1_is_scaled(fh, refs, ref_frame): i64 {
+    # hostile guards: a refFrame outside LAST..ALTREF or an unset/lying slot index
+    # must not index fh/refs OOB — report "scaled" (the conservative branch: the
+    # caller falls to the OBMC/SIMPLE read and scaled-ref MC is rejected anyway).
+    if (ref_frame < AV1_LAST_FRAME || ref_frame > AV1_ALTREF_FRAME) { return 1; }
+    var ref_idx = av1_fh_ref_frame_idx(fh, ref_frame - AV1_LAST_FRAME);
+    if (ref_idx < 0 || ref_idx > 7) { return 1; }
+    var fw = av1_fh_frame_width(fh);
+    var fht = av1_fh_frame_height(fh);
+    if (fw < 1 || fht < 1) { return 1; }    # dimension-bomb backstop: no divide-by-zero
+    var x_scale = ((av1_ref_upscaled_width(refs, ref_idx) << AV1_REF_SCALE_SHIFT) + (fw / 2)) / fw;
+    var y_scale = ((av1_ref_frame_height(refs, ref_idx) << AV1_REF_SCALE_SHIFT) + (fht / 2)) / fht;
+    var no_scale = 1 << AV1_REF_SCALE_SHIFT;
+    return (x_scale != no_scale) || (y_scale != no_scale);
+}
+
+# ================================================================
 # Av1FrameHeader accessors.
 # ================================================================
 fn av1_fh_show_existing_frame(fh): i64 { return load64(fh + AV1FH_SHOW_EXISTING); }

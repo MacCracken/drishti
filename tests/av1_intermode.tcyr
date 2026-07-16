@@ -630,17 +630,17 @@ fn test_motion_mode_rt() {
         var enc = av1_sym_enc_init(32, 1);
         av1_write_use_obmc(enc, cc, sz, 0);
         av1_write_use_obmc(enc, cc, sz, 1);
-        av1_write_motion_mode(enc, cc, sz, AV1_MM_SIMPLE);
-        av1_write_motion_mode(enc, cc, sz, AV1_MM_OBMC);
-        av1_write_motion_mode(enc, cc, sz, AV1_MM_LOCALWARP);
+        av1_write_motion_mode_sym(enc, cc, sz, AV1_MM_SIMPLE);
+        av1_write_motion_mode_sym(enc, cc, sz, AV1_MM_OBMC);
+        av1_write_motion_mode_sym(enc, cc, sz, AV1_MM_LOCALWARP);
         var olen = 0;
         var out = av1_sym_enc_finish(enc, &olen);
         var sd = av1_sym_dec_init(out, olen, 1);
         assert_eq(av1_read_use_obmc(sd, cc, sz), 0, "use_obmc 0 (SIMPLE)");
         assert_eq(av1_read_use_obmc(sd, cc, sz), 1, "use_obmc 1 (OBMC)");
-        assert_eq(av1_read_motion_mode(sd, cc, sz), AV1_MM_SIMPLE, "motion_mode SIMPLE");
-        assert_eq(av1_read_motion_mode(sd, cc, sz), AV1_MM_OBMC, "motion_mode OBMC");
-        assert_eq(av1_read_motion_mode(sd, cc, sz), AV1_MM_LOCALWARP, "motion_mode LOCALWARP");
+        assert_eq(av1_read_motion_mode_sym(sd, cc, sz), AV1_MM_SIMPLE, "motion_mode SIMPLE");
+        assert_eq(av1_read_motion_mode_sym(sd, cc, sz), AV1_MM_OBMC, "motion_mode OBMC");
+        assert_eq(av1_read_motion_mode_sym(sd, cc, sz), AV1_MM_LOCALWARP, "motion_mode LOCALWARP");
         sz = sz + 1;
     }
     return 0;
@@ -651,13 +651,13 @@ fn test_interp_motion_adaptive() {
     var ccd = av1_imcdf_new();
     var enc = av1_sym_enc_init(32, 0);
     av1_write_interp_filter(enc, cce, 7, 2);
-    av1_write_motion_mode(enc, cce, 9, AV1_MM_LOCALWARP);
+    av1_write_motion_mode_sym(enc, cce, 9, AV1_MM_LOCALWARP);
     av1_write_use_obmc(enc, cce, 12, 1);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 0);
     assert_eq(av1_read_interp_filter(sd, ccd, 7), 2, "interp adaptive SHARP");
-    assert_eq(av1_read_motion_mode(sd, ccd, 9), AV1_MM_LOCALWARP, "motion_mode adaptive LOCALWARP");
+    assert_eq(av1_read_motion_mode_sym(sd, ccd, 9), AV1_MM_LOCALWARP, "motion_mode adaptive LOCALWARP");
     assert_eq(av1_read_use_obmc(sd, ccd, 12), 1, "use_obmc adaptive OBMC");
     return 0;
 }
@@ -1040,6 +1040,40 @@ fn test_comptype_nosym() {
     # wedge_sign is re-read here (5.11.28 already read them) — wedge fields stay 0.
     ct_rt_both(0, 0, 6, 1, 1, 1, 1, 2, 2, ct_mk(AV1_COMPOUND_WEDGE, 0, 1, 0, 0, 0),
     "single, interintra, wedge_ii -> WEDGE (no wedge re-read)");
+    return 0;
+}
+# ct_rt CANNOT prove the writer's no-symbol gates: on these paths the reader consumes
+# zero symbols regardless, so a broken writer gate that leaks symbols leaves every
+# field-level assert green — the extra bits simply go unread (demonstrated: mutating the
+# writer's skip_mode gate to `== 999` left the whole suite green). Trail the write with
+# an 8-bit 0xA5 marker (the av1_symbol.tcyr literal idiom): the marker only decodes at
+# the right bit position, so ANY symbol the writer leaks before it desyncs the read.
+fn ct_marker_rt(is_comp, skip, disable, tag): i64 {
+    var cce = av1_iicdf_blob();
+    var ccd = av1_iicdf_blob();
+    if (disable == 0) { cce = av1_iicdf_new(); ccd = av1_iicdf_new(); }
+    var exp = ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0);
+    var enc = av1_sym_enc_init(64, disable);
+    # every coding enable ON (en_masked=1, en_jnt=1): only the gate under test suppresses output.
+    av1_write_compound_type(enc, cce, exp, is_comp, skip, 6, 1, 1, 0, 0, 2, 2);
+    av1_sym_encode_literal(enc, 0xA5, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, disable);
+    var got = av1_comptype_new();
+    av1_read_compound_type(sd, ccd, got, is_comp, skip, 6, 1, 1, 0, 0, 2, 2);
+    ct_assert(got, exp, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 0xA5, tag);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, tag);
+    return 0;
+}
+fn test_comptype_nosym_marker() {
+    # skip_mode=1 (is_compound=1): writer's skip_mode gate must code NOTHING.
+    ct_marker_rt(1, 1, 1, "skip_mode codes nothing (marker, no-adapt)");
+    ct_marker_rt(1, 1, 0, "skip_mode codes nothing (marker, adapt)");
+    # is_compound=0: the sibling gate must code nothing either.
+    ct_marker_rt(0, 0, 1, "single codes nothing (marker, no-adapt)");
+    ct_marker_rt(0, 0, 0, "single codes nothing (marker, adapt)");
     return 0;
 }
 # the comp_group_idx == 0 branch: jnt-comp on/off.
@@ -2027,6 +2061,333 @@ fn test_read_interp_filters() {
     return 0;
 }
 
+# ================================================================
+# The read_motion_mode gating DRIVER (5.11.27) + is_scaled. Branch decisions are known
+# answers from scripts/refs/motion_mode_ref.py (a spec-literal port); the MI grid is laid
+# by the REAL av1_mi_store_mode (a hand-poked fixture misses add_sample's block-top-left
+# reads — the 0.7.79 lesson). The marker proves gated-off paths consume NOTHING and coded
+# paths consume EXACTLY the writer's symbols.
+# ================================================================
+# refs state with slot 0 carrying (RefUpscaledWidth, RefFrameHeight).
+fn mm_refs(ruw, rh): i64 {
+    var refs = av1_ref_state_new();
+    store64(refs + AV1REF_UPSCALED_W + 0, ruw);
+    store64(refs + AV1REF_FRAME_H + 0, rh);
+    return refs;
+}
+# frame header: the 5.11.27 frame-level gates + frame dims + a global-motion type for
+# LAST. ref_frame_idx[0..6] stays 0 (memset) -> every refFrame maps to slot 0.
+fn mm_fh(switchable, force_int, allow_warp, gm_last, fw, fht): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, switchable);
+    store64(fh + AV1FH_FORCE_INT_MV, force_int);
+    store64(fh + AV1FH_ALLOW_WARPED, allow_warp);
+    store64(fh + AV1FH_GM_TYPE + ((AV1_LAST_FRAME - 1) * 8), gm_last);
+    store64(fh + AV1FH_FRAME_WIDTH, fw);
+    store64(fh + AV1FH_FRAME_HEIGHT, fht);
+    return fh;
+}
+# a 16x16-cell grid tiled with 16x16-luma (MiSize 6) blocks carrying (mv, ref0, ref1),
+# laid by the REAL storage loops.
+fn mm_grid(mvr, mvc, ref0, ref1): i64 {
+    var cols = 16;
+    var g = av1_mv_grid_new(cols, 16);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            av1_mi_store_mode(g, cols, 16, r, c, 6, AV1_NEWMV, ref0, ref1, 1, mvr, mvc, 0, 0,
+            0, 0, 0, 0, 0);
+            av1_mi_store_final(g, cols, 16, r, c, 6, 1);
+            c = c + 4;
+        }
+        r = r + 4;
+    }
+    return g;
+}
+# ref1_scan is the ref pair AS SCANNED (find_mv_stack ran BEFORE 5.11.28 may set
+# RefFrame[1] = INTRA_FRAME) — so compound blocks carry their pair, everything else NONE.
+fn mm_ctx(g, sz, ref0, ref1_scan): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, g, 16, 16);
+    av1_mvctx_set_tile(ctx, 0, 16, 0, 16);
+    av1_mvctx_set_block(ctx, 4, 4, sz);      # the block under test at (4,4)
+    av1_mvctx_set_refs(ctx, ref0, ref1_scan);
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+# is_scaled (5.11.27) — known answers from motion_mode_ref.py.
+fn test_is_scaled() {
+    var fh = mm_fh(1, 0, 1, 1, 64, 64);
+    assert_eq(av1_is_scaled(fh, mm_refs(64, 64), AV1_LAST_FRAME), 0, "identical dims -> unscaled");
+    assert_eq(av1_is_scaled(fh, mm_refs(128, 64), AV1_LAST_FRAME), 1, "wider ref -> scaled");
+    assert_eq(av1_is_scaled(fh, mm_refs(64, 128), AV1_LAST_FRAME), 1, "taller ref -> scaled");
+    assert_eq(av1_is_scaled(fh, mm_refs(32, 64), AV1_LAST_FRAME), 1, "narrower ref -> scaled");
+    assert_eq(av1_is_scaled(fh, mm_refs(64, 64), AV1_ALTREF_FRAME), 0, "ALTREF maps to slot 0 too");
+    # the +FrameWidth/2 rounding: 32767/32768 lands EXACTLY on noScale (16383.5 -> 16384).
+    var fh2 = mm_fh(1, 0, 1, 1, 32768, 64);
+    assert_eq(av1_is_scaled(fh2, mm_refs(32767, 64), AV1_LAST_FRAME), 0,
+    "x rounding edge 32767/32768 -> unscaled (the +fw/2 term)");
+    assert_eq(av1_is_scaled(fh2, mm_refs(32766, 64), AV1_LAST_FRAME), 1,
+    "one below the rounding edge -> scaled");
+    var fh3 = mm_fh(1, 0, 1, 1, 64, 32768);
+    assert_eq(av1_is_scaled(fh3, mm_refs(64, 32767), AV1_LAST_FRAME), 0, "y rounding edge -> unscaled");
+    # hostile guards: a refFrame outside LAST..ALTREF or a lying slot index -> "scaled".
+    assert_eq(av1_is_scaled(fh, mm_refs(64, 64), AV1_INTRA_FRAME), 1, "INTRA_FRAME -> guard fires");
+    assert_eq(av1_is_scaled(fh, mm_refs(64, 64), 8), 1, "refFrame 8 -> guard fires");
+    var fh4 = mm_fh(1, 0, 1, 1, 64, 64);
+    store64(fh4 + AV1FH_REF_FRAME_IDX + 0, 0 - 1);
+    assert_eq(av1_is_scaled(fh4, mm_refs(64, 64), AV1_LAST_FRAME), 1, "slot -1 -> guard fires");
+    store64(fh4 + AV1FH_REF_FRAME_IDX + 0, 8);
+    assert_eq(av1_is_scaled(fh4, mm_refs(64, 64), AV1_LAST_FRAME), 1, "slot 8 -> guard fires");
+    # make the guards OBSERVABLE (mutation-killable): an unguarded slot -1 / 8 aliases
+    # into the ADJACENT Av1RefState arrays, which normally read 0 -> "scaled" — the same
+    # answer the guard gives. Plant matching dims at the aliased offsets so the unguarded
+    # read would return UNSCALED: the guard's 1 is then proof, not coincidence.
+    var refs5 = mm_refs(64, 64);
+    store64(refs5 + AV1REF_FRAME_ID + 56, 64);       # slot -1 x reads FRAME_ID[7] (128 - 8)
+    store64(refs5 + AV1REF_FRAME_W + 56, 64);        # slot -1 y reads FRAME_W[7]  (256 - 8)
+    var fh5 = mm_fh(1, 0, 1, 1, 64, 64);
+    store64(fh5 + AV1FH_REF_FRAME_IDX + 0, 0 - 1);
+    assert_eq(av1_is_scaled(fh5, refs5, AV1_LAST_FRAME), 1, "slot -1 guard is no aliasing accident");
+    var refs6 = mm_refs(64, 64);
+    store64(refs6 + AV1REF_FRAME_W + 0, 64);         # slot 8 x reads FRAME_W[0]
+    store64(refs6 + AV1REF_RENDER_W + 0, 64);        # slot 8 y reads RENDER_W[0]
+    var fh6 = mm_fh(1, 0, 1, 1, 64, 64);
+    store64(fh6 + AV1FH_REF_FRAME_IDX + 0, 8);
+    assert_eq(av1_is_scaled(fh6, refs6, AV1_LAST_FRAME), 1, "slot 8 guard is no aliasing accident");
+    # boundary: slot 7 (the LAST valid) is READ, not guarded — matching dims planted at
+    # slot 7 must come back unscaled (a >= 7 guard mutant would report it scaled).
+    var refs7 = av1_ref_state_new();
+    store64(refs7 + AV1REF_UPSCALED_W + 56, 64);
+    store64(refs7 + AV1REF_FRAME_H + 56, 64);
+    var fh7 = mm_fh(1, 0, 1, 1, 64, 64);
+    store64(fh7 + AV1FH_REF_FRAME_IDX + 0, 7);
+    assert_eq(av1_is_scaled(fh7, refs7, AV1_LAST_FRAME), 0, "slot 7 (last valid) is read, not guarded");
+    # hostile: zero frame dims -> "scaled" (the divide-by-zero backstop, both axes).
+    assert_eq(av1_is_scaled(mm_fh(1, 0, 1, 1, 0, 64), mm_refs(64, 64), AV1_LAST_FRAME), 1,
+    "FrameWidth 0 -> backstop fires");
+    assert_eq(av1_is_scaled(mm_fh(1, 0, 1, 1, 64, 0), mm_refs(64, 64), AV1_LAST_FRAME), 1,
+    "FrameHeight 0 -> backstop fires");
+    return 0;
+}
+# round-trip motion_mode through the driver: write via the encoder inverse, decode via
+# the driver, assert the mode AND that the branch consumed exactly the writer's symbols
+# (proven by the trailing 8-bit 0xA5 literal marker).
+fn mm_rt(fh, refs, g, sz, skip, y_mode, ref0, ref1, is_comp, src_mode, exp_mode, tag): i64 {
+    var cc = av1_imcdf_blob();
+    var wse = av1_warp_new();
+    var wsd = av1_warp_new();
+    var scan_ref1 = AV1_REF_NONE;
+    if (is_comp != 0) { scan_ref1 = ref1; }
+    var ctxe = mm_ctx(g, sz, ref0, scan_ref1);
+    var ctxd = mm_ctx(g, sz, ref0, scan_ref1);
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_motion_mode(enc, cc, ctxe, wse, fh, refs, skip, y_mode, ref0, ref1,
+    is_comp, 8, 8, src_mode), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);             # marker: 8-bit 0xA5 (a lucky one-symbol
+    #   desync can fake a binary marker — an 8-bit literal survives at 1/256, not 1/2)
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = alloc(8);
+    assert_eq(av1_read_motion_mode(sd, cc, got, ctxd, wsd, fh, refs, skip, y_mode, ref0, ref1,
+    is_comp, 8, 8), DR_OK, tag);
+    assert_eq(load64(got + 0), exp_mode, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "marker: reader consumed exactly the writer's symbols");
+    return 0;
+}
+# every 5.11.27 gate, driven BOTH ways (branch letters = motion_mode_ref.py's cases).
+fn test_read_motion_mode_gate() {
+    var fh_ok = mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 64, 64);
+    var refs_ok = mm_refs(64, 64);
+    var g_same = mm_grid(8, 8, 1, AV1_REF_NONE);      # inter, the block's own ref
+    var g_other = mm_grid(8, 8, 4, AV1_REF_NONE);     # inter, ref MISMATCH: overlappable, 0 samples
+    var g_intra = mm_grid(8, 8, AV1_INTRA_FRAME, AV1_REF_NONE);   # intra: not overlappable
+    # A: permissive -> the WARP branch (@@motion_mode); all three values round-trip.
+    mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_SIMPLE,
+    AV1_MM_SIMPLE, "A warp branch: SIMPLE");
+    mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_OBMC,
+    AV1_MM_OBMC, "A warp branch: OBMC");
+    mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
+    AV1_MM_LOCALWARP, "A warp branch: LOCALWARP");
+    # B/C: skip_mode / !is_motion_mode_switchable -> SIMPLE, nothing coded.
+    mm_rt(fh_ok, refs_ok, g_same, 6, 1, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
+    AV1_MM_SIMPLE, "B skip_mode -> SIMPLE, no symbol");
+    mm_rt(mm_fh(0, 0, 1, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "C !switchable -> SIMPLE, no symbol");
+    # D: min(Block_Width, Block_Height) < 8 -> SIMPLE. MiSize 0 = 4x4, 1 = 4x8; 3 = 8x8.
+    mm_rt(fh_ok, refs_ok, g_same, 0, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
+    AV1_MM_SIMPLE, "D 4x4 -> SIMPLE, no symbol");
+    mm_rt(fh_ok, refs_ok, g_same, 1, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
+    AV1_MM_SIMPLE, "D2 4x8 -> SIMPLE, no symbol");
+    mm_rt(fh_ok, refs_ok, g_same, 3, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
+    AV1_MM_LOCALWARP, "D3 8x8 (the >= 8 boundary) IS large -> warp branch");
+    # E: GLOBALMV with a global model beyond TRANSLATION -> SIMPLE; TRANSLATION passes;
+    # force_integer_mv SKIPS the global gate but then forces the OBMC branch.
+    mm_rt(mm_fh(1, 0, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "E GLOBALMV + ROTZOOM -> SIMPLE");
+    mm_rt(mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP, "E2 GLOBALMV + TRANSLATION -> warp branch");
+    mm_rt(mm_fh(1, 1, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC, "E3 GLOBALMV + ROTZOOM + force_int -> @@use_obmc");
+    mm_rt(mm_fh(1, 1, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_SIMPLE, AV1_MM_SIMPLE, "E3b ...use_obmc = 0 decodes SIMPLE");
+    mm_rt(mm_fh(1, 0, 1, AV1_GM_AFFINE, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBAL_GLOBALMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "L GLOBAL_GLOBALMV + AFFINE -> SIMPLE");
+    # M: the y_mode RESTRICTION on the global gate — a non-GLOBALMV-family mode is NOT
+    # gated by a beyond-TRANSLATION model (a bug applying the gate to every mode would
+    # silently desync every NEWMV block in a ROTZOOM/AFFINE global-motion frame; the
+    # LOCALWARP expectation can only decode from @@motion_mode, so even a gate bug
+    # SHARED by driver + inverse fails here).
+    mm_rt(mm_fh(1, 0, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
+    "M NEWMV + ROTZOOM -> NOT gated, warp branch");
+    mm_rt(mm_fh(1, 0, 1, AV1_GM_AFFINE, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC,
+    "M2 NEWMV + AFFINE -> NOT gated, warp branch");
+    # boundary: ALTREF (7, the LAST valid ref) round-trips on a coded branch — pins the
+    # ref0 guard's upper edge (a >= mutant would reject every valid ALTREF block).
+    mm_rt(fh_ok, refs_ok, mm_grid(8, 8, AV1_ALTREF_FRAME, AV1_REF_NONE), 6, 0, AV1_NEWMV,
+    AV1_ALTREF_FRAME, AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
+    "ref0 = ALTREF (upper valid boundary) -> warp branch");
+    # F/G: compound / inter-intra (RefFrame[1] == INTRA_FRAME) -> SIMPLE.
+    mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEW_NEWMV, 1, 5, 1, AV1_MM_LOCALWARP,
+    AV1_MM_SIMPLE, "F compound -> SIMPLE, no symbol");
+    mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_INTRA_FRAME, 0, AV1_MM_LOCALWARP,
+    AV1_MM_SIMPLE, "G interintra (ref1 = INTRA_FRAME) -> SIMPLE, no symbol");
+    # H: no overlappable inter neighbour -> SIMPLE.
+    mm_rt(fh_ok, refs_ok, g_intra, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
+    AV1_MM_SIMPLE, "H intra neighbours -> SIMPLE, no symbol");
+    # I: overlappable neighbours on ANOTHER ref -> NumSamples == 0 -> the OBMC branch.
+    mm_rt(fh_ok, refs_ok, g_other, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_OBMC,
+    AV1_MM_OBMC, "I NumSamples == 0 -> @@use_obmc (OBMC)");
+    mm_rt(fh_ok, refs_ok, g_other, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_SIMPLE,
+    AV1_MM_SIMPLE, "I2 NumSamples == 0 -> @@use_obmc (SIMPLE)");
+    # J: !allow_warped_motion -> the OBMC branch.
+    mm_rt(mm_fh(1, 0, 0, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC, "J !allow_warped_motion -> @@use_obmc");
+    # K: a scaled reference -> the OBMC branch; and the 32767/32768 rounding edge is
+    # UNSCALED end-to-end (the ref port's rounding case driving the real driver).
+    mm_rt(fh_ok, mm_refs(32, 64), g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_OBMC,
+    AV1_MM_OBMC, "K scaled ref -> @@use_obmc");
+    mm_rt(mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 32768, 64), mm_refs(32767, 64), g_same, 6, 0,
+    AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
+    "K2 rounding-edge ref (32767/32768) is UNSCALED -> warp branch");
+    return 0;
+}
+# decode-side CONFORMANCE, independent of the driver's own inverse: the symbol stream is
+# hand-built with the LEAF writers per the ref port's expected branch, so a gate bug
+# shared by the driver AND its inverse cannot cancel out (the round-trip blindspot).
+# kind: 0 = nothing coded (early SIMPLE), 1 = @@use_obmc(val), 2 = @@motion_mode(val).
+fn mm_dec(fh, refs, g, sz, skip, y_mode, ref0, ref1, is_comp, kind, val, exp_mode, tag): i64 {
+    var cc = av1_imcdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    if (kind == 1) { av1_write_use_obmc(enc, cc, sz, val); }
+    if (kind == 2) { av1_write_motion_mode_sym(enc, cc, sz, val); }
+    av1_sym_encode_literal(enc, 165, 8);             # marker: 8-bit 0xA5 (see mm_rt)
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = alloc(8);
+    var scan_ref1 = AV1_REF_NONE;
+    if (is_comp != 0) { scan_ref1 = ref1; }
+    assert_eq(av1_read_motion_mode(sd, cc, got, mm_ctx(g, sz, ref0, scan_ref1), av1_warp_new(),
+    fh, refs, skip, y_mode, ref0, ref1, is_comp, 8, 8), DR_OK, tag);
+    assert_eq(load64(got + 0), exp_mode, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165,
+    "marker: the driver consumed exactly the expected symbols");
+    return 0;
+}
+fn test_read_motion_mode_conformance() {
+    var fh_ok = mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 64, 64);
+    var refs_ok = mm_refs(64, 64);
+    var g_same = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var g_other = mm_grid(8, 8, 4, AV1_REF_NONE);
+    var g_intra = mm_grid(8, 8, AV1_INTRA_FRAME, AV1_REF_NONE);
+    # the WARP branch consumes @@motion_mode:
+    mm_dec(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 2, AV1_MM_LOCALWARP,
+    AV1_MM_LOCALWARP, "conformance: permissive -> @@motion_mode");
+    # each OBMC-branch trigger consumes @@use_obmc:
+    mm_dec(mm_fh(1, 1, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
+    AV1_REF_NONE, 0, 1, 1, AV1_MM_OBMC, "conformance: force_integer_mv -> @@use_obmc");
+    mm_dec(fh_ok, refs_ok, g_other, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 1, 1,
+    AV1_MM_OBMC, "conformance: NumSamples == 0 -> @@use_obmc");
+    mm_dec(mm_fh(1, 0, 0, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, 1, 1, AV1_MM_OBMC, "conformance: !allow_warped_motion -> @@use_obmc");
+    mm_dec(fh_ok, mm_refs(32, 64), g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 1, 1,
+    AV1_MM_OBMC, "conformance: scaled ref -> @@use_obmc");
+    # early-SIMPLE paths consume NOTHING:
+    mm_dec(fh_ok, refs_ok, g_same, 6, 1, AV1_NEWMV, 1, AV1_REF_NONE, 0, 0, 0,
+    AV1_MM_SIMPLE, "conformance: skip_mode consumes nothing");
+    mm_dec(fh_ok, refs_ok, g_intra, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 0, 0,
+    AV1_MM_SIMPLE, "conformance: no overlappable consumes nothing");
+    mm_dec(fh_ok, refs_ok, g_same, 6, 0, AV1_NEW_NEWMV, 1, 5, 1, 0, 0,
+    AV1_MM_SIMPLE, "conformance: compound consumes nothing");
+    mm_dec(mm_fh(1, 0, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
+    AV1_REF_NONE, 0, 0, 0, AV1_MM_SIMPLE, "conformance: GLOBALMV + ROTZOOM consumes nothing");
+    return 0;
+}
+# driver side-effects + hostile inputs: ws is zeroed on gated-off paths, filled on the
+# warp branch (warp_estimation reads it later); bad ref0 / MiSize / out -> bounds error.
+fn test_motion_mode_driver_state() {
+    var fh_ok = mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 64, 64);
+    var refs_ok = mm_refs(64, 64);
+    var g_same = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var cc = av1_imcdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    var wse = av1_warp_new();
+    av1_write_motion_mode(enc, cc, mm_ctx(g_same, 6, 1, AV1_REF_NONE), wse, fh_ok, refs_ok, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, 8, 8, AV1_MM_LOCALWARP);
+    assert_eq(av1_warp_num(wse), 4, "the encoder inverse also runs find_warp_samples");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = alloc(8);
+    var wsd = av1_warp_new();
+    store64(wsd + AV1WS_NUM, 7);                     # stale: the driver must reset it
+    av1_read_motion_mode(sd, cc, got, mm_ctx(g_same, 6, 1, AV1_REF_NONE), wsd, fh_ok, refs_ok, 0, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, 8, 8);
+    assert_eq(load64(got + 0), AV1_MM_LOCALWARP, "warp branch decodes");
+    assert_eq(av1_warp_num(wsd), 4, "the WARP branch leaves NumSamples for warp_estimation");
+    # a gated-off path ZEROES the caller's ws (stale NumSamples must not leak).
+    var ws2 = av1_warp_new();
+    store64(ws2 + AV1WS_NUM, 7);
+    var got2 = alloc(8);
+    var sd2 = av1_sym_dec_init(out, olen, 1);
+    av1_read_motion_mode(sd2, cc, got2, mm_ctx(g_same, 6, 1, AV1_REF_NONE), ws2, fh_ok, refs_ok, 1, AV1_NEWMV, 1,
+    AV1_REF_NONE, 0, 8, 8);
+    assert_eq(load64(got2 + 0), AV1_MM_SIMPLE, "skip_mode -> SIMPLE");
+    assert_eq(av1_warp_num(ws2), 0, "a gated-off path zeroes ws");
+    # hostile: ref0 / MiSize out of range, or a null out -> DR_ERR_BOUNDS, no symbol read.
+    var got3 = alloc(8);
+    var sd3 = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 6, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
+    0, AV1_NEWMV, 0, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ref0 = INTRA_FRAME -> bounds error");
+    assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 6, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
+    0, AV1_NEWMV, 8, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ref0 = 8 -> bounds error");
+    assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 25, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
+    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "MiSize 25 -> bounds error");
+    # the guard's exact boundaries: 22 is the FIRST invalid, negative is invalid, and 21
+    # (the last valid) is accepted — off-by-one mutants die on all three.
+    assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 22, 1, AV1_REF_NONE), av1_warp_new(),
+    fh_ok, refs_ok, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS,
+    "MiSize 22 (first invalid) -> bounds error");
+    assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 0 - 1, 1, AV1_REF_NONE), av1_warp_new(),
+    fh_ok, refs_ok, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS,
+    "negative MiSize -> bounds error");
+    assert_eq(av1_read_motion_mode(av1_sym_dec_init(out, olen, 1), cc, got3,
+    mm_ctx(g_same, 21, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
+    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_OK, "MiSize 21 (last valid) is accepted");
+    assert_eq(av1_read_motion_mode(sd3, cc, 0, mm_ctx(g_same, 6, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
+    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "out = 0 -> bounds error");
+    assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 6, 1, AV1_REF_NONE), 0, fh_ok, refs_ok,
+    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ws = 0 -> bounds error");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -2105,10 +2466,16 @@ fn main() {
     test_read_interintra_mode_gate();
     test_needs_interp_filter();
     test_read_interp_filters();
+    test_group("read_motion_mode driver (5.11.27 full gate) + is_scaled");
+    test_is_scaled();
+    test_read_motion_mode_gate();
+    test_read_motion_mode_conformance();
+    test_motion_mode_driver_state();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();
     test_comptype_nosym();
+    test_comptype_nosym_marker();
     test_comptype_group0();
     test_comptype_group1();
     test_comptype_reset();
