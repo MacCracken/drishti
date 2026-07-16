@@ -453,6 +453,10 @@ fn av1_seq_enable_cdef(s): i64 { return load64(s + AV1_SEQ_ENABLE_CDEF); }
 fn av1_seq_enable_restoration(s): i64 { return load64(s + AV1_SEQ_ENABLE_RESTORATION); }
 fn av1_seq_enable_warped_motion(s): i64 { return load64(s + AV1_SEQ_ENABLE_WARPED); }
 fn av1_seq_enable_ref_frame_mvs(s): i64 { return load64(s + AV1_SEQ_ENABLE_REF_FRAME_MVS); }
+fn av1_seq_enable_interintra_compound(s): i64 { return load64(s + AV1_SEQ_ENABLE_INTERINTRA); }
+fn av1_seq_enable_masked_compound(s): i64 { return load64(s + AV1_SEQ_ENABLE_MASKED); }
+fn av1_seq_enable_dual_filter(s): i64 { return load64(s + AV1_SEQ_ENABLE_DUAL_FILTER); }
+fn av1_seq_enable_jnt_comp(s): i64 { return load64(s + AV1_SEQ_ENABLE_JNT_COMP); }
 fn av1_seq_force_screen_content_tools(s): i64 { return load64(s + AV1_SEQ_FORCE_SCT); }
 fn av1_seq_force_integer_mv(s): i64 { return load64(s + AV1_SEQ_FORCE_INT_MV); }
 fn av1_seq_decoder_model_present(s): i64 { return load64(s + AV1_SEQ_DM_PRESENT); }

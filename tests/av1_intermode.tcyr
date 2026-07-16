@@ -2673,6 +2673,486 @@ fn test_read_ref_frames_review_hardening() {
     return 0;
 }
 
+# ================================================================
+# inter_block_mode_info (5.11.23) — THE ORCHESTRATOR. Symbol schedules are known
+# answers from scripts/refs/inter_block_ref.py; every case ends in the 0xA5 literal
+# marker, so a schedule deviation (wrong group, wrong order, wrong count) desyncs.
+# The per-symbol values/CDFs are prior bites' verified territory.
+# ================================================================
+fn ib_seq(en_ii, en_masked, en_dual, en_jnt): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_ENABLE_INTERINTRA, en_ii);
+    store64(s + AV1_SEQ_ENABLE_MASKED, en_masked);
+    store64(s + AV1_SEQ_ENABLE_DUAL_FILTER, en_dual);
+    store64(s + AV1_SEQ_ENABLE_JNT_COMP, en_jnt);
+    return s;
+}
+fn ib_fh(ref_select, interp_filt, switchable_mm, allow_warp, smf0, smf1): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_REFERENCE_SELECT, ref_select);
+    store64(fh + AV1FH_INTERP_FILTER, interp_filt);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, switchable_mm);
+    store64(fh + AV1FH_ALLOW_WARPED, allow_warp);
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 1);
+    store64(fh + AV1FH_FRAME_WIDTH, 64);
+    store64(fh + AV1FH_FRAME_HEIGHT, 64);
+    store64(fh + AV1FH_SKIP_MODE_FRAME0, smf0);
+    store64(fh + AV1FH_SKIP_MODE_FRAME1, smf1);
+    return fh;
+}
+# a 16x16-cell grid with TWO distinct neighbour MVs (left half (8,8), right half
+# (32,16)) so find_mv_stack yields >= 2 candidates and the DRL loops actually read.
+fn ib_grid2(ref0, ref1): i64 {
+    var cols = 16;
+    var g = av1_mv_grid_new(cols, 16);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            var mvr = 8;
+            var mvc = 8;
+            if (c >= 8) { mvr = 32; mvc = 16; }
+            av1_mi_store_mode(g, cols, 16, r, c, 6, AV1_NEWMV, ref0, ref1, 1, mvr, mvc,
+            mvr, mvc, 0, 0, 0, 0, 0);
+            av1_mi_store_final(g, cols, 16, r, c, 6, 1);
+            c = c + 4;
+        }
+        r = r + 4;
+    }
+    return g;
+}
+fn ib_ctx(g, sz): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, g, 16, 16);
+    av1_mvctx_set_tile(ctx, 0, 16, 0, 16);
+    av1_mvctx_set_block(ctx, 4, 4, sz);      # refs + global MVs set by the ORCHESTRATOR
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+fn ib_mk(r0, r1, ymode, refmvidx, m0r, m0c, m1r, m1c, mm, i0, i1): i64 {
+    var b = av1_interblock_new();
+    store64(b + AV1IB_REF0, r0);
+    store64(b + AV1IB_REF1, r1);
+    store64(b + AV1IB_YMODE, ymode);
+    store64(b + AV1IB_REFMVIDX, refmvidx);
+    store64(b + AV1IB_MV0 + AV1MV_ROW, m0r);
+    store64(b + AV1IB_MV0 + AV1MV_COL, m0c);
+    store64(b + AV1IB_MV1 + AV1MV_ROW, m1r);
+    store64(b + AV1IB_MV1 + AV1MV_COL, m1c);
+    store64(b + AV1IB_MOTIONMODE, mm);
+    store64(b + AV1IB_INTERP + 0, i0);
+    store64(b + AV1IB_INTERP + 8, i1);
+    store64(b + AV1IB_CT + AV1CT_COMPIDX, 1);      # the 5.11.29 default
+    return b;
+}
+# full round-trip through the orchestrator + its inverse; returns the decoded record
+# so callers can assert MVs / II / CT specifics. exp_ref1 is POST-interintra.
+fn ib_rt(fh, s, g, sz, skip, seg_id, blk, exp_ref1, exp_mm, tag): i64 {
+    var ccr = av1_refcdf_blob();
+    var ccim = av1_imcdf_blob();
+    var ccii = av1_iicdf_blob();
+    var ccmv = av1_mvcdf_blob();
+    var refs = mm_refs(64, 64);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
+    var enc = av1_sym_enc_init(128, 1);
+    assert_eq(av1_write_inter_block_mode_info(enc, ccr, ccim, ccii, ccmv, blk, ib_ctx(g, sz),
+    nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);             # marker
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_interblock_new();
+    assert_eq(av1_inter_block_mode_info(sd, ccr, ccim, ccii, ccmv, got, ib_ctx(g, sz),
+    nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0), DR_OK, tag);
+    assert_eq(av1_ib_ref(got, 0), load64(blk + AV1IB_REF0), tag);
+    assert_eq(av1_ib_ref(got, 1), exp_ref1, tag);
+    assert_eq(av1_ib_ymode(got), load64(blk + AV1IB_YMODE), tag);
+    assert_eq(av1_ib_ref_mv_idx(got), load64(blk + AV1IB_REFMVIDX), tag);
+    assert_eq(av1_ib_motion_mode(got), exp_mm, tag);
+    assert_eq(av1_ib_interp(got, 0), load64(blk + AV1IB_INTERP + 0), tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165,
+    "marker: reader consumed exactly the writer's symbols");
+    return got;
+}
+# ref-port cases 1-4, 10, 11: the single-prediction schedules.
+fn test_inter_block_single() {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    # 1: NEWMV — inter_mode(1) + drl + read_mv; the warp branch codes @@motion_mode.
+    var got = ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4,
+    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "1 single NEWMV");
+    assert_eq(load64(got + AV1IB_MV0 + AV1MV_ROW), 12, "1 NEWMV mv row");
+    assert_eq(load64(got + AV1IB_MV0 + AV1MV_COL), 0 - 4, "1 NEWMV mv col");
+    assert_eq(av1_ib_is_comp(got), 0, "1 single");
+    assert_eq(load64(got + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_AVERAGE, "1 no-ii CT default");
+    # 10: the LOCALWARP value survives the warp branch end-to-end. A LOCALWARP block
+    # codes NO interp filter (needs_interp_filter = 0), so the source carries EIGHTTAP.
+    ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0,
+    AV1_MM_LOCALWARP, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_LOCALWARP,
+    "10 warp-branch LOCALWARP");
+    # 2: NEARESTMV — inter_mode(3), no DRL (uniform grid dedups to 1 candidate), no mv
+    # read; the decoded mv IS the uniform fixture's (8, 8).
+    var g2 = ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEARESTMV, 0, 8, 8,
+    0, 0, AV1_MM_SIMPLE, 1, 1), AV1_REF_NONE, AV1_MM_SIMPLE, "2 single NEARESTMV");
+    assert_eq(load64(g2 + AV1IB_MV0 + AV1MV_ROW), 8, "2 NEARESTMV mv = the stack head");
+    assert_eq(load64(g2 + AV1IB_MV0 + AV1MV_COL), 8, "2 NEARESTMV mv col");
+    # 4: GLOBALMV with an IDENTITY model — mv (0,0); needs_interp_filter = 0 (large +
+    # GLOBALMV + gm != TRANSLATION), so interp reads NOTHING and defaults EIGHTTAP.
+    var g4 = ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV, 0, 0, 0,
+    0, 0, AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE,
+    "4 single GLOBALMV (IDENTITY)");
+    assert_eq(load64(g4 + AV1IB_MV0 + AV1MV_ROW), 0, "4 GLOBALMV mv row 0");
+    # 3: NEARMV + a real DRL read on the two-MV grid (NumMvFound >= 2).
+    var gd = ib_grid2(1, AV1_REF_NONE);
+    ib_rt(fh, s0, gd, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEARMV, 1, 0, 0, 0, 0,
+    AV1_MM_SIMPLE, 0, 0), AV1_REF_NONE, AV1_MM_SIMPLE, "3 single NEARMV + DRL idx 1");
+    # 11: a fixed (non-SWITCHABLE) frame filter codes NO interp symbols; both dirs
+    # take the frame's filter.
+    var fh_fix = ib_fh(1, 2, 1, 1, 0, 0);
+    var g11 = ib_rt(fh_fix, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12,
+    0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "11 fixed filter");
+    assert_eq(av1_ib_interp(g11, 1), 2, "11 dir 1 takes the frame filter");
+    # 12: GLOBALMV with a TRANSLATION model — the global-MV WIRING is observable:
+    # gm_params (8192, 16384) >>> 13 = the (1, 2) candidate the orchestrator must
+    # compute and install (a dropped set_global decodes (0, 0) instead). TRANSLATION
+    # also means needs_interp_filter = 1, so the filter IS coded this time.
+    var fh_gm = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    store64(fh_gm + AV1FH_GM_TYPE + ((AV1_LAST_FRAME - 1) * 8), AV1_GM_TRANSLATION);
+    store64(fh_gm + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 0) * 8), 8192);
+    store64(fh_gm + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 1) * 8), 16384);
+    var g12 = ib_rt(fh_gm, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV, 0, 1, 2,
+    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "12 GLOBALMV + TRANSLATION");
+    assert_eq(load64(g12 + AV1IB_MV0 + AV1MV_ROW), 1, "12 global mv row (8192 >>> 13)");
+    assert_eq(load64(g12 + AV1IB_MV0 + AV1MV_COL), 2, "12 global mv col (16384 >>> 13)");
+    return 0;
+}
+# ref-port cases 5-7: the compound schedules + skip_mode.
+fn test_inter_block_compound() {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 1, 7);
+    var s = ib_seq(0, 1, 0, 1);
+    var gc = mm_grid(8, 8, 1, 7);
+    # 5: NEAREST_NEARESTMV — compound_mode + the compound-type group; motion_mode is
+    # gated SIMPLE (compound), no mm symbol.
+    var b5 = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE, 1, 1);
+    store64(b5 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
+    var g5 = ib_rt(fh, s, gc, 6, 0, 0, b5, 7, AV1_MM_SIMPLE, "5 comp NEAREST_NEARESTMV");
+    assert_eq(av1_ib_is_comp(g5), 1, "5 compound");
+    assert_eq(load64(g5 + AV1IB_MV1 + AV1MV_ROW), 0, "5 mv1 = list-1 stack head");
+    assert_eq(load64(g5 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_AVERAGE, "5 CT AVERAGE");
+    # 6: NEW_NEWMV — two DRL reads + two mv reads on the two-MV compound grid.
+    var gd = ib_grid2(1, 7);
+    var b6 = ib_mk(1, 7, AV1_NEW_NEWMV, 1, 12, 0 - 4, 20, 8, AV1_MM_SIMPLE, 1, 1);
+    store64(b6 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
+    var g6 = ib_rt(fh, s, gd, 6, 0, 0, b6, 7, AV1_MM_SIMPLE, "6 comp NEW_NEWMV + DRL");
+    assert_eq(load64(g6 + AV1IB_MV0 + AV1MV_ROW), 12, "6 mv0 row");
+    assert_eq(load64(g6 + AV1IB_MV1 + AV1MV_ROW), 20, "6 mv1 row");
+    assert_eq(load64(g6 + AV1IB_MV1 + AV1MV_COL), 8, "6 mv1 col");
+    # 7: skip_mode — the SkipModeFrame pair, fixed NEAREST_NEARESTMV, and NOT ONE
+    # symbol in the stream (the marker is the whole payload).
+    var b7 = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE,
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    store64(b7 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);   # 0 would alias WEDGE
+    var g7 = ib_rt(fh, s, gc, 6, 1, 0, b7, 7, AV1_MM_SIMPLE, "7 skip_mode");
+    assert_eq(load64(g7 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_AVERAGE, "7 skip CT AVERAGE");
+    # 7b: skip_mode BEATS an active seg SKIP feature — the YMode fixed-path ORDER
+    # (skip -> NEAREST_NEARESTMV, never the seg path's GLOBALMV).
+    var fh_p = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 1, 7);
+    store64(fh_p + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_p, 2, AV1_SEG_LVL_SKIP, 0);
+    var b7b = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE,
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    store64(b7b + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);  # 0 would alias WEDGE
+    ib_rt(fh_p, s, gc, 6, 1, 2, b7b, 7, AV1_MM_SIMPLE, "7b skip_mode beats seg SKIP");
+    return 0;
+}
+# position-parameterized fixtures (the 0.7.82 review: every fixture at square (4,4)
+# with IDENTITY/TRANSLATION models left the global-MV threading as dead wiring).
+fn ib_ctx_at(g, sz, mi_row, mi_col): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, g, 16, 16);
+    av1_mvctx_set_tile(ctx, 0, 16, 0, 16);
+    av1_mvctx_set_block(ctx, mi_row, mi_col, sz);
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+fn ib_grid_y(ymode, mvr, mvc, ref0, ref1): i64 {
+    var cols = 16;
+    var g = av1_mv_grid_new(cols, 16);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            av1_mi_store_mode(g, cols, 16, r, c, 6, ymode, ref0, ref1, 1, mvr, mvc,
+            mvr, mvc, 0, 0, 0, 0, 0);
+            av1_mi_store_final(g, cols, 16, r, c, 6, 1);
+            c = c + 4;
+        }
+        r = r + 4;
+    }
+    return g;
+}
+fn ib_rt_at(fh, s, g, sz, mi_row, mi_col, au, al, skip, seg_id, blk, exp_ref1, exp_mm, tag): i64 {
+    var ccr = av1_refcdf_blob();
+    var ccim = av1_imcdf_blob();
+    var ccii = av1_iicdf_blob();
+    var ccmv = av1_mvcdf_blob();
+    var refs = mm_refs(64, 64);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, mi_row, mi_col, au, al);
+    var enc = av1_sym_enc_init(128, 1);
+    assert_eq(av1_write_inter_block_mode_info(enc, ccr, ccim, ccii, ccmv, blk,
+    ib_ctx_at(g, sz, mi_row, mi_col), nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0),
+    DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_interblock_new();
+    assert_eq(av1_inter_block_mode_info(sd, ccr, ccim, ccii, ccmv, got,
+    ib_ctx_at(g, sz, mi_row, mi_col), nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0),
+    DR_OK, tag);
+    assert_eq(av1_ib_ref(got, 1), exp_ref1, tag);
+    assert_eq(av1_ib_ymode(got), load64(blk + AV1IB_YMODE), tag);
+    assert_eq(av1_ib_motion_mode(got), exp_mm, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165,
+    "marker: reader consumed exactly the writer's symbols");
+    return got;
+}
+# the 0.7.82 review hardening — kills the reviewer-run surviving mutants.
+fn test_inter_block_review_hardening() {
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var gc = mm_grid(8, 8, 1, 7);
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    # H1: ROTZOOM at an ASYMMETRIC position — 7.10.2.1's projection is position-
+    # dependent (KA from mv_ref.py: alpha 8192, 8x8 at mi_row 1 / mi_col 2 -> col 11),
+    # so a mi_col/mi_row swap into setup_global_mv decodes col 7, not 11. GLOBALMV +
+    # ROTZOOM: the 5.11.27 gate forces SIMPLE (no mm symbol); needs_interp = 0.
+    var fh_rz = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    store64(fh_rz + AV1FH_GM_TYPE + ((AV1_LAST_FRAME - 1) * 8), AV1_GM_ROTZOOM);
+    store64(fh_rz + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 2) * 8), (1 << 16) + 8192);
+    store64(fh_rz + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 5) * 8), 1 << 16);
+    var h1 = ib_rt_at(fh_rz, s0, g, 3, 1, 2, 1, 1, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV,
+    0, 0, 11, 0, 0, AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE,
+    "H1 GLOBALMV + ROTZOOM at (1,2)");
+    assert_eq(load64(h1 + AV1IB_MV0 + AV1MV_COL), 11, "H1 rotzoom col 11 (position-derived)");
+    assert_eq(load64(h1 + AV1IB_MV0 + AV1MV_ROW), 0, "H1 rotzoom row 0");
+    # H2: GLOBALMV-family NEIGHBOURS + ROTZOOM — the scans SUBSTITUTE the installed
+    # global MV for such candidates, so NEARESTMV decodes (0, 11): dies if set_global
+    # runs after find_mv_stack, or the position args swap, or the install is zeroed.
+    var gg = ib_grid_y(AV1_GLOBALMV, 8, 8, 1, AV1_REF_NONE);
+    var h2 = ib_rt_at(fh_rz, s0, gg, 3, 1, 2, 1, 1, 0, 0, ib_mk(1, AV1_REF_NONE,
+    AV1_NEARESTMV, 0, 0, 11, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE,
+    "H2 global substitution in the scans");
+    assert_eq(load64(h2 + AV1IB_MV0 + AV1MV_COL), 11, "H2 substituted candidate col 11");
+    # H3: en_dual — two INDEPENDENT interp symbols.
+    var h3 = ib_rt(fh, ib_seq(0, 0, 1, 0), g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0,
+    12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 1), AV1_REF_NONE, AV1_MM_SIMPLE, "H3 dual filter");
+    assert_eq(av1_ib_interp(h3, 1), 1, "H3 dir 1 is independent under en_dual");
+    # H4: an interintra record the gate cannot code is SURFACED as a bounds error —
+    # by en_interintra = 0, and by a 64x64 block outside the 8x8..32x32 window.
+    var nbg = av1_nbctx_new();
+    av1_nbctx_setup(nbg, g, 16, 4, 4, 1, 1);
+    var b4 = ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2);
+    store64(b4 + AV1IB_II + AV1II_INTERINTRA, 1);
+    var enc4 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_inter_block_mode_info(enc4, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), b4, ib_ctx(g, 6), nbg, av1_warp_new(), fh,
+    mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS, "H4 uncodable interintra (en=0) -> bounds");
+    assert_eq(av1_write_inter_block_mode_info(enc4, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), b4, ib_ctx_at(g, 11, 0, 0), nbg, av1_warp_new(), fh,
+    mm_refs(64, 64), ib_seq(1, 0, 0, 0), 0, 0, 0), DR_ERR_BOUNDS,
+    "H4b uncodable interintra (64x64) -> bounds");
+    # H5: mi_size variation — 8x8 with the ii gate OPEN (reads the interintra=0 symbol)
+    # and 64x64 with the gate CLOSED by size (reads nothing); both behind the marker.
+    ib_rt(fh, ib_seq(1, 0, 0, 0), g, 3, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12,
+    0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H5 8x8, ii gate open");
+    var h5b = ib_rt_at(fh, ib_seq(1, 0, 0, 0), g, 11, 0, 0, 0, 0, 0, 0, ib_mk(1, AV1_REF_NONE,
+    AV1_NEWMV, 0, 16, 8, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE,
+    "H5b 64x64, ii gate closed by size");
+    assert_eq(load64(h5b + AV1IB_MV0 + AV1MV_ROW), 16, "H5b 64x64 NEWMV mv");
+    # H6: MV-precision threading — force_integer_mv = 1 (integer MVs; also forces the
+    # OBMC motion branch) and allow_high_precision_mv = 0 (even MVs).
+    var fh_fi = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    store64(fh_fi + AV1FH_FORCE_INT_MV, 1);
+    var h6 = ib_rt(fh_fi, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 16, 0 - 8,
+    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H6 force_integer_mv");
+    assert_eq(load64(h6 + AV1IB_MV0 + AV1MV_ROW), 16, "H6 integer mv row");
+    var fh_lp = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    store64(fh_lp + AV1FH_ALLOW_HIGH_PREC_MV, 0);
+    var h6b = ib_rt(fh_lp, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 10, 0 - 6,
+    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H6b allow_hp = 0");
+    assert_eq(load64(h6b + AV1IB_MV0 + AV1MV_COL), 0 - 6, "H6b low-precision mv col");
+    # H7: interintra WEDGE through the orchestrator (16x16: Wedge_Bits > 0).
+    var b7h = ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2);
+    store64(b7h + AV1IB_II + AV1II_INTERINTRA, 1);
+    store64(b7h + AV1IB_II + AV1II_MODE, AV1_II_SMOOTH_PRED);
+    store64(b7h + AV1IB_II + AV1II_WEDGE, 1);
+    store64(b7h + AV1IB_II + AV1II_WEDGEIDX, 11);
+    var h7 = ib_rt(fh, ib_seq(1, 0, 0, 0), g, 6, 0, 0, b7h, AV1_INTRA_FRAME, AV1_MM_SIMPLE,
+    "H7 interintra wedge");
+    assert_eq(av1_interintra_wedge(h7 + AV1IB_II), 1, "H7 wedge on");
+    assert_eq(av1_interintra_wedge_idx(h7 + AV1IB_II), 11, "H7 wedge index");
+    assert_eq(load64(h7 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_WEDGE, "H7 CT WEDGE");
+    # H8: compound group-1 WEDGE through the orchestrator (en_masked + en_jnt on).
+    var b8 = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE, 1, 1);
+    store64(b8 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_WEDGE);
+    store64(b8 + AV1IB_CT + AV1CT_GROUPIDX, 1);
+    store64(b8 + AV1IB_CT + AV1CT_WEDGEIDX, 5);
+    store64(b8 + AV1IB_CT + AV1CT_WEDGESIGN, 1);
+    var h8 = ib_rt(ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 1, 7), ib_seq(0, 1, 0, 1), gc, 6,
+    0, 0, b8, 7, AV1_MM_SIMPLE, "H8 compound group-1 wedge");
+    assert_eq(load64(h8 + AV1IB_CT + AV1CT_GROUPIDX), 1, "H8 group idx 1");
+    assert_eq(load64(h8 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_WEDGE, "H8 CT WEDGE");
+    assert_eq(load64(h8 + AV1IB_CT + AV1CT_WEDGEIDX), 5, "H8 wedge index");
+    assert_eq(load64(h8 + AV1IB_CT + AV1CT_WEDGESIGN), 1, "H8 wedge sign");
+    # H9: compound with EVERY compound enable off — the CT group codes NOTHING.
+    var b9 = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE, 1, 1);
+    store64(b9 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
+    ib_rt(ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 1, 7), s0, gc, 6, 0, 0, b9, 7,
+    AV1_MM_SIMPLE, "H9 compound, enables off -> no CT symbols");
+    return 0;
+}
+# adaptive mv_ctx pin: the MV CDF DEFAULTS are identical across the two contexts, so
+# only the adaptation COUNT distinguishes the 5.11.32 MvCtx = 0 wiring (a reader-side
+# mv_ctx = 1 mutant adapts ctx 1 and this test's two count asserts flip).
+fn test_inter_block_mvctx_adaptation() {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var refs = mm_refs(64, 64);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
+    var cmv_e = av1_mvcdf_new();
+    var cmv_d = av1_mvcdf_new();
+    var blk = ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2);
+    var enc = av1_sym_enc_init(128, 0);
+    av1_write_inter_block_mode_info(enc, av1_refcdf_new(), av1_imcdf_new(), av1_iicdf_new(),
+    cmv_e, blk, ib_ctx(g, 6), nb, av1_warp_new(), fh, refs, s0, 0, 0, 0);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var got = av1_interblock_new();
+    av1_inter_block_mode_info(sd, av1_refcdf_new(), av1_imcdf_new(), av1_iicdf_new(),
+    cmv_d, got, ib_ctx(g, 6), nb, av1_warp_new(), fh, refs, s0, 0, 0, 0);
+    assert_eq(load64(got + AV1IB_MV0 + AV1MV_ROW), 12, "adaptive NEWMV decodes");
+    assert_eq(load64(av1_mvcdf_joint(cmv_d, 0) + 32) > 0, 1, "MV adaptation lands in ctx 0");
+    assert_eq(load64(av1_mvcdf_joint(cmv_d, 1) + 32), 0, "ctx 1 (intrabc) untouched");
+    return 0;
+}
+# leaf-built conformance: the stream is composed from the SUB-WRITERS in the spec's
+# order with the scan state derived INDEPENDENTLY — a wiring bug shared by the driver
+# and its inverse cannot cancel here.
+fn test_inter_block_conformance() {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var refs = mm_refs(64, 64);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
+    var ccr = av1_refcdf_blob();
+    var ccim = av1_imcdf_blob();
+    var ccii = av1_iicdf_blob();
+    var ccmv = av1_mvcdf_blob();
+    # the independent scan state:
+    var ctxi = ib_ctx(g, 6);
+    av1_mvctx_set_refs(ctxi, 1, AV1_REF_NONE);
+    av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
+    av1_find_mv_stack(ctxi, 0);
+    assert_eq(av1_mv_stack_num(load64(ctxi + AV1MVC_STACK)), 1,
+    "conformance precondition: the uniform grid dedups to one candidate");
+    var scr = alloc(AV1CCTX_SIZE);
+    var enc = av1_sym_enc_init(128, 1);
+    # 5.11.25: comp_mode (gate open at 16x16) + the single tree for LAST
+    av1_write_comp_mode(enc, ccr, av1_comp_mode_ctx(nb), AV1_SINGLE_REFERENCE);
+    av1_single_ref_ctxs(nb, scr);
+    av1_write_single_ref(enc, ccr, scr, AV1_LAST_FRAME);
+    # 5.11.24: new_mv = 0 -> NEWMV; NumMvFound = 1 -> NO drl symbols
+    av1_write_inter_mode(enc, ccim, ctxi, AV1_NEWMV);
+    # 5.11.32: the NEWMV diff vs the stack head (8, 8): mv (12, -4) -> diff (4, -12)
+    av1_write_mv(enc, ccmv, 0, 1, 0, 4, 0 - 12);
+    # 5.11.28: en_ii = 0 -> nothing. 5.11.27: the warp branch -> @@motion_mode(SIMPLE)
+    av1_write_motion_mode_sym(enc, ccim, 6, AV1_MM_SIMPLE);
+    # 5.11.29: single -> nothing. interp: needs = 1 -> ONE symbol (SHARP)
+    av1_write_interp_filter(enc, ccim, av1_interp_filter_ctx(nb, 0, 1, AV1_REF_NONE), 2);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_interblock_new();
+    assert_eq(av1_inter_block_mode_info(sd, ccr, ccim, ccii, ccmv, got, ib_ctx(g, 6), nb,
+    av1_warp_new(), fh, refs, s0, 0, 0, 0), DR_OK, "conformance decode ok");
+    assert_eq(av1_ib_ref(got, 0), AV1_LAST_FRAME, "conformance ref LAST");
+    assert_eq(av1_ib_ymode(got), AV1_NEWMV, "conformance NEWMV");
+    assert_eq(load64(got + AV1IB_MV0 + AV1MV_ROW), 12, "conformance mv row");
+    assert_eq(load64(got + AV1IB_MV0 + AV1MV_COL), 0 - 4, "conformance mv col");
+    assert_eq(av1_ib_motion_mode(got), AV1_MM_SIMPLE, "conformance motion mode");
+    assert_eq(av1_ib_interp(got, 0), 2, "conformance interp SHARP");
+    assert_eq(av1_sym_read_literal(sd, 8), 165,
+    "marker: the driver consumed exactly the leaf-built symbols");
+    return 0;
+}
+# ref-port case 9 + the interintra -> RefFrame[1] -> motion-mode interaction.
+fn test_inter_block_interintra() {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    var s = ib_seq(1, 1, 0, 1);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var b = ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2);
+    store64(b + AV1IB_II + AV1II_INTERINTRA, 1);
+    store64(b + AV1IB_II + AV1II_MODE, AV1_II_DC_PRED);
+    # pre-ii REF1 is NONE; 5.11.28 sets it to INTRA_FRAME, which FORCES motion_mode
+    # SIMPLE with no symbol — the interaction this test pins end-to-end.
+    var got = ib_rt(fh, s, g, 6, 0, 0, b, AV1_INTRA_FRAME, AV1_MM_SIMPLE, "9 interintra");
+    assert_eq(av1_interintra_on(got + AV1IB_II), 1, "9 interintra on");
+    assert_eq(av1_interintra_mode(got + AV1IB_II), AV1_II_DC_PRED, "9 ii mode");
+    assert_eq(load64(got + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_INTRA, "9 CT INTRA");
+    return 0;
+}
+# ref-port case 8 + hostile inputs.
+fn test_inter_block_seg_and_errors() {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh, 2, AV1_SEG_LVL_GLOBALMV, 0);
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    # 8: seg GLOBALMV — refs fixed (LAST, NONE), YMode fixed GLOBALMV, no mode symbols;
+    # mv (0,0) from the IDENTITY model; interp reads nothing (GLOBALMV + !TRANSLATION);
+    # the warp branch still codes @@motion_mode (IDENTITY is not gated).
+    var g8 = ib_rt(fh, s0, g, 6, 0, 2, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV, 0, 0, 0, 0, 0,
+    AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE, "8 seg GLOBALMV");
+    assert_eq(load64(g8 + AV1IB_MV0 + AV1MV_ROW), 0, "8 GLOBALMV mv 0");
+    # hostile: null out / ctx / ws.
+    var sd = av1_sym_dec_init(alloc(8), 8, 1);
+    assert_eq(av1_inter_block_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
+    fh, mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS, "out = 0 -> bounds error");
+    assert_eq(av1_inter_block_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), av1_interblock_new(), ib_ctx(g, 6),
+    av1_nbctx_new(), 0, fh, mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS,
+    "ws = 0 -> bounds error");
+    # a hostile seg REF_FRAME datum of 0 (INTRA) reaching the INTER path is rejected —
+    # 5.11.15 would have derived is_inter = 0 from it.
+    var fh_bad = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
+    store64(fh_bad + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_bad, 3, AV1_SEG_LVL_REF_FRAME, 0);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
+    assert_eq(av1_inter_block_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), av1_interblock_new(), ib_ctx(g, 6), nb,
+    av1_warp_new(), fh_bad, mm_refs(64, 64), s0, 0, 3, 0), DR_ERR_BOUNDS,
+    "seg REF_FRAME datum 0 on the inter path -> bounds error");
+    # the record layout, pinned absolutely.
+    assert_eq(AV1IB_II + AV1II_SIZE, AV1IB_CT, "II region ends exactly at CT");
+    assert_eq(AV1IB_CT + AV1CT_SIZE, AV1IB_SIZE, "CT region ends exactly at AV1IB_SIZE");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -2762,6 +3242,14 @@ fn main() {
     test_read_ref_frames_tree();
     test_read_ref_frames_errors();
     test_read_ref_frames_review_hardening();
+    test_group("inter_block_mode_info (5.11.23 — the orchestrator)");
+    test_inter_block_single();
+    test_inter_block_compound();
+    test_inter_block_interintra();
+    test_inter_block_seg_and_errors();
+    test_inter_block_review_hardening();
+    test_inter_block_mvctx_adaptation();
+    test_inter_block_conformance();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();

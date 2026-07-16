@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.82] - 2026-07-16
+
+**Inter prediction — `inter_block_mode_info` (spec 5.11.23), THE ORCHESTRATOR.** Every inter mode-info
+subsystem built across 0.7.62–0.7.81 now composes into the complete per-block decode, in the spec's exact
+read order: `read_ref_frames` → `isCompound` → `find_mv_stack` → YMode (skip_mode fixed
+`NEAREST_NEARESTMV` / seg SKIP|GLOBALMV fixed `GLOBALMV` / `@@compound_mode` / the
+`@@new_mv`–`@@zero_mv`–`@@ref_mv` chain) → the DRL loops → `assign_mv` → `read_interintra_mode` (with its
+`RefFrame[1] = INTRA_FRAME` side-effect applied between stages) → `read_motion_mode` (which sees the
+POST-interintra `RefFrame[1]`) → `read_compound_type` → the interp-filter tail.
+
+- **`Av1InterBlock`** (`src/av1_intermode.cyr`) — the block-level output record: refs / isCompound /
+  YMode / RefMvIdx / Mv[0..1] / motion_mode / interp_filter[0..1] + embedded interintra and
+  compound-type records; layout pinned absolutely (II ends at CT, CT ends at SIZE).
+- **`av1_inter_block_mode_info`** — the driver. The block's refs and GLOBAL-MV candidates are installed
+  into the scan ctx HERE (they depend on the just-decoded refs — `setup_global_mv` per ref, `GmType`
+  guarded for the post-interintra `INTRA_FRAME`/`NONE`); `find_mv_stack` then runs on the configured ctx.
+  Persistent 2×`Av1Mv` scratch (`av1_ibmi_scratch`). Hostile guards: null out/ctx/ws, and a seg
+  REF_FRAME datum of 0 (INTRA) reaching the inter path → `DR_ERR_BOUNDS` (5.11.15 derives `is_inter = 0`
+  from it, so a conformant stream cannot get here).
+- **`av1_write_inter_block_mode_info`** + the **`av1_write_assign_mv_*`** family — the full encoder
+  inverse; `write_assign_mv_list` mirrors the reader's predictor derivation and emits the NEWMV diff.
+- Four new seq accessors (`av1_seq_enable_interintra_compound` / `_masked_compound` / `_dual_filter` /
+  `_jnt_comp`).
+
+### Fixed
+- **Development-caught writer bug** (by the interintra test case's marker, before any review): the
+  inverse applied the 5.11.28 `RefFrame[1]` side-effect by checking `SETREF1` — a READER output the
+  source record never carries — so writer and reader diverged on `ref1` and desynced from
+  `read_motion_mode` onward. The spec assigns `RefFrame[1]` inside `if (interintra)`: the writer now
+  keys on the interintra flag itself, gated `!isCompound && !skip_mode`.
+
+Verified against a new committed spec-literal port (`scripts/refs/inter_block_ref.py` — the 5.11.23
+SYMBOL SCHEDULE: group order/presence, `get_mode`, `has_nearmv`, the DRL read-count model, 11 labeled
+schedules). Tests: 12 full-path round-trips through driver + inverse behind the `0xA5` literal marker —
+single NEWMV/NEARESTMV/NEARMV+DRL/GLOBALMV(IDENTITY and TRANSLATION with a real (1,2) global vector) /
+LOCALWARP / fixed-filter; compound NEAREST_NEARESTMV / NEW_NEWMV+two-DRL+two-MV; skip_mode (a
+marker-only stream — not one symbol coded); skip-beats-seg priority; interintra (the
+`ref1 → INTRA_FRAME → motion_mode forced SIMPLE` interaction end-to-end); seg GLOBALMV; hostile nulls +
+the INTRA-datum reject; record-layout pins.
+
+All **mutation-verified — 20 mutations, 0 survivors** (12 author + 8 review-driven): set_refs dropped →
+40 failures, the global-MV install zeroed → 2, skip-vs-seg order → 4, compound/single mode-reads
+swapped → 47, DRL forced 0 → 7, compound assign lists swapped → 4, the interintra side-effect dropped →
+4, motion_mode handed the pre-ii ref1 → 3, compound_type handed interintra=0 → 1, the interp tail
+handed SIMPLE → 1, the skip YMode default corrupted → 2, single assign routed through list 1 → 6;
+review-driven: reader-only mv_ctx=1 → 2, the setup_global_mv position swap (paired AND reader-only) →
+2/2, set_global reordered after find_mv_stack → 1, the writer ref1 guard reverted → 2, en_dual
+wired from en_jnt → 6, force_int threading dropped → 3, mi_size hardcoded → 6.
+
+4-slice adversarial review (isolated worktrees, `sawCode` tripwires, reproduce-in-worktree refuters,
+new-mutant discipline): **15 findings confirmed (4 major), 1 refuted — all closed in-cut** with one code
+fix, one reference-port fix, and a hardening package whose 8 mutant classes all now die:
+- **Code**: the writer's interintra `RefFrame[1]` side-effect lacked the full 5.11.28 coding gate — an
+  uncodable interintra record (enable off, or a block outside 8x8..32x32) silently desynced; now
+  surfaced as `DR_ERR_BOUNDS` (the unrepresentable-input convention).
+- **Reference port**: the reviewers caught THREE WRONG ROWS in `inter_block_ref.py` (cases 4/8/10 had
+  `needs_interp`/motion-branch inputs copied across rows instead of derived) — the known-answer source
+  itself was buggy; fixed and re-derived per-case.
+- **Tests**: the global-MV threading was dead wiring (square fixtures + IDENTITY/TRANSLATION models) —
+  killed by a ROTZOOM fixture at an ASYMMETRIC position with a mv_ref.py-derived value pin (col 11) and
+  a GLOBALMV-neighbour substitution case; the `mv_ctx=0` wiring was round-trip-invisible (identical
+  default CDFs adapt in lockstep) — pinned by asserting the adaptation COUNT lands in ctx 0 and not
+  ctx 1; seq-enable separation (en_dual, en_ii, all-off compound), force_int/allow_hp variation,
+  mi_size variation (8x8/64x64), the II-wedge and CT-group-1 paths, a leaf-built conformance schedule
+  (kills paired wiring bugs), and the b7 `CT_TYPE=0`-aliases-WEDGE fixture accident.
+
 ## [0.7.81] - 2026-07-16
 
 **Inter prediction — `read_ref_frames` (spec 5.11.25), the reference dispatcher +

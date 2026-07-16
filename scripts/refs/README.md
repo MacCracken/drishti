@@ -20,6 +20,7 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 | `nbctx_ref.py` | neighbour CDF contexts — the 5.11.15 `inter_frame_mode_info` preamble + §9 `is_inter` / `comp_mode` ctx, `check_backward`, `count_refs`, `ref_count_ctx` | `tests/av1_intermode.tcyr` (`test_nbctx_known_answers`, `test_nbctx_full_enumeration`) |
 | `motion_mode_ref.py` | `read_motion_mode` (5.11.27) branch decision + `is_scaled` | `tests/av1_intermode.tcyr` (`test_is_scaled`, `test_read_motion_mode_gate`, `test_motion_mode_driver_state`) |
 | `ref_frames_ref.py` | `read_ref_frames` (5.11.25) dispatch + `seg_feature_active` (5.11.14) | `tests/av1_intermode.tcyr` (`test_seg_feature_active`, `test_read_ref_frames_dispatch`, `test_read_ref_frames_tree`) |
+| `inter_block_ref.py` | `inter_block_mode_info` (5.11.23) symbol schedule — group order/presence, `get_mode`, `has_nearmv`, the DRL read counts | `tests/av1_intermode.tcyr` (`test_inter_block_single`, `test_inter_block_compound`, `test_inter_block_interintra`, `test_inter_block_seg_and_errors`) |
 
 ## Why these live in the repo
 

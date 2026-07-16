@@ -266,11 +266,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   the _sym leaves + warp samples + `av1_is_scaled` `av1_frame.cyr`, with the gate-replaying encoder inverse;
   the last gating orchestrator) and the **read_ref_frames dispatcher + seg_feature_active** 0.7.81
   (`av1_read_ref_frames` — the 5.11.25 dispatch: skip_mode / segmentation fixed paths / the comp_mode gate
-  into the 0.7.68/0.7.69 trees; + `av1_seg_feature_active` 5.11.14 `av1_frame.cyr`) are in too; next the
-  `inter_block_mode_info` orchestrator (5.11.23 — pure composition, every part exists), then
+  into the 0.7.68/0.7.69 trees; + `av1_seg_feature_active` 5.11.14 `av1_frame.cyr`) and the **5.11.23
+  ORCHESTRATOR itself** 0.7.82 (`av1_inter_block_mode_info` — the complete per-block inter mode-info
+  decode as one call, with the Av1InterBlock record + the full encoder inverse) are in too; next
+  `inter_frame_mode_info` (5.11.15 — the outer is_inter dispatch), then
   `warp_estimation` (7.11.3.8) turns the
   samples into a model, and
-  `inter_frame_mode_info`, and
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
   DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
