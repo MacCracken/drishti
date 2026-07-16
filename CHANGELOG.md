@@ -4,6 +4,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.81] - 2026-07-16
+
+**Inter prediction — `read_ref_frames` (spec 5.11.25), the reference dispatcher +
+`seg_feature_active` (5.11.14).** The next orchestrator toward `inter_block_mode_info`: RefFrame[0..1]
+now resolves through the full spec dispatch.
+
+- **`av1_seg_feature_active`** (`src/av1_frame.cyr`) — 5.11.14: `segmentation_enabled &&
+  FeatureEnabled[segment_id][feature]`, plus the missing `SEG_LVL_SKIP = 6` / `SEG_LVL_GLOBALMV = 7`
+  constants. Defensive: out-of-range segment/feature indices read nothing and report inactive (callers
+  wanting a hard error validate first — the driver does).
+- **`av1_read_ref_frames`** (`src/av1_intermode.cyr`) — the dispatcher. Three no-symbol paths, in spec
+  order: `skip_mode` → the frame header's `SkipModeFrame` pair (5.9.23); an active `SEG_LVL_REF_FRAME` →
+  its parse-clipped (5.9.14) `FeatureData` ref verbatim (including the 0 = INTRA datum) + `NONE`; an
+  active `SEG_LVL_SKIP` or `SEG_LVL_GLOBALMV` → `(LAST, NONE)`. Otherwise `@@comp_mode` is coded only
+  when `reference_select && min(bw4, bh4) >= 2` (else forced SINGLE, no symbol) and the 0.7.69 compound /
+  0.7.68 single tree runs with its 0.7.75/0.7.76-derived contexts. Hostile guards (segment_id, MiSize)
+  reject before any symbol is consumed. The ctx records fill a lazily-allocated **persistent scratch**
+  (`av1_rrf_scratch`) — a per-call arena alloc in a per-block path would grow without bound (the 0.7.60
+  lesson).
+- **`av1_write_ref_frames`** — the gate-replaying encoder inverse; `is_comp` derives from
+  `r1 > INTRA_FRAME` (NONE = -1 and INTRA_FRAME = 0 both classify single, matching 5.11.23's isCompound).
+
+Verified against a new committed spec-literal port (`scripts/refs/ref_frames_ref.py`: the dispatch +
+`seg_feature_active`, 15 labeled cases including both priority orderings — skip_mode beats seg
+REF_FRAME, REF_FRAME beats SKIP on the same segment). Tests: every dispatch path round-tripped both
+ways behind the 8-bit `0xA5` literal marker; decode-side conformance streams hand-built with the LEAF
+writers (pinning that the forced-SINGLE gate codes **no** comp_mode symbol at 4x8/8x4 and codes it at
+the exact 8x8 boundary); the parse-clip boundary data values 0 and 7 land verbatim; guard boundaries
+pinned at BOTH edges (segment_id −1/0/7/8, MiSize −1/21/22/25 — the 0.7.80 review lesson); an
+adaptive-CDF lockstep case; writer-side guard parity.
+
+All **mutation-verified — 28 mutations, 0 survivors** (17 author + 11 review-driven): each dispatch path
+dropped (skip_mode → 4 failures, SEG_REF → 7, SKIP-term → 1, GLOBALMV-term → 1), the wrong feature's
+data → 3, the reference_select gate dropped → 3, the min gate `>=2`→`>=1` → 4 and `>=2`→`>=3` → 5, the
+comp_mode dispatch inverted → 34, the single path fed the compound ctx filler → 18 **and its mirror**
+(the compound path fed the single filler) → 6, the skip-pair index swap → 2, the WRITER dropping
+SEG_REF → 3, a **paired** reader+writer SEG_REF drop → 4 (the ref-port-pinned expectations catch it — a
+round-trip alone cannot), both index guards weakened → 2/2, and `seg_feature_active` ignoring
+`segmentation_enabled` → 2. One harness pattern initially aliased into the motion-mode pair's identical
+guard+skip sequence — caught as a PATTERN ERROR by the unique-anchor discipline (0.7.80's lesson paying
+for itself), re-anchored, killed.
+
+4-slice adversarial review (isolated worktrees, `sawCode` tripwires, reproduce-in-worktree refuters,
+instructed to invent NEW mutant classes rather than re-run the author's list): **9 findings confirmed
+(2 major, 7 minor), 0 wrong decodes on valid streams — all closed in-cut** with one code change and a
+hardening test whose 11 mutants all now die: the writer's comp_mode gate was entirely unpinned through
+the paired round-trip (closed/boundary states never driven; writer-only gate mutants survived → three
+paired cases at 8x8 / 4x8 / ref_select-off); a single shared nb fixture made `comp_mode_ctx` = 0
+everywhere (a hardcoded-ctx mutant survived → a provably nonzero-ctx fixture, pinned `== 1`, + a
+leaf-built conformance case); the SEG_LVL_SKIP/GLOBALMV constant values were circular through the
+constants themselves (→ absolute-slot pins at literal 6/7, the CDF-blob offset rule applied to
+segmentation); a **precondition violation in the writer produced DR_OK + an unparseable stream** (a
+compound pair with the gate closed emitted the compound tree the reader never parses — now surfaced as
+`DR_ERR_BOUNDS`); the `r1 == INTRA_FRAME` single-classification boundary, the writer's negative-edge
+guards, and the first-invalid `seg_feature_active` probes were vacuous (planted-alias + boundary cases
+added); the persistent-scratch layout contract is now pinned (`AV1CCTX_SIZE == 72`, last slot ends at
+size; residual documented: an alloc-site literal shrink is invisible — the arena has no red zones).
+One earlier notification for this review carried a plausible but **unverifiable** result (empty output
+file, journal mid-run) whose central claim failed live reproduction — discarded; only the journal-backed
+completion was recorded. Details in `docs/development/state.md`.
+
 ## [0.7.80] - 2026-07-16
 
 **Inter prediction — `read_motion_mode` (spec 5.11.27), the full gating driver + `is_scaled`.** The last

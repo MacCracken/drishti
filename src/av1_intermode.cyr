@@ -2156,3 +2156,96 @@ is_compound, mv_row, mv_col, motion_mode): i64 {
     av1_write_motion_mode_sym(enc, cc, mi_size, motion_mode);
     return DR_OK;
 }
+
+# ================================================================
+# read_ref_frames (spec 5.11.25) — the DISPATCHER over the reference reads. Three
+# no-symbol paths: skip_mode takes the frame header's SkipModeFrame pair (5.9.23);
+# an active SEG_LVL_REF_FRAME feature takes its (parse-clipped, 5.9.14) FeatureData
+# ref + NONE; an active SEG_LVL_SKIP or SEG_LVL_GLOBALMV forces LAST + NONE. Otherwise
+# @@comp_mode is read only when reference_select && min(bw4, bh4) >= 2 (else forced
+# SINGLE), then the compound (0.7.69) or single (0.7.68) tree runs with every CDF
+# context derived from the neighbour record (0.7.75/0.7.76). `nb` is the block's
+# Av1NbCtx exactly as set up by av1_nbctx_setup for the 5.11.15 preamble; segment_id
+# is the block's decoded segment id. out_ref[0..1] <- RefFrame.
+# ================================================================
+# persistent ctx scratch (refctx[6] fits inside AV1CCTX_SIZE) — lazily allocated ONCE;
+# a per-call arena alloc in a per-block path would grow without bound (the 0.7.60 lesson).
+var AV1RRF_SCRATCH = 0;
+fn av1_rrf_scratch(): i64 {
+    if (AV1RRF_SCRATCH != 0) { return AV1RRF_SCRATCH; }
+    AV1RRF_SCRATCH = alloc(AV1CCTX_SIZE);
+    return AV1RRF_SCRATCH;
+}
+fn av1_read_ref_frames(sd, cc, out_ref, nb, fh, skip_mode, segment_id, mi_size): i64 {
+    if (out_ref == 0) { return DR_ERR_BOUNDS; }
+    # the spec's two fixed-assignment paths both land on LAST + NONE for RefFrame[1];
+    # store the LAST + NONE default up front so every no-read path is covered.
+    store64(out_ref + 0, AV1_LAST_FRAME);
+    store64(out_ref + 8, AV1_REF_NONE);
+    # hostile guards (no symbol is consumed before them): segment_id indexes the
+    # 8x8 FeatureEnabled/FeatureData tables, mi_size the 22-entry Num_4x4 tables.
+    if ((segment_id < 0) || (segment_id >= AV1_MAX_SEGMENTS)) { return DR_ERR_BOUNDS; }
+    if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
+    if (skip_mode != 0) {
+        store64(out_ref + 0, av1_fh_skip_mode_frame(fh, 0));
+        store64(out_ref + 8, av1_fh_skip_mode_frame(fh, 1));
+        return DR_OK;
+    }
+    if (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_REF_FRAME) != 0) {
+        store64(out_ref + 0, av1_fh_feature_data(fh, segment_id, AV1_SEG_LVL_REF_FRAME));
+        return DR_OK;
+    }
+    if ((av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0)
+    || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
+        return DR_OK;      # LAST + NONE (stored above)
+    }
+    var comp_mode = AV1_SINGLE_REFERENCE;
+    if (av1_fh_reference_select(fh) != 0) {
+        if (av1_min(av1_num_4x4_w(mi_size), av1_num_4x4_h(mi_size)) >= 2) {
+            comp_mode = av1_read_comp_mode(sd, cc, av1_comp_mode_ctx(nb));
+        }
+    }
+    var scr = av1_rrf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    if (comp_mode == AV1_COMPOUND_REFERENCE) {
+        av1_comp_ref_ctxs(nb, scr);
+        return av1_read_compound_ref(sd, cc, scr, out_ref);
+    }
+    av1_single_ref_ctxs(nb, scr);
+    av1_read_single_ref(sd, cc, scr, out_ref);
+    return DR_OK;
+}
+# the encoder inverse — replays the dispatch and emits exactly the symbols the reader
+# consumes: NOTHING on the skip_mode / segmentation paths (the pair is implied by frame
+# state), else comp_mode (when gated on) + the matching tree. A compound pair is
+# UNREPRESENTABLE when the comp_mode gate is closed (the reader forces SINGLE and parses
+# the single tree) — that precondition violation is surfaced as DR_ERR_BOUNDS rather than
+# silently emitting a stream the reader cannot parse.
+fn av1_write_ref_frames(enc, cc, nb, fh, skip_mode, segment_id, mi_size, r0, r1): i64 {
+    if ((segment_id < 0) || (segment_id >= AV1_MAX_SEGMENTS)) { return DR_ERR_BOUNDS; }
+    if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
+    if (skip_mode != 0) { return DR_OK; }
+    if (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_REF_FRAME) != 0) { return DR_OK; }
+    if ((av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0)
+    || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
+        return DR_OK;
+    }
+    var is_comp = AV1_SINGLE_REFERENCE;
+    if (r1 > AV1_INTRA_FRAME) { is_comp = AV1_COMPOUND_REFERENCE; }
+    var gate_open = 0;
+    if (av1_fh_reference_select(fh) != 0) {
+        if (av1_min(av1_num_4x4_w(mi_size), av1_num_4x4_h(mi_size)) >= 2) { gate_open = 1; }
+    }
+    if ((gate_open == 0) && (is_comp == AV1_COMPOUND_REFERENCE)) { return DR_ERR_BOUNDS; }
+    if (gate_open != 0) {
+        av1_write_comp_mode(enc, cc, av1_comp_mode_ctx(nb), is_comp);
+    }
+    var scr = av1_rrf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    if (is_comp == AV1_COMPOUND_REFERENCE) {
+        av1_comp_ref_ctxs(nb, scr);
+        return av1_write_compound_ref(enc, cc, scr, r0, r1);
+    }
+    av1_single_ref_ctxs(nb, scr);
+    return av1_write_single_ref(enc, cc, scr, r0);
+}

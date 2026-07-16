@@ -264,9 +264,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   `has_overlappable_candidates` — what read_motion_mode's OBMC/LOCALWARP gating needs) are in, and the
   **read_motion_mode gating driver + is_scaled** 0.7.80 (`av1_read_motion_mode` — the full 5.11.27 gate over
   the _sym leaves + warp samples + `av1_is_scaled` `av1_frame.cyr`, with the gate-replaying encoder inverse;
-  the last gating orchestrator) is in too; next `read_ref_frames` (5.11.25), then `warp_estimation`
-  (7.11.3.8) turns the
-  samples into a model, and the `inter_block_mode_info` orchestrator,
+  the last gating orchestrator) and the **read_ref_frames dispatcher + seg_feature_active** 0.7.81
+  (`av1_read_ref_frames` — the 5.11.25 dispatch: skip_mode / segmentation fixed paths / the comp_mode gate
+  into the 0.7.68/0.7.69 trees; + `av1_seg_feature_active` 5.11.14 `av1_frame.cyr`) are in too; next the
+  `inter_block_mode_info` orchestrator (5.11.23 — pure composition, every part exists), then
+  `warp_estimation` (7.11.3.8) turns the
+  samples into a model, and
   `inter_frame_mode_info`, and
   the inter tile decode that lets
   `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the

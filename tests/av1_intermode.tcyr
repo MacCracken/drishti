@@ -2388,6 +2388,291 @@ fn test_motion_mode_driver_state() {
     return 0;
 }
 
+# ================================================================
+# The read_ref_frames DISPATCHER (5.11.25) + seg_feature_active (5.11.14). Dispatch
+# decisions are known answers from scripts/refs/ref_frames_ref.py; the single/compound
+# TREES were verified in 0.7.68/0.7.69 — these tests pin WHICH path runs, WHICH symbols
+# are coded (0xA5 literal marker), and the guard boundaries at BOTH edges.
+# ================================================================
+fn rrf_fh(seg_enabled, ref_select, smf0, smf1): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_SEG_ENABLED, seg_enabled);
+    store64(fh + AV1FH_REFERENCE_SELECT, ref_select);
+    store64(fh + AV1FH_SKIP_MODE_FRAME0, smf0);
+    store64(fh + AV1FH_SKIP_MODE_FRAME1, smf1);
+    return fh;
+}
+fn rrf_feature(fh, seg, j, data): i64 {
+    store64(fh + AV1FH_FEATURE_ENABLED + ((seg * 8 + j) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((seg * 8 + j) * 8), data);
+    return DR_OK;
+}
+# round-trip through the encoder inverse + the 0xA5 literal marker.
+fn rrf_rt(fh, nb, skip, seg_id, sz, r0, r1, e0, e1, tag): i64 {
+    var cc = av1_refcdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_ref_frames(enc, cc, nb, fh, skip, seg_id, sz, r0, r1), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);             # marker
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = alloc(16);
+    assert_eq(av1_read_ref_frames(sd, cc, got, nb, fh, skip, seg_id, sz), DR_OK, tag);
+    assert_eq(load64(got + 0), e0, tag);
+    assert_eq(load64(got + 8), e1, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "marker: reader consumed exactly the writer's symbols");
+    return 0;
+}
+# decode-side CONFORMANCE: the stream is hand-built with the LEAF writers, so a dispatch
+# bug shared by driver + inverse cannot cancel out. kind: 0 = nothing coded,
+# 1 = comp_mode(cmv) + single_ref(r0), 2 = comp_mode(cmv) + compound_ref(r0, r1),
+# 3 = single_ref(r0) ONLY (the forced-SINGLE gate: no comp_mode symbol).
+fn rrf_dec(fh, nb, skip, seg_id, sz, kind, cmv, r0, r1, e0, e1, tag): i64 {
+    var cc = av1_refcdf_blob();
+    var enc = av1_sym_enc_init(64, 1);
+    var scr = alloc(AV1CCTX_SIZE);
+    if (kind == 1) {
+        av1_write_comp_mode(enc, cc, av1_comp_mode_ctx(nb), cmv);
+        av1_single_ref_ctxs(nb, scr);
+        av1_write_single_ref(enc, cc, scr, r0);
+    }
+    if (kind == 2) {
+        av1_write_comp_mode(enc, cc, av1_comp_mode_ctx(nb), cmv);
+        av1_comp_ref_ctxs(nb, scr);
+        av1_write_compound_ref(enc, cc, scr, r0, r1);
+    }
+    if (kind == 3) {
+        av1_single_ref_ctxs(nb, scr);
+        av1_write_single_ref(enc, cc, scr, r0);
+    }
+    av1_sym_encode_literal(enc, 165, 8);             # marker
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = alloc(16);
+    assert_eq(av1_read_ref_frames(sd, cc, got, nb, fh, skip, seg_id, sz), DR_OK, tag);
+    assert_eq(load64(got + 0), e0, tag);
+    assert_eq(load64(got + 8), e1, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165,
+    "marker: the driver consumed exactly the expected symbols");
+    return 0;
+}
+# seg_feature_active (5.11.14) — both ways on every condition + the defensive guards.
+fn test_seg_feature_active() {
+    var fh = rrf_fh(1, 0, 0, 0);
+    rrf_feature(fh, 2, AV1_SEG_LVL_REF_FRAME, 4);
+    assert_eq(av1_seg_feature_active(fh, 2, AV1_SEG_LVL_REF_FRAME), 1, "enabled + feature on -> active");
+    assert_eq(av1_seg_feature_active(fh, 3, AV1_SEG_LVL_REF_FRAME), 0, "other segment -> inactive");
+    assert_eq(av1_seg_feature_active(fh, 2, AV1_SEG_LVL_SKIP), 0, "other feature -> inactive");
+    var fh_off = rrf_fh(0, 0, 0, 0);
+    rrf_feature(fh_off, 2, AV1_SEG_LVL_REF_FRAME, 4);
+    assert_eq(av1_seg_feature_active(fh_off, 2, AV1_SEG_LVL_REF_FRAME), 0,
+    "segmentation_enabled = 0 -> inactive even with the feature bit set");
+    # defensive guards read NOTHING out of range (both edges of both indices).
+    assert_eq(av1_seg_feature_active(fh, 0 - 1, AV1_SEG_LVL_REF_FRAME), 0, "seg -1 -> inactive");
+    assert_eq(av1_seg_feature_active(fh, 8, AV1_SEG_LVL_REF_FRAME), 0, "seg 8 -> inactive");
+    assert_eq(av1_seg_feature_active(fh, 2, 0 - 1), 0, "feature -1 -> inactive");
+    assert_eq(av1_seg_feature_active(fh, 2, 8), 0, "feature 8 -> inactive");
+    assert_eq(av1_seg_feature_active(fh, 7, AV1_SEG_LVL_REF_FRAME), 0, "seg 7 (last valid) is READ");
+    rrf_feature(fh, 7, AV1_SEG_LVL_GLOBALMV, 0);
+    assert_eq(av1_seg_feature_active(fh, 7, AV1_SEG_LVL_GLOBALMV), 1,
+    "seg 7 / feature 7 (both last valid) -> active, not guarded");
+    return 0;
+}
+# the no-symbol dispatch paths (ref-port cases A-D, G).
+fn test_read_ref_frames_dispatch() {
+    var nb = nb_build(1, 1, 1, AV1_REF_NONE, 1, AV1_REF_NONE);
+    # A: skip_mode takes the SkipModeFrame pair; nothing coded.
+    rrf_rt(rrf_fh(0, 1, 1, 5), nb, 1, 0, 6, 0, 0, 1, 5, "A skip_mode -> SkipModeFrame pair, no symbol");
+    # B: an active SEG_LVL_REF_FRAME takes its FeatureData ref + NONE; nothing coded.
+    var fh_seg = rrf_fh(1, 1, 1, 5);
+    rrf_feature(fh_seg, 2, AV1_SEG_LVL_REF_FRAME, AV1_GOLDEN_FRAME);
+    rrf_rt(fh_seg, nb, 0, 2, 6, 0, 0, AV1_GOLDEN_FRAME, AV1_REF_NONE,
+    "B seg REF_FRAME -> (GOLDEN, NONE), no symbol");
+    # B2: the same feature bits but segmentation DISABLED -> the tree runs instead.
+    var fh_soff = rrf_fh(0, 1, 1, 5);
+    rrf_feature(fh_soff, 2, AV1_SEG_LVL_REF_FRAME, AV1_GOLDEN_FRAME);
+    rrf_rt(fh_soff, nb, 0, 2, 6, AV1_LAST2_FRAME, AV1_REF_NONE, AV1_LAST2_FRAME, AV1_REF_NONE,
+    "B2 feature set but segmentation OFF -> the tree runs");
+    # B3: the feature is on ANOTHER segment -> the tree runs for this one.
+    rrf_rt(fh_seg, nb, 0, 3, 6, AV1_LAST2_FRAME, AV1_REF_NONE, AV1_LAST2_FRAME, AV1_REF_NONE,
+    "B3 feature on another segment -> the tree runs");
+    # B4/B5: the parse-clipped FeatureData boundaries land verbatim: 7 (ALTREF) and 0 (INTRA).
+    var fh_b4 = rrf_fh(1, 1, 0, 0);
+    rrf_feature(fh_b4, 4, AV1_SEG_LVL_REF_FRAME, 7);
+    rrf_rt(fh_b4, nb, 0, 4, 6, 0, 0, 7, AV1_REF_NONE, "B4 feature data 7 (ALTREF) verbatim");
+    var fh_b5 = rrf_fh(1, 1, 0, 0);
+    rrf_feature(fh_b5, 5, AV1_SEG_LVL_REF_FRAME, 0);
+    rrf_rt(fh_b5, nb, 0, 5, 6, 0, 0, 0, AV1_REF_NONE, "B5 feature data 0 (INTRA datum) verbatim");
+    # C/C2: SEG_LVL_SKIP / SEG_LVL_GLOBALMV each force (LAST, NONE); nothing coded.
+    var fh_sk = rrf_fh(1, 1, 0, 0);
+    rrf_feature(fh_sk, 1, AV1_SEG_LVL_SKIP, 0);
+    rrf_rt(fh_sk, nb, 0, 1, 6, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
+    "C seg SKIP -> (LAST, NONE), no symbol");
+    var fh_gm = rrf_fh(1, 1, 0, 0);
+    rrf_feature(fh_gm, 1, AV1_SEG_LVL_GLOBALMV, 0);
+    rrf_rt(fh_gm, nb, 0, 1, 6, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
+    "C2 seg GLOBALMV -> (LAST, NONE), no symbol");
+    # D: skip_mode BEATS an active seg REF_FRAME (dispatch order).
+    rrf_rt(fh_seg, nb, 1, 2, 6, 0, 0, 1, 5, "D skip_mode beats seg REF_FRAME");
+    # G: REF_FRAME beats SKIP when both are active on the SAME segment (dispatch order).
+    var fh_both = rrf_fh(1, 1, 0, 0);
+    rrf_feature(fh_both, 3, AV1_SEG_LVL_REF_FRAME, AV1_LAST2_FRAME);
+    rrf_feature(fh_both, 3, AV1_SEG_LVL_SKIP, 0);
+    rrf_rt(fh_both, nb, 0, 3, 6, 0, 0, AV1_LAST2_FRAME, AV1_REF_NONE,
+    "G REF_FRAME beats SKIP on the same segment");
+    return 0;
+}
+# the tree path: the comp_mode gate (ref-port cases E-F3) + both trees + conformance.
+fn test_read_ref_frames_tree() {
+    var nb = nb_build(1, 1, 1, AV1_REF_NONE, 1, AV1_REF_NONE);
+    var fh_on = rrf_fh(0, 1, 0, 0);     # reference_select on
+    var fh_off = rrf_fh(0, 0, 0, 0);    # reference_select off
+    # E: single refs round-trip at BOTH boundary values (LAST = 1, ALTREF = 7).
+    rrf_rt(fh_on, nb, 0, 0, 6, AV1_LAST_FRAME, AV1_REF_NONE, AV1_LAST_FRAME, AV1_REF_NONE,
+    "E single LAST via comp_mode gate");
+    rrf_rt(fh_on, nb, 0, 0, 6, AV1_ALTREF_FRAME, AV1_REF_NONE, AV1_ALTREF_FRAME, AV1_REF_NONE,
+    "E single ALTREF via comp_mode gate");
+    # E: compound pairs round-trip (unidir + bidir).
+    rrf_rt(fh_on, nb, 0, 0, 6, AV1_LAST_FRAME, AV1_LAST2_FRAME, AV1_LAST_FRAME, AV1_LAST2_FRAME,
+    "E compound unidir (LAST, LAST2)");
+    rrf_rt(fh_on, nb, 0, 0, 6, AV1_GOLDEN_FRAME, AV1_ALTREF_FRAME, AV1_GOLDEN_FRAME, AV1_ALTREF_FRAME,
+    "E compound bidir (GOLDEN, ALTREF)");
+    # E2: reference_select OFF -> comp_mode is NOT coded (conformance: single tree only).
+    rrf_dec(fh_off, nb, 0, 0, 6, 3, 0, AV1_LAST3_FRAME, AV1_REF_NONE, AV1_LAST3_FRAME, AV1_REF_NONE,
+    "E2 ref_select off -> forced SINGLE, no comp_mode symbol");
+    # F/F2: min(bw4, bh4) == 1 -> forced SINGLE even with ref_select on (4x8 and 8x4).
+    rrf_dec(fh_on, nb, 0, 0, 1, 3, 0, AV1_BWDREF_FRAME, AV1_REF_NONE, AV1_BWDREF_FRAME, AV1_REF_NONE,
+    "F 4x8 (min = 1) -> forced SINGLE, no comp_mode symbol");
+    rrf_dec(fh_on, nb, 0, 0, 2, 3, 0, AV1_LAST_FRAME, AV1_REF_NONE, AV1_LAST_FRAME, AV1_REF_NONE,
+    "F2 8x4 (min = 1) -> forced SINGLE, no comp_mode symbol");
+    # F3: 8x8 (min = 2) is the exact boundary -> comp_mode IS coded.
+    rrf_dec(fh_on, nb, 0, 0, 3, 1, AV1_SINGLE_REFERENCE, AV1_LAST2_FRAME, AV1_REF_NONE,
+    AV1_LAST2_FRAME, AV1_REF_NONE, "F3 8x8 (min = 2) -> comp_mode coded (SINGLE)");
+    rrf_dec(fh_on, nb, 0, 0, 3, 2, AV1_COMPOUND_REFERENCE, AV1_LAST_FRAME, AV1_ALTREF_FRAME,
+    AV1_LAST_FRAME, AV1_ALTREF_FRAME, "F3b 8x8 -> comp_mode coded (COMPOUND) + pair");
+    # adaptive-CDF mode: encoder and decoder contexts adapt in lockstep.
+    var cce = av1_refcdf_new();
+    var ccd = av1_refcdf_new();
+    var enc = av1_sym_enc_init(64, 0);
+    var scr = alloc(AV1CCTX_SIZE);
+    av1_write_comp_mode(enc, cce, av1_comp_mode_ctx(nb), AV1_COMPOUND_REFERENCE);
+    av1_comp_ref_ctxs(nb, scr);
+    av1_write_compound_ref(enc, cce, scr, AV1_LAST_FRAME, AV1_ALTREF_FRAME);
+    av1_write_comp_mode(enc, cce, av1_comp_mode_ctx(nb), AV1_SINGLE_REFERENCE);
+    av1_single_ref_ctxs(nb, scr);
+    av1_write_single_ref(enc, cce, scr, AV1_GOLDEN_FRAME);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var got = alloc(16);
+    assert_eq(av1_read_ref_frames(sd, ccd, got, nb, rrf_fh(0, 1, 0, 0), 0, 0, 6), DR_OK, "adaptive rt");
+    assert_eq(load64(got + 0), AV1_LAST_FRAME, "adaptive compound [0]");
+    assert_eq(load64(got + 8), AV1_ALTREF_FRAME, "adaptive compound [1]");
+    assert_eq(av1_read_ref_frames(sd, ccd, got, nb, rrf_fh(0, 1, 0, 0), 0, 0, 6), DR_OK, "adaptive rt 2");
+    assert_eq(load64(got + 0), AV1_GOLDEN_FRAME, "adaptive single follows in lockstep");
+    return 0;
+}
+# hostile inputs + guard boundaries at BOTH edges (the 0.7.80 review lesson).
+fn test_read_ref_frames_errors() {
+    var nb = nb_build(1, 1, 1, AV1_REF_NONE, 1, AV1_REF_NONE);
+    var fh = rrf_fh(0, 1, 0, 0);
+    var got = alloc(16);
+    var sd = av1_sym_dec_init(alloc(8), 8, 1);
+    assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), 0, nb, fh, 1, 0, 6), DR_ERR_BOUNDS,
+    "out = 0 -> bounds error");
+    assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 0 - 1, 6), DR_ERR_BOUNDS,
+    "segment_id -1 -> bounds error");
+    assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 8, 6), DR_ERR_BOUNDS,
+    "segment_id 8 (first invalid) -> bounds error");
+    assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 0, 0 - 1), DR_ERR_BOUNDS,
+    "negative MiSize -> bounds error");
+    assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 0, 22), DR_ERR_BOUNDS,
+    "MiSize 22 (first invalid) -> bounds error");
+    # both last-valid boundaries ACCEPTED, through a real coded round-trip.
+    rrf_rt(fh, nb, 0, 7, 21, AV1_LAST2_FRAME, AV1_REF_NONE, AV1_LAST2_FRAME, AV1_REF_NONE,
+    "segment_id 7 + MiSize 21 (both last valid) are accepted");
+    # the writer replays the same guards.
+    var enc = av1_sym_enc_init(32, 1);
+    assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh, 0, 8, 6, 1, 0 - 1), DR_ERR_BOUNDS,
+    "writer: segment_id 8 -> bounds error");
+    assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh, 0, 0, 22, 1, 0 - 1), DR_ERR_BOUNDS,
+    "writer: MiSize 22 -> bounds error");
+    return 0;
+}
+# review hardening (the 0.7.81 adversarial review's 9 confirmed findings — all test /
+# precondition classes; no wrong decode on valid streams).
+fn test_read_ref_frames_review_hardening() {
+    var nb = nb_build(1, 1, 1, AV1_REF_NONE, 1, AV1_REF_NONE);
+    # (1) the SEG_LVL constants pinned ABSOLUTELY: plant the bit at the LITERAL slot the
+    # positional 5.9.14 parse loop sets (SKIP = 6, GLOBALMV = 7), bypassing the constants;
+    # decode via a leaf-built stream so a wrong constant in BOTH reader and writer still
+    # desyncs (the cdf-blob absolute-offset rule, applied to segmentation).
+    var fh6 = rrf_fh(1, 1, 0, 0);
+    store64(fh6 + AV1FH_FEATURE_ENABLED + ((1 * 8 + 6) * 8), 1);    # literal slot 6 = SKIP
+    rrf_dec(fh6, nb, 0, 1, 6, 0, 0, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
+    "SEG_LVL_SKIP is slot 6 exactly (absolute-offset pin)");
+    var fh7 = rrf_fh(1, 1, 0, 0);
+    store64(fh7 + AV1FH_FEATURE_ENABLED + ((1 * 8 + 7) * 8), 1);    # literal slot 7 = GLOBALMV
+    rrf_dec(fh7, nb, 0, 1, 6, 0, 0, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
+    "SEG_LVL_GLOBALMV is slot 7 exactly (absolute-offset pin)");
+    # (2) the WRITER's comp_mode gate through the PAIRED round-trip: at the exact 8x8
+    # boundary (compound), closed-by-size (4x8), and closed-by-reference_select — the
+    # leaf-built conformance cases only ever exercised the reader's copy of the gate.
+    var fh_on = rrf_fh(0, 1, 0, 0);
+    var fh_off = rrf_fh(0, 0, 0, 0);
+    rrf_rt(fh_on, nb, 0, 0, 3, AV1_LAST_FRAME, AV1_ALTREF_FRAME, AV1_LAST_FRAME, AV1_ALTREF_FRAME,
+    "writer gate: compound at the exact 8x8 boundary");
+    rrf_rt(fh_on, nb, 0, 0, 1, AV1_BWDREF_FRAME, AV1_REF_NONE, AV1_BWDREF_FRAME, AV1_REF_NONE,
+    "writer gate: 4x8 forces SINGLE through the paired round-trip");
+    rrf_rt(fh_off, nb, 0, 0, 6, AV1_GOLDEN_FRAME, AV1_REF_NONE, AV1_GOLDEN_FRAME, AV1_REF_NONE,
+    "writer gate: reference_select off through the paired round-trip");
+    # (3) an UNREPRESENTABLE compound pair (gate closed) is a surfaced bounds error, not
+    # a silently-emitted stream the reader cannot parse.
+    var enc = av1_sym_enc_init(32, 1);
+    assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_off, 0, 0, 6,
+    AV1_LAST_FRAME, AV1_ALTREF_FRAME), DR_ERR_BOUNDS,
+    "writer: compound pair, gate closed by ref_select -> bounds error");
+    assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_on, 0, 0, 1,
+    AV1_LAST_FRAME, AV1_ALTREF_FRAME), DR_ERR_BOUNDS,
+    "writer: compound pair, gate closed by 4x8 size -> bounds error");
+    # (4) r1 == INTRA_FRAME (the post-interintra pair) classifies SINGLE — the writer's
+    # is_comp `>` driven at its exact boundary.
+    rrf_rt(fh_on, nb, 0, 0, 6, AV1_LAST_FRAME, AV1_INTRA_FRAME, AV1_LAST_FRAME, AV1_REF_NONE,
+    "writer: r1 = INTRA_FRAME classifies SINGLE (the > boundary)");
+    # (5) the writer's NEGATIVE-edge guards (the reader's were pinned; the writer's not).
+    assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_on, 0, 0 - 1, 6, 1, 0 - 1),
+    DR_ERR_BOUNDS, "writer: segment_id -1 -> bounds error");
+    assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_on, 0, 0, 0 - 1, 1, 0 - 1),
+    DR_ERR_BOUNDS, "writer: negative MiSize -> bounds error");
+    # (6) NON-VACUOUS first-invalid probes for seg_feature_active: plant a 1 at the exact
+    # aliased location an unguarded read would hit (seg 8 / j 5 lands on FeatureData[0][5];
+    # seg 2 / j 8 lands on FeatureEnabled[3][0]) — the guard's 0 is proof, not luck.
+    var fha = rrf_fh(1, 0, 0, 0);
+    store64(fha + AV1FH_FEATURE_DATA + (5 * 8), 1);
+    assert_eq(av1_seg_feature_active(fha, 8, AV1_SEG_LVL_REF_FRAME), 0,
+    "seg 8 guard is no aliasing accident");
+    var fhb = rrf_fh(1, 0, 0, 0);
+    store64(fhb + AV1FH_FEATURE_ENABLED + ((3 * 8 + 0) * 8), 1);
+    assert_eq(av1_seg_feature_active(fhb, 2, 8), 0, "feature 8 guard is no aliasing accident");
+    # (7) the comp_mode ctx WIRING on a provably NONZERO ctx (above BWDREF single, left
+    # LAST single -> abw ^ lbw = 1); the leaf-built conformance case decouples the
+    # driver's wiring from its inverse's.
+    var nb2 = nb_build(1, 1, AV1_BWDREF_FRAME, AV1_REF_NONE, AV1_LAST_FRAME, AV1_REF_NONE);
+    assert_eq(av1_comp_mode_ctx(nb2), 1, "the hardening fixture's comp_mode ctx is nonzero");
+    rrf_rt(fh_on, nb2, 0, 0, 6, AV1_LAST_FRAME, AV1_ALTREF_FRAME, AV1_LAST_FRAME, AV1_ALTREF_FRAME,
+    "compound round-trip on the nonzero comp_mode ctx");
+    rrf_dec(fh_on, nb2, 0, 0, 6, 1, AV1_SINGLE_REFERENCE, AV1_LAST3_FRAME, AV1_REF_NONE,
+    AV1_LAST3_FRAME, AV1_REF_NONE, "leaf-built conformance on the nonzero ctx (driver wiring)");
+    # (8) the persistent-scratch layout contract, pinned absolutely: refctx[6] (48 bytes)
+    # fits ONLY because Av1CompCtx is 9 slots ending exactly at AV1CCTX_SIZE. (Residual:
+    # an alloc-site literal shrink is undetectable — the arena has no red zones.)
+    assert_eq(AV1CCTX_SIZE, 72, "Av1CompCtx is 9 slots");
+    assert_eq(AV1CCTX_BWDREF_P1 + 8, AV1CCTX_SIZE, "the last slot ends exactly at AV1CCTX_SIZE");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("MV CDF structure (default tables, spec 10)");
@@ -2471,6 +2756,12 @@ fn main() {
     test_read_motion_mode_gate();
     test_read_motion_mode_conformance();
     test_motion_mode_driver_state();
+    test_group("read_ref_frames dispatcher (5.11.25) + seg_feature_active (5.11.14)");
+    test_seg_feature_active();
+    test_read_ref_frames_dispatch();
+    test_read_ref_frames_tree();
+    test_read_ref_frames_errors();
+    test_read_ref_frames_review_hardening();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();
