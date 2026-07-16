@@ -4,6 +4,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.83] - 2026-07-16
+
+**Inter prediction — `inter_frame_mode_info` (spec 5.11.15), the OUTER DISPATCH.** The last mode-info
+layer before the inter tile decode: neighbour preamble → `inter_segment_id(1)` → `read_skip_mode` →
+skip → `inter_segment_id(0)` → the cdef splice → the delta positions → `read_is_inter` → the
+inter/intra fork.
+
+- **`Skip_Mode` CDF** (§10 `Default_Skip_Mode_Cdf[3]`) — refcdf blob 168 → 177, rows pinned per-value
+  at absolute offsets in the layout test.
+- **`av1_read_skip_mode(_sym)`** (5.11.11) — the full six-condition gate (three segment features /
+  `!skip_mode_present` / either dimension < 8 → forced 0, NO symbol); ctx (0..2) is
+  AboveSkipMode + LeftSkipMode, caller-derived until the tile bite (roadmap.md).
+- **`av1_read_is_inter`** — the 5.11.15 four-way selection over the 0.7.68 leaf (renamed
+  `av1_read_is_inter_sym`): skip_mode → 1; seg REF_FRAME → its parse-clipped datum ≠ INTRA; seg
+  GLOBALMV → 1; else `@@is_inter` at the derived ctx.
+- **`Av1BlockInfo`** + **`av1_inter_frame_mode_info`** — the outer driver: builds the 5.11.15 neighbour
+  cache (`av1_nbctx_setup`) at the spec's preamble position, then dispatches into the 0.7.82
+  orchestrator. Deferred features gate hard as `DR_ERR_UNSUPPORTED` **consuming nothing** —
+  segmentation reads, delta-q/lf, and the intra fork (each roadmap-tracked); the cdef splice mirrors
+  the intra path's 0.7.32 record. Paired **`av1_write_inter_frame_mode_info`** inverse.
+
+Verified against a new committed spec-literal port (`scripts/refs/inter_frame_ref.py` — the 5.11.11
+gate table, the is_inter selection, five outer schedules). Tests: leaf round-trips at every ctx +
+per-value §10 pins; the gate driven both ways per condition; dispatch conformance (leaf-written
+fall-through); four full outer round-trips (plain inter / skip_mode / present-off / size-closed)
+behind the `0xA5` marker; UNSUPPORTED gates proven to consume **nothing** via marker-only streams —
+a mutation showed plain return-code asserts are blind here (a dropped gate lands on UNSUPPORTED via
+the downstream intra fork by accident); hostile nulls + mi_size boundaries.
+
+All **mutation-verified — 25 mutations, 0 survivors** (14 author + 11 review-driven): each 5.11.11 gate
+condition dropped/shifted → 1/1, the skip forcing dropped → 2, the is_inter skip_mode forcing dropped →
+2 and the datum test inverted → 2, the nbctx preamble crippled → 6, the skip ctx hardcoded → 3, each
+UNSUPPORTED gate dropped → 2/2/1 (killed only after the marker-only hardening — two initially SURVIVED
+the return-code asserts), the skip_mode CDF base shifted → 6, and a WRITER-only present-check drop → 2.
+Two harness patterns initially aliased into the writer's identical gate block — caught as PATTERN ERRORs
+by the unique-anchor discipline. Review-driven: the cdef splice scrambled → 2 and deleted → 2, each
+seg-feature gate condition deleted → 2/2/2, the is_inter branch swap → 1, skip_mode ctx hardcoded in
+BOTH drivers → 3, the skip threading zeroed in both → 4, mi_size hardcoded into both skip_mode calls →
+1, the Av1BlockInfo layout shrunk → 2, and the unrepresentable-record guard reverted → 6.
+
+4-slice adversarial review (isolated worktrees, `sawCode` tripwires, reproduce-in-worktree refuters,
+new-mutant discipline; the workflow itself survived an API-outage marathon — six all-529 void
+completions were correctly discarded as non-reviews before the seventh ran 38 agents): **17 findings
+confirmed (7 major), 0 refuted — all closed in-cut**:
+- **Code**: the writer silently desynced on records the 5.11.11/5.11.15 gates cannot code —
+  `av1_write_skip_mode` now surfaces a closed-gate `skip_mode = 1` as `DR_ERR_BOUNDS`,
+  `av1_write_is_inter` checks every forced path AGREES with the record, and the driver rejects the
+  inconsistent `skip_mode = 1 / skip = 0` coupling (the unrepresentable-input convention, third time
+  it has caught a writer).
+- **Tests**: the cdef splice was completely unexercised in BOTH drivers (now driven with a live ctx —
+  the decoded index must LAND in the reader's grid, and a skip = 1 block must leave it untouched); the
+  three seg-feature closures were **falsely verified** — their asserts ran after the marker was already
+  consumed, and even per-case trailing literals passed by arithmetic-coder luck on a single
+  high-probability binary symbol (measured: three deletion mutants survived twice) — the deterministic
+  fix plants a `skip_mode` SYMBOL with value 1 right after the gated call so a wrongly-consuming gate
+  fails by VALUE; the 5.11.15 REF_FRAME-beats-GLOBALMV priority pinned with both features active;
+  write-side forced-path agreement asserts; leaf-built OUTER conformance streams (the skip-mode form at
+  a nonzero ctx; the ref port's F5 at 4x8 with threaded neighbour-skip ctx) killing the symmetric
+  ctx/size/threading mutants; the `Av1BlockInfo` layout pinned absolutely.
+
 ## [0.7.82] - 2026-07-16
 
 **Inter prediction — `inter_block_mode_info` (spec 5.11.23), THE ORCHESTRATOR.** Every inter mode-info

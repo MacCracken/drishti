@@ -375,13 +375,13 @@ fn test_is_inter_rt() {
     while (ctx < AV1_IS_INTER_CONTEXTS) {
         var cc = av1_refcdf_blob();
         var enc = av1_sym_enc_init(32, 1);
-        av1_write_is_inter(enc, cc, ctx, 1);
-        av1_write_is_inter(enc, cc, ctx, 0);
+        av1_write_is_inter_sym(enc, cc, ctx, 1);
+        av1_write_is_inter_sym(enc, cc, ctx, 0);
         var olen = 0;
         var out = av1_sym_enc_finish(enc, &olen);
         var sd = av1_sym_dec_init(out, olen, 1);
-        assert_eq(av1_read_is_inter(sd, cc, ctx), 1, "is_inter 1");
-        assert_eq(av1_read_is_inter(sd, cc, ctx), 0, "is_inter 0");
+        assert_eq(av1_read_is_inter_sym(sd, cc, ctx), 1, "is_inter 1");
+        assert_eq(av1_read_is_inter_sym(sd, cc, ctx), 0, "is_inter 0");
         ctx = ctx + 1;
     }
     return 0;
@@ -924,8 +924,16 @@ fn test_refcdf_layout() {
     assert_eq(av1_refcdf_compbwdref(cc, 0, 0) - cc, 123 * 8, "comp_bwdref base 123");
     assert_eq(av1_refcdf_compbwdref(cc, 3, 0) - cc, 141 * 8, "comp_bwdref[3x2 rows] ends at 141");
     assert_eq(av1_refcdf_unicompref(cc, 0, 0) - cc, 141 * 8, "uni_comp_ref base 141");
-    assert_eq(av1_refcdf_unicompref(cc, 3, 0) - cc, AV1REFCDF_SIZE * 8,
-    "uni_comp_ref[3x3 rows] ends EXACTLY at the blob end");
+    assert_eq(av1_refcdf_unicompref(cc, 3, 0) - cc, 168 * 8, "uni_comp_ref[3x3 rows] ends at 168");
+    assert_eq(av1_refcdf_skipmode(cc, 0) - cc, 168 * 8, "skip_mode base 168 (0.7.83)");
+    assert_eq(av1_refcdf_skipmode(cc, 3) - cc, AV1REFCDF_SIZE * 8,
+    "skip_mode[3 rows] ends EXACTLY at the blob end");
+    # the Default_Skip_Mode_Cdf values (spec 10), pinned per-row at ABSOLUTE offsets.
+    assert_eq(load64(cc + (168 * 8)), 32621, "skip_mode[0] c0");
+    assert_eq(load64(cc + (171 * 8)), 20708, "skip_mode[1] c0");
+    assert_eq(load64(cc + (174 * 8)), 8127, "skip_mode[2] c0");
+    assert_eq(load64(cc + (169 * 8)), 32768, "skip_mode[0] terminator");
+    assert_eq(load64(cc + (170 * 8)), 0, "skip_mode[0] count slot");
     return 0;
 }
 fn test_comptype_cdf() {
@@ -1929,13 +1937,13 @@ fn test_nbctx_feeds_the_read() {
     assert_eq(ctx, 3, "derived ctx");
     var cc = av1_refcdf_blob();
     var enc = av1_sym_enc_init(32, 1);
-    av1_write_is_inter(enc, cc, ctx, 1);
-    av1_write_is_inter(enc, cc, ctx, 0);
+    av1_write_is_inter_sym(enc, cc, ctx, 1);
+    av1_write_is_inter_sym(enc, cc, ctx, 0);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 1);
-    assert_eq(av1_read_is_inter(sd, cc, ctx), 1, "read_is_inter with a DERIVED ctx");
-    assert_eq(av1_read_is_inter(sd, cc, ctx), 0, "read_is_inter with a DERIVED ctx (0)");
+    assert_eq(av1_read_is_inter_sym(sd, cc, ctx), 1, "read_is_inter with a DERIVED ctx");
+    assert_eq(av1_read_is_inter_sym(sd, cc, ctx), 0, "read_is_inter with a DERIVED ctx (0)");
     return 0;
 }
 
@@ -3098,6 +3106,489 @@ fn test_inter_block_conformance() {
     "marker: the driver consumed exactly the leaf-built symbols");
     return 0;
 }
+
+# ================================================================
+# inter_frame_mode_info (5.11.15) — the OUTER DISPATCH. Gate decisions and outer
+# schedules are known answers from scripts/refs/inter_frame_ref.py; the embedded
+# 5.11.23 layer is the 0.7.82-verified orchestrator.
+# ================================================================
+fn fb_mk(skip_mode, skip, is_inter): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIPMODE, skip_mode);
+    store64(b + AV1FB_SKIP, skip);
+    store64(b + AV1FB_ISINTER, is_inter);
+    return b;
+}
+# round-trip through the outer driver + inverse (cdef_ctx = 0: the splice is the
+# 0.7.32-verified intra-path record, wired by the tile decode; roadmap.md).
+fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, tag): i64 {
+    var ccr = av1_refcdf_blob();
+    var ccim = av1_imcdf_blob();
+    var ccii = av1_iicdf_blob();
+    var ccmv = av1_mvcdf_blob();
+    var ncc = av1_ncdf_new();
+    var refs = mm_refs(64, 64);
+    var nbw = av1_nbctx_new();
+    var enc = av1_sym_enc_init(160, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, blk,
+    ib_ctx(g, sz), nbw, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0),
+    DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);             # marker
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_blockinfo_new();
+    var nbr = av1_nbctx_new();
+    assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got,
+    ib_ctx(g, sz), nbr, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0),
+    DR_OK, tag);
+    assert_eq(av1_fb_skip_mode(got), load64(blk + AV1FB_SKIPMODE), tag);
+    assert_eq(av1_fb_skip(got), load64(blk + AV1FB_SKIP), tag);
+    assert_eq(av1_fb_is_inter(got), 1, tag);
+    assert_eq(av1_fb_segment_id(got), 0, tag);
+    assert_eq(av1_ib_ref(av1_fb_ib(got), 1), exp_ref1, tag);
+    assert_eq(av1_ib_ymode(av1_fb_ib(got)), load64(blk + AV1FB_IB + AV1IB_YMODE), tag);
+    assert_eq(av1_ib_motion_mode(av1_fb_ib(got)), exp_mm, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165,
+    "marker: reader consumed exactly the writer's symbols");
+    return got;
+}
+fn fb_fh(skip_mode_present, smf0, smf1): i64 {
+    var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, smf0, smf1);
+    store64(fh + AV1FH_SKIP_MODE_PRESENT, skip_mode_present);
+    return fh;
+}
+# the skip_mode leaf: every ctx round-trips (the values are pinned per-row in the
+# refcdf layout test at absolute offsets).
+fn test_skip_mode_leaf() {
+    var ctx = 0;
+    while (ctx < 3) {
+        var cc = av1_refcdf_blob();
+        var enc = av1_sym_enc_init(32, 1);
+        av1_write_skip_mode_sym(enc, cc, ctx, 1);
+        av1_write_skip_mode_sym(enc, cc, ctx, 0);
+        var olen = 0;
+        var out = av1_sym_enc_finish(enc, &olen);
+        var sd = av1_sym_dec_init(out, olen, 1);
+        assert_eq(av1_read_skip_mode_sym(sd, cc, ctx), 1, "skip_mode 1");
+        assert_eq(av1_read_skip_mode_sym(sd, cc, ctx), 0, "skip_mode 0");
+        ctx = ctx + 1;
+    }
+    # the 5.11.11 gate, each condition both ways (ref-port table). EACH closure case
+    # gets its OWN stream with the marker read AFTER the gated call — the 0.7.83
+    # review proved an assert placed after the marker verifies NOTHING (three deleted
+    # gate conditions shipped green that way). smg_closed also pins that a closed
+    # gate + a skip_mode = 1 record is a surfaced bounds error, never a silent write.
+    var fh_on = fb_fh(1, 0, 0);
+    smg_closed(fh_on, 0, 1, "gate closed: 4x8");
+    smg_closed(fh_on, 0, 2, "gate closed: 8x4");
+    smg_closed(fb_fh(0, 0, 0), 0, 6, "gate closed: present off");
+    var fh_seg = fb_fh(1, 0, 0);
+    store64(fh_seg + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_seg, 2, AV1_SEG_LVL_SKIP, 0);
+    smg_closed(fh_seg, 2, 6, "gate closed: seg SKIP");
+    var fh_sr = fb_fh(1, 0, 0);
+    store64(fh_sr + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_sr, 2, AV1_SEG_LVL_REF_FRAME, 4);
+    smg_closed(fh_sr, 2, 6, "gate closed: seg REF_FRAME");
+    var fh_sg = fb_fh(1, 0, 0);
+    store64(fh_sg + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_sg, 2, AV1_SEG_LVL_GLOBALMV, 0);
+    smg_closed(fh_sg, 2, 6, "gate closed: seg GLOBALMV");
+    # the OPEN gate reads the symbol (leaf-written stream, marker after).
+    var cco = av1_refcdf_blob();
+    var enco = av1_sym_enc_init(32, 1);
+    av1_write_skip_mode_sym(enco, cco, 0, 1);
+    av1_sym_encode_literal(enco, 165, 8);
+    var olo = 0;
+    var obo = av1_sym_enc_finish(enco, &olo);
+    var sdo = av1_sym_dec_init(obo, olo, 1);
+    assert_eq(av1_read_skip_mode(sdo, cco, 0, fh_on, 0, 6), 1, "the open gate reads the symbol");
+    assert_eq(av1_sym_read_literal(sdo, 8), 165, "and consumed exactly one symbol");
+    return 0;
+}
+# one closed-gate case: its own stream, and — the decisive part — a skip_mode SYMBOL
+# with value 1 planted immediately after the gated call. A gate that wrongly consumes
+# it returns 1 and fails the == 0 assert BY VALUE: a trailing literal alone can pass by
+# arithmetic-coder luck on a single high-probability binary symbol (measured twice —
+# the 0.7.80 marker lesson and this bite's S3-S5 first run).
+fn smg_closed(fh, seg_id, sz, tag): i64 {
+    var cc = av1_refcdf_blob();
+    var enc = av1_sym_enc_init(32, 1);
+    assert_eq(av1_write_skip_mode(enc, cc, 0, fh, seg_id, sz, 0), DR_OK, tag);
+    av1_write_skip_mode_sym(enc, cc, 0, 1);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_read_skip_mode(sd, cc, 0, fh, seg_id, sz), 0, tag);
+    assert_eq(av1_read_skip_mode_sym(sd, cc, 0), 1, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, tag);
+    var enc2 = av1_sym_enc_init(32, 1);
+    assert_eq(av1_write_skip_mode(enc2, cc, 0, fh, seg_id, sz, 1), DR_ERR_BOUNDS,
+    "closed gate + skip_mode 1 record -> surfaced, not silent");
+    return 0;
+}
+# the is_inter dispatch (leaf-written conformance for the fall-through).
+fn test_is_inter_dispatch() {
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
+    var fh = fb_fh(1, 0, 0);
+    var sd0 = av1_sym_dec_init(alloc(8), 8, 1);
+    assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh, 1, 0), 1,
+    "skip_mode forces inter, no symbol");
+    var fh_r0 = fb_fh(1, 0, 0);
+    store64(fh_r0 + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_r0, 3, AV1_SEG_LVL_REF_FRAME, 0);
+    assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_r0, 0, 3), 0,
+    "seg REF datum 0 -> intra, no symbol");
+    var fh_r4 = fb_fh(1, 0, 0);
+    store64(fh_r4 + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_r4, 3, AV1_SEG_LVL_REF_FRAME, 4);
+    assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_r4, 0, 3), 1,
+    "seg REF datum 4 -> inter, no symbol");
+    var fh_gm = fb_fh(1, 0, 0);
+    store64(fh_gm + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_gm, 3, AV1_SEG_LVL_GLOBALMV, 0);
+    assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_gm, 0, 3), 1,
+    "seg GLOBALMV -> inter, no symbol");
+    # the 5.11.15 PRIORITY: with BOTH features active on one segment and a REF_FRAME
+    # datum of INTRA, REF_FRAME wins -> intra (a branch swap derives inter).
+    var fh_b = fb_fh(1, 0, 0);
+    store64(fh_b + AV1FH_SEG_ENABLED, 1);
+    rrf_feature(fh_b, 3, AV1_SEG_LVL_REF_FRAME, 0);
+    rrf_feature(fh_b, 3, AV1_SEG_LVL_GLOBALMV, 0);
+    assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_b, 0, 3), 0,
+    "REF_FRAME beats GLOBALMV (the 5.11.15 order)");
+    # the write-side forced paths: an AGREEING record writes nothing; a disagreeing
+    # one is unrepresentable (surfaced, never a silent desync).
+    var encw = av1_sym_enc_init(32, 1);
+    var ccw = av1_refcdf_blob();
+    assert_eq(av1_write_is_inter(encw, ccw, nb, fh, 1, 0, 1), DR_OK, "skip_mode: 1 agrees");
+    assert_eq(av1_write_is_inter(encw, ccw, nb, fh, 1, 0, 0), DR_ERR_BOUNDS,
+    "skip_mode: is_inter 0 is unrepresentable");
+    assert_eq(av1_write_is_inter(encw, ccw, nb, fh_r0, 0, 3, 0), DR_OK, "seg REF datum 0: intra agrees");
+    assert_eq(av1_write_is_inter(encw, ccw, nb, fh_r0, 0, 3, 1), DR_ERR_BOUNDS,
+    "seg REF datum 0: inter is unrepresentable");
+    assert_eq(av1_write_is_inter(encw, ccw, nb, fh_gm, 0, 3, 1), DR_OK, "seg GLOBALMV: inter agrees");
+    assert_eq(av1_write_is_inter(encw, ccw, nb, fh_gm, 0, 3, 0), DR_ERR_BOUNDS,
+    "seg GLOBALMV: intra is unrepresentable");
+    # the fall-through codes @@is_inter at the DERIVED ctx — leaf-written stream.
+    var cc = av1_refcdf_blob();
+    var enc = av1_sym_enc_init(32, 1);
+    av1_write_is_inter_sym(enc, cc, av1_is_inter_ctx(nb), 1);
+    av1_write_is_inter_sym(enc, cc, av1_is_inter_ctx(nb), 0);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_read_is_inter(sd, cc, nb, fh, 0, 0), 1, "fall-through decodes 1");
+    assert_eq(av1_read_is_inter(sd, cc, nb, fh, 0, 0), 0, "fall-through decodes 0");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "dispatch consumed exactly the symbols");
+    return 0;
+}
+# the outer driver end-to-end (ref-port schedules F1-F4; F5 is the leaf-built
+# conformance case in test_inter_frame_conformance) + gates + errors.
+fn test_inter_frame_mode_info() {
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var gc = mm_grid(8, 8, 1, 7);
+    # F1: plain inter NEWMV — skip_mode(0) + skip(0) + is_inter(1) + the 5.11.23 layer.
+    var b1 = fb_mk(0, 0, 1);
+    var ib1 = b1 + AV1FB_IB;
+    store64(ib1 + AV1IB_REF0, 1);
+    store64(ib1 + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib1 + AV1IB_YMODE, AV1_NEWMV);
+    store64(ib1 + AV1IB_MV0 + AV1MV_ROW, 12);
+    store64(ib1 + AV1IB_MV0 + AV1MV_COL, 0 - 4);
+    store64(ib1 + AV1IB_INTERP + 0, 2);
+    store64(ib1 + AV1IB_INTERP + 8, 2);
+    store64(ib1 + AV1IB_CT + AV1CT_COMPIDX, 1);
+    var f1 = fb_rt(fb_fh(1, 0, 0), s0, g, 6, 1, 1, 0, 0, 0, b1, AV1_REF_NONE,
+    AV1_MM_SIMPLE, "F1 plain inter NEWMV");
+    assert_eq(load64(av1_fb_ib(f1) + AV1IB_MV0 + AV1MV_ROW), 12, "F1 mv through the stack");
+    # F2: skip_mode — skip forced 1 (no skip symbol), is_inter forced (no symbol),
+    # the SkipModeFrame pair (1, 7) drives a compound NEAREST_NEARESTMV block.
+    var b2 = fb_mk(1, 1, 1);
+    var ib2 = b2 + AV1FB_IB;
+    store64(ib2 + AV1IB_REF0, 1);
+    store64(ib2 + AV1IB_REF1, 7);
+    store64(ib2 + AV1IB_YMODE, AV1_NEAREST_NEARESTMV);
+    store64(ib2 + AV1IB_MV0 + AV1MV_ROW, 8);
+    store64(ib2 + AV1IB_MV0 + AV1MV_COL, 8);
+    store64(ib2 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
+    store64(ib2 + AV1IB_CT + AV1CT_COMPIDX, 1);
+    fb_rt(fb_fh(1, 1, 7), s0, gc, 6, 1, 1, 0, 0, 1, b2, 7, AV1_MM_SIMPLE, "F2 skip_mode");
+    # F3: skip_mode_present off — NO skip_mode symbol; the skip symbol IS read.
+    var b3 = fb_mk(0, 1, 1);
+    var ib3 = b3 + AV1FB_IB;
+    store64(ib3 + AV1IB_REF0, 1);
+    store64(ib3 + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib3 + AV1IB_YMODE, AV1_NEARESTMV);
+    store64(ib3 + AV1IB_MV0 + AV1MV_ROW, 8);
+    store64(ib3 + AV1IB_MV0 + AV1MV_COL, 8);
+    store64(ib3 + AV1IB_INTERP + 0, 1);
+    store64(ib3 + AV1IB_INTERP + 8, 1);
+    store64(ib3 + AV1IB_CT + AV1CT_COMPIDX, 1);
+    fb_rt(fb_fh(0, 0, 0), s0, g, 6, 1, 1, 1, 1, 0, b3, AV1_REF_NONE, AV1_MM_SIMPLE,
+    "F3 present off, skip = 1");
+    # F4: a 4x8 block closes the skip_mode gate by SIZE (present is on).
+    var b4 = fb_mk(0, 0, 1);
+    var ib4 = b4 + AV1FB_IB;
+    store64(ib4 + AV1IB_REF0, 1);
+    store64(ib4 + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib4 + AV1IB_YMODE, AV1_NEARESTMV);
+    store64(ib4 + AV1IB_MV0 + AV1MV_ROW, 8);
+    store64(ib4 + AV1IB_MV0 + AV1MV_COL, 8);
+    store64(ib4 + AV1IB_INTERP + 0, 1);
+    store64(ib4 + AV1IB_INTERP + 8, 1);
+    store64(ib4 + AV1IB_CT + AV1CT_COMPIDX, 1);
+    fb_rt(fb_fh(1, 0, 0), s0, g, 1, 1, 1, 0, 0, 0, b4, AV1_REF_NONE, AV1_MM_SIMPLE,
+    "F4 4x8 closes the skip_mode gate");
+    # gates: segmentation / delta-q / delta-lf -> UNSUPPORTED, consuming NOTHING (a
+    # marker-only stream distinguishes the gate from a downstream accident: a dropped
+    # gate decodes garbage and can land on UNSUPPORTED via the intra fork by luck —
+    # proven by mutation, D8/D9 survived the plain return-code asserts).
+    var mk = av1_sym_enc_init(16, 1);
+    av1_sym_encode_literal(mk, 165, 8);
+    var mkl = 0;
+    var mkb = av1_sym_enc_finish(mk, &mkl);
+    var fh_sg = fb_fh(1, 0, 0);
+    store64(fh_sg + AV1FH_SEG_ENABLED, 1);
+    var sd = av1_sym_dec_init(mkb, mkl, 1);
+    assert_eq(av1_inter_frame_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
+    av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0),
+    DR_ERR_UNSUPPORTED, "segmentation gates UNSUPPORTED");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "the segmentation gate consumed NOTHING");
+    var fh_dq = fb_fh(1, 0, 0);
+    store64(fh_dq + AV1FH_DELTA_Q_PRESENT, 1);
+    var sd_q = av1_sym_dec_init(mkb, mkl, 1);
+    assert_eq(av1_inter_frame_mode_info(sd_q, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
+    av1_nbctx_new(), av1_warp_new(), fh_dq, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0),
+    DR_ERR_UNSUPPORTED, "delta_q gates UNSUPPORTED");
+    assert_eq(av1_sym_read_literal(sd_q, 8), 165, "the delta_q gate consumed NOTHING");
+    var fh_dl = fb_fh(1, 0, 0);
+    store64(fh_dl + AV1FH_DELTA_LF_PRESENT, 1);
+    var sd_l = av1_sym_dec_init(mkb, mkl, 1);
+    assert_eq(av1_inter_frame_mode_info(sd_l, av1_refcdf_blob(), av1_imcdf_blob(),
+    av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
+    av1_nbctx_new(), av1_warp_new(), fh_dl, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0),
+    DR_ERR_UNSUPPORTED, "delta_lf gates UNSUPPORTED");
+    assert_eq(av1_sym_read_literal(sd_l, 8), 165, "the delta_lf gate consumed NOTHING");
+    # the intra fork: decode a leaf-written is_inter = 0 -> UNSUPPORTED (next bite).
+    var cc = av1_refcdf_blob();
+    var ncc = av1_ncdf_new();
+    var nb0 = av1_nbctx_new();
+    av1_nbctx_setup(nb0, g, 16, 4, 4, 1, 1);
+    var enc = av1_sym_enc_init(32, 1);
+    av1_write_skip_mode_sym(enc, cc, 0, 0);
+    av1_write_skip(enc, ncc, av1_skip_ctx(1, 0, 1, 0), 0);
+    av1_write_is_inter_sym(enc, cc, av1_is_inter_ctx(nb0), 0);
+    var olen = 0;
+    var ob = av1_sym_enc_finish(enc, &olen);
+    var sd2 = av1_sym_dec_init(ob, olen, 1);
+    assert_eq(av1_inter_frame_mode_info(sd2, cc, av1_imcdf_blob(), av1_iicdf_blob(),
+    av1_mvcdf_blob(), ncc, av1_blockinfo_new(), ib_ctx(g, 6), av1_nbctx_new(),
+    av1_warp_new(), fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0),
+    DR_ERR_UNSUPPORTED, "the intra fork gates UNSUPPORTED");
+    # hostile nulls + mi_size bounds (both edges).
+    assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
+    av1_mvcdf_blob(), ncc, 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
+    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0), DR_ERR_BOUNDS,
+    "out = 0 -> bounds");
+    assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
+    av1_mvcdf_blob(), ncc, av1_blockinfo_new(), ib_ctx(g, 22), av1_nbctx_new(),
+    av1_warp_new(), fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0),
+    DR_ERR_BOUNDS, "MiSize 22 -> bounds");
+    return 0;
+}
+# the 0.7.83 review hardening: the cdef splice exercised for REAL, the driver-writer
+# desync guards, the writer UNSUPPORTED gates, and the record-layout pins.
+fn fb_cdef_ctx(grid, plan): i64 {
+    var c = alloc(56);
+    store64(c + 0, 1);        # enable_cdef
+    store64(c + 8, 3);        # cdef_bits
+    store64(c + 16, 0);       # coded_lossless
+    store64(c + 24, 0);       # allow_intrabc
+    store64(c + 32, grid);
+    store64(c + 40, 16);      # stride
+    store64(c + 48, plan);    # writer-side plan
+    return c;
+}
+fn fb_cdef_grid(seed): i64 {
+    var gr = alloc(16 * 16 * 8);
+    memset(gr, 0, 16 * 16 * 8);
+    store64(gr + 0, seed);    # the (0,0) 64x64 unit's slot (block (4,4) maps to it)
+    return gr;
+}
+fn test_inter_frame_hardening() {
+    var s0 = ib_seq(0, 0, 0, 0);
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    # C1: a REAL cdef splice — skip = 0 codes the 3-bit literal ONCE and the decoded
+    # index (5) lands in the reader's grid: the splice's position, gates, and argument
+    # wiring are all load-bearing here.
+    var b1 = fb_mk(0, 0, 1);
+    var ib1 = b1 + AV1FB_IB;
+    store64(ib1 + AV1IB_REF0, 1);
+    store64(ib1 + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib1 + AV1IB_YMODE, AV1_NEARESTMV);
+    store64(ib1 + AV1IB_MV0 + AV1MV_ROW, 8);
+    store64(ib1 + AV1IB_MV0 + AV1MV_COL, 8);
+    store64(ib1 + AV1IB_INTERP + 0, 1);
+    store64(ib1 + AV1IB_INTERP + 8, 1);
+    store64(ib1 + AV1IB_CT + AV1CT_COMPIDX, 1);
+    var wgrid = fb_cdef_grid(0 - 1);
+    var plan = fb_cdef_grid(5);
+    var rgrid = fb_cdef_grid(0 - 1);
+    var fh = fb_fh(1, 0, 0);
+    var refs = mm_refs(64, 64);
+    var enc = av1_sym_enc_init(160, 1);
+    var ccr = av1_refcdf_blob();
+    var ccim = av1_imcdf_blob();
+    var ccii = av1_iicdf_blob();
+    var ccmv = av1_mvcdf_blob();
+    var ncc = av1_ncdf_new();
+    assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, b1,
+    ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
+    fb_cdef_ctx(wgrid, plan), 0), DR_OK, "C1 write with a live cdef ctx");
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_blockinfo_new();
+    assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got,
+    ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
+    fb_cdef_ctx(rgrid, 0), 0), DR_OK, "C1 read with a live cdef ctx");
+    assert_eq(load64(rgrid + 0), 5, "C1 the decoded cdef index LANDS in the grid");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "C1 marker");
+    # C2: skip = 1 CLOSES the cdef read (the skip argument is load-bearing): nothing
+    # coded, the reader's grid slot stays -1.
+    var b2 = fb_mk(0, 1, 1);
+    var ib2 = b2 + AV1FB_IB;
+    store64(ib2 + AV1IB_REF0, 1);
+    store64(ib2 + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib2 + AV1IB_YMODE, AV1_NEARESTMV);
+    store64(ib2 + AV1IB_MV0 + AV1MV_ROW, 8);
+    store64(ib2 + AV1IB_MV0 + AV1MV_COL, 8);
+    store64(ib2 + AV1IB_INTERP + 0, 1);
+    store64(ib2 + AV1IB_INTERP + 8, 1);
+    store64(ib2 + AV1IB_CT + AV1CT_COMPIDX, 1);
+    var wg2 = fb_cdef_grid(0 - 1);
+    var rg2 = fb_cdef_grid(0 - 1);
+    var enc2 = av1_sym_enc_init(160, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc2, ccr, ccim, ccii, ccmv, ncc, b2,
+    ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
+    fb_cdef_ctx(wg2, plan), 0), DR_OK, "C2 write, skip = 1");
+    av1_sym_encode_literal(enc2, 165, 8);
+    var ol2 = 0;
+    var ob2 = av1_sym_enc_finish(enc2, &ol2);
+    var sd2 = av1_sym_dec_init(ob2, ol2, 1);
+    assert_eq(av1_inter_frame_mode_info(sd2, ccr, ccim, ccii, ccmv, ncc,
+    av1_blockinfo_new(), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0,
+    1, 1, 0, 0, 0, fb_cdef_ctx(rg2, 0), 0), DR_OK, "C2 read, skip = 1");
+    assert_eq(load64(rg2 + 0), 0 - 1, "C2 skip = 1 leaves the cdef grid untouched");
+    assert_eq(av1_sym_read_literal(sd2, 8), 165, "C2 marker: skip coded no cdef literal");
+    # the driver-writer desync guards: an inconsistent or uncodable record is surfaced.
+    var enc3 = av1_sym_enc_init(32, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
+    fb_mk(1, 0, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
+    fb_fh(1, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0), DR_ERR_BOUNDS,
+    "skip_mode = 1 with skip = 0 -> surfaced, not silent");
+    assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
+    fb_mk(1, 1, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
+    fb_fh(0, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0), DR_ERR_BOUNDS,
+    "skip_mode = 1 with present off -> surfaced, not silent");
+    # the writer's deferred-feature gates mirror the reader's.
+    var fh_sg = fb_fh(1, 0, 0);
+    store64(fh_sg + AV1FH_SEG_ENABLED, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
+    fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg, refs, s0,
+    1, 1, 0, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");
+    var fh_dq = fb_fh(1, 0, 0);
+    store64(fh_dq + AV1FH_DELTA_Q_PRESENT, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
+    fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dq, refs, s0,
+    1, 1, 0, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_q gates UNSUPPORTED");
+    var fh_dl = fb_fh(1, 0, 0);
+    store64(fh_dl + AV1FH_DELTA_LF_PRESENT, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
+    fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dl, refs, s0,
+    1, 1, 0, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_lf gates UNSUPPORTED");
+    assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
+    fb_mk(0, 0, 0), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fb_fh(1, 0, 0), refs,
+    s0, 1, 1, 0, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: the intra fork gates UNSUPPORTED");
+    # the record layout, pinned absolutely (a shrunk AV1FB_IB aliases ISINTER).
+    assert_eq(AV1FB_IB, 32, "Av1BlockInfo: IB starts at 32");
+    assert_eq(AV1FB_IB + AV1IB_SIZE, AV1FB_SIZE, "IB region ends exactly at AV1FB_SIZE");
+    return 0;
+}
+# leaf-built OUTER conformance: streams composed from the sub-writers with the ctx
+# values derived independently — kills symmetric ctx/size/threading mutants in the
+# driver pair, and exercises the ref port's F5 schedule.
+fn test_inter_frame_conformance() {
+    var s0 = ib_seq(0, 0, 0, 0);
+    # (a) the skip-mode form at a NONZERO skip_mode ctx (2): after skip_mode = 1 the
+    # ENTIRE remaining schedule codes nothing, so the stream is one symbol + marker.
+    var gc = mm_grid(8, 8, 1, 7);
+    var fh_p = fb_fh(1, 1, 7);
+    var cc = av1_refcdf_blob();
+    var ncc = av1_ncdf_new();
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_skip_mode_sym(enc, cc, 2, 1);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_blockinfo_new();
+    assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
+    av1_mvcdf_blob(), ncc, got, ib_ctx(gc, 6), av1_nbctx_new(), av1_warp_new(), fh_p,
+    mm_refs(64, 64), s0, 1, 1, 0, 0, 2, 0, 0), DR_OK, "Ca decode at skip_mode ctx 2");
+    assert_eq(av1_fb_skip_mode(got), 1, "Ca skip_mode decodes at ctx 2");
+    assert_eq(av1_fb_skip(got), 1, "Ca skip forced 1");
+    assert_eq(av1_ib_ref(av1_fb_ib(got), 0), 1, "Ca SkipModeFrame[0]");
+    assert_eq(av1_ib_ref(av1_fb_ib(got), 1), 7, "Ca SkipModeFrame[1]");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "Ca marker: ONE symbol total");
+    # (b) the ref port's F5 at 4x8 with NONZERO neighbour-skip ctx: NO skip_mode symbol
+    # (size gate), skip = 1 at skip_ctx(1,1,1,1), is_inter at the derived ctx, then the
+    # 5.11.23 4x8 form (forced-SINGLE ref tree, NEARESTMV chain, no ii/mm symbols, one
+    # interp symbol). Kills a driver that hardcodes mi_size or drops the skip threading.
+    var g = mm_grid(8, 8, 1, AV1_REF_NONE);
+    var nb0 = av1_nbctx_new();
+    av1_nbctx_setup(nb0, g, 16, 4, 4, 1, 1);
+    var scr = alloc(AV1CCTX_SIZE);
+    var cc2 = av1_refcdf_blob();
+    var ncc2 = av1_ncdf_new();
+    var ccim = av1_imcdf_blob();
+    var ctxi = ib_ctx(g, 1);
+    av1_mvctx_set_refs(ctxi, 1, AV1_REF_NONE);
+    av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
+    av1_find_mv_stack(ctxi, 0);
+    var enc2 = av1_sym_enc_init(96, 1);
+    av1_write_skip(enc2, ncc2, av1_skip_ctx(1, 1, 1, 1), 1);
+    av1_write_is_inter_sym(enc2, cc2, av1_is_inter_ctx(nb0), 1);
+    av1_single_ref_ctxs(nb0, scr);
+    av1_write_single_ref(enc2, cc2, scr, AV1_LAST_FRAME);
+    av1_write_inter_mode(enc2, ccim, ctxi, AV1_NEARESTMV);
+    av1_write_interp_filter(enc2, ccim, av1_interp_filter_ctx(nb0, 0, 1, AV1_REF_NONE), 1);
+    av1_sym_encode_literal(enc2, 165, 8);
+    var ol2 = 0;
+    var ob2 = av1_sym_enc_finish(enc2, &ol2);
+    var sd2 = av1_sym_dec_init(ob2, ol2, 1);
+    var got2 = av1_blockinfo_new();
+    assert_eq(av1_inter_frame_mode_info(sd2, cc2, ccim, av1_iicdf_blob(),
+    av1_mvcdf_blob(), ncc2, got2, ib_ctx(g, 1), av1_nbctx_new(), av1_warp_new(),
+    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 1, 1, 0, 0, 0), DR_OK, "Cb F5 decode at 4x8");
+    assert_eq(av1_fb_skip_mode(got2), 0, "Cb 4x8: NO skip_mode symbol (size gate)");
+    assert_eq(av1_fb_skip(got2), 1, "Cb skip decodes at the threaded ctx");
+    assert_eq(av1_fb_is_inter(got2), 1, "Cb is_inter");
+    assert_eq(av1_ib_ymode(av1_fb_ib(got2)), AV1_NEARESTMV, "Cb NEARESTMV");
+    assert_eq(load64(av1_fb_ib(got2) + AV1IB_MV0 + AV1MV_ROW), 8, "Cb mv from the stack");
+    assert_eq(av1_sym_read_literal(sd2, 8), 165, "Cb marker: the exact 4x8 schedule");
+    return 0;
+}
 # ref-port case 9 + the interintra -> RefFrame[1] -> motion-mode interaction.
 fn test_inter_block_interintra() {
     var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
@@ -3250,6 +3741,12 @@ fn main() {
     test_inter_block_review_hardening();
     test_inter_block_mvctx_adaptation();
     test_inter_block_conformance();
+    test_group("inter_frame_mode_info (5.11.15 — the outer dispatch)");
+    test_skip_mode_leaf();
+    test_is_inter_dispatch();
+    test_inter_frame_mode_info();
+    test_inter_frame_hardening();
+    test_inter_frame_conformance();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();

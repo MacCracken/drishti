@@ -268,8 +268,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   (`av1_read_ref_frames` — the 5.11.25 dispatch: skip_mode / segmentation fixed paths / the comp_mode gate
   into the 0.7.68/0.7.69 trees; + `av1_seg_feature_active` 5.11.14 `av1_frame.cyr`) and the **5.11.23
   ORCHESTRATOR itself** 0.7.82 (`av1_inter_block_mode_info` — the complete per-block inter mode-info
-  decode as one call, with the Av1InterBlock record + the full encoder inverse) are in too; next
-  `inter_frame_mode_info` (5.11.15 — the outer is_inter dispatch), then
+  decode as one call, with the Av1InterBlock record + the full encoder inverse) and the **5.11.15
+  OUTER DISPATCH** 0.7.83 (`av1_inter_frame_mode_info` + `read_skip_mode` 5.11.11 + the is_inter
+  selection; segmentation reads / delta-q/lf / the intra fork remain hard-gated deferrals of this
+  list) are in too; next
+  the INTER TILE DECODE itself, then
   `warp_estimation` (7.11.3.8) turns the
   samples into a model, and
   the inter tile decode that lets
