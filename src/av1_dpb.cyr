@@ -229,7 +229,8 @@ fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
             if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
             if (hbytes > osize) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
-            var frame = av1_decode_frame(seq, ffh, buf + ooff + hbytes, osize - hbytes, out_err);
+            var frame = av1_decode_frame_ref(seq, ffh, dpb, refs, buf + ooff + hbytes,
+            osize - hbytes, out_err);
             if (frame == 0) { return 0; }   # av1_decode_frame wrote the precise cause
             var uerr2 = av1_dpb_update(dpb, refs, seq, ffh, frame);
             if (uerr2 != DR_OK) { store64(out_err, uerr2); return 0; }
@@ -242,6 +243,7 @@ fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
             if (fdc == 0) {
                 fdc = av1_frame_dec_new(seq, fh, out_err);
                 if (fdc == 0) { return 0; }
+                av1_frame_dec_set_inter(fdc, dpb, refs);
             }
             var gdone = av1_frame_dec_group(fdc, buf + ooff, osize, out_err);
             if (gdone < 0) { return 0; }

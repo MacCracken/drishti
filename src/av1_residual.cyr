@@ -104,7 +104,24 @@ enum Av1TileOff {
     AV1TILE_ROW_START = 400;  # MiRowStart
     AV1TILE_COL_END   = 408;  # MiColEnd
     AV1TILE_ROW_END   = 416;  # MiRowEnd
-    AV1TILE_SIZE      = 424;
+    # --- the inter decode context (0.7.84). ALL zero for an intra tile; a nonzero
+    #     FH switches decode_block to the 5.11.15 inter path. Handles are set by
+    #     av1_tile_set_inter_ctx; the per-tile adaptive blobs by the tile driver. ---
+    AV1TILE_FH        = 424;  # Av1FrameHeader
+    AV1TILE_REFS      = 432;  # Av1RefState
+    AV1TILE_SEQ       = 440;  # Av1Seq
+    AV1TILE_DPB       = 448;  # Av1Dpb — the MC reference source
+    AV1TILE_MVGRID    = 456;  # Av1MiRec grid (frame-addressed, stride FMI_COLS; shared)
+    AV1TILE_MVCTX     = 464;  # ONE reusable Av1MvCtx (reconfigured per block)
+    AV1TILE_NB        = 472;  # ONE reusable Av1NbCtx
+    AV1TILE_WS        = 480;  # ONE reusable Av1WarpSamples
+    AV1TILE_CCREF     = 488;  # per-tile adaptive refcdf blob
+    AV1TILE_CCIM      = 496;  # per-tile adaptive imcdf blob
+    AV1TILE_CCII      = 504;  # per-tile adaptive iicdf blob
+    AV1TILE_CCMV      = 512;  # per-tile adaptive mvcdf blob
+    AV1TILE_SKIPMODES = 520;  # SkipModes grid (frame-addressed; shared)
+    AV1TILE_ICDEF     = 528;  # the 5.11.15 driver's 7-slot cdef record (0 = splice off)
+    AV1TILE_SIZE      = 536;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -156,6 +173,21 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_CDEFIDX, 0);
     store64(tile + AV1TILE_CDEF_CTX, 0);
     store64(tile + AV1TILE_LRPARAMS, 0);
+    # the inter context defaults OFF (an intra tile; av1_tile_set_inter_ctx wires it).
+    store64(tile + AV1TILE_FH, 0);
+    store64(tile + AV1TILE_REFS, 0);
+    store64(tile + AV1TILE_SEQ, 0);
+    store64(tile + AV1TILE_DPB, 0);
+    store64(tile + AV1TILE_MVGRID, 0);
+    store64(tile + AV1TILE_MVCTX, 0);
+    store64(tile + AV1TILE_NB, 0);
+    store64(tile + AV1TILE_WS, 0);
+    store64(tile + AV1TILE_CCREF, 0);
+    store64(tile + AV1TILE_CCIM, 0);
+    store64(tile + AV1TILE_CCII, 0);
+    store64(tile + AV1TILE_CCMV, 0);
+    store64(tile + AV1TILE_SKIPMODES, 0);
+    store64(tile + AV1TILE_ICDEF, 0);
     # frame-addressed grids default to the tile dims (single tile spans the frame);
     # a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new.
     store64(tile + AV1TILE_FMI_COLS, mi_cols);
@@ -230,8 +262,17 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_LFTX + 8, load64(src + AV1TILE_LFTX + 8));
     store64(dst + AV1TILE_LFTX + 16, load64(src + AV1TILE_LFTX + 16));
     store64(dst + AV1TILE_CDEFIDX, load64(src + AV1TILE_CDEFIDX));
+    # the inter frame-level grids are shared exactly like the intra ones (the MV
+    # scans legitimately read OUTSIDE the tile window only via is_inside gating).
+    store64(dst + AV1TILE_MVGRID, load64(src + AV1TILE_MVGRID));
+    store64(dst + AV1TILE_SKIPMODES, load64(src + AV1TILE_SKIPMODES));
     return 0;
 }
+
+# The inter decode context wiring (av1_tile_set_inter_ctx) and the inter block/tile
+# drivers live in src/av1_intertile.cyr (0.7.84) — a LATER module, so they can see
+# the av1_mv / av1_intermode / av1_dpb records and enums this module cannot (the
+# 0.7.74 enum-visibility rule). This module only carries the tile fields.
 
 # Set the tile's absolute MI window [col_start, col_end) x [row_start, row_end)
 # into the frame (spec 5.11.2 MiColStart..MiColEnd). Also refreshes MI_COLS/MI_ROWS

@@ -411,6 +411,7 @@ fn frame_mk_seq(enable_cdef): i64 {
 fn frame_mk_fh(tile_cols, tile_rows, tile_cols_log2, tile_rows_log2): i64 {
     var fh = alloc(AV1FH_SIZE);
     memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_IS_INTRA, 1);   # hand-built KEYFRAME (the 0.7.84 gate reads it)
     store64(fh + AV1FH_FRAME_WIDTH, 128);
     store64(fh + AV1FH_FRAME_HEIGHT, 64);
     store64(fh + AV1FH_UPSCALED_WIDTH, 128);
@@ -439,6 +440,7 @@ fn frame_mk_fh(tile_cols, tile_rows, tile_cols_log2, tile_rows_log2): i64 {
 fn frame_mk_fh_2tile(): i64 {
     var fh = alloc(AV1FH_SIZE);
     memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_IS_INTRA, 1);   # hand-built KEYFRAME (the 0.7.84 gate reads it)
     store64(fh + AV1FH_FRAME_WIDTH, 256);
     store64(fh + AV1FH_FRAME_HEIGHT, 64);
     store64(fh + AV1FH_UPSCALED_WIDTH, 256);
@@ -516,6 +518,7 @@ fn test_frame_decode_2tile() {
     # frame header: 256x64 (MiCols 64), 2 tile columns [0,32) and [32,64).
     var fh = alloc(AV1FH_SIZE);
     memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_IS_INTRA, 1);   # hand-built KEYFRAME (the 0.7.84 gate reads it)
     store64(fh + AV1FH_FRAME_WIDTH, 256);
     store64(fh + AV1FH_FRAME_HEIGHT, 64);
     store64(fh + AV1FH_UPSCALED_WIDTH, 256);

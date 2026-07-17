@@ -289,7 +289,9 @@ enum Av1FrameDec {
     AV1FDEC_FH         = 32;   # active Av1FrameHeader
     AV1FDEC_NUM_TILES  = 40;   # TileCols * TileRows (frame total)
     AV1FDEC_TILES_DONE = 48;   # tiles decoded so far == next expected TileNum
-    AV1FDEC_SIZE       = 56;
+    AV1FDEC_DPB        = 56;   # Av1Dpb (0 = intra-only decode; inter frames need it)
+    AV1FDEC_REFS       = 64;   # Av1RefState (paired with DPB)
+    AV1FDEC_SIZE       = 72;
 }
 
 # av1_frame_dec_new — begin a frame decode: validate scope, create the reconstruction
@@ -320,7 +322,16 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     store64(fdc + AV1FDEC_FH, fh);
     store64(fdc + AV1FDEC_NUM_TILES, av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh));
     store64(fdc + AV1FDEC_TILES_DONE, 0);
+    store64(fdc + AV1FDEC_DPB, 0);
+    store64(fdc + AV1FDEC_REFS, 0);
     return fdc;
+}
+# wire the reference state an INTER frame needs (0.7.84): the DPB the MC reads and
+# the ref-frame metadata. Without them a non-intra frame is rejected UNSUPPORTED.
+fn av1_frame_dec_set_inter(fdc, dpb, refs): i64 {
+    store64(fdc + AV1FDEC_DPB, dpb);
+    store64(fdc + AV1FDEC_REFS, refs);
+    return DR_OK;
 }
 
 # av1_frame_dec_group — decode one tile group's payload (buf[0..sz)) into the shared
@@ -378,10 +389,23 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
         var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
         if (ar != DR_OK) { store64(out_err, ar); return 0 - 1; }
-        var dr = av1_decode_intra_tile(tile, buf + av1_tg_tile_offset(tg, tn),
-        av1_tg_tile_size(tg, tn), disable_cdf);
-        if (dr != DR_OK) { store64(out_err, dr); return 0 - 1; }
-        tn = tn + 1;
+        if (av1_fh_frame_is_intra(fh) == 0) {
+            # an INTER frame (0.7.84): needs the DPB + ref state for MC.
+            var idpb = load64(fdc + AV1FDEC_DPB);
+            var irefs = load64(fdc + AV1FDEC_REFS);
+            if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0 - 1; }
+            var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
+            if (ir != DR_OK) { store64(out_err, ir); return 0 - 1; }
+            var dri = av1_decode_inter_tile(tile, buf + av1_tg_tile_offset(tg, tn),
+            av1_tg_tile_size(tg, tn), disable_cdf);
+            if (dri != DR_OK) { store64(out_err, dri); return 0 - 1; }
+            tn = tn + 1;
+        } else {
+            var dr = av1_decode_intra_tile(tile, buf + av1_tg_tile_offset(tg, tn),
+            av1_tg_tile_size(tg, tn), disable_cdf);
+            if (dr != DR_OK) { store64(out_err, dr); return 0 - 1; }
+            tn = tn + 1;
+        }
     }
     store64(fdc + AV1FDEC_TILES_DONE, av1_tg_end(tg) + 1);
     if ((av1_tg_end(tg) + 1) == num_tiles) { return 1; }
@@ -414,12 +438,18 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
 # filtered (and, under use_superres, upscaled) frame or 0.
 # ================================================================
 fn av1_decode_frame(seq, fh, buf, sz, out_err): i64 {
+    return av1_decode_frame_ref(seq, fh, 0, 0, buf, sz, out_err);
+}
+# av1_decode_frame with the inter reference state threaded (0.7.84): dpb/refs = 0
+# keeps the intra-only behavior (a non-intra frame then rejects UNSUPPORTED).
+fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
     store64(out_err, DR_OK);
     if ((seq == 0) || (fh == 0) || (buf == 0) || (sz < 0)) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
     var fdc = av1_frame_dec_new(seq, fh, out_err);
     if (fdc == 0) { return 0; }   # av1_frame_dec_new already wrote the precise cause
+    av1_frame_dec_set_inter(fdc, dpb, refs);
     var done = av1_frame_dec_group(fdc, buf, sz, out_err);
     if (done < 0) { return 0; }   # error, *out_err set
     # a single-group entry: the one group must cover the whole frame. A partial group

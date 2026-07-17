@@ -253,6 +253,9 @@ fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
 # mode_info → read_block_tx_size → residual, then the MI-grid writes.
 # ================================================================
 fn av1_decode_block(tile, r, c, sub_size): i64 {
+    # an inter tile (FH wired by av1_tile_set_inter_ctx) takes the 5.11.15 path in
+    # av1_intertile.cyr — a LATER module (forward fn reference; the 0.7.74 rule).
+    if (load64(tile + AV1TILE_FH) != 0) { return av1_decode_block_inter(tile, r, c, sub_size); }
     var frame = load64(tile + AV1TILE_FRAME);
     var sd = load64(tile + AV1TILE_SD);
     var ncc = load64(tile + AV1TILE_NCC);
@@ -315,6 +318,8 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
 # carries the block's mode; tx_size is the chosen luma TxSize. (Skip blocks only:
 # the non-skip coeffs-encode in residual order is deferred, roadmap.md.)
 fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
+    # the inter encode lane: the plan's mi slot carries an Av1BlockInfo (tx unused).
+    if (load64(tile + AV1TILE_FH) != 0) { return av1_encode_block_inter(tile, r, c, sub_size, mi); }
     var frame = load64(tile + AV1TILE_FRAME);
     var enc = load64(tile + AV1TILE_ENC);
     var ncc = load64(tile + AV1TILE_NCC);
