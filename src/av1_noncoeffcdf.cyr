@@ -25,7 +25,7 @@ fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1636 * 8);   # 1634 entries (+ LR restoration CDFs at 1624..1633) + pad
+    var t = alloc(1695 * 8);   # 1693 entries (intra 0..1633 + inter tx-type 1634..1692) + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -235,17 +235,45 @@ fn av1_noncoeff_cdf_blob(): i64 {
     store64(t + (1627 * 8), 16855); store64(t + (1628 * 8), 32768); store64(t + (1629 * 8), 0);
     store64(t + (1630 * 8), 9413); store64(t + (1631 * 8), 22581);
     store64(t + (1632 * 8), 32768); store64(t + (1633 * 8), 0);
+    # inter transform-type CDFs (spec §10 Default_Inter_Tx_Type_Set1/2/3_Cdf; the
+    # spec prints these already forward-cumulative, byte-identical to libaom's
+    # AOM_CDF args and dav1d's CDF args — 3-source verified, stored verbatim +
+    # {32768, 0}). Keyed on Tx_Size_Sqr only (no intra-direction dimension).
+    # Set1 (INTER_1 / ALL16, 16 sym): 2 rows [Tx_Size_Sqr 0,1] @ 1634, 1651.
+    store64(t + (1634 * 8), 4458);  store64(t + (1635 * 8), 5560);  store64(t + (1636 * 8), 7695);
+    store64(t + (1637 * 8), 9709);  store64(t + (1638 * 8), 13330); store64(t + (1639 * 8), 14789);
+    store64(t + (1640 * 8), 17537); store64(t + (1641 * 8), 20266); store64(t + (1642 * 8), 21504);
+    store64(t + (1643 * 8), 22848); store64(t + (1644 * 8), 23934); store64(t + (1645 * 8), 25474);
+    store64(t + (1646 * 8), 27727); store64(t + (1647 * 8), 28915); store64(t + (1648 * 8), 30631);
+    store64(t + (1649 * 8), 32768); store64(t + (1650 * 8), 0);
+    store64(t + (1651 * 8), 1645);  store64(t + (1652 * 8), 2573);  store64(t + (1653 * 8), 4778);
+    store64(t + (1654 * 8), 5711);  store64(t + (1655 * 8), 7807);  store64(t + (1656 * 8), 8622);
+    store64(t + (1657 * 8), 10522); store64(t + (1658 * 8), 15357); store64(t + (1659 * 8), 17674);
+    store64(t + (1660 * 8), 20408); store64(t + (1661 * 8), 22517); store64(t + (1662 * 8), 25010);
+    store64(t + (1663 * 8), 27116); store64(t + (1664 * 8), 28856); store64(t + (1665 * 8), 30749);
+    store64(t + (1666 * 8), 32768); store64(t + (1667 * 8), 0);
+    # Set2 (INTER_2 / DTT9_IDTX_1DDCT, 12 sym): 1 row (only 16x16 reaches it) @ 1668.
+    store64(t + (1668 * 8), 770);   store64(t + (1669 * 8), 2421);  store64(t + (1670 * 8), 5225);
+    store64(t + (1671 * 8), 12907); store64(t + (1672 * 8), 15819); store64(t + (1673 * 8), 18927);
+    store64(t + (1674 * 8), 21561); store64(t + (1675 * 8), 24089); store64(t + (1676 * 8), 26595);
+    store64(t + (1677 * 8), 28526); store64(t + (1678 * 8), 30529); store64(t + (1679 * 8), 32768);
+    store64(t + (1680 * 8), 0);
+    # Set3 (INTER_3 / DCT_IDTX, 2 sym): 4 rows [Tx_Size_Sqr 0,1,2,3] @ 1681,1684,1687,1690.
+    store64(t + (1681 * 8), 16384); store64(t + (1682 * 8), 32768); store64(t + (1683 * 8), 0);
+    store64(t + (1684 * 8), 4167);  store64(t + (1685 * 8), 32768); store64(t + (1686 * 8), 0);
+    store64(t + (1687 * 8), 1998);  store64(t + (1688 * 8), 32768); store64(t + (1689 * 8), 0);
+    store64(t + (1690 * 8), 748);   store64(t + (1691 * 8), 32768); store64(t + (1692 * 8), 0);
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1634 * 8);
+    var cc = alloc(1693 * 8);   # intra 0..1633 + inter tx-type 1634..1692
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1634) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < 1693) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -270,6 +298,12 @@ fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }
 fn av1_ncdf_tx64(cc, ctx): i64 { return cc + ((1168 + ctx * 4) * 8); }
 fn av1_ncdf_intra_tx_set1(cc, sqr, dir): i64 { return cc + ((1180 + ((sqr * 13) + dir) * 8) * 8); }
 fn av1_ncdf_intra_tx_set2(cc, sqr, dir): i64 { return cc + ((1388 + ((sqr * 13) + dir) * 6) * 8); }
+# inter transform-type CDFs (1634..1692). Set1 keyed by Tx_Size_Sqr {0,1} (stride
+# 17 = 16 sym + count); Set2 single row (12 sym + count); Set3 keyed by Tx_Size_Sqr
+# {0,1,2,3} (stride 3 = 2 sym + count).
+fn av1_ncdf_inter_tx_set1(cc, sqr): i64 { return cc + ((1634 + (sqr * 17)) * 8); }
+fn av1_ncdf_inter_tx_set2(cc): i64 { return cc + (1668 * 8); }
+fn av1_ncdf_inter_tx_set3(cc, sqr): i64 { return cc + ((1681 + (sqr * 3)) * 8); }
 # loop-restoration type CDFs: use_wiener / use_sgrproj (2-symbol), restoration_type (3-symbol).
 fn av1_ncdf_use_wiener(cc): i64 { return cc + (1624 * 8); }
 fn av1_ncdf_use_sgrproj(cc): i64 { return cc + (1627 * 8); }

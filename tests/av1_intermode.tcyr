@@ -3522,7 +3522,9 @@ fn test_inter_frame_hardening() {
     s0, 1, 1, 0, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: the intra fork gates UNSUPPORTED");
     # the record layout, pinned absolutely (a shrunk AV1FB_IB aliases ISINTER).
     assert_eq(AV1FB_IB, 32, "Av1BlockInfo: IB starts at 32");
-    assert_eq(AV1FB_IB + AV1IB_SIZE, AV1FB_SIZE, "IB region ends exactly at AV1FB_SIZE");
+    # the embedded IB ends where the (0.7.85) encode-residual-plan slot begins.
+    assert_eq(AV1FB_IB + AV1IB_SIZE, AV1FB_RESID, "IB region ends at AV1FB_RESID");
+    assert_eq(AV1FB_RESID + 8, AV1FB_SIZE, "RESID is the last slot before AV1FB_SIZE");
     return 0;
 }
 # leaf-built OUTER conformance: streams composed from the sub-writers with the ctx

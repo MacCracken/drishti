@@ -1075,6 +1075,724 @@ fn test_key_header_parseback() {
     return 0;
 }
 
+# ================================================================
+# THE NON-SKIP INTER RESIDUAL (0.7.85, UNIFORM-TX): a genuine non-skip inter
+# block decodes with the reconstructed residual added onto the MC prediction.
+# Round-trip (encode -> decode) with an INDEPENDENT oracle: MC (av1_mc_pred_block)
+# + reconstruct (av1_reconstruct) composed here, both already reference-verified,
+# with the KNOWN planted coeffs + tx types. The inter tx-type derivation is cross-
+# checked against scripts/refs/inter_residual_ref.py. Per-set coverage (INTER_1/2/3),
+# mono + 4:2:0, and the var-tx scope gate.
+# ================================================================
+fn ir_ref(w, h, planes, sx, sy): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
+    var p = 0;
+    while (p < planes) {
+        var pw = w;
+        var ph = h;
+        if (p > 0) { pw = w >> sx; ph = h >> sy; }
+        var y = 0;
+        while (y < ph) {
+            var x = 0;
+            while (x < pw) {
+                var v = (x + (2 * y)) & 255;
+                if (p == 1) { v = ((2 * x) + y) & 255; }
+                if (p == 2) { v = (x + (3 * y)) & 255; }
+                dr_frame_set(f, p, x, y, v);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return f;
+}
+fn ir_fh(w, h, mic, mir, tx_mode): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_WIDTH, w);
+    store64(fh + AV1FH_FRAME_HEIGHT, h);
+    store64(fh + AV1FH_UPSCALED_WIDTH, w);
+    store64(fh + AV1FH_MI_COLS, mic);
+    store64(fh + AV1FH_MI_ROWS, mir);
+    store64(fh + AV1FH_BASE_Q_IDX, 40);
+    store64(fh + AV1FH_TX_MODE, tx_mode);
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    store64(fh + AV1FH_TILE_COLS, 1);
+    store64(fh + AV1FH_TILE_ROWS, 1);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, mic);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, mir);
+    return fh;
+}
+fn ir_refs(w, h): i64 {
+    var refs = av1_ref_state_new();
+    store64(refs + AV1REF_UPSCALED_W + 0, w);
+    store64(refs + AV1REF_FRAME_W + 0, w);
+    store64(refs + AV1REF_FRAME_H + 0, h);
+    return refs;
+}
+fn ir_seq(planes, sx, sy): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_BITDEPTH, 8);
+    store64(s + AV1_SEQ_NUM_PLANES, planes);
+    store64(s + AV1_SEQ_SUBX, sx);
+    store64(s + AV1_SEQ_SUBY, sy);
+    return s;
+}
+fn ir_blk(mvr, mvc, resid): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIP, 0);
+    store64(b + AV1FB_ISINTER, 1);
+    var ib = b + AV1FB_IB;
+    store64(ib + AV1IB_REF0, AV1_LAST_FRAME);
+    store64(ib + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib + AV1IB_YMODE, AV1_NEWMV);
+    store64(ib + AV1IB_MV0 + AV1MV_ROW, mvr);
+    store64(ib + AV1IB_MV0 + AV1MV_COL, mvc);
+    store64(ib + AV1IB_MOTIONMODE, AV1_MM_SIMPLE);
+    store64(ib + AV1IB_INTERP + 0, AV1_EIGHTTAP);
+    store64(ib + AV1IB_INTERP + 8, AV1_EIGHTTAP);
+    store64(ib + AV1IB_CT + AV1CT_COMPIDX, 1);
+    av1_fb_set_resid(b, resid);
+    return b;
+}
+fn ir_plan(pp, nsplit): i64 {
+    var i = 0;
+    while (i < nsplit) { store64(pp + (i * 8), AV1_PARTITION_SPLIT); i = i + 1; }
+    store64(pp + (nsplit * 8), AV1_PARTITION_NONE);
+    return 0;
+}
+# encode a single non-skip block frame, decode it, return the decoded frame.
+fn ir_roundtrip(ref, fh, refs, seq, blk, nsplit, w, h, planes, sx, sy, mic, mir): i64 {
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
+    var et = av1_tile_new(ef, mic, mir, 40, 1, 0, planes);
+    av1_tile_grids_new(et);
+    assert_eq(av1_tile_set_inter_ctx(et, fh, refs, seq, dpb), DR_OK, "ir enc ctx");
+    var pp = alloc((nsplit + 1) * 8);
+    ir_plan(pp, nsplit);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "ir encoded payload");
+    assert_eq(av1_sym_enc_err(load64(et + AV1TILE_ENC)), DR_OK, "ir no enc err");
+    var df = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
+    var dt = av1_tile_new(df, mic, mir, 40, 1, 0, planes);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "ir decodes");
+    return df;
+}
+# oracle: MC each plane + reconstruct(residual) with the given per-plane tx types.
+fn ir_oracle(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma, tx_luma, chroma_tt): i64 {
+    var oe = alloc(8);
+    var xf = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
+    var q_dc = av1_get_dc_quant(8, 40, 0);
+    var q_ac = av1_get_ac_quant(8, 40, 0);
+    var p = 0;
+    while (p < planes) {
+        var pw = w;
+        var ph = h;
+        if (p > 0) { pw = w >> sx; ph = h >> sy; }
+        av1_mc_pred_block(xf, ref, p, 0, 0, pw, ph, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        var eob = load64(resid + ((1 + (p * 2)) * 8));
+        var coeff = load64(resid + ((2 + (p * 2)) * 8));
+        if (eob > 0) {
+            var ptx = av1_get_tx_size(p, tx_size_luma, sub_size, sx, sy);
+            var tt = tx_luma;
+            if (p > 0) { tt = chroma_tt; }
+            av1_reconstruct(xf, p, 0, 0, ptx, tt, 0, coeff, q_dc, q_ac);
+        }
+        p = p + 1;
+    }
+    return xf;
+}
+fn ir_diff(a, b, w, h, planes, sx, sy): i64 {
+    var diff = 0;
+    var p = 0;
+    while (p < planes) {
+        var pw = w;
+        var ph = h;
+        if (p > 0) { pw = w >> sx; ph = h >> sy; }
+        var y = 0;
+        while (y < ph) {
+            var x = 0;
+            while (x < pw) {
+                if (dr_frame_get(a, p, x, y) != dr_frame_get(b, p, x, y)) { diff = diff + 1; }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return diff;
+}
+fn ir_diff_p(a, b, plane, pw, ph): i64 {
+    var diff = 0;
+    var y = 0;
+    while (y < ph) {
+        var x = 0;
+        while (x < pw) {
+            if (dr_frame_get(a, plane, x, y) != dr_frame_get(b, plane, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return diff;
+}
+# a 1-plane residual plan (luma tx type + eob + coeff buffer).
+fn ir_resid1(luma_tt, eob, coeff): i64 {
+    var r = alloc(8 * 8);
+    memset(r, 0, 8 * 8);
+    store64(r + 0, luma_tt);
+    store64(r + (1 * 8), eob);
+    store64(r + (2 * 8), coeff);
+    return r;
+}
+
+# ============ per-set residual round-trip (mono) ============
+# INTER_1 (BLOCK_8X8 -> TX_8X8): a DC + AC residual, ADST_DCT luma tx.
+fn test_ir_inter1() {
+    var ref = ir_ref(8, 8, 1, 0, 0);
+    var fh = ir_fh(8, 8, 2, 2, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(8, 8);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 90);              # DC
+    store64(coeff + (1 * 8), 0 - 40);    # scan[1]
+    var resid = ir_resid1(AV1_ADST_DCT, 2, coeff);
+    var blk = ir_blk(8, 0 - 4, resid);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 3, 8, 8, 1, 0, 0, 2, 2);
+    var xf = ir_oracle(ref, 8, 0 - 4, resid, 8, 8, 1, 0, 0, AV1_BLOCK_8X8, 1, AV1_ADST_DCT, 0);
+    assert_eq(ir_diff(df, xf, 8, 8, 1, 0, 0), 0, "INTER_1 8x8: decode == MC+residual oracle (64)");
+    return 0;
+}
+# INTER_2 (BLOCK_16X16 -> TX_16X16): DCT_ADST luma tx (in INTER_2).
+fn test_ir_inter2() {
+    var ref = ir_ref(16, 16, 1, 0, 0);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 0 - 120);
+    store64(coeff + (1 * 8), 55);
+    var resid = ir_resid1(AV1_DCT_ADST, 2, coeff);
+    var blk = ir_blk(0 - 6, 10, resid);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
+    var xf = ir_oracle(ref, 0 - 6, 10, resid, 16, 16, 1, 0, 0, 6, 2, AV1_DCT_ADST, 0);
+    assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0, "INTER_2 16x16: decode == oracle (256)");
+    return 0;
+}
+# INTER_3 (BLOCK_32X32 -> TX_32X32): only DCT_DCT / IDTX. Use IDTX.
+fn test_ir_inter3() {
+    var ref = ir_ref(32, 32, 1, 0, 0);
+    var fh = ir_fh(32, 32, 8, 8, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(32, 32);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 200);
+    var resid = ir_resid1(AV1_IDTX, 1, coeff);
+    var blk = ir_blk(16, 8, resid);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 1, 32, 32, 1, 0, 0, 8, 8);
+    var xf = ir_oracle(ref, 16, 8, resid, 32, 32, 1, 0, 0, 9, 3, AV1_IDTX, 0);
+    assert_eq(ir_diff(df, xf, 32, 32, 1, 0, 0), 0, "INTER_3 32x32 IDTX: decode == oracle (1024)");
+    return 0;
+}
+# 4:2:0 chroma residual: 16x16 luma (INTER_2), 8x8 chroma. Luma ADST_DCT (in
+# INTER_2 AND the chroma 8x8 set INTER_1) -> chroma tx type ADST_DCT (co-located).
+fn test_ir_420() {
+    var ref = ir_ref(16, 16, 3, 1, 1);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(3, 1, 1);
+    var cy = alloc(1024 * 8);
+    memset(cy, 0, 1024 * 8);
+    store64(cy + 0, 80);
+    store64(cy + (1 * 8), 0 - 30);
+    var cu = alloc(1024 * 8);
+    memset(cu, 0, 1024 * 8);
+    store64(cu + 0, 60);
+    var cv = alloc(1024 * 8);
+    memset(cv, 0, 1024 * 8);
+    store64(cv + 0, 0 - 50);
+    var r = alloc(8 * 8);
+    memset(r, 0, 8 * 8);
+    store64(r + 0, AV1_ADST_DCT);
+    store64(r + (1 * 8), 2);  store64(r + (2 * 8), cy);
+    store64(r + (3 * 8), 1);  store64(r + (4 * 8), cu);
+    store64(r + (5 * 8), 1);  store64(r + (6 * 8), cv);
+    var blk = ir_blk(0 - 6, 10, r);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 3, 1, 1, 4, 4);
+    # chroma tx type = co-located luma ADST_DCT (spec-literal ref: in INTER_1 -> kept).
+    var xf = ir_oracle(ref, 0 - 6, 10, r, 16, 16, 3, 1, 1, 6, 2, AV1_ADST_DCT, AV1_ADST_DCT);
+    assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0, "4:2:0 luma == oracle");
+    assert_eq(ir_diff_p(df, xf, 1, 8, 8), 0, "4:2:0 U == oracle");
+    assert_eq(ir_diff_p(df, xf, 2, 8, 8), 0, "4:2:0 V == oracle");
+    return 0;
+}
+# non-skip with ZERO residual (all_zero path) == pure MC.
+fn test_ir_zero() {
+    var ref = ir_ref(16, 16, 1, 0, 0);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    var resid = ir_resid1(AV1_DCT_DCT, 0, 0);   # eob 0 -> all_zero
+    var blk = ir_blk(16, 8, resid);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
+    var oe = alloc(8);
+    var mcf = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(mcf, ref, 0, 0, 0, 16, 16, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    assert_eq(ir_diff(df, mcf, 16, 16, 1, 0, 0), 0, "zero residual non-skip == pure MC");
+    return 0;
+}
+
+# ============ var-tx gate ============
+fn test_ir_vartx_gated() {
+    var ref = ir_ref(16, 16, 1, 0, 0);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_SELECT);   # SELECT + non-skip + >4x4 -> gated
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 50);
+    var resid = ir_resid1(AV1_DCT_DCT, 1, coeff);
+    var blk = ir_blk(16, 8, resid);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 4, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(3 * 8);
+    ir_plan(pp, 2);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    assert_eq(av1_encode_inter_tile(et, pp, pf, 1, &tlen), 0, "var-tx non-skip REFUSED by encode");
+    assert_eq(tlen, 0, "var-tx encode emits no bytes");
+    return 0;
+}
+
+# ============ CDF + table offset pins ============
+fn test_ir_cdf_pins() {
+    var cc = av1_ncdf_new();
+    # inter tx CDF absolute offsets (mutation-anchored: fresh cc, not the accessor's math).
+    assert_eq(load64(cc + (1634 * 8)), 4458, "inter set1[0][0] @1634");
+    assert_eq(load64(cc + (1649 * 8)), 32768, "inter set1[0] terminator @1649");
+    assert_eq(load64(cc + (1650 * 8)), 0, "inter set1[0] count @1650");
+    assert_eq(load64(cc + (1651 * 8)), 1645, "inter set1[1][0] @1651");
+    assert_eq(load64(cc + (1668 * 8)), 770, "inter set2[0] @1668");
+    assert_eq(load64(cc + (1681 * 8)), 16384, "inter set3[0] @1681");
+    assert_eq(load64(cc + (1690 * 8)), 748, "inter set3[3] @1690");
+    # accessors point at those offsets.
+    assert_eq(av1_ncdf_inter_tx_set1(cc, 0), cc + (1634 * 8), "set1(0) accessor");
+    assert_eq(av1_ncdf_inter_tx_set1(cc, 1), cc + (1651 * 8), "set1(1) accessor");
+    assert_eq(av1_ncdf_inter_tx_set2(cc), cc + (1668 * 8), "set2 accessor");
+    assert_eq(av1_ncdf_inter_tx_set3(cc, 3), cc + (1690 * 8), "set3(3) accessor");
+    # inverse maps (spec-literal ref: INV_SET1/2/3).
+    assert_eq(av1_inter_tx_inv_set1(0), AV1_IDTX, "inv_set1[0]=IDTX");
+    assert_eq(av1_inter_tx_inv_set1(7), AV1_DCT_DCT, "inv_set1[7]=DCT_DCT");
+    assert_eq(av1_inter_tx_inv_set1(15), AV1_FLIPADST_ADST, "inv_set1[15]");
+    assert_eq(av1_inter_tx_inv_set2(0), AV1_IDTX, "inv_set2[0]=IDTX");
+    assert_eq(av1_inter_tx_inv_set2(3), AV1_DCT_DCT, "inv_set2[3]=DCT_DCT");
+    assert_eq(av1_inter_tx_inv_set2(11), AV1_FLIPADST_ADST, "inv_set2[11]");
+    assert_eq(av1_inter_tx_inv_set3(0), AV1_IDTX, "inv_set3[0]=IDTX");
+    assert_eq(av1_inter_tx_inv_set3(1), AV1_DCT_DCT, "inv_set3[1]=DCT_DCT");
+    # membership (spec-literal ref: IN_SET rows).
+    assert_eq(av1_is_tx_type_in_set_inter(1, AV1_H_FLIPADST), 1, "INTER_1 all16");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 12), 0, "INTER_2 excludes tx 12");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 11), 1, "INTER_2 includes tx 11");
+    assert_eq(av1_is_tx_type_in_set_inter(3, AV1_DCT_DCT), 1, "INTER_3 DCT_DCT");
+    assert_eq(av1_is_tx_type_in_set_inter(3, AV1_IDTX), 1, "INTER_3 IDTX");
+    assert_eq(av1_is_tx_type_in_set_inter(3, AV1_ADST_DCT), 0, "INTER_3 excludes ADST_DCT");
+    return 0;
+}
+
+# ============ tx_type round-trip (encode -> decode) ============
+fn ir_tt_rt(tx_size, tx_type, nsym): i64 {
+    var nce = av1_ncdf_new();
+    var ttx = av1_txtypectx_new();
+    store64(ttx + AV1TTC_IS_INTER, 1);
+    store64(ttx + AV1TTC_BASE_Q, 40);
+    var enc = av1_sym_enc_init(64, 1);
+    av1_transform_type_encode(enc, nce, tx_size, ttx, tx_type);
+    var olen = 0;
+    var ob = av1_sym_enc_finish(enc, &olen);
+    var ncd = av1_ncdf_new();
+    var sd = av1_sym_dec_init(ob, olen, 1);
+    return av1_transform_type_decode(sd, ncd, tx_size, ttx);
+}
+fn test_ir_txtype_roundtrip() {
+    # INTER_1 (TX_8X8): every-ish type round-trips.
+    assert_eq(ir_tt_rt(1, AV1_DCT_DCT, 16), AV1_DCT_DCT, "rt INTER_1 DCT_DCT");
+    assert_eq(ir_tt_rt(1, AV1_ADST_DCT, 16), AV1_ADST_DCT, "rt INTER_1 ADST_DCT");
+    assert_eq(ir_tt_rt(1, AV1_H_FLIPADST, 16), AV1_H_FLIPADST, "rt INTER_1 H_FLIPADST");
+    assert_eq(ir_tt_rt(1, AV1_IDTX, 16), AV1_IDTX, "rt INTER_1 IDTX");
+    # INTER_2 (TX_16X16): the 12-type set.
+    assert_eq(ir_tt_rt(2, AV1_DCT_DCT, 12), AV1_DCT_DCT, "rt INTER_2 DCT_DCT");
+    assert_eq(ir_tt_rt(2, AV1_FLIPADST_ADST, 12), AV1_FLIPADST_ADST, "rt INTER_2 FLIPADST_ADST");
+    assert_eq(ir_tt_rt(2, AV1_H_DCT, 12), AV1_H_DCT, "rt INTER_2 H_DCT");
+    # INTER_3 (TX_32X32): DCT_DCT / IDTX.
+    assert_eq(ir_tt_rt(3, AV1_DCT_DCT, 2), AV1_DCT_DCT, "rt INTER_3 DCT_DCT");
+    assert_eq(ir_tt_rt(3, AV1_IDTX, 2), AV1_IDTX, "rt INTER_3 IDTX");
+    return 0;
+}
+
+# ============ compute_tx_type inter chroma (matches inter_residual_ref.py) ============
+fn ir_ctt(sqr, luma_tt): i64 {
+    var ttx = av1_txtypectx_new();
+    store64(ttx + AV1TTC_IS_INTER, 1);
+    store64(ttx + AV1TTC_BASE_Q, 40);
+    store64(ttx + AV1TTC_LUMA_TXTYPE, luma_tt);
+    var txsz = 1;                        # sqr 1
+    if (sqr == 2) { txsz = 2; }
+    if (sqr == 3) { txsz = 3; }
+    return av1_compute_tx_type(1, txsz, ttx, luma_tt);
+}
+fn test_ir_chroma_txtype() {
+    assert_eq(ir_ctt(1, AV1_ADST_ADST), AV1_ADST_ADST, "chroma sqr1 ADST_ADST kept");
+    assert_eq(ir_ctt(1, AV1_V_DCT), AV1_V_DCT, "chroma sqr1 V_DCT kept");
+    assert_eq(ir_ctt(2, AV1_H_ADST), AV1_DCT_DCT, "chroma sqr2 H_ADST -> DCT_DCT (INTER_2)");
+    assert_eq(ir_ctt(3, AV1_ADST_ADST), AV1_DCT_DCT, "chroma sqr3 ADST_ADST -> DCT_DCT (INTER_3)");
+    assert_eq(ir_ctt(3, AV1_IDTX), AV1_IDTX, "chroma sqr3 IDTX kept (INTER_3)");
+    return 0;
+}
+
+# ============ FULL absolute-offset pins (every inter-tx CDF, inverse-map, and
+# membership entry) against scripts/refs/inter_residual_ref.py — closes the
+# round-trip-circularity gap the 0.7.85 review found (wrong interior values
+# round-trip through drishti's own encoder undetected). Mutation-anchored: a
+# fresh cc buffer, checked entry-by-entry.
+fn test_ir_full_cdf_pins() {
+    var cc = av1_ncdf_new();
+    assert_eq(load64(cc + (1634 * 8)), 4458, "cdf@1634");
+    assert_eq(load64(cc + (1635 * 8)), 5560, "cdf@1635");
+    assert_eq(load64(cc + (1636 * 8)), 7695, "cdf@1636");
+    assert_eq(load64(cc + (1637 * 8)), 9709, "cdf@1637");
+    assert_eq(load64(cc + (1638 * 8)), 13330, "cdf@1638");
+    assert_eq(load64(cc + (1639 * 8)), 14789, "cdf@1639");
+    assert_eq(load64(cc + (1640 * 8)), 17537, "cdf@1640");
+    assert_eq(load64(cc + (1641 * 8)), 20266, "cdf@1641");
+    assert_eq(load64(cc + (1642 * 8)), 21504, "cdf@1642");
+    assert_eq(load64(cc + (1643 * 8)), 22848, "cdf@1643");
+    assert_eq(load64(cc + (1644 * 8)), 23934, "cdf@1644");
+    assert_eq(load64(cc + (1645 * 8)), 25474, "cdf@1645");
+    assert_eq(load64(cc + (1646 * 8)), 27727, "cdf@1646");
+    assert_eq(load64(cc + (1647 * 8)), 28915, "cdf@1647");
+    assert_eq(load64(cc + (1648 * 8)), 30631, "cdf@1648");
+    assert_eq(load64(cc + (1649 * 8)), 32768, "cdf@1649");
+    assert_eq(load64(cc + (1650 * 8)), 0, "cdf@1650");
+    assert_eq(load64(cc + (1651 * 8)), 1645, "cdf@1651");
+    assert_eq(load64(cc + (1652 * 8)), 2573, "cdf@1652");
+    assert_eq(load64(cc + (1653 * 8)), 4778, "cdf@1653");
+    assert_eq(load64(cc + (1654 * 8)), 5711, "cdf@1654");
+    assert_eq(load64(cc + (1655 * 8)), 7807, "cdf@1655");
+    assert_eq(load64(cc + (1656 * 8)), 8622, "cdf@1656");
+    assert_eq(load64(cc + (1657 * 8)), 10522, "cdf@1657");
+    assert_eq(load64(cc + (1658 * 8)), 15357, "cdf@1658");
+    assert_eq(load64(cc + (1659 * 8)), 17674, "cdf@1659");
+    assert_eq(load64(cc + (1660 * 8)), 20408, "cdf@1660");
+    assert_eq(load64(cc + (1661 * 8)), 22517, "cdf@1661");
+    assert_eq(load64(cc + (1662 * 8)), 25010, "cdf@1662");
+    assert_eq(load64(cc + (1663 * 8)), 27116, "cdf@1663");
+    assert_eq(load64(cc + (1664 * 8)), 28856, "cdf@1664");
+    assert_eq(load64(cc + (1665 * 8)), 30749, "cdf@1665");
+    assert_eq(load64(cc + (1666 * 8)), 32768, "cdf@1666");
+    assert_eq(load64(cc + (1667 * 8)), 0, "cdf@1667");
+    assert_eq(load64(cc + (1668 * 8)), 770, "cdf@1668");
+    assert_eq(load64(cc + (1669 * 8)), 2421, "cdf@1669");
+    assert_eq(load64(cc + (1670 * 8)), 5225, "cdf@1670");
+    assert_eq(load64(cc + (1671 * 8)), 12907, "cdf@1671");
+    assert_eq(load64(cc + (1672 * 8)), 15819, "cdf@1672");
+    assert_eq(load64(cc + (1673 * 8)), 18927, "cdf@1673");
+    assert_eq(load64(cc + (1674 * 8)), 21561, "cdf@1674");
+    assert_eq(load64(cc + (1675 * 8)), 24089, "cdf@1675");
+    assert_eq(load64(cc + (1676 * 8)), 26595, "cdf@1676");
+    assert_eq(load64(cc + (1677 * 8)), 28526, "cdf@1677");
+    assert_eq(load64(cc + (1678 * 8)), 30529, "cdf@1678");
+    assert_eq(load64(cc + (1679 * 8)), 32768, "cdf@1679");
+    assert_eq(load64(cc + (1680 * 8)), 0, "cdf@1680");
+    assert_eq(load64(cc + (1681 * 8)), 16384, "cdf@1681");
+    assert_eq(load64(cc + (1682 * 8)), 32768, "cdf@1682");
+    assert_eq(load64(cc + (1683 * 8)), 0, "cdf@1683");
+    assert_eq(load64(cc + (1684 * 8)), 4167, "cdf@1684");
+    assert_eq(load64(cc + (1685 * 8)), 32768, "cdf@1685");
+    assert_eq(load64(cc + (1686 * 8)), 0, "cdf@1686");
+    assert_eq(load64(cc + (1687 * 8)), 1998, "cdf@1687");
+    assert_eq(load64(cc + (1688 * 8)), 32768, "cdf@1688");
+    assert_eq(load64(cc + (1689 * 8)), 0, "cdf@1689");
+    assert_eq(load64(cc + (1690 * 8)), 748, "cdf@1690");
+    assert_eq(load64(cc + (1691 * 8)), 32768, "cdf@1691");
+    assert_eq(load64(cc + (1692 * 8)), 0, "cdf@1692");
+    return 0;
+}
+fn test_ir_full_table_pins() {
+    assert_eq(av1_inter_tx_inv_set1(0), 9, "inv1@0");
+    assert_eq(av1_inter_tx_inv_set1(1), 10, "inv1@1");
+    assert_eq(av1_inter_tx_inv_set1(2), 11, "inv1@2");
+    assert_eq(av1_inter_tx_inv_set1(3), 12, "inv1@3");
+    assert_eq(av1_inter_tx_inv_set1(4), 13, "inv1@4");
+    assert_eq(av1_inter_tx_inv_set1(5), 14, "inv1@5");
+    assert_eq(av1_inter_tx_inv_set1(6), 15, "inv1@6");
+    assert_eq(av1_inter_tx_inv_set1(7), 0, "inv1@7");
+    assert_eq(av1_inter_tx_inv_set1(8), 1, "inv1@8");
+    assert_eq(av1_inter_tx_inv_set1(9), 2, "inv1@9");
+    assert_eq(av1_inter_tx_inv_set1(10), 4, "inv1@10");
+    assert_eq(av1_inter_tx_inv_set1(11), 5, "inv1@11");
+    assert_eq(av1_inter_tx_inv_set1(12), 3, "inv1@12");
+    assert_eq(av1_inter_tx_inv_set1(13), 6, "inv1@13");
+    assert_eq(av1_inter_tx_inv_set1(14), 7, "inv1@14");
+    assert_eq(av1_inter_tx_inv_set1(15), 8, "inv1@15");
+    assert_eq(av1_inter_tx_inv_set2(0), 9, "inv2@0");
+    assert_eq(av1_inter_tx_inv_set2(1), 10, "inv2@1");
+    assert_eq(av1_inter_tx_inv_set2(2), 11, "inv2@2");
+    assert_eq(av1_inter_tx_inv_set2(3), 0, "inv2@3");
+    assert_eq(av1_inter_tx_inv_set2(4), 1, "inv2@4");
+    assert_eq(av1_inter_tx_inv_set2(5), 2, "inv2@5");
+    assert_eq(av1_inter_tx_inv_set2(6), 4, "inv2@6");
+    assert_eq(av1_inter_tx_inv_set2(7), 5, "inv2@7");
+    assert_eq(av1_inter_tx_inv_set2(8), 3, "inv2@8");
+    assert_eq(av1_inter_tx_inv_set2(9), 6, "inv2@9");
+    assert_eq(av1_inter_tx_inv_set2(10), 7, "inv2@10");
+    assert_eq(av1_inter_tx_inv_set2(11), 8, "inv2@11");
+    assert_eq(av1_inter_tx_inv_set3(0), 9, "inv3@0");
+    assert_eq(av1_inter_tx_inv_set3(1), 0, "inv3@1");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 0), 1, "inset[0][0]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 1), 0, "inset[0][1]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 2), 0, "inset[0][2]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 3), 0, "inset[0][3]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 4), 0, "inset[0][4]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 5), 0, "inset[0][5]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 6), 0, "inset[0][6]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 7), 0, "inset[0][7]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 8), 0, "inset[0][8]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 9), 0, "inset[0][9]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 10), 0, "inset[0][10]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 11), 0, "inset[0][11]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 12), 0, "inset[0][12]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 13), 0, "inset[0][13]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 14), 0, "inset[0][14]");
+    assert_eq(av1_is_tx_type_in_set_inter(0, 15), 0, "inset[0][15]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 0), 1, "inset[1][0]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 1), 1, "inset[1][1]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 2), 1, "inset[1][2]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 3), 1, "inset[1][3]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 4), 1, "inset[1][4]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 5), 1, "inset[1][5]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 6), 1, "inset[1][6]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 7), 1, "inset[1][7]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 8), 1, "inset[1][8]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 9), 1, "inset[1][9]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 10), 1, "inset[1][10]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 11), 1, "inset[1][11]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 12), 1, "inset[1][12]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 13), 1, "inset[1][13]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 14), 1, "inset[1][14]");
+    assert_eq(av1_is_tx_type_in_set_inter(1, 15), 1, "inset[1][15]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 0), 1, "inset[2][0]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 1), 1, "inset[2][1]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 2), 1, "inset[2][2]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 3), 1, "inset[2][3]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 4), 1, "inset[2][4]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 5), 1, "inset[2][5]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 6), 1, "inset[2][6]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 7), 1, "inset[2][7]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 8), 1, "inset[2][8]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 9), 1, "inset[2][9]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 10), 1, "inset[2][10]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 11), 1, "inset[2][11]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 12), 0, "inset[2][12]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 13), 0, "inset[2][13]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 14), 0, "inset[2][14]");
+    assert_eq(av1_is_tx_type_in_set_inter(2, 15), 0, "inset[2][15]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 0), 1, "inset[3][0]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 1), 0, "inset[3][1]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 2), 0, "inset[3][2]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 3), 0, "inset[3][3]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 4), 0, "inset[3][4]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 5), 0, "inset[3][5]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 6), 0, "inset[3][6]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 7), 0, "inset[3][7]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 8), 0, "inset[3][8]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 9), 1, "inset[3][9]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 10), 0, "inset[3][10]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 11), 0, "inset[3][11]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 12), 0, "inset[3][12]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 13), 0, "inset[3][13]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 14), 0, "inset[3][14]");
+    assert_eq(av1_is_tx_type_in_set_inter(3, 15), 0, "inset[3][15]");
+    return 0;
+}
+# F4 (review): encode/decode chroma tx-type sync when the LUMA tx is all-zero.
+# The plan carries a non-DCT luma type but eob0=0 (no transform_type symbol is
+# written) -> the decoder derives DCT_DCT for the co-located chroma; the encoder
+# must match. Chroma carries a real coeff so a desync shows in pixels.
+# encode-only: return the tile payload buffer (out_len via ptr). Same setup as
+# ir_roundtrip's encode half.
+fn ir_enc_only(ref, fh, refs, seq, blk, nsplit, w, h, planes, sx, sy, mic, mir, out_len): i64 {
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
+    var et = av1_tile_new(ef, mic, mir, 40, 1, 0, planes);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc((nsplit + 1) * 8);
+    ir_plan(pp, nsplit);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    return av1_encode_inter_tile(et, pp, pf, 1, out_len);
+}
+fn ir_az_plan(luma_tt, cu, cv): i64 {
+    var r = alloc(8 * 8);
+    memset(r, 0, 8 * 8);
+    store64(r + 0, luma_tt);
+    store64(r + (1 * 8), 0);  store64(r + (2 * 8), 0);      # luma all_zero (eob 0)
+    store64(r + (3 * 8), 2);  store64(r + (4 * 8), cu);     # chroma U: DC + AC (eob 2)
+    store64(r + (5 * 8), 2);  store64(r + (6 * 8), cv);     # chroma V: DC + AC
+    return r;
+}
+# F4 (review): when the LUMA tx is all-zero NO transform_type symbol is written, so
+# the plan's luma tx type must be IGNORED for chroma co-location (the decoder derives
+# DCT_DCT). Deterministic witness: encoding with a 1D-scan-class plan luma type
+# (V_DCT — a DIFFERENT chroma scan) must produce BYTE-IDENTICAL output to encoding
+# with DCT_DCT, because the effective luma type is DCT_DCT either way. Chroma carries
+# an AC coeff so the scan (tx-class) actually matters. (Without the fix, V_DCT would
+# scan the chroma coeffs differently -> different bytes -> the decoder, deriving
+# DCT_DCT, would mis-read them: a write/read desync.)
+fn test_ir_luma_allzero_chroma() {
+    var ref = ir_ref(16, 16, 3, 1, 1);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(3, 1, 1);
+    var cu = alloc(1024 * 8);
+    memset(cu, 0, 1024 * 8);
+    store64(cu + 0, 70);
+    store64(cu + (1 * 8), 30);              # AC coeff -> scan class matters
+    var cv = alloc(1024 * 8);
+    memset(cv, 0, 1024 * 8);
+    store64(cv + 0, 0 - 45);
+    store64(cv + (1 * 8), 20);
+    var lenV = 0;
+    var tbV = ir_enc_only(ref, ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST), refs, seq,
+    ir_blk(0 - 6, 10, ir_az_plan(AV1_V_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4, &lenV);
+    var lenD = 0;
+    var tbD = ir_enc_only(ref, ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST), refs, seq,
+    ir_blk(0 - 6, 10, ir_az_plan(AV1_DCT_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4, &lenD);
+    assert_eq(lenV > 0, 1, "luma-all-zero tile encoded");
+    assert_eq(lenV, lenD, "luma all_zero: plan luma type ignored (same byte length)");
+    var i = 0;
+    var d = 0;
+    while (i < lenV) {
+        if (load8(tbV + i) != load8(tbD + i)) { d = d + 1; }
+        i = i + 1;
+    }
+    assert_eq(d, 0, "luma all_zero: encode ignores the plan luma type (byte-identical)");
+    # and the round-trip decodes cleanly (chroma tx type in sync).
+    var df = ir_roundtrip(ref, ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST), refs, seq,
+    ir_blk(0 - 6, 10, ir_az_plan(AV1_DCT_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4);
+    assert_eq(df != 0, 1, "luma all_zero: decodes");
+    return 0;
+}
+# F1 (review): a LOSSLESS (base_q 0) inter block records chroma LoopfilterTxSizes as
+# TX_4X4 (0), not the uv max-rect — matching the intra path + spec 5.11.34.
+fn test_ir_lossless_lftx() {
+    var ref = ir_ref(16, 16, 3, 1, 1);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST);
+    store64(fh + AV1FH_BASE_Q_IDX, 0);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(3, 1, 1);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(16, 16, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 4, 4, 0, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(3 * 8);
+    ir_plan(pp, 2);
+    var pf = alloc(8);
+    store64(pf + 0, ir_blk(16, 8, 0));    # zero residual (lossless WHT); the LFTX store is the point
+    var tlen = 0;
+    av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    # lossless forces TX_4X4 for EVERY plane; chroma LFTX must be 0, not TX_8X8.
+    assert_eq(av1_lftx_get(et, 0, 0, 0), 0, "lossless luma LFTX = TX_4X4");
+    assert_eq(av1_lftx_get(et, 1, 0, 0), 0, "lossless chroma LFTX = TX_4X4 (not uv max-rect)");
+    return 0;
+}
+# F7 (review): reduced_tx_set routes a 16x16 inter block to INTER_3 (not INTER_2).
+fn test_ir_reduced_tx() {
+    var ref = ir_ref(16, 16, 1, 0, 0);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST);
+    store64(fh + AV1FH_REDUCED_TX_SET, 1);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 150);
+    var resid = ir_resid1(AV1_IDTX, 1, coeff);   # IDTX is in INTER_3
+    var blk = ir_blk(16, 8, resid);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
+    var xf = ir_oracle(ref, 16, 8, resid, 16, 16, 1, 0, 0, 6, 2, AV1_IDTX, 0);
+    assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0, "reduced_tx_set 16x16: INTER_3 IDTX round-trips");
+    # the tile carries reduced_tx into the ttx: get_tx_set(TX_16X16, inter, reduced=1) = INTER_3.
+    assert_eq(av1_get_tx_set(2, 1, 1), AV1_TX_SET_INTER_3, "reduced_tx: 16x16 -> INTER_3");
+    assert_eq(av1_get_tx_set(2, 1, 0), AV1_TX_SET_INTER_2, "non-reduced: 16x16 -> INTER_2");
+    return 0;
+}
+# F7 (review): RECTANGULAR (non-square) tx sizes route through the inter tx-set
+# selection (via Tx_Size_Sqr / Tx_Size_Sqr_Up) and round-trip through the CDF path.
+# the co-location PRECONDITION (0.7.85 review): every reachable block (<=64x64,
+# sizes 0..12; the codebase is 64x64-SB only, sbMask=15) is exactly ONE luma tx
+# under TX_MODE_LARGEST — so the single AV1TTC_LUMA_TXTYPE holds the whole block's
+# luma tx type and chroma co-location is exact. (Sizes 13..15 are 128-superblock
+# blocks, unreachable without use_128x128 which the decoder does not support.)
+fn test_ir_one_luma_tx() {
+    var b = 0;
+    var multi = 0;
+    while (b < 13) {
+        var tx = av1_max_tx_size_rect(b);
+        var stepx = av1_tx_width(tx) >> 2;
+        var stepy = av1_tx_height(tx) >> 2;
+        var nx = 0;
+        var x = 0;
+        while (x < av1_num_4x4_w(b)) { nx = nx + 1; x = x + stepx; }
+        var ny = 0;
+        var y = 0;
+        while (y < av1_num_4x4_h(b)) { ny = ny + 1; y = y + stepy; }
+        if ((nx * ny) > 1) { multi = multi + 1; }
+        b = b + 1;
+    }
+    assert_eq(multi, 0, "every reachable block (<=64x64) is ONE luma tx (co-location precondition)");
+    return 0;
+}
+fn test_ir_rect_txset() {
+    var t168 = av1_max_tx_size_rect(5);        # BLOCK_16X8  -> TX_16X8
+    var t816 = av1_max_tx_size_rect(4);        # BLOCK_8X16  -> TX_8X16
+    var t1632 = av1_max_tx_size_rect(7);       # BLOCK_16X32 -> TX_16X32
+    # TX_16X8/8X16: sqr=TX_8X8, sqr_up=TX_16X16 -> INTER_1 (16 sym).
+    assert_eq(av1_get_tx_set(t168, 1, 0), AV1_TX_SET_INTER_1, "rect TX_16X8 -> INTER_1");
+    assert_eq(av1_get_tx_set(t816, 1, 0), AV1_TX_SET_INTER_1, "rect TX_8X16 -> INTER_1");
+    # TX_16X32: sqr_up=TX_32X32 -> INTER_3 (2 sym).
+    assert_eq(av1_get_tx_set(t1632, 1, 0), AV1_TX_SET_INTER_3, "rect TX_16X32 -> INTER_3");
+    # transform_type round-trips at each rect tx (exercises the CDF + inverse for rect).
+    assert_eq(ir_tt_rt(t168, AV1_ADST_DCT, 16), AV1_ADST_DCT, "rt rect TX_16X8 ADST_DCT");
+    assert_eq(ir_tt_rt(t816, AV1_H_FLIPADST, 16), AV1_H_FLIPADST, "rt rect TX_8X16 H_FLIPADST");
+    assert_eq(ir_tt_rt(t1632, AV1_IDTX, 2), AV1_IDTX, "rt rect TX_16X32 IDTX (INTER_3)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
@@ -1096,6 +1814,25 @@ fn main() {
     test_group("the byte-stream layer: real headers drive the inter lane");
     test_inter_header_parseback();
     test_inter_stream_e2e();
+    test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
+    test_ir_inter1();
+    test_ir_inter2();
+    test_ir_inter3();
+    test_ir_420();
+    test_ir_zero();
+    test_ir_vartx_gated();
+    test_group("inter tx-type: CDF/table pins, round-trip, chroma co-location");
+    test_ir_cdf_pins();
+    test_ir_txtype_roundtrip();
+    test_ir_chroma_txtype();
+    test_group("review hardening: full pins, luma-all-zero sync, reduced_tx, rect");
+    test_ir_full_cdf_pins();
+    test_ir_full_table_pins();
+    test_ir_luma_allzero_chroma();
+    test_ir_lossless_lftx();
+    test_ir_reduced_tx();
+    test_ir_one_luma_tx();
+    test_ir_rect_txset();
     return assert_summary();
 }
 

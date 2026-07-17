@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.84 (AV1 decode: THE INTER MILESTONE — a genuine inter frame decodes end-to-end, raw bytes → motion-compensated pixels from the DPB, through av1_decode_stream; 8/10/12-bit, multi-tile, superres; next: the non-skip inter residual)
+## Status — 0.7.85 (AV1 decode: THE NON-SKIP INTER RESIDUAL — a non-skip inter block decodes with the reconstructed residual added onto the MC prediction, uniform-tx scope; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: the var-tx inter residual)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (27,078 suite assertions + 1,140 fuzz
+derived, and adversarially tested (27,352 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

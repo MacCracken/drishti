@@ -6,7 +6,28 @@
 
 ## Version
 
-**0.7.84** — cut 2026-07-16, not yet tagged (user's git). **THE INTER TILE DECODE — THE MILESTONE.**
+**0.7.85** — cut 2026-07-17, not yet tagged (user's git). **THE NON-SKIP INTER RESIDUAL (uniform-tx).**
+The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
+ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
+var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready
+(txb_skip/eob/coeff_base/br/dc_sign CDFs are set-agnostic) — the only NEW machinery is the inter
+TRANSFORM-TYPE reads: `av1_transform_type_decode/encode` gained the is_inter branch (reads/writes
+`inter_tx_type`, placed BEFORE the set dispatch — the tx-set enum COLLIDES INTER_1==INTRA_1); new
+Default_Inter_Tx_Type_Set1/2/3 CDFs (spec §10, 3-source verified) into av1_noncoeffcdf's TWO-tier blob (static
+builder 1636→1695 AND the av1_ncdf_new copy 1634→1693 — the ship-green-wrong trap); Tx_Type_Inter_Inv_Set1/2/3
++ Tx_Type_In_Set_Inter[4][16] into av1_txtype; compute_tx_type inter-chroma co-location (the block's single
+luma TxType via AV1TTC_LUMA_TXTYPE, since <=64x64 uniform blocks have one luma tx). The DRIVER
+(av1_intertile): av1_transform_block_inter + av1_residual_inter (NO intra predict; coeffs is_inter=1 +
+reconstruct-onto-MC) + the paired encode lane (reads a per-block residual plan via the new AV1FB_RESID slot),
+wired behind a VAR-TX gate (skip==0 && TX_MODE_SELECT && sub_size>BLOCK_4X4 && base_q!=0 → UNSUPPORTED, both
+lanes). Av1BlockInfo grew 224→232 (a layout-guard test caught it). THE PROOF (tests/av1_intertile.tcyr, 166):
+non-skip blocks round-trip with pixels EXHAUSTIVELY equal to an INDEPENDENT oracle (MC + reconstruct composed
+from verified leaves with KNOWN planted coeffs/tx types) — per set (INTER_1/2/3), mono + 4:2:0, zero-residual
+== pure MC; the 4:2:0 case caught a tx-type-vs-tx-size bug in the TEST oracle (decoder was right). Plus
+tx-type round-trip, compute_tx_type matching scripts/refs/inter_residual_ref.py, absolute-offset CDF/table
+pins, the var-tx gate. 11 mutations, 11 killed, 0 survivors. THE REVIEW (14 agents, 4 dims, worktree-isolated) confirmed 5+2 findings, all folded: the MAJOR was round-trip circularity (wrong interior CDF/membership/inverse values SURVIVED — every test round-trips through drishti's own encoder; fixed with FULL absolute-offset pins of all 59 CDF + 30 inverse + 64 membership entries vs the ref, killing the 3 survivors); a real encode/decode chroma-tx-type DESYNC when the luma tx is all-zero (no transform_type symbol written -> decoder derives DCT_DCT; the encoder now matches, byte-comparison witnessed); lossless chroma LFTX clamped to TX_4X4; reduced_tx_set threaded from the fh (latent fix) + covered; rectangular tx-set + the one-luma-tx-per-block co-location precondition pinned. Spawned (pre-existing): use_128x128_superblock is unrejected (silently mis-parsed). Inter suite 166->343. Next: **the VAR-TX inter residual**
+(read_var_tx_size + txfm_split CDF + transform_tree + the full per-4x4 TxTypes grid), then compound/OBMC/warp
++ the temporal scan. **Prior: THE INTER TILE DECODE — THE MILESTONE.**
 A genuine AV1 inter frame decodes END-TO-END: raw bytes → the complete mode-info decode → motion-
 compensated pixels from a DPB reference, through decode_block/decode_tile AND av1_decode_stream. NEW
 module `src/av1_intertile.cyr` (after av1_dpb, the enum-visibility rule; the block/tile dispatchers
@@ -239,13 +260,13 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 ## Gates (all green, 2026-07-16)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 38 suites / **27,078 assertions**: drishti 51 · bits
+- `make test` — 38 suites / **27,352 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 4,253 · av1_intertile 98 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 4,254 · av1_intertile 343 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — exit 0; `make lint` — exit 0, clean for **every** module

@@ -273,9 +273,13 @@ Baseline (0.7.0): OBU layer + sequence header.
   selection; segmentation reads / delta-q/lf / the intra fork remain hard-gated deferrals of this
   list) are in too, and **THE INTER TILE DECODE 0.7.84 — THE MILESTONE, REACHED**
   (`src/av1_intertile.cyr`: a genuine skip-path inter frame decodes end-to-end, raw bytes →
-  motion-compensated pixels from the DPB, through `av1_decode_stream`); next the NON-SKIP
-  INTER RESIDUAL (var-tx reads + inter coeffs — also makes the two 0.7.84 tracked mutation
-  residuals killable), then
+  motion-compensated pixels from the DPB, through `av1_decode_stream`), and **THE NON-SKIP INTER
+  RESIDUAL 0.7.85 — UNIFORM-TX** (`av1_transform_block_inter`/`av1_residual_inter`: `inter_tx_type`
+  reads + inter coeffs + reconstruct-onto-MC; non-skip inter blocks decode with a real residual,
+  TX_MODE_LARGEST scope; the inter transform-type CDF/inverse/membership tables land in
+  `av1_txtype`/`av1_noncoeffcdf`); next the **VAR-TX inter residual** (`read_var_tx_size` +
+  `txfm_split` CDF + `transform_tree` + the full per-4x4 `TxTypes` grid — un-gates TX_MODE_SELECT
+  inter, and makes the two 0.7.84 tracked skip-ctx residuals killable), then
   `warp_estimation` (7.11.3.8) turns the
   samples into a model, the compound/inter-intra blends + OBMC, the temporal scan (needs the
   DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free, dav1d

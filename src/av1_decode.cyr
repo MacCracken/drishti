@@ -304,6 +304,14 @@ enum Av1FrameDec {
 fn av1_frame_dec_new(seq, fh, out_err): i64 {
     store64(out_err, DR_OK);
     if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    # use_128x128_superblock (spec 5.5.1): the tile SB loop (av1_decode_tile) hardcodes
+    # 64x64 SBs — it steps by AV1_SB4 and calls av1_decode_partition with BLOCK_64X64 —
+    # so a 128-SB stream would be silently mis-parsed (only the top-left 64x64 of each
+    # superblock) instead of decoded. Reject it here, at the one chokepoint every decode
+    # path (av1_decode_frame/_ref, av1_decode_obus, av1_decode_stream) shares, so a
+    # valid-but-128-SB seq fails cleanly rather than producing garbage (trust no input
+    # byte, CLAUDE.md; 128-SB superblock decode is out of scope, roadmap.md).
+    if (av1_seq_use_128x128(seq) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     var num_planes = av1_seq_num_planes(seq);
     var frame = dr_frame_new(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
     num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),

@@ -23,6 +23,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exactly those. Mutation-verified: the above and left loops each flipped back to absolute
   independently — 12 and 11 assertions red respectively; restore byte-identical, 27106/27106 green.
 
+## [0.7.85] - 2026-07-17
+
+**THE NON-SKIP INTER RESIDUAL (uniform-tx).** A genuine non-skip inter block now decodes with the
+reconstructed residual **added onto the motion-compensated prediction** — the first inter path that
+codes coefficients. Scope: the UNIFORM-tx case (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane, no
+`txfm_split`); var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite.
+
+- **Inter transform-type reads** — the missing piece, since the coeff loop was otherwise inter-ready.
+  `av1_transform_type_decode/encode` gained the `is_inter` branch (reads/writes `inter_tx_type`), placed
+  BEFORE the set dispatch because the tx-set enum collides (`AV1_TX_SET_INTER_1 == AV1_TX_SET_INTRA_1`).
+  New `Default_Inter_Tx_Type_Set1/2/3` CDFs (spec §10, 3-source verified vs libaom `default_inter_ext_tx_cdf`
+  + dav1d) into `av1_noncoeffcdf.cyr`'s TWO-tier blob (static builder + the `av1_ncdf_new` copy both grown);
+  the `Tx_Type_Inter_Inv_Set1/2/3` + `Tx_Type_In_Set_Inter[4][16]` tables + accessors into `av1_txtype.cyr`.
+- **`compute_tx_type` inter chroma** co-locates the luma TxType (uniform tx: the block's single luma type,
+  threaded via a new `AV1TTC_LUMA_TXTYPE` slot), gated by `Tx_Type_In_Set_Inter`.
+- **The inter residual driver** (`av1_intertile.cyr`): `av1_transform_block_inter` + `av1_residual_inter`
+  (NO intra prediction — MC already wrote the pixels; `av1_coeffs_decode` with `is_inter=1` then
+  `av1_reconstruct` ADDS residual onto the MC prediction), the paired encode lane
+  (`av1_residual_inter_encode` reading a per-block residual plan via the new `AV1FB_RESID` slot), wired into
+  `av1_decode/encode_block_inter` behind the **var-tx gate** (`skip==0 && TX_MODE_SELECT && sub_size>BLOCK_4X4
+  && base_q!=0 → DR_ERR_UNSUPPORTED`, mirrored on both lanes). `AV1TILE_TX_MODE` is threaded in
+  `av1_tile_set_inter_ctx`.
+
+**Proofs** (`tests/av1_intertile.tcyr`, 98 → 166 assertions): non-skip inter blocks round-trip
+(encode→decode) with pixels compared EXHAUSTIVELY against an INDEPENDENT oracle (MC via `av1_mc_pred_block`
++ residual via `av1_reconstruct`, both already reference-verified, composed with the KNOWN planted coeffs +
+tx types) — per tx SET (INTER_1 8×8, INTER_2 16×16, INTER_3 32×32 IDTX), MONO + 4:2:0 (three-plane chroma
+co-location), and the zero-residual (`all_zero`) non-skip path == pure MC. The 4:2:0 case caught a real
+tx-type-vs-tx-size confusion in the test oracle (the decoder was correct) — the decoder path is sharp. Plus:
+inter tx-type round-trip across all three sets, `compute_tx_type` chroma matching `scripts/refs/inter_residual_ref.py`
+(spec-literal), absolute-offset CDF/table pins, and the var-tx scope gate (both lanes refuse). All
+**mutation-verified — 11 mutations, 11 killed, 0 survivors**: symbol-count/dispatch per set, inverse-map +
+membership transcription, the two-tier CDF allocation trap, the `AV1TTC_LUMA_TXTYPE` thread, `is_inter`
+routing, the residual/reconstruct calls, and the var-tx gate. A `Av1BlockInfo` layout-guard test caught the
+struct growth (224→232) — updated.
+
+**The adversarial review (14 agents, 4 dimensions, worktree-isolated) confirmed 5 findings + 2 uncertain,
+all folded in:**
+- **THE MAJOR (test-adequacy, the [[cdf-blob-tests-must-pin-absolute-offsets]] lesson): round-trip
+  circularity.** Wrong interior inter-tx CDF values, a flipped membership entry, and an inverse-map swap
+  all SURVIVED the suite — every test round-trips through drishti's OWN encoder with the SAME table, so a
+  symbol survives any monotonic CDF. Fixed with FULL absolute-offset pins: all 59 CDF entries + 30 inverse
+  entries + 64 membership entries checked against `scripts/refs/inter_residual_ref.py` (now emitting the
+  authoritative values). The three previously-surviving mutants are now killed.
+- **A real encode/decode desync** (minor, malformed-plan robustness): the encode lane derived the chroma
+  tx type from the plan's luma type UNCONDITIONALLY, but when the luma tx is all-zero NO `transform_type`
+  symbol is written — the decoder derives DCT_DCT. Fixed: the encoder now uses the effective luma type
+  (DCT_DCT when luma `eob==0`). Witnessed by a deterministic byte-comparison (a 1D-scan-class plan luma
+  type must produce byte-identical output to DCT_DCT).
+- **Lossless chroma LoopfilterTxSizes** recorded the uv max-rect tx instead of TX_4X4 (intra/spec
+  divergence, harmless today — deblocking is off under coded_lossless). Fixed to clamp TX_4X4 for every
+  plane when lossless; witnessed.
+- **Coverage** added: `reduced_tx_set` (routes 16×16 inter → INTER_3) and rectangular tx-set selection
+  (TX_16X8/8X16 → INTER_1, TX_16X32 → INTER_3, round-tripped); the one-luma-tx-per-≤64×64-block invariant
+  (the chroma co-location precondition) pinned. `reduced_tx_set` is now threaded from the frame header in
+  `av1_tile_set_inter_ctx` (a latent fix — the inter path previously took it only from `av1_tile_new`).
+- Spawned (pre-existing, codebase-wide, out of this bite's scope): `use_128x128_superblock` is read but
+  never rejected — a 128-SB stream is silently mis-parsed (the SB loop is 64×64-only). Flagged for a
+  frame-level UNSUPPORTED gate.
+
+Final: **38 suites / 27,352 assertions / 0 failed**; inter suite 166 → 343.
+
 ## [0.7.84] - 2026-07-16
 
 **THE INTER TILE DECODE — the milestone of the inter arc.** A genuine AV1 inter frame decodes
