@@ -217,7 +217,7 @@ fn test_mc_compound_avg() {
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     # ref0 MV (row 16=+2px, col 8=+1px); ref1 MV (row -8=-1px, col 24=+3px). Filter 0.
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0),
     DR_OK, "compound-average decodes");
     var diff = 0;
     y = 0;
@@ -252,7 +252,7 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
     var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     av1_mc_pred_block(s, ref, 0, 0, 0, 32, 32, mvr, mvc, 0, 0);
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8);
+    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8, 0, 0);
     var big = 0;
     var y = 0;
     while (y < 32) {
@@ -275,7 +275,7 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
 # oracle above — the ONLY change is the weighting. Independent (scripts/refs/dist_wtd_ref.py).
 fn mcd_dist_oracle(r0, r1, fwd, bck, tag): i64 {
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck, 0, 0),
     DR_OK, tag);
     var diff = 0;
     var y = 0;
@@ -320,8 +320,8 @@ fn test_mc_compound_dist() {
     # DISTANCE (13/3) must actually DIFFER from AVERAGE (8/8) — else the mode is untested.
     var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     var dd = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8);
-    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0);
+    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3, 0, 0);
     var ndiff = 0;
     y = 0;
     while (y < 32) {
@@ -333,6 +333,198 @@ fn test_mc_compound_dist() {
         y = y + 1;
     }
     assert_eq(ndiff > 0, 1, "DISTANCE (13/3) DIFFERS from AVERAGE (8/8) — mode observable");
+    return 0;
+}
+
+# COMPOUND DIFFWTD (masked, 0.7.89): the per-pixel difference mask + blend. With ZERO MV the
+# prep is pixel<<ib, so |t0-t1|=|p0-p1|<<ib and the combine (t0*m + t1*(64-m)) >> (ib+6) reduces
+# to the BIT-DEPTH-INDEPENDENT (p0*m + p1*(64-m) + 32) >> 6 — an INDEPENDENT oracle. The mask
+# m = Clip3(0,64, 38 + (Round2(|p0-p1|<<ib, (bd-8)+ib) >> 4)) DOES depend on bit depth (nsh).
+# Two distinct gradients make the mask vary per pixel (the core DIFFWTD property).
+fn mcd_diffwtd_case(bd, mask_type, tag): i64 {
+    var r0 = dr_frame_new(32, 32, 1, 0, 0, bd, 8, Mcd_Err);
+    var r1 = dr_frame_new(32, 32, 1, 0, 0, bd, 8, Mcd_Err);
+    var mx = (1 << bd) - 1;
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            dr_frame_set(r0, 0, x, y, ((x * 37) + (y * 19)) & mx);
+            dr_frame_set(r1, 0, x, y, ((x * 11) + (y * 53) + 7) & mx);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var d = dr_frame_new(32, 32, 1, 0, 0, bd, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type),
+    DR_OK, tag);
+    var ib = 4;
+    if (bd == 12) { ib = 2; }
+    var nsh = (bd - 8) + ib;
+    var diff = 0;
+    var varies = 0;
+    var mfirst = 0 - 1;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            var p0 = dr_frame_get(r0, 0, x, y);
+            var p1 = dr_frame_get(r1, 0, x, y);
+            var ad = p0 - p1;
+            if (ad < 0) { ad = 0 - ad; }
+            var m = av1_clip3(0, 64, 38 + (av1_round2(ad << ib, nsh) >> 4));
+            if (mask_type != 0) { m = 64 - m; }
+            if (mfirst < 0) { mfirst = m; }
+            if (m != mfirst) { varies = 1; }
+            var exp = ((p0 * m) + (p1 * (64 - m)) + 32) >> 6;
+            if (dr_frame_get(d, 0, x, y) != exp) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, tag);
+    assert_eq(varies, 1, "diffwtd mask varies per pixel");
+    return 0;
+}
+# DIFFWTD CHROMA subsampling (4:2:0): the mask is built ONCE on luma then averaged over each
+# 2x2 luma block for chroma (spec 7.11.3.14). Independent oracle recomputes the luma mask from
+# the LUMA refs + the 2x2 Round2 average — witnessing both the subsample math and that the mask
+# comes from LUMA (a builder run on chroma preds would give a different mask). Plane 0 built
+# FIRST (caches Av1_McMask), then plane 1 reads it subsampled.
+fn mcd_diffwtd_chroma_case(bd, mask_type, tag): i64 {
+    var r0 = dr_frame_new(32, 32, 3, 1, 1, bd, 8, Mcd_Err);
+    var r1 = dr_frame_new(32, 32, 3, 1, 1, bd, 8, Mcd_Err);
+    var mx = (1 << bd) - 1;
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(r0, p);
+        var ph = dr_frame_plane_height(r0, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) {
+                dr_frame_set(r0, p, xx, yy, ((xx * 37) + (yy * 19) + (p * 13)) & mx);
+                dr_frame_set(r1, p, xx, yy, ((xx * 11) + (yy * 53) + 7 + (p * 5)) & mx);
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    var d = dr_frame_new(32, 32, 3, 1, 1, bd, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type),
+    DR_OK, tag);
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type),
+    DR_OK, tag);
+    var ib = 4;
+    if (bd == 12) { ib = 2; }
+    var nsh = (bd - 8) + ib;
+    var diff = 0;
+    var cy = 0;
+    while (cy < 16) {
+        var cx = 0;
+        while (cx < 16) {
+            var sum = 0;
+            var ddy = 0;
+            while (ddy <= 1) {
+                var ddx = 0;
+                while (ddx <= 1) {
+                    var lp0 = dr_frame_get(r0, 0, (cx << 1) + ddx, (cy << 1) + ddy);
+                    var lp1 = dr_frame_get(r1, 0, (cx << 1) + ddx, (cy << 1) + ddy);
+                    var lad = lp0 - lp1;
+                    if (lad < 0) { lad = 0 - lad; }
+                    var lm = av1_clip3(0, 64, 38 + (av1_round2(lad << ib, nsh) >> 4));
+                    if (mask_type != 0) { lm = 64 - lm; }
+                    sum = sum + lm;
+                    ddx = ddx + 1;
+                }
+                ddy = ddy + 1;
+            }
+            var m = av1_round2(sum, 2);
+            var cp0 = dr_frame_get(r0, 1, cx, cy);
+            var cp1 = dr_frame_get(r1, 1, cx, cy);
+            var exp = ((cp0 * m) + (cp1 * (64 - m)) + 32) >> 6;
+            if (dr_frame_get(d, 1, cx, cy) != exp) { diff = diff + 1; }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
+fn test_mc_diffwtd() {
+    mcd_diffwtd_case(8, 0, "DIFFWTD 8-bit mt=0 == (p0*m + p1*(64-m) + 32)>>6 (1024 px)");
+    mcd_diffwtd_case(8, 1, "DIFFWTD 8-bit mt=1 (m -> 64-m)");
+    mcd_diffwtd_case(10, 0, "DIFFWTD 10-bit (nsh=6)");
+    mcd_diffwtd_case(12, 0, "DIFFWTD 12-bit (ib=2, nsh=6)");
+    mcd_diffwtd_chroma_case(8, 0, "DIFFWTD 4:2:0 chroma mask subsample (2x2 avg)");
+    mcd_diffwtd_chroma_case(8, 1, "DIFFWTD 4:2:0 chroma mask_type=1");
+    # DIFFWTD must DIFFER from AVERAGE (8/8) on distinct-content refs (else the mask is inert).
+    var r0 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var r1 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var yy = 0;
+    while (yy < 32) {
+        var xx = 0;
+        while (xx < 32) {
+            dr_frame_set(r0, 0, xx, yy, ((xx * 37) + (yy * 19)) & 255);
+            dr_frame_set(r1, 0, xx, yy, ((xx * 11) + (yy * 53) + 7) & 255);
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    var dw = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_mc_pred_compound(dw, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0);
+    var nd = 0;
+    yy = 0;
+    while (yy < 32) {
+        var xx = 0;
+        while (xx < 32) {
+            if (dr_frame_get(dw, 0, xx, yy) != dr_frame_get(da, 0, xx, yy)) { nd = nd + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(nd > 0, 1, "DIFFWTD differs from AVERAGE (mask applied)");
+    return 0;
+}
+
+# DIFFWTD known-answers vs scripts/refs/diffwtd_ref.py (spec-literal PYTHON — a third source,
+# independent of the test's inline oracle, so a shared conceptual error in the Cyrius impl AND
+# the inline oracle cannot both hide). Uniform frames -> uniform mask -> the pinned blend value.
+fn diffwtd_kat_luma(p0, p1, bd, mask_type, exp_out, tag): i64 {
+    var r0 = dr_frame_new(4, 4, 1, 0, 0, bd, 8, Mcd_Err);
+    var r1 = dr_frame_new(4, 4, 1, 0, 0, bd, 8, Mcd_Err);
+    dr_frame_fill(r0, 0, p0);
+    dr_frame_fill(r1, 0, p1);
+    var d = dr_frame_new(4, 4, 1, 0, 0, bd, 8, Mcd_Err);
+    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type);
+    assert_eq(dr_frame_get(d, 0, 1, 1), exp_out, tag);
+    return 0;
+}
+fn test_diffwtd_kat() {
+    diffwtd_kat_luma(200, 40, 8, 0, 160, "KAT 200/40 8b mt0 (m=48) -> 160");
+    diffwtd_kat_luma(40, 200, 8, 0, 80, "KAT 40/200 8b mt0 -> 80");
+    diffwtd_kat_luma(200, 40, 8, 1, 80, "KAT 200/40 8b mt1 (m=16) -> 80");
+    diffwtd_kat_luma(128, 128, 8, 0, 128, "KAT equal 8b (m=38) -> 128");
+    diffwtd_kat_luma(255, 0, 8, 0, 211, "KAT 255/0 8b (m=53) -> 211");
+    diffwtd_kat_luma(900, 100, 10, 0, 725, "KAT 900/100 10b (m=50) -> 725");
+    diffwtd_kat_luma(100, 900, 10, 1, 725, "KAT 100/900 10b mt1 (m=14) -> 725");
+    diffwtd_kat_luma(4000, 50, 12, 0, 3321, "KAT 4000/50 12b (m=53) -> 3321");
+    # chroma 4:2:0 KAT: luma 2x2 masks [48,48,38,53] -> chroma m=47; chroma preds 150/90 -> 134.
+    var oe = alloc(8);
+    var r0 = dr_frame_new(4, 4, 3, 1, 1, 8, 8, oe);
+    var r1 = dr_frame_new(4, 4, 3, 1, 1, 8, 8, oe);
+    dr_frame_set(r0, 0, 0, 0, 200); dr_frame_set(r1, 0, 0, 0, 40);   # -> m=48
+    dr_frame_set(r0, 0, 1, 0, 200); dr_frame_set(r1, 0, 1, 0, 40);   # -> m=48
+    dr_frame_set(r0, 0, 0, 1, 128); dr_frame_set(r1, 0, 0, 1, 128);  # -> m=38
+    dr_frame_set(r0, 0, 1, 1, 255); dr_frame_set(r1, 0, 1, 1, 0);    # -> m=53
+    dr_frame_set(r0, 1, 0, 0, 150); dr_frame_set(r1, 1, 0, 0, 90);   # chroma preds
+    var d = dr_frame_new(4, 4, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0);
+    av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0);
+    assert_eq(dr_frame_get(d, 1, 0, 0), 134, "KAT chroma 4:2:0 masks[48,48,38,53]->m47, 150/90 -> 134");
     return 0;
 }
 
@@ -353,6 +545,9 @@ fn main() {
     test_mc_compound_avg();
     test_group("compound-distance MC (7.11.3.15 jnt weights)");
     test_mc_compound_dist();
+    test_group("compound-diffwtd MC (7.11.3.12 diff mask + blend)");
+    test_mc_diffwtd();
+    test_diffwtd_kat();
     return assert_summary();
 }
 

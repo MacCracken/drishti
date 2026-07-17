@@ -6,36 +6,33 @@
 
 ## Version
 
-**0.7.88** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND DISTANCE (jnt) INTER PREDICTION.** A
-two-reference block with compound_idx==0 blends its two predictions with ORDER-HINT DISTANCE WEIGHTS (the
-closer ref weighted more) — the direct extension of 0.7.87 AVERAGE (same prep intermediates, weighted
-combine). Scope stays comp_group_idx==0 (AVERAGE + DISTANCE); only masked wedge/diffwtd stays refused
-UNSUPPORTED on both lanes. av1_dist_wtd_fwd (spec 7.11.3.15, src/av1_mc.cyr) returns FwdWeight->ref0 (Bck=
-16-Fwd->ref1) from the two clamped abs order-hint distances: d0=dist1, d1=dist0 (THE SWAP), order=(d0<=d1),
-a 3-row ratio search over Quant_Dist_Weight=[2,3,2,5,2,7,1,31] selecting Quant_Dist_Lookup=[9,7,11,5,12,4,
-13,3] (rows sum to 16). av1_ref_dist (src/av1_frame.cyr) = Clip3(0,31,Abs(get_relative_dist(OrderHints[ref],
-OrderHint))), reusing the existing 5.9.4 helper. The weighted combine (av1_mc_pred_compound, generalized):
-Clip1(Round2(tmp0*fwd + tmp1*bck, ib+4)); the 4 is DIST_PRECISION_BITS, not ib. AVERAGE is now the fwd=bck=8
-special case — BIT-EXACT with the old Round2(tmp0+tmp1, ib+1) (8*(t0+t1)>>(ib+4) ≡ (t0+t1)>>(ib+1), proven +
-regression-witnessed). Decode computes the weights once per block (8/8 unless compound_idx==0), threads them
-per plane; un-gate both lanes to admit compound_idx==0. 3-source verified (compound_distance.md) — NOT the
-hallucinated {8,8},{7,9},{6,10} an early web fetch produced (also sums to 16 — tables pinned by EXACT pair,
-not sum). THE PROOF (tests/av1_mc_driver.tcyr, tests/av1_intertile.tcyr): the combine vs an INDEPENDENT
-integer-MV oracle (ref0*Fwd+ref1*Bck+8)>>4 (1024 px, incl. 8/8==AVERAGE bit-exact + DISTANCE-differs
-witnesses); the weights + av1_ref_dist vs the new spec-literal scripts/refs/dist_wtd_ref.py (equal->7/9, the
-SWAP witness 13 vs 3, order boundary, zero-dist/order-hint-off->Lookup[3]); the Quant tables pinned to EXACT
-values; a jnt DISTANCE round-trip (unequal-dist refs, Fwd=13) EXHAUSTIVELY equal to the av1_mc_pred_compound
-(Fwd=13) oracle AND differing from the AVERAGE oracle. Mutations, 0 survivors: the combine shift + weight
-pairing die in the driver's INDEPENDENT oracle (the round-trip can't see combine-internal bugs — it shares
-av1_mc_pred_compound), the swap / order boundary / table values die in the weight tests, the decode
-threading dies in the round-trip. THE REVIEW (3 dims, worktree-isolated, patch-applied): weight-math CLEAN,
-memory-safety CLEAN (OrderHints[ref] cannot OOB — ref∈[1,7] via parse-validation + the compound guard + a
-belt-and-suspenders ref1!=INTRA check; no overflow; the ratio search terminates; order-hints-off handled).
-DEFERRED (review-flagged, roadmap): the fwd_eq_bck compound_idx CDF-ctx fix (5.11.29) is UN-witnessable in
-this pre-conformance arc (it shifts one binary symbol's context; a self-consistent round-trip can't see it
-fail and it doesn't change the coded bytes) — it lands WITH conformance testing, not shipped untested; the
-ctx stays fwd_eq_bck=0 (unchanged since 0.7.87, correct for drishti's own round-trips). Next: **compound
-wedge/diffwtd + inter-intra blends, OBMC/warp + the temporal scan**. **Prior: COMPOUND AVERAGE (0.7.87).**
+**0.7.89** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND DIFFWTD (MASKED) INTER PREDICTION.** A
+two-reference block with comp_group_idx==1 && type==COMPOUND_DIFFWTD blends its two predictions through a
+PER-PIXEL difference mask — the first MASKED compound mode, reusing the 0.7.87/0.7.88 prep intermediates.
+Only WEDGE (type==COMPOUND_WEDGE, needs a mask codebook) stays refused on both lanes. av1_diffwtd_mask_build
+(spec 7.11.3.12, src/av1_mc.cyr) fills a new per-luma-pixel Av1_McMask: m = Clip3(0,64, 38 + (Round2(Abs(
+t0-t1), (BitDepth-8)+ib) >> 4)), inverted to 64-m when mask_type!=0 (base 38, DIFF_FACTOR 16, MAX_ALPHA 64;
+the diff-norm shift is bit-depth dependent — 4 @8-bit, 6 @10/12-bit). The blend (av1_mc_pred_compound gained
+comp_mode/mask_type): Clip1(Round2(tmp0*m + tmp1*(64-m), ib+6)); the 6 is AOM_BLEND_A64_ROUND_BITS (log2 of
+the mask-sum 64); the scalar AVERAGE/DISTANCE path (comp_mode==0) is untouched. Chroma (av1_diffwtd_mask_at):
+the mask is built ONCE on luma then read subsampled — 4:2:0 = Round2(2x2 sum, 2), 4:2:2/vert = Round2(2x1,
+1); luma read indices edge-clamped (defensive). Un-gate both lanes to admit type==DIFFWTD; narrow the reject
+to WEDGE. 3-source verified (compound_diffwtd.md). THE PROOF (tests/av1_mc_driver.tcyr, av1_intertile.tcyr):
+the mask+blend vs an INDEPENDENT integer-MV oracle (p0*m+p1*(64-m)+32)>>6 with m recomputed from the spec
+formula (8/10/12-bit, both mask_types, mask varies per-pixel, DIFFWTD-differs-from-AVERAGE); a 4:2:0 chroma
+oracle recomputing the luma mask + 2x2 average (witnessing the subsample AND mask-from-luma); Python-
+independent KATs from the new spec-literal scripts/refs/diffwtd_ref.py (a third derivation); a DIFFWTD
+round-trip (both mask_types) EXHAUSTIVELY equal to the av1_mc_pred_compound(comp_mode=1) oracle AND
+differing from AVERAGE. Mutations, 0 survivors: the combine shift, the diff-norm bit-depth shift, base/
+divisor/Abs/inversion, and the chroma subsample die in the driver's INDEPENDENT oracle (the round-trip
+shares av1_mc_pred_compound, can't see combine-internal bugs); the decode mode-threading + both gate lanes
+die in the round-trips. THE REVIEW (3 dims, worktree-isolated): math CLEAN, memory-safety CLEAN (the
+top-risk chroma-subsample × edge-clamp proven safe at odd luma dims down to 1x1; no Av1_McMask overflow).
+One CONFIRMED coverage finding — the DECODE-side WEDGE reject had NO witness (a 64x64 block can't carry a
+wedge symbol) — CLOSED with a 32x32-via-SPLIT fixture that mints a WEDGE stream and drives it through the
+decoder as the LAST sub-block (so mis-admission -> DR_OK, not a truncation error), mutation-verified; plus a
+latent lw==0 negative-index read (unreachable) hardened with a guard. Next: **compound WEDGE (the mask
+codebook) + inter-intra blends, OBMC/warp + the temporal scan**. **Prior: COMPOUND DISTANCE (jnt) (0.7.88).**
 The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
 ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
 var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready

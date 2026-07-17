@@ -284,10 +284,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   (`av1_mc_pred_compound` + the `put_8tap` prep/`ib` precision path — a two-reference block predicts from
   BOTH refs and averages them; scope `COMPOUND_AVERAGE` only), and **COMPOUND DISTANCE (jnt) 0.7.88**
   (`av1_dist_wtd_fwd` 7.11.3.15 order-hint weights + the generalized weighted combine — `compound_idx==0`
-  blends the two predictions by distance; masked wedge/diffwtd still refused). DEFERRED to the
-  conformance era: the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary symbol's
-  context, un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors, not on the
-  pre-conformance decode lane. Next the remaining **compound wedge/diffwtd + inter-intra** blends,
+  blends the two predictions by distance; masked wedge/diffwtd still refused), and **COMPOUND DIFFWTD
+  (masked) 0.7.89** (`av1_diffwtd_mask_build` 7.11.3.12 per-pixel difference mask + the 7.11.3.14 mask
+  blend + chroma subsampling — `comp_group_idx==1 && type==DIFFWTD` blends by a difference mask; WEDGE
+  still refused). DEFERRED to the conformance era: the `fwd_eq_bck` compound_idx CDF-context term
+  (5.11.29) — it shifts one binary symbol's context, un-witnessable by a self-consistent round-trip, so it
+  lands with external jnt vectors, not on the pre-conformance decode lane. Next the remaining **compound
+  WEDGE** (the mask codebook — `Wedge_Masks` + `av1_read_wedge_index`'s prediction consumer) + **inter-intra**
+  blends,
   `warp_estimation` (7.11.3.8) turning the
   samples into a model, OBMC, the temporal scan (needs the
   DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free, dav1d

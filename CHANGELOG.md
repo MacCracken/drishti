@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.89] - 2026-07-17
+
+**COMPOUND DIFFWTD (MASKED) INTER PREDICTION.** A two-reference block with `comp_group_idx == 1` and
+`compound_type == COMPOUND_DIFFWTD` now blends its two predictions through a PER-PIXEL difference mask —
+where the two predictions disagree most, the mask leans toward one reference. This is the first MASKED
+compound mode and reuses the 0.7.87/0.7.88 prep intermediates. Scope stays exactly here: WEDGE (the other
+masked mode, `type == COMPOUND_WEDGE`) still needs a mask codebook and remains a later bite, refused on
+both lanes.
+
+### Added
+
+- **The difference-weight mask** (spec 7.11.3.12): `av1_diffwtd_mask_build` fills a new per-luma-pixel
+  `Av1_McMask` — `m = Clip3(0, 64, 38 + (Round2(Abs(t0-t1), (BitDepth-8)+ib) >> 4))`, inverted to `64-m`
+  when `mask_type != 0`. Base 38, DIFF_FACTOR 16, AOM_BLEND_A64_MAX_ALPHA 64. The diff-normalization shift
+  is bit-depth dependent (4 @8-bit, 6 @10/12-bit) — a naive hardcode passes 8-bit and silently fails
+  ≥10-bit, so ≥10-bit KATs ship. **3-source verified** (`compound_diffwtd.md`).
+- **The mask blend** (spec 7.11.3.14, `av1_mc_pred_compound` extended with `comp_mode`/`mask_type`):
+  `Clip1(Round2(tmp0*m + tmp1*(64-m), ib+6))` — the `6` is AOM_BLEND_A64_ROUND_BITS (log2 of the mask-sum
+  64). The AVERAGE/DISTANCE scalar path (`comp_mode == 0`) is untouched.
+- **Chroma mask subsampling** (`av1_diffwtd_mask_at`): the mask is built ONCE on luma, then read subsampled
+  for chroma — 4:2:0 = `Round2(2×2 luma-mask sum, 2)`, 4:2:2 / vertical = `Round2(2×1 sum, 1)`. Luma read
+  indices are edge-clamped (defense-in-depth; a conformant decode never overhangs).
+- **The decode/encode un-gate**: both lanes now admit `comp_group_idx == 1` when `type == COMPOUND_DIFFWTD`;
+  the reject narrows to WEDGE only.
+
+**Proofs** (`tests/av1_mc_driver.tcyr`, `tests/av1_intertile.tcyr`): the mask+blend against an INDEPENDENT
+integer-MV oracle `(p0*m + p1*(64-m) + 32) >> 6` with `m` recomputed from the spec formula (8/10/12-bit,
+both mask_type polarities, the mask proven to vary per-pixel, and DIFFWTD-differs-from-AVERAGE); a 4:2:0
+CHROMA oracle that recomputes the luma mask + 2×2 average (witnessing both the subsample math and that the
+mask is sourced from LUMA); Python-independent known-answers pinned from the new spec-literal
+`scripts/refs/diffwtd_ref.py` (a third derivation, defeating a shared impl/inline-oracle error); and a
+DIFFWTD round-trip (both mask_types) EXHAUSTIVELY equal to the `av1_mc_pred_compound(comp_mode=1)` oracle
+AND differing from AVERAGE. **Mutation-verified — 0 survivors**: the combine shift, the diff-norm
+bit-depth shift, the base/divisor/Abs/inversion, and the chroma subsample die in the driver's INDEPENDENT
+oracle (the round-trip shares `av1_mc_pred_compound`, so it can't see combine-internal bugs); the decode
+mode-threading and both gate lanes die in the round-trips.
+
+**The adversarial review (3 dimensions, worktree-isolated, patch-applied):** mask+combine math CLEAN
+(ref-port-matched, every witness bites); memory-safety CLEAN (the top-risk chroma-subsample × edge-clamp
+proven safe at odd luma dims down to 1×1, no `Av1_McMask` overflow, no overflow/infinite-loop). One
+CONFIRMED coverage finding — the DECODE-side WEDGE reject had no witness (a 64×64 block can't carry a wedge
+symbol) — now CLOSED with a 32×32-via-SPLIT fixture that mints a WEDGE stream and drives it through the
+decoder as the LAST sub-block (so mis-admission yields `DR_OK`, not a truncation error), mutation-verified.
+A latent `av1_diffwtd_mask_at` `lw==0` negative-index read (unreachable via bitstream) was hardened with a
+guard.
+
 ## [0.7.88] - 2026-07-17
 
 **COMPOUND DISTANCE (jnt) INTER PREDICTION.** A two-reference block whose `compound_idx == 0` now blends
