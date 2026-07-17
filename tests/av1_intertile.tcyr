@@ -2225,7 +2225,8 @@ fn test_ir_compound() {
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "compound tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP, 8, 8, 0, 0);
+    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
+    8, 8, 0, 0, 0, 0, 0);
     var diff = 0;
     y = 0;
     while (y < 64) {
@@ -2291,86 +2292,6 @@ fn test_ir_compound_missing_ref() {
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb2);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_ERR_BOUNDS,
     "missing-ref: compound with empty ALTREF slot -> BOUNDS (no OOB)");
-    return 0;
-}
-
-fn test_ir_compound_gates() {
-    # 0.7.89: DIFFWTD (comp_group_idx==1, type==DIFFWTD) is now IN SCOPE (test_ir_compound_diffwtd).
-    # WEDGE (type==COMPOUND_WEDGE) stays refused — no mask codebook yet. Witnessed on the ENCODE
-    # gate: a 64x64 block can't carry a wedge SYMBOL (wedge_bits==0), so the decode-gate WEDGE
-    # reject waits for a wedge-eligible bite; the encode gate reads the block's compound-type
-    # directly and refuses WEDGE with DR_ERR_UNSUPPORTED regardless.
-    var oe = alloc(8);
-    var r0 = it_ref_frame();
-    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    var fh = it_fh();
-    store64(fh + AV1FH_REFERENCE_SELECT, 1);
-    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
-    var dpb = av1_dpb_new();
-    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
-    av1_dpb_store(dpb, fh, r0);
-    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
-    av1_dpb_store(dpb, fh, r1);
-    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
-    var refs = it_refs();
-    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
-    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
-    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
-    var seq = it_seq();
-    store64(seq + AV1_SEQ_ENABLE_MASKED, 1);
-    var blk = it_blk_comp(16, 8, 0 - 8, 24);
-    var ct = (blk + AV1FB_IB) + AV1IB_CT;
-    store64(ct + AV1CT_GROUPIDX, 1);
-    store64(ct + AV1CT_TYPE, AV1_COMPOUND_WEDGE);
-    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
-    av1_tile_grids_new(et);
-    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
-    var pp = alloc(8);
-    store64(pp + 0, AV1_PARTITION_NONE);
-    var pf = alloc(8);
-    store64(pf + 0, blk);
-    var tlen = 0;
-    av1_encode_inter_tile(et, pp, pf, 1, &tlen);
-    assert_eq(load64(et + AV1TILE_IERR), DR_ERR_UNSUPPORTED, "WEDGE compound: encode gate refuses");
-    assert_eq(tlen, 0, "WEDGE compound: encode finalizes no tile");
-    # DECODE-side WEDGE reject: mint a WEDGE stream at a WEDGE-ELIGIBLE size (32x32 via a SPLIT
-    # partition, so wedge_bits!=0 and the compound_type SYMBOL actually carries WEDGE). Crucially
-    # the WEDGE block is the LAST of the four 32x32 sub-blocks (blocks 0-2 are in-scope AVERAGE):
-    # so if the decode gate WRONGLY admits it, the tile COMPLETES to DR_OK (silently mis-predicted
-    # as scalar AVERAGE) rather than erroring on a truncated tail — that is what makes this a clean
-    # witness of the gate, not of stream truncation. The encode gate discards the tile, so finish
-    # the symbol encoder BY HAND and drive it through the DECODER; the gate must refuse UNSUPPORTED.
-    store64(ct + AV1CT_WEDGEIDX, 0);
-    store64(ct + AV1CT_WEDGESIGN, 0);
-    var avgblk = it_blk_comp(16, 8, 0 - 8, 24);        # AVERAGE (group=0, compound_idx=1)
-    var pp2 = alloc(5 * 8);
-    store64(pp2 + 0, AV1_PARTITION_SPLIT);
-    store64(pp2 + 8, AV1_PARTITION_NONE);
-    store64(pp2 + 16, AV1_PARTITION_NONE);
-    store64(pp2 + 24, AV1_PARTITION_NONE);
-    store64(pp2 + 32, AV1_PARTITION_NONE);
-    var pf2 = alloc(4 * 8);
-    store64(pf2 + 0, avgblk);
-    store64(pf2 + 8, avgblk);
-    store64(pf2 + 16, avgblk);
-    store64(pf2 + 24, blk);                            # WEDGE is the LAST sub-block
-    var ef2 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    var et2 = av1_tile_new(ef2, 16, 16, 40, 1, 0, 1);
-    av1_tile_grids_new(et2);
-    av1_tile_set_inter_ctx(et2, fh, refs, seq, dpb);
-    var tlen2 = 0;
-    av1_encode_inter_tile(et2, pp2, pf2, 1, &tlen2);
-    assert_eq(load64(et2 + AV1TILE_IERR), DR_ERR_UNSUPPORTED, "WEDGE 32x32: encode gate refuses");
-    var blen = 0;
-    var bb = av1_sym_enc_finish(load64(et2 + AV1TILE_ENC), &blen);
-    assert_eq(blen > 0, 1, "WEDGE 32x32: mode-info minted");
-    var df2 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    var dt2 = av1_tile_new(df2, 16, 16, 40, 1, 0, 1);
-    av1_tile_grids_new(dt2);
-    av1_tile_set_inter_ctx(dt2, fh, refs, seq, dpb);
-    assert_eq(av1_decode_inter_tile(dt2, bb, blen, 1), DR_ERR_UNSUPPORTED,
-    "WEDGE 32x32: decode gate refuses (no scalar mis-predict)");
     return 0;
 }
 
@@ -2497,10 +2418,10 @@ fn test_ir_compound_distance() {
     assert_eq(fwd, 13, "round-trip Fwd = 13 (dist0=2, dist1=10)");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    fwd, 16 - fwd, 0, 0);
+    fwd, 16 - fwd, 0, 0, 0, 0, 0);
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0);
+    8, 8, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -2514,14 +2435,14 @@ fn test_ir_compound_distance() {
         }
         y = y + 1;
     }
-    assert_eq(diff, 0, "compound DISTANCE block: decode == av1_mc_pred_compound(Fwd=13) oracle (4096)");
+    assert_eq(diff, 0, "compound DISTANCE block: decode == av1_mc_pred_compound(Fwd=13, 0, 0, 0) oracle (4096)");
     assert_eq(adiff > 0, 1, "decoded DISTANCE differs from the AVERAGE oracle (weights threaded)");
     return 0;
 }
 
 # DIFFWTD (masked) ROUND-TRIP (0.7.89): a skip=1 comp_group_idx==1 / type==DIFFWTD block
 # (enable_masked_compound so mask_type is coded). Decoded pixels EXHAUSTIVELY equal the verified
-# av1_mc_pred_compound(comp_mode=1) oracle AND differ from the AVERAGE oracle (proving the decode
+# av1_mc_pred_compound(comp_mode=1, 0, 0, 0) oracle AND differ from the AVERAGE oracle (proving the decode
 # threaded comp_mode + mask_type, and built the per-pixel mask). Both mask_type polarities.
 fn it_diffwtd_roundtrip(mask_type, tag): i64 {
     var oe = alloc(8);
@@ -2571,10 +2492,10 @@ fn it_diffwtd_roundtrip(mask_type, tag): i64 {
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "diffwtd tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 1, mask_type);
+    8, 8, 1, mask_type, 0, 0, 0);
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0);
+    8, 8, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -2595,6 +2516,103 @@ fn it_diffwtd_roundtrip(mask_type, tag): i64 {
 fn test_ir_compound_diffwtd() {
     it_diffwtd_roundtrip(0, "compound DIFFWTD mask_type=0: decode == av1_mc_pred_compound oracle (4096)");
     it_diffwtd_roundtrip(1, "compound DIFFWTD mask_type=1: decode == av1_mc_pred_compound oracle (4096)");
+    return 0;
+}
+
+# WEDGE (masked) ROUND-TRIP (0.7.90): a skip=1 comp_group_idx==1 / type==WEDGE block at a
+# WEDGE-ELIGIBLE size (32x32 via a SPLIT partition — 64x64 has wedge_bits==0). All four 32x32
+# sub-blocks are the same WEDGE block; decoded pixels EXHAUSTIVELY equal the verified
+# av1_mc_pred_compound(comp_mode=2) oracle per 32x32 region AND differ from AVERAGE (proving the
+# decode threaded comp_mode=2 + wedge_idx/sign + sub_size, and built the codebook mask).
+fn iw_oracle(dstf, r0, r1, rx, ry, wedge_idx, wedge_sign): i64 {
+    av1_mc_pred_compound(dstf, r0, r1, 0, rx, ry, 32, 32, 16, 8, 0 - 8, 24, AV1_EIGHTTAP,
+    AV1_EIGHTTAP, 8, 8, 2, 0, AV1_BLOCK_32X32, wedge_idx, wedge_sign);
+    return 0;
+}
+fn it_wedge_roundtrip(wedge_idx, wedge_sign, tag): i64 {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_MASKED, 1);
+    var blk = it_blk_comp(16, 8, 0 - 8, 24);
+    var ct = (blk + AV1FB_IB) + AV1IB_CT;
+    store64(ct + AV1CT_GROUPIDX, 1);
+    store64(ct + AV1CT_TYPE, AV1_COMPOUND_WEDGE);
+    store64(ct + AV1CT_WEDGEIDX, wedge_idx);
+    store64(ct + AV1CT_WEDGESIGN, wedge_sign);
+    var pp = alloc(5 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);
+    store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);
+    store64(pp + 32, AV1_PARTITION_NONE);
+    var pf = alloc(4 * 8);
+    store64(pf + 0, blk);
+    store64(pf + 8, blk);
+    store64(pf + 16, blk);
+    store64(pf + 24, blk);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "wedge tile encoded");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "wedge tile decodes");
+    # oracle: the 4 32x32 regions (SPLIT order (0,0)(32,0)(0,32)(32,32)).
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    iw_oracle(xf, r0, r1, 0, 0, wedge_idx, wedge_sign);
+    iw_oracle(xf, r0, r1, 32, 0, wedge_idx, wedge_sign);
+    iw_oracle(xf, r0, r1, 0, 32, wedge_idx, wedge_sign);
+    iw_oracle(xf, r0, r1, 32, 32, wedge_idx, wedge_sign);
+    # AVERAGE oracle (comp_mode=0) for the differs-witness.
+    var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
+    8, 8, 0, 0, 0, 0, 0);
+    var diff = 0;
+    var adiff = 0;
+    y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            var got = dr_frame_get(df, 0, x, y);
+            if (got != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            if (got != dr_frame_get(af, 0, x, y)) { adiff = adiff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, tag);
+    assert_eq(adiff > 0, 1, "decoded WEDGE differs from the AVERAGE oracle (mask threaded)");
+    return 0;
+}
+fn test_ir_compound_wedge() {
+    it_wedge_roundtrip(0, 0, "compound WEDGE idx0 sign0: decode == av1_mc_pred_compound oracle (4096)");
+    it_wedge_roundtrip(6, 1, "compound WEDGE idx6 sign1: decode == oracle (4096)");
     return 0;
 }
 
@@ -2627,11 +2645,11 @@ fn main() {
     test_ir_vartx();
     test_ir_compound();
     test_ir_compound_missing_ref();
-    test_ir_compound_gates();
     test_dist_tables();
     test_ir_dist_weights();
     test_ir_compound_distance();
     test_ir_compound_diffwtd();
+    test_ir_compound_wedge();
     test_ir_vartx_edge_clamp();
     test_ir_vartx_32();
     test_ir_vartx_intertx_grid();

@@ -635,6 +635,209 @@ fn av1_diffwtd_mask_at(r, c, sx, sy): i64 {
     }
     return av1_round2(sum, sx + sy);            # shift 1 (2:2/vert) or 2 (2:0); never 0 here
 }
+# ================================================================
+# WEDGE masked compound (spec 7.11.3.11) — the mask CODEBOOK + per-block generation. The
+# blend + chroma subsample are the SAME as DIFFWTD (av1_diffwtd_mask_at + the ib+6 loop); only
+# the mask FILL is new. 3-source verified (compound_wedge.md). Lazy tables (av1_wedge_bits_tbl
+# idiom): the 6x64x64 master + the 3x16 codebook build once. Ramps are 0..64 hard literals.
+# ================================================================
+# the three 1-D master ramps (0..64): zeros left, a short soft transition, 64s right.
+fn av1_wm_even(i): i64 {
+    if (i < 28) { return 0; }
+    if (i > 35) { return 64; }
+    if (i == 28) { return 1; }
+    if (i == 29) { return 4; }
+    if (i == 30) { return 11; }
+    if (i == 31) { return 27; }
+    if (i == 32) { return 46; }
+    if (i == 33) { return 58; }
+    if (i == 34) { return 62; }
+    return 63;
+}
+fn av1_wm_odd(i): i64 {
+    if (i < 28) { return 0; }
+    if (i > 35) { return 64; }
+    if (i == 28) { return 1; }
+    if (i == 29) { return 2; }
+    if (i == 30) { return 6; }
+    if (i == 31) { return 18; }
+    if (i == 32) { return 37; }
+    if (i == 33) { return 53; }
+    if (i == 34) { return 60; }
+    return 63;
+}
+fn av1_wm_vert(i): i64 {
+    if (i < 29) { return 0; }
+    if (i > 34) { return 64; }
+    if (i == 29) { return 2; }
+    if (i == 30) { return 7; }
+    if (i == 31) { return 21; }
+    if (i == 32) { return 43; }
+    if (i == 33) { return 57; }
+    return 62;
+}
+# the 6x64x64 master planes (u64 slots, values 0..64). Index dir*4096 + row*64 + col. Direction
+# enum: HORIZONTAL=0 VERTICAL=1 OBLIQUE27=2 OBLIQUE63=3 OBLIQUE117=4 OBLIQUE153=5. Built lazily.
+var Av1_WedgeMaster = 0;
+fn av1_wedge_master_tbl(): i64 {
+    if (Av1_WedgeMaster != 0) { return Av1_WedgeMaster; }
+    var m = alloc(6 * 64 * 64 * 8);
+    if (m == 0) { return 0; }
+    # Stage 1 (spec 7.11.3.11): OBLIQUE63 (dir 3) + VERTICAL (dir 1). shift decrements ONCE
+    # between the even row and the odd row, and PERSISTS across the outer iteration (the slope).
+    var shift = 16;
+    var i = 0;
+    while (i < 64) {
+        var j = 0;
+        while (j < 64) {
+            store64(m + (((3 * 4096) + (i * 64) + j) * 8), av1_wm_even(av1_clip3(0, 63, j - shift)));
+            j = j + 1;
+        }
+        shift = shift - 1;
+        j = 0;
+        while (j < 64) {
+            store64(m + (((3 * 4096) + (((i + 1) * 64) + j)) * 8), av1_wm_odd(av1_clip3(0, 63, j - shift)));
+            j = j + 1;
+        }
+        j = 0;
+        while (j < 64) {
+            store64(m + (((1 * 4096) + (i * 64) + j) * 8), av1_wm_vert(j));
+            store64(m + (((1 * 4096) + (((i + 1) * 64) + j)) * 8), av1_wm_vert(j));
+            j = j + 1;
+        }
+        i = i + 2;
+    }
+    # Stage 2: derive OBLIQUE27 (transpose), OBLIQUE117 (hflip+complement), OBLIQUE153
+    # (transpose+hflip+complement), HORIZONTAL (transpose of VERTICAL). Index-form, literal.
+    i = 0;
+    while (i < 64) {
+        var j2 = 0;
+        while (j2 < 64) {
+            var msk = load64(m + (((3 * 4096) + (i * 64) + j2) * 8));
+            store64(m + (((2 * 4096) + (j2 * 64) + i) * 8), msk);
+            store64(m + (((4 * 4096) + (i * 64) + (63 - j2)) * 8), 64 - msk);
+            store64(m + (((5 * 4096) + ((63 - j2) * 64) + i) * 8), 64 - msk);
+            store64(m + (((0 * 4096) + (j2 * 64) + i) * 8), load64(m + (((1 * 4096) + (i * 64) + j2) * 8)));
+            j2 = j2 + 1;
+        }
+        i = i + 1;
+    }
+    Av1_WedgeMaster = m;
+    return m;
+}
+# Wedge_Codebook[3][16] packed as dir*64 + xoff*8 + yoff (shape 0=TALL,1=WIDE,2=SQUARE; shape =
+# (h>w)?0 : (h<w)?1 : 2). Offsets in eighths of the block dim. Lazy 48-entry blob.
+var Av1_WedgeCb = 0;
+fn av1_wedge_cb_tbl(): i64 {
+    if (Av1_WedgeCb != 0) { return Av1_WedgeCb; }
+    var t = alloc(48 * 8);
+    if (t == 0) { return 0; }
+    # shape 0 TALL
+    store64(t + (0 * 8), 164);
+    store64(t + (1 * 8), 228);
+    store64(t + (2 * 8), 292);
+    store64(t + (3 * 8), 356);
+    store64(t + (4 * 8), 34);
+    store64(t + (5 * 8), 36);
+    store64(t + (6 * 8), 38);
+    store64(t + (7 * 8), 100);
+    store64(t + (8 * 8), 162);
+    store64(t + (9 * 8), 166);
+    store64(t + (10 * 8), 354);
+    store64(t + (11 * 8), 358);
+    store64(t + (12 * 8), 212);
+    store64(t + (13 * 8), 244);
+    store64(t + (14 * 8), 276);
+    store64(t + (15 * 8), 308);
+    # shape 1 WIDE
+    store64(t + (16 * 8), 164);
+    store64(t + (17 * 8), 228);
+    store64(t + (18 * 8), 292);
+    store64(t + (19 * 8), 356);
+    store64(t + (20 * 8), 84);
+    store64(t + (21 * 8), 100);
+    store64(t + (22 * 8), 116);
+    store64(t + (23 * 8), 36);
+    store64(t + (24 * 8), 162);
+    store64(t + (25 * 8), 166);
+    store64(t + (26 * 8), 354);
+    store64(t + (27 * 8), 358);
+    store64(t + (28 * 8), 212);
+    store64(t + (29 * 8), 244);
+    store64(t + (30 * 8), 276);
+    store64(t + (31 * 8), 308);
+    # shape 2 SQUARE
+    store64(t + (32 * 8), 164);
+    store64(t + (33 * 8), 228);
+    store64(t + (34 * 8), 292);
+    store64(t + (35 * 8), 356);
+    store64(t + (36 * 8), 34);
+    store64(t + (37 * 8), 38);
+    store64(t + (38 * 8), 84);
+    store64(t + (39 * 8), 116);
+    store64(t + (40 * 8), 162);
+    store64(t + (41 * 8), 166);
+    store64(t + (42 * 8), 354);
+    store64(t + (43 * 8), 358);
+    store64(t + (44 * 8), 212);
+    store64(t + (45 * 8), 244);
+    store64(t + (46 * 8), 276);
+    store64(t + (47 * 8), 308);
+    Av1_WedgeCb = t;
+    return t;
+}
+# av1_wedge_mask_build — fill Av1_McMask (stride fill_w) with the wedge mask for (sub_size,
+# wedge_idx, wedge_sign). Geometry (shape/dir/xoff/yoff/flipSign) uses the NOMINAL block dims
+# (av1_block_width/height) — NOT the edge-clamped fill_w/fill_h, else frame-edge blocks corrupt.
+# flipSign = (perimeter-average < 32) canonicalizes wedge_sign==0; the emitted mask is
+# raw (or 64-raw) per inv = wedge_sign XOR flipSign. Records Av1_McMaskW/H = fill_w/h.
+fn av1_wedge_mask_build(sub_size, wedge_idx, wedge_sign, fill_w, fill_h): i64 {
+    var mtbl = av1_wedge_master_tbl();
+    if (mtbl == 0) { return DR_ERR_OOM; }
+    var cbtbl = av1_wedge_cb_tbl();
+    if (cbtbl == 0) { return DR_ERR_OOM; }   # symmetric with the master OOM guard (review F1)
+    var w = av1_block_width(sub_size);
+    var h = av1_block_height(sub_size);
+    var shape = 2;
+    if (h > w) { shape = 0; }
+    if (h < w) { shape = 1; }
+    var packed = load64(cbtbl + (((shape * 16) + wedge_idx) * 8));
+    var dir = packed >> 6;
+    var xoff = 32 - (((((packed >> 3) & 7) * w)) >> 3);
+    var yoff = 32 - ((((packed & 7) * h)) >> 3);
+    var base = mtbl + ((dir * 4096) * 8);
+    var sum = 0;
+    var j = 0;
+    while (j < w) {
+        sum = sum + load64(base + (((yoff * 64) + (xoff + j)) * 8));
+        j = j + 1;
+    }
+    var i = 1;
+    while (i < h) {
+        sum = sum + load64(base + ((((yoff + i) * 64) + xoff) * 8));
+        i = i + 1;
+    }
+    var avg = (sum + ((w + h - 1) / 2)) / (w + h - 1);
+    var flip = 0;
+    if (avg < 32) { flip = 1; }
+    var inv = wedge_sign ^ flip;
+    var r = 0;
+    while (r < fill_h) {
+        var c = 0;
+        while (c < fill_w) {
+            var raw = load64(base + ((((yoff + r) * 64) + (xoff + c)) * 8));
+            var mv = raw;
+            if (inv != 0) { mv = 64 - raw; }
+            store64(Av1_McMask + (((r * fill_w) + c) * 8), mv);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    Av1_McMaskW = fill_w;
+    Av1_McMaskH = fill_h;
+    return DR_OK;
+}
+
 # COMPOUND MC (7.11.3.1 isCompound): MC from BOTH references at intermediate precision, then a
 # combine. comp_mode==0 = SCALAR (AVERAGE fwd=bck=8; DISTANCE FwdWeight/16-Fwd) ->
 # Clip1(Round2(t0*fwd + t1*bck, ib+4)) (AVERAGE 8/8 is BIT-EXACT with the old ib+1 form).
@@ -642,7 +845,7 @@ fn av1_diffwtd_mask_at(r, c, sx, sy): i64 {
 # chroma -> Clip1(Round2(t0*m + t1*(64-m), ib+6)); the 6 is AOM_BLEND_A64_ROUND_BITS (log2 of
 # the mask-sum 64). dav1d w_avg/w_mask, PREP_BIAS=0. 3-source verified (compound_*.md).
 fn av1_mc_pred_compound(dst, ref0, ref1, plane, x, y, w, h, mv0_row, mv0_col, mv1_row, mv1_col,
-filt_x, filt_y, fwd, bck, comp_mode, mask_type): i64 {
+filt_x, filt_y, fwd, bck, comp_mode, mask_type, sub_size, wedge_idx, wedge_sign): i64 {
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
     var e = av1_mc_pred_core(Av1_McTmp, dst, ref0, plane, x, y, w, h, mv0_row, mv0_col,
     filt_x, filt_y, 1);
@@ -654,8 +857,17 @@ filt_x, filt_y, fwd, bck, comp_mode, mask_type): i64 {
     var ib = 4;
     if (bd == 12) { ib = 2; }
     if (comp_mode != 0) {
-        # DIFFWTD: build the mask ONCE on luma; chroma reuses it subsampled.
-        if (plane == 0) { av1_diffwtd_mask_build(w, h, mask_type, bd, ib); }
+        # MASKED (comp_mode 1=DIFFWTD, 2=WEDGE): build the mask ONCE on luma; chroma reuses it
+        # subsampled. Both fill Av1_McMask (stride w) so av1_diffwtd_mask_at + the blend are shared.
+        if (plane == 0) {
+            if (comp_mode == 2) {
+                if (av1_wedge_mask_build(sub_size, wedge_idx, wedge_sign, w, h) != DR_OK) {
+                    return DR_ERR_OOM;
+                }
+            } else {
+                av1_diffwtd_mask_build(w, h, mask_type, bd, ib);
+            }
+        }
         var msx = 0;
         var msy = 0;
         if (plane > 0) {

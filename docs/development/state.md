@@ -6,33 +6,34 @@
 
 ## Version
 
-**0.7.89** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND DIFFWTD (MASKED) INTER PREDICTION.** A
-two-reference block with comp_group_idx==1 && type==COMPOUND_DIFFWTD blends its two predictions through a
-PER-PIXEL difference mask — the first MASKED compound mode, reusing the 0.7.87/0.7.88 prep intermediates.
-Only WEDGE (type==COMPOUND_WEDGE, needs a mask codebook) stays refused on both lanes. av1_diffwtd_mask_build
-(spec 7.11.3.12, src/av1_mc.cyr) fills a new per-luma-pixel Av1_McMask: m = Clip3(0,64, 38 + (Round2(Abs(
-t0-t1), (BitDepth-8)+ib) >> 4)), inverted to 64-m when mask_type!=0 (base 38, DIFF_FACTOR 16, MAX_ALPHA 64;
-the diff-norm shift is bit-depth dependent — 4 @8-bit, 6 @10/12-bit). The blend (av1_mc_pred_compound gained
-comp_mode/mask_type): Clip1(Round2(tmp0*m + tmp1*(64-m), ib+6)); the 6 is AOM_BLEND_A64_ROUND_BITS (log2 of
-the mask-sum 64); the scalar AVERAGE/DISTANCE path (comp_mode==0) is untouched. Chroma (av1_diffwtd_mask_at):
-the mask is built ONCE on luma then read subsampled — 4:2:0 = Round2(2x2 sum, 2), 4:2:2/vert = Round2(2x1,
-1); luma read indices edge-clamped (defensive). Un-gate both lanes to admit type==DIFFWTD; narrow the reject
-to WEDGE. 3-source verified (compound_diffwtd.md). THE PROOF (tests/av1_mc_driver.tcyr, av1_intertile.tcyr):
-the mask+blend vs an INDEPENDENT integer-MV oracle (p0*m+p1*(64-m)+32)>>6 with m recomputed from the spec
-formula (8/10/12-bit, both mask_types, mask varies per-pixel, DIFFWTD-differs-from-AVERAGE); a 4:2:0 chroma
-oracle recomputing the luma mask + 2x2 average (witnessing the subsample AND mask-from-luma); Python-
-independent KATs from the new spec-literal scripts/refs/diffwtd_ref.py (a third derivation); a DIFFWTD
-round-trip (both mask_types) EXHAUSTIVELY equal to the av1_mc_pred_compound(comp_mode=1) oracle AND
-differing from AVERAGE. Mutations, 0 survivors: the combine shift, the diff-norm bit-depth shift, base/
-divisor/Abs/inversion, and the chroma subsample die in the driver's INDEPENDENT oracle (the round-trip
-shares av1_mc_pred_compound, can't see combine-internal bugs); the decode mode-threading + both gate lanes
-die in the round-trips. THE REVIEW (3 dims, worktree-isolated): math CLEAN, memory-safety CLEAN (the
-top-risk chroma-subsample × edge-clamp proven safe at odd luma dims down to 1x1; no Av1_McMask overflow).
-One CONFIRMED coverage finding — the DECODE-side WEDGE reject had NO witness (a 64x64 block can't carry a
-wedge symbol) — CLOSED with a 32x32-via-SPLIT fixture that mints a WEDGE stream and drives it through the
-decoder as the LAST sub-block (so mis-admission -> DR_OK, not a truncation error), mutation-verified; plus a
-latent lw==0 negative-index read (unreachable) hardened with a guard. Next: **compound WEDGE (the mask
-codebook) + inter-intra blends, OBMC/warp + the temporal scan**. **Prior: COMPOUND DISTANCE (jnt) (0.7.88).**
+**0.7.90** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND WEDGE (MASKED) INTER PREDICTION.** The
+second masked mode: comp_group_idx==1 && type==COMPOUND_WEDGE blends the two predictions through a per-pixel
+mask from a WEDGE CODEBOOK (an oriented soft boundary) indexed by block size + wedge_index + wedge_sign.
+Reuses the 0.7.89 DIFFWTD blend + chroma subsample UNCHANGED; the new piece is the codebook + 2D generation.
+Closes the masked family (DIFFWTD + WEDGE both in scope; only inter-intra, the ref1==INTRA path, stays
+gated). av1_mc.cyr: three 1-D master ramps (av1_wm_odd/even/vert, 0..64) lazily expanded to a 6x64x64 master
+blob (av1_wedge_master_tbl — Stage 1 OBLIQUE63+VERTICAL via the shift-per-2-rows slope; Stage 2 derives
+OBLIQUE27=transpose, OBLIQUE117/153=hflip/transpose+64-complement, HORIZONTAL); a 3x16 Wedge_Codebook
+(av1_wedge_cb_tbl, packed dir*64+xoff*8+yoff; shape=TALL/WIDE/SQUARE). av1_wedge_mask_build (Stage 3):
+xoff/yoff = 32-((off*dim)>>3), a perimeter-average flipSign canonicalization, Mask = raw or 64-raw per
+inv = wedge_sign XOR flipSign. Geometry uses NOMINAL block dims (av1_block_width/height), fill uses the
+edge-clamped extent (a frame-edge block gets the top-left of the nominal mask). Fills Av1_McMask ->
+comp_mode==2 -> the DIFFWTD blend runs unchanged. Un-gate both lanes for type==WEDGE. 3-source verified
+(compound_wedge.md). THE PROOF (tests/av1_mc_driver.tcyr, av1_intertile.tcyr): a COMPREHENSIVE 288-checksum
+(every eligible size x 16 idx x 2 signs) position-weight-checksummed vs the new spec-literal
+scripts/refs/wedge_ref.py — catches any codebook/master/oblique/flipSign/shape bug on any index/size/dir;
+two HAND-COMPUTABLE anchors (KAT-A VERTICAL, KAT-B HORIZONTAL) pinning the ref port to spec-derived values;
+a clamped-fill witness for nominal-vs-clamped geometry; a WEDGE round-trip (32x32 via SPLIT, both signs)
+EXHAUSTIVELY equal to the av1_mc_pred_compound(comp_mode=2) oracle AND differing from AVERAGE. Mutations, 0
+survivors EXCEPT the two provably-equivalent transforms the spec sign-convention analysis predicts (dropping
+the O117/O153 64-complement is exactly cancelled by flipSign; an offset on a direction's invariant axis is a
+no-op) — a real transpose error in those planes IS caught (56 red). THE REVIEW (2 dims, worktree-isolated):
+math CLEAN (288 checksums + hand anchors + transpose mutation), wiring+bounds CLEAN (gate mirror, comp_mode
+exclusivity, master reads bounded [8,55] for every codebook entry, wedge_idx entropy-bounded [0,15]). Two
+CONFIRMED findings FIXED: (F1) av1_wedge_mask_build checked the master OOM but not the codebook table (wild
+read on a specific OOM) — now guarded symmetrically; (F2) the nominal-vs-clamped split had no test (mutating
+to clamped dims shipped green) — CLOSED with the clamped-fill witness, mutation-verified. Next: **inter-intra
+blends, OBMC/warp + the temporal scan**. **Prior: COMPOUND DIFFWTD (masked) (0.7.89).**
 The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
 ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
 var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready

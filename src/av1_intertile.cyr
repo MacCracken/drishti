@@ -724,12 +724,12 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma);
     var ib = av1_fb_ib(fb);
     var is_comp = av1_ib_is_comp(ib);
-    # COMPOUND (0.7.89): AVERAGE + DISTANCE (comp_group_idx==0) and DIFFWTD masked
-    # (comp_group_idx==1, type==COMPOUND_DIFFWTD); only WEDGE (type==COMPOUND_WEDGE, needs the
-    # mask codebook) stays a later bite (roadmap.md).
+    # COMPOUND (0.7.90): AVERAGE + DISTANCE (comp_group_idx==0) and BOTH masked modes —
+    # DIFFWTD + WEDGE (comp_group_idx==1). inter-intra (ref1==INTRA) stays separately gated below.
     if (is_comp != 0) {
         var ct = av1_ib_ct(ib);
-        if ((load64(ct + AV1CT_GROUPIDX) != 0) && (av1_comptype_type(ct) != AV1_COMPOUND_DIFFWTD)) {
+        if ((load64(ct + AV1CT_GROUPIDX) != 0) && (av1_comptype_type(ct) != AV1_COMPOUND_DIFFWTD)
+        && (av1_comptype_type(ct) != AV1_COMPOUND_WEDGE)) {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }
@@ -777,24 +777,33 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     var mv1_col = av1_mv_col(mv1);
     var filt_y = av1_ib_interp(ib, 0);
     var filt_x = av1_ib_interp(ib, 1);
-    # Compound blend params (spec 7.11.3.14/15): SCALAR path (comp_mode=0) is AVERAGE (8/8,
-    # bit-identical to the plain average) or DISTANCE (compound_idx==0 -> order-hint weights);
-    # DIFFWTD (comp_mode=1) blends by a per-pixel difference mask (mask_type). Plane-independent
-    # scalars — computed ONCE per block; the DIFFWTD mask itself is built inside the MC driver.
+    # Compound blend params (spec 7.11.3.11/14/15): SCALAR (comp_mode=0) = AVERAGE (8/8, bit-
+    # identical to the plain average) or DISTANCE (compound_idx==0 -> order-hint weights); DIFFWTD
+    # (comp_mode=1) = per-pixel difference mask (mask_type); WEDGE (comp_mode=2) = a codebook mask
+    # (wedge_index/sign + sub_size). Plane-independent — computed ONCE per block; the mask itself
+    # is built inside the MC driver (from sub_size's NOMINAL dims, not the edge-clamped w/h).
     var cfwd = 8;
     var cbck = 8;
     var cmode = 0;
     var cmtype = 0;
+    var cwidx = 0;
+    var cwsign = 0;
     if (is_comp != 0) {
         var ctp = av1_ib_ct(ib);
         if (av1_comptype_type(ctp) == AV1_COMPOUND_DIFFWTD) {
             cmode = 1;
             cmtype = av1_comptype_mask_type(ctp);
         } else {
-            if (load64(ctp + AV1CT_COMPIDX) == 0) {
-                cfwd = av1_dist_wtd_fwd(load64(tile + AV1TILE_SEQ), fh, av1_ib_ref(ib, 0),
-                av1_ib_ref(ib, 1));
-                cbck = 16 - cfwd;
+            if (av1_comptype_type(ctp) == AV1_COMPOUND_WEDGE) {
+                cmode = 2;
+                cwidx = av1_comptype_wedge_idx(ctp);
+                cwsign = av1_comptype_wedge_sign(ctp);
+            } else {
+                if (load64(ctp + AV1CT_COMPIDX) == 0) {
+                    cfwd = av1_dist_wtd_fwd(load64(tile + AV1TILE_SEQ), fh, av1_ib_ref(ib, 0),
+                    av1_ib_ref(ib, 1));
+                    cbck = 16 - cfwd;
+                }
             }
         }
     }
@@ -819,7 +828,8 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                 var em = DR_OK;
                 if (is_comp != 0) {
                     em = av1_mc_pred_compound(frame, refframe, ref1frame, plane, x, y, w, h,
-                    mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype);
+                    mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
+                    sub_size, cwidx, cwsign);
                 } else {
                     em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
                     mv_row, mv_col, filt_x, filt_y);
@@ -873,13 +883,14 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
     load64(tile + AV1TILE_ICDEF), 0);
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
-    # mirror the decode SCOPE gates: WEDGE masked compound / inter-intra / non-SIMPLE motion
-    # are out of scope on both lanes (roadmap.md) — an encode plan requesting them is refused.
-    # AVERAGE + DISTANCE (comp_group_idx==0) and DIFFWTD (comp_group_idx==1, type==DIFFWTD) are in scope.
+    # mirror the decode SCOPE gates: inter-intra / non-SIMPLE motion are out of scope on both
+    # lanes (roadmap.md). AVERAGE + DISTANCE (comp_group_idx==0) and BOTH masked modes DIFFWTD +
+    # WEDGE (comp_group_idx==1) are in scope.
     var eib = av1_fb_ib(fb);
     if (av1_ib_is_comp(eib) != 0) {
         var ect = av1_ib_ct(eib);
-        if ((load64(ect + AV1CT_GROUPIDX) != 0) && (av1_comptype_type(ect) != AV1_COMPOUND_DIFFWTD)) {
+        if ((load64(ect + AV1CT_GROUPIDX) != 0) && (av1_comptype_type(ect) != AV1_COMPOUND_DIFFWTD)
+        && (av1_comptype_type(ect) != AV1_COMPOUND_WEDGE)) {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }

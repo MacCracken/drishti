@@ -217,7 +217,7 @@ fn test_mc_compound_avg() {
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     # ref0 MV (row 16=+2px, col 8=+1px); ref1 MV (row -8=-1px, col 24=+3px). Filter 0.
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0),
     DR_OK, "compound-average decodes");
     var diff = 0;
     y = 0;
@@ -252,7 +252,7 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
     var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     av1_mc_pred_block(s, ref, 0, 0, 0, 32, 32, mvr, mvc, 0, 0);
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8, 0, 0);
+    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8, 0, 0, 0, 0, 0);
     var big = 0;
     var y = 0;
     while (y < 32) {
@@ -275,7 +275,7 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
 # oracle above — the ONLY change is the weighting. Independent (scripts/refs/dist_wtd_ref.py).
 fn mcd_dist_oracle(r0, r1, fwd, bck, tag): i64 {
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck, 0, 0, 0, 0, 0),
     DR_OK, tag);
     var diff = 0;
     var y = 0;
@@ -320,8 +320,8 @@ fn test_mc_compound_dist() {
     # DISTANCE (13/3) must actually DIFFER from AVERAGE (8/8) — else the mode is untested.
     var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     var dd = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0);
-    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3, 0, 0);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3, 0, 0, 0, 0, 0);
     var ndiff = 0;
     y = 0;
     while (y < 32) {
@@ -356,7 +356,7 @@ fn mcd_diffwtd_case(bd, mask_type, tag): i64 {
         y = y + 1;
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, bd, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0),
     DR_OK, tag);
     var ib = 4;
     if (bd == 12) { ib = 2; }
@@ -412,9 +412,9 @@ fn mcd_diffwtd_chroma_case(bd, mask_type, tag): i64 {
         p = p + 1;
     }
     var d = dr_frame_new(32, 32, 3, 1, 1, bd, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0),
     DR_OK, tag);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0),
     DR_OK, tag);
     var ib = 4;
     if (bd == 12) { ib = 2; }
@@ -474,8 +474,8 @@ fn test_mc_diffwtd() {
     }
     var dw = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(dw, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0);
-    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0);
+    av1_mc_pred_compound(dw, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0);
     var nd = 0;
     yy = 0;
     while (yy < 32) {
@@ -499,7 +499,7 @@ fn diffwtd_kat_luma(p0, p1, bd, mask_type, exp_out, tag): i64 {
     dr_frame_fill(r0, 0, p0);
     dr_frame_fill(r1, 0, p1);
     var d = dr_frame_new(4, 4, 1, 0, 0, bd, 8, Mcd_Err);
-    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type);
+    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0);
     assert_eq(dr_frame_get(d, 0, 1, 1), exp_out, tag);
     return 0;
 }
@@ -522,9 +522,430 @@ fn test_diffwtd_kat() {
     dr_frame_set(r0, 0, 1, 1, 255); dr_frame_set(r1, 0, 1, 1, 0);    # -> m=53
     dr_frame_set(r0, 1, 0, 0, 150); dr_frame_set(r1, 1, 0, 0, 90);   # chroma preds
     var d = dr_frame_new(4, 4, 3, 1, 1, 8, 8, oe);
-    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0);
-    av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0);
+    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
+    av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
     assert_eq(dr_frame_get(d, 1, 0, 0), 134, "KAT chroma 4:2:0 masks[48,48,38,53]->m47, 150/90 -> 134");
+    return 0;
+}
+
+# WEDGE mask KATs (0.7.90) vs scripts/refs/wedge_ref.py (spec-literal). Builds the wedge mask
+# into Av1_McMask and pins the first row + structural invariance (VERTICAL is column-varying/
+# row-invariant; HORIZONTAL the transpose) + oblique corners. AV1_BLOCK_* : 8X8=3,16X8=5,16X16=6,
+# 32X32=9. av1_mc_drv_scratch() first (allocates Av1_McMask).
+fn wedge_row0(sub_size, wi, ws, w, h): i64 {
+    av1_mc_drv_scratch();
+    av1_wedge_mask_build(sub_size, wi, ws, w, h);
+    return 0;
+}
+fn wedge_px(r, c, w): i64 { return load64(Av1_McMask + (((r * w) + c) * 8)); }
+# COMPREHENSIVE wedge checksum: every eligible (size x 16 indices x 2 signs) = 288 masks, each a
+# position-weighted checksum pinned against scripts/refs/wedge_ref.py (spec-literal). Catches any
+# codebook / master / oblique-generation / flipSign / shape-class bug on ANY index, size, direction.
+fn wedge_cs(w, h): i64 {
+    var s = 0;
+    var k = 0;
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            k = k + 1;
+            s = s + (load64(Av1_McMask + (((i * w) + j) * 8)) * k);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+fn test_wedge_cs() {
+    av1_mc_drv_scratch();
+    var exp = alloc(288 * 8);
+    store64(exp + (0 * 8), 39141);
+    store64(exp + (1 * 8), 93979);
+    store64(exp + (2 * 8), 52777);
+    store64(exp + (3 * 8), 80343);
+    store64(exp + (4 * 8), 73817);
+    store64(exp + (5 * 8), 59303);
+    store64(exp + (6 * 8), 41771);
+    store64(exp + (7 * 8), 91349);
+    store64(exp + (8 * 8), 11976);
+    store64(exp + (9 * 8), 121144);
+    store64(exp + (10 * 8), 77496);
+    store64(exp + (11 * 8), 55624);
+    store64(exp + (12 * 8), 31072);
+    store64(exp + (13 * 8), 102048);
+    store64(exp + (14 * 8), 96592);
+    store64(exp + (15 * 8), 36528);
+    store64(exp + (16 * 8), 14128);
+    store64(exp + (17 * 8), 118992);
+    store64(exp + (18 * 8), 76658);
+    store64(exp + (19 * 8), 56462);
+    store64(exp + (20 * 8), 116594);
+    store64(exp + (21 * 8), 16526);
+    store64(exp + (22 * 8), 79056);
+    store64(exp + (23 * 8), 54064);
+    store64(exp + (24 * 8), 23207);
+    store64(exp + (25 * 8), 109913);
+    store64(exp + (26 * 8), 85737);
+    store64(exp + (27 * 8), 47383);
+    store64(exp + (28 * 8), 90729);
+    store64(exp + (29 * 8), 42391);
+    store64(exp + (30 * 8), 104921);
+    store64(exp + (31 * 8), 28199);
+    store64(exp + (32 * 8), 138816);
+    store64(exp + (33 * 8), 389568);
+    store64(exp + (34 * 8), 178448);
+    store64(exp + (35 * 8), 349936);
+    store64(exp + (36 * 8), 339952);
+    store64(exp + (37 * 8), 188432);
+    store64(exp + (38 * 8), 141504);
+    store64(exp + (39 * 8), 386880);
+    store64(exp + (40 * 8), 491264);
+    store64(exp + (41 * 8), 37120);
+    store64(exp + (42 * 8), 136448);
+    store64(exp + (43 * 8), 391936);
+    store64(exp + (44 * 8), 301312);
+    store64(exp + (45 * 8), 227072);
+    store64(exp + (46 * 8), 256832);
+    store64(exp + (47 * 8), 271552);
+    store64(exp + (48 * 8), 39477);
+    store64(exp + (49 * 8), 488907);
+    store64(exp + (50 * 8), 303024);
+    store64(exp + (51 * 8), 225360);
+    store64(exp + (52 * 8), 486248);
+    store64(exp + (53 * 8), 42136);
+    store64(exp + (54 * 8), 305683);
+    store64(exp + (55 * 8), 222701);
+    store64(exp + (56 * 8), 82066);
+    store64(exp + (57 * 8), 446318);
+    store64(exp + (58 * 8), 298528);
+    store64(exp + (59 * 8), 229856);
+    store64(exp + (60 * 8), 307134);
+    store64(exp + (61 * 8), 221250);
+    store64(exp + (62 * 8), 437712);
+    store64(exp + (63 * 8), 90672);
+    store64(exp + (64 * 8), 174226);
+    store64(exp + (65 * 8), 354158);
+    store64(exp + (66 * 8), 227184);
+    store64(exp + (67 * 8), 301200);
+    store64(exp + (68 * 8), 270192);
+    store64(exp + (69 * 8), 258192);
+    store64(exp + (70 * 8), 194414);
+    store64(exp + (71 * 8), 333970);
+    store64(exp + (72 * 8), 408160);
+    store64(exp + (73 * 8), 120224);
+    store64(exp + (74 * 8), 248224);
+    store64(exp + (75 * 8), 280160);
+    store64(exp + (76 * 8), 384416);
+    store64(exp + (77 * 8), 143968);
+    store64(exp + (78 * 8), 146432);
+    store64(exp + (79 * 8), 381952);
+    store64(exp + (80 * 8), 78414);
+    store64(exp + (81 * 8), 449970);
+    store64(exp + (82 * 8), 294876);
+    store64(exp + (83 * 8), 233508);
+    store64(exp + (84 * 8), 432572);
+    store64(exp + (85 * 8), 95812);
+    store64(exp + (86 * 8), 312274);
+    store64(exp + (87 * 8), 216110);
+    store64(exp + (88 * 8), 99695);
+    store64(exp + (89 * 8), 428689);
+    store64(exp + (90 * 8), 363242);
+    store64(exp + (91 * 8), 165142);
+    store64(exp + (92 * 8), 386145);
+    store64(exp + (93 * 8), 142239);
+    store64(exp + (94 * 8), 405786);
+    store64(exp + (95 * 8), 122598);
+    store64(exp + (96 * 8), 578432);
+    store64(exp + (97 * 8), 1526912);
+    store64(exp + (98 * 8), 849632);
+    store64(exp + (99 * 8), 1255712);
+    store64(exp + (100 * 8), 1197792);
+    store64(exp + (101 * 8), 907552);
+    store64(exp + (102 * 8), 600192);
+    store64(exp + (103 * 8), 1505152);
+    store64(exp + (104 * 8), 146432);
+    store64(exp + (105 * 8), 1958912);
+    store64(exp + (106 * 8), 1199104);
+    store64(exp + (107 * 8), 906240);
+    store64(exp + (108 * 8), 502592);
+    store64(exp + (109 * 8), 1602752);
+    store64(exp + (110 * 8), 1555264);
+    store64(exp + (111 * 8), 550080);
+    store64(exp + (112 * 8), 182696);
+    store64(exp + (113 * 8), 1922648);
+    store64(exp + (114 * 8), 1219434);
+    store64(exp + (115 * 8), 885910);
+    store64(exp + (116 * 8), 1901674);
+    store64(exp + (117 * 8), 203670);
+    store64(exp + (118 * 8), 1240408);
+    store64(exp + (119 * 8), 864936);
+    store64(exp + (120 * 8), 345191);
+    store64(exp + (121 * 8), 1760153);
+    store64(exp + (122 * 8), 1381929);
+    store64(exp + (123 * 8), 723415);
+    store64(exp + (124 * 8), 1424569);
+    store64(exp + (125 * 8), 680775);
+    store64(exp + (126 * 8), 1717513);
+    store64(exp + (127 * 8), 387831);
+    store64(exp + (128 * 8), 2155392);
+    store64(exp + (129 * 8), 6249600);
+    store64(exp + (130 * 8), 2791568);
+    store64(exp + (131 * 8), 5613424);
+    store64(exp + (132 * 8), 5528144);
+    store64(exp + (133 * 8), 2876848);
+    store64(exp + (134 * 8), 2177152);
+    store64(exp + (135 * 8), 6227840);
+    store64(exp + (136 * 8), 7863296);
+    store64(exp + (137 * 8), 541696);
+    store64(exp + (138 * 8), 2118656);
+    store64(exp + (139 * 8), 6286336);
+    store64(exp + (140 * 8), 4744192);
+    store64(exp + (141 * 8), 3660800);
+    store64(exp + (142 * 8), 4138624);
+    store64(exp + (143 * 8), 4266368);
+    store64(exp + (144 * 8), 578432);
+    store64(exp + (145 * 8), 7826560);
+    store64(exp + (146 * 8), 4780928);
+    store64(exp + (147 * 8), 3624064);
+    store64(exp + (148 * 8), 7804800);
+    store64(exp + (149 * 8), 600192);
+    store64(exp + (150 * 8), 4802688);
+    store64(exp + (151 * 8), 3602304);
+    store64(exp + (152 * 8), 1196718);
+    store64(exp + (153 * 8), 7208274);
+    store64(exp + (154 * 8), 4810290);
+    store64(exp + (155 * 8), 3594702);
+    store64(exp + (156 * 8), 4882770);
+    store64(exp + (157 * 8), 3522222);
+    store64(exp + (158 * 8), 7135794);
+    store64(exp + (159 * 8), 1269198);
+    store64(exp + (160 * 8), 2752498);
+    store64(exp + (161 * 8), 5652494);
+    store64(exp + (162 * 8), 3727072);
+    store64(exp + (163 * 8), 4677920);
+    store64(exp + (164 * 8), 4423392);
+    store64(exp + (165 * 8), 3981600);
+    store64(exp + (166 * 8), 2923534);
+    store64(exp + (167 * 8), 5481458);
+    store64(exp + (168 * 8), 6401216);
+    store64(exp + (169 * 8), 2003776);
+    store64(exp + (170 * 8), 4072256);
+    store64(exp + (171 * 8), 4332736);
+    store64(exp + (172 * 8), 6206272);
+    store64(exp + (173 * 8), 2198720);
+    store64(exp + (174 * 8), 2158592);
+    store64(exp + (175 * 8), 6246400);
+    store64(exp + (176 * 8), 1163358);
+    store64(exp + (177 * 8), 7241634);
+    store64(exp + (178 * 8), 4776930);
+    store64(exp + (179 * 8), 3628062);
+    store64(exp + (180 * 8), 7096290);
+    store64(exp + (181 * 8), 1308702);
+    store64(exp + (182 * 8), 4922274);
+    store64(exp + (183 * 8), 3482718);
+    store64(exp + (184 * 8), 1658592);
+    store64(exp + (185 * 8), 6746400);
+    store64(exp + (186 * 8), 5861088);
+    store64(exp + (187 * 8), 2543904);
+    store64(exp + (188 * 8), 6050080);
+    store64(exp + (189 * 8), 2354912);
+    store64(exp + (190 * 8), 6557408);
+    store64(exp + (191 * 8), 1847584);
+    store64(exp + (192 * 8), 9085696);
+    store64(exp + (193 * 8), 24501504);
+    store64(exp + (194 * 8), 13761984);
+    store64(exp + (195 * 8), 19825216);
+    store64(exp + (196 * 8), 19348928);
+    store64(exp + (197 * 8), 14238272);
+    store64(exp + (198 * 8), 9260288);
+    store64(exp + (199 * 8), 24326912);
+    store64(exp + (200 * 8), 2158592);
+    store64(exp + (201 * 8), 31428608);
+    store64(exp + (202 * 8), 18952192);
+    store64(exp + (203 * 8), 14635008);
+    store64(exp + (204 * 8), 8201856);
+    store64(exp + (205 * 8), 25385344);
+    store64(exp + (206 * 8), 24995456);
+    store64(exp + (207 * 8), 8591744);
+    store64(exp + (208 * 8), 2785176);
+    store64(exp + (209 * 8), 30802024);
+    store64(exp + (210 * 8), 19515226);
+    store64(exp + (211 * 8), 14071974);
+    store64(exp + (212 * 8), 30629210);
+    store64(exp + (213 * 8), 2957990);
+    store64(exp + (214 * 8), 19688040);
+    store64(exp + (215 * 8), 13899160);
+    store64(exp + (216 * 8), 5489895);
+    store64(exp + (217 * 8), 28097305);
+    store64(exp + (218 * 8), 22219945);
+    store64(exp + (219 * 8), 11367255);
+    store64(exp + (220 * 8), 22567257);
+    store64(exp + (221 * 8), 11019943);
+    store64(exp + (222 * 8), 27749993);
+    store64(exp + (223 * 8), 5837207);
+    store64(exp + (224 * 8), 534080);
+    store64(exp + (225 * 8), 1571264);
+    store64(exp + (226 * 8), 582912);
+    store64(exp + (227 * 8), 1522432);
+    store64(exp + (228 * 8), 1511680);
+    store64(exp + (229 * 8), 593664);
+    store64(exp + (230 * 8), 536768);
+    store64(exp + (231 * 8), 1568576);
+    store64(exp + (232 * 8), 1968896);
+    store64(exp + (233 * 8), 136448);
+    store64(exp + (234 * 8), 531712);
+    store64(exp + (235 * 8), 1573632);
+    store64(exp + (236 * 8), 1189120);
+    store64(exp + (237 * 8), 916224);
+    store64(exp + (238 * 8), 1037952);
+    store64(exp + (239 * 8), 1067392);
+    store64(exp + (240 * 8), 1966528);
+    store64(exp + (241 * 8), 138816);
+    store64(exp + (242 * 8), 1191488);
+    store64(exp + (243 * 8), 913856);
+    store64(exp + (244 * 8), 1963840);
+    store64(exp + (245 * 8), 141504);
+    store64(exp + (246 * 8), 1194176);
+    store64(exp + (247 * 8), 911168);
+    store64(exp + (248 * 8), 352487);
+    store64(exp + (249 * 8), 1752857);
+    store64(exp + (250 * 8), 877538);
+    store64(exp + (251 * 8), 1227806);
+    store64(exp + (252 * 8), 888257);
+    store64(exp + (253 * 8), 1217087);
+    store64(exp + (254 * 8), 1742138);
+    store64(exp + (255 * 8), 363206);
+    store64(exp + (256 * 8), 822592);
+    store64(exp + (257 * 8), 1282752);
+    store64(exp + (258 * 8), 945008);
+    store64(exp + (259 * 8), 1160336);
+    store64(exp + (260 * 8), 1031024);
+    store64(exp + (261 * 8), 1074320);
+    store64(exp + (262 * 8), 938688);
+    store64(exp + (263 * 8), 1166656);
+    store64(exp + (264 * 8), 1627744);
+    store64(exp + (265 * 8), 477600);
+    store64(exp + (266 * 8), 987552);
+    store64(exp + (267 * 8), 1117792);
+    store64(exp + (268 * 8), 1530272);
+    store64(exp + (269 * 8), 575072);
+    store64(exp + (270 * 8), 581632);
+    store64(exp + (271 * 8), 1523712);
+    store64(exp + (272 * 8), 564605);
+    store64(exp + (273 * 8), 1540739);
+    store64(exp + (274 * 8), 1089656);
+    store64(exp + (275 * 8), 1015688);
+    store64(exp + (276 * 8), 1432664);
+    store64(exp + (277 * 8), 672680);
+    store64(exp + (278 * 8), 1197731);
+    store64(exp + (279 * 8), 907613);
+    store64(exp + (280 * 8), 1670288);
+    store64(exp + (281 * 8), 435056);
+    store64(exp + (282 * 8), 1487728);
+    store64(exp + (283 * 8), 617616);
+    store64(exp + (284 * 8), 1584272);
+    store64(exp + (285 * 8), 521072);
+    store64(exp + (286 * 8), 1573744);
+    store64(exp + (287 * 8), 531600);
+    var sz = alloc(27 * 8);
+    store64(sz + (0 * 8), 3); store64(sz + (1 * 8), 8); store64(sz + (2 * 8), 8);
+    store64(sz + (3 * 8), 4); store64(sz + (4 * 8), 8); store64(sz + (5 * 8), 16);
+    store64(sz + (6 * 8), 5); store64(sz + (7 * 8), 16); store64(sz + (8 * 8), 8);
+    store64(sz + (9 * 8), 6); store64(sz + (10 * 8), 16); store64(sz + (11 * 8), 16);
+    store64(sz + (12 * 8), 7); store64(sz + (13 * 8), 16); store64(sz + (14 * 8), 32);
+    store64(sz + (15 * 8), 8); store64(sz + (16 * 8), 32); store64(sz + (17 * 8), 16);
+    store64(sz + (18 * 8), 9); store64(sz + (19 * 8), 32); store64(sz + (20 * 8), 32);
+    store64(sz + (21 * 8), 18); store64(sz + (22 * 8), 8); store64(sz + (23 * 8), 32);
+    store64(sz + (24 * 8), 19); store64(sz + (25 * 8), 32); store64(sz + (26 * 8), 8);
+    var r = 0;
+    while (r < 9) {
+        var ms = load64(sz + ((r * 3) * 8));
+        var w = load64(sz + (((r * 3) + 1) * 8));
+        var h = load64(sz + (((r * 3) + 2) * 8));
+        var wi = 0;
+        while (wi < 16) {
+            var sg = 0;
+            while (sg < 2) {
+                av1_wedge_mask_build(ms, wi, sg, w, h);
+                assert_eq(wedge_cs(w, h), load64(exp + ((((r * 16) + wi) * 2) + sg) * 8),
+                "wedge mask checksum vs wedge_ref.py");
+                sg = sg + 1;
+            }
+            wi = wi + 1;
+        }
+        r = r + 1;
+    }
+    return 0;
+}
+
+# NOMINAL-vs-CLAMPED (review F2): a frame-edge wedge block clamps the FILL extent but its mask
+# geometry MUST use the NOMINAL block size. Build BLOCK_32X32 (nominal, SQUARE) with fill 16x32
+# (the clamped visible extent) -> Av1_McMask must equal the TOP-LEFT 16x32 of the full 32x32
+# mask. If geometry wrongly used the clamped 16x32 (a WIDE block), the mask + checksum differ.
+fn test_wedge_clamp() {
+    av1_mc_drv_scratch();
+    av1_wedge_mask_build(9, 3, 0, 16, 32);
+    assert_eq(wedge_cs(16, 32), 1257600, "wedge clamped-fill 32x32 idx3 sign0 (nominal geometry)");
+    av1_wedge_mask_build(9, 12, 0, 16, 32);
+    assert_eq(wedge_cs(16, 32), 2791568, "wedge clamped-fill 32x32 idx12 sign0 (nominal geometry)");
+    return 0;
+}
+
+fn test_wedge_mask() {
+    var exp = alloc(32 * 8);
+    # KAT-A: 16x16 idx6 = {VERT,2,4}, sign0 -> row0 = 64-Vert[28+j], col-invariant.
+    wedge_row0(6, 6, 0, 16, 16);
+    store64(exp + 0, 64);  store64(exp + 8, 62);  store64(exp + 16, 57); store64(exp + 24, 43);
+    store64(exp + 32, 21); store64(exp + 40, 7);  store64(exp + 48, 2);  store64(exp + 56, 0);
+    var j = 0;
+    while (j < 16) {
+        var e = 0;
+        if (j < 8) { e = load64(exp + (j * 8)); }
+        assert_eq(wedge_px(0, j, 16), e, "KAT-A 16x16 idx6 sign0 row0");
+        assert_eq(wedge_px(15, j, 16), e, "KAT-A col-invariant (row15==row0)");
+        j = j + 1;
+    }
+    # KAT-A sign1 = complement (Vert[28+j]).
+    wedge_row0(6, 6, 1, 16, 16);
+    assert_eq(wedge_px(0, 0, 16), 0, "KAT-A sign1 m00=0");
+    assert_eq(wedge_px(0, 7, 16), 64, "KAT-A sign1 m07=64");
+    # KAT-B: 16x16 idx4 = {HORIZ,4,2}, sign0 -> col0 = 64-Vert[28+i], row-invariant.
+    wedge_row0(6, 4, 0, 16, 16);
+    var i = 0;
+    while (i < 16) {
+        var e = 0;
+        if (i < 8) { e = load64(exp + (i * 8)); }
+        assert_eq(wedge_px(i, 0, 16), e, "KAT-B 16x16 idx4 sign0 col0");
+        assert_eq(wedge_px(i, 15, 16), e, "KAT-B row-invariant (col15==col0)");
+        i = i + 1;
+    }
+    # 8x8 idx0 (OBLIQUE27) sign0 row0 = [64,64,64,63,63,62,60,58].
+    wedge_row0(3, 0, 0, 8, 8);
+    store64(exp + 0, 64);  store64(exp + 8, 64);  store64(exp + 16, 64); store64(exp + 24, 63);
+    store64(exp + 32, 63); store64(exp + 40, 62); store64(exp + 48, 60); store64(exp + 56, 58);
+    j = 0;
+    while (j < 8) { assert_eq(wedge_px(0, j, 8), load64(exp + (j * 8)), "8x8 idx0 sign0 row0 (O27)"); j = j + 1; }
+    # 8x8 idx0 sign1 = complement.
+    wedge_row0(3, 0, 1, 8, 8);
+    assert_eq(wedge_px(0, 0, 8), 0, "8x8 idx0 sign1 m00=0");
+    assert_eq(wedge_px(0, 7, 8), 6, "8x8 idx0 sign1 m07=6");
+    assert_eq(wedge_px(7, 7, 8), 64, "8x8 idx0 sign1 mll=64");
+    # 16x8 idx4 (WIDE -> {VERT,2,4}) sign0 row0 = [0,2,7,21,43,57,62,64,64...].
+    wedge_row0(5, 4, 0, 16, 8);
+    store64(exp + 0, 0);   store64(exp + 8, 2);   store64(exp + 16, 7);  store64(exp + 24, 21);
+    store64(exp + 32, 43); store64(exp + 40, 57); store64(exp + 48, 62); store64(exp + 56, 64);
+    j = 0;
+    while (j < 16) {
+        var e2 = 64;
+        if (j < 8) { e2 = load64(exp + (j * 8)); }
+        assert_eq(wedge_px(0, j, 16), e2, "16x8 idx4 sign0 row0 (WIDE VERT)");
+        j = j + 1;
+    }
+    # 32x32 idx10 (O153) sign0 m00=37, m0last=0, mll=64.
+    wedge_row0(9, 10, 0, 32, 32);
+    assert_eq(wedge_px(0, 0, 32), 37, "32x32 idx10 sign0 m00=37");
+    assert_eq(wedge_px(0, 31, 32), 0, "32x32 idx10 sign0 m0last=0");
+    assert_eq(wedge_px(31, 31, 32), 64, "32x32 idx10 sign0 mll=64");
     return 0;
 }
 
@@ -548,6 +969,10 @@ fn main() {
     test_group("compound-diffwtd MC (7.11.3.12 diff mask + blend)");
     test_mc_diffwtd();
     test_diffwtd_kat();
+    test_group("compound-wedge mask (7.11.3.11 codebook + generation)");
+    test_wedge_mask();
+    test_wedge_cs();
+    test_wedge_clamp();
     return assert_summary();
 }
 

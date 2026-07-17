@@ -22,7 +22,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.89 (AV1 decode: COMPOUND DIFFWTD (masked) INTER PREDICTION — a two-reference block with comp_group_idx==1 blends its two predictions through a per-pixel difference mask (the first masked mode), over 0.7.88 DISTANCE; only WEDGE (needs a mask codebook) refused; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: compound WEDGE + inter-intra, OBMC/warp + the temporal scan)
+## Status — 0.7.90 (AV1 decode: COMPOUND WEDGE (masked) INTER PREDICTION — a two-reference block with comp_group_idx==1/type==WEDGE blends through a codebook wedge mask (the second masked mode, closing the masked family with DIFFWTD); only inter-intra remains gated; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: inter-intra, OBMC/warp + the temporal scan)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (27,420 suite assertions + 1,140 fuzz

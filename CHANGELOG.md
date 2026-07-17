@@ -4,6 +4,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.90] - 2026-07-17
+
+**COMPOUND WEDGE (MASKED) INTER PREDICTION.** The second masked compound mode: a two-reference block with
+`comp_group_idx == 1` and `compound_type == COMPOUND_WEDGE` blends its two predictions through a per-pixel
+mask drawn from a WEDGE CODEBOOK (an oriented soft boundary), indexed by block size + `wedge_index` +
+`wedge_sign`. It reuses the 0.7.89 DIFFWTD mask-blend + chroma subsample unchanged; the new piece is the
+mask codebook + its 2D generation. This closes the masked-compound family — both DIFFWTD and WEDGE are now
+in scope; only inter-intra (a separate `ref1 == INTRA` path) remains gated.
+
+### Added
+
+- **The wedge master masks + codebook** (spec 7.11.3.11) in `av1_mc.cyr`: three 1-D master ramps
+  (`av1_wm_odd/even/vert`, 0..64), lazily expanded into a `6 × 64 × 64` master blob (`av1_wedge_master_tbl`)
+  — Stage 1 builds OBLIQUE63 + VERTICAL (the `shift`-per-two-rows slope), Stage 2 derives OBLIQUE27
+  (transpose), OBLIQUE117/153 (hflip/transpose + `64−` complement) and HORIZONTAL; plus the `3 × 16`
+  `Wedge_Codebook` (`av1_wedge_cb_tbl`, packed `dir·64 + xoff·8 + yoff`), shape = TALL/WIDE/SQUARE. **3-source
+  verified** (spec + libaom + dav1d, `compound_wedge.md`).
+- **`av1_wedge_mask_build`** (Stage 3): per block, `xoff/yoff = 32 − ((off·dim)>>3)`, a perimeter-average
+  `flipSign` canonicalization, and `Mask = raw` or `64−raw` per `inv = wedge_sign XOR flipSign`. Geometry
+  uses the NOMINAL block dims (`av1_block_width/height`), the fill uses the edge-clamped extent — so a
+  frame-edge wedge block gets the top-left subregion of the nominal mask, not a mask computed from clamped
+  dims. Fills `Av1_McMask`, then the DIFFWTD blend/chroma path runs unchanged (`comp_mode == 2`).
+- **The decode/encode un-gate**: both lanes now admit `type == COMPOUND_WEDGE`.
+
+**Proofs** (`tests/av1_mc_driver.tcyr`, `tests/av1_intertile.tcyr`): a COMPREHENSIVE 288-checksum test —
+every eligible size × 16 indices × 2 signs — position-weight-checksummed against the new spec-literal
+`scripts/refs/wedge_ref.py`, catching any codebook / master / oblique-generation / `flipSign` / shape-class
+error on any index/size/direction; two HAND-COMPUTABLE anchors (KAT-A VERTICAL, KAT-B HORIZONTAL) that pin
+the ref port itself to spec-derived values; a clamped-fill witness for the nominal-vs-clamped geometry; and
+a WEDGE round-trip (32×32 via SPLIT, both signs) EXHAUSTIVELY equal to the `av1_mc_pred_compound(comp_mode=2)`
+oracle AND differing from AVERAGE. **Mutation-verified — 0 survivors** except the two provably-equivalent
+transformations the spec's sign-convention analysis predicts (dropping the O117/O153 complement is exactly
+cancelled by `flipSign`; an offset on a direction's invariant axis is a no-op) — a real transpose/generation
+error in those same planes IS caught. The decode mode-threading + both gate lanes die in the round-trips.
+
+**The adversarial review (2 dimensions, worktree-isolated, patch-applied):** mask-generation math CLEAN
+(288 checksums + hand-derived anchors + Stage-2 transpose mutation-verified); wiring + bounds CLEAN (gate
+mirror, `comp_mode` exclusivity, `Av1_WedgeMaster` reads bounded to `[8,55] ⊂ [0,64)` for every codebook
+entry, `wedge_index` entropy-bounded to `[0,15]`). Two CONFIRMED findings, both fixed: (F1) `av1_wedge_mask_build`
+checked the master-table OOM but not the codebook-table — a wild read on a specific OOM, now guarded
+symmetrically; (F2) the nominal-vs-clamped geometry split had no test (mutating to clamped dims shipped
+green) — now closed by the clamped-fill witness, mutation-verified.
+
 ## [0.7.89] - 2026-07-17
 
 **COMPOUND DIFFWTD (MASKED) INTER PREDICTION.** A two-reference block with `comp_group_idx == 1` and
