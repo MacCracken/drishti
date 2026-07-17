@@ -326,6 +326,9 @@ fn av1_encode_inter_tile(tile, plan_part, plan_fb, disable_cdf, out_len): i64 {
     store64(tile + AV1TILE_CCIM, cim);
     store64(tile + AV1TILE_CCII, cii);
     store64(tile + AV1TILE_CCMV, cmv);
-    av1_encode_tile(tile, plan_part, plan_fb, 0);
+    # plan_fb doubles as plan_tx: the partition walker loads plan_tx[bc] before the
+    # per-block dispatch, and the inter path ignores the value — passing plan_fb keeps
+    # that load in-bounds and parallel to the block plan (a literal 0 would deref null).
+    av1_encode_tile(tile, plan_part, plan_fb, plan_fb);
     return av1_sym_enc_finish(enc, out_len);
 }

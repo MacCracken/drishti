@@ -1,0 +1,216 @@
+# tests/av1_intertile.tcyr — the INTER TILE DECODE (0.7.84): the milestone.
+#
+# A genuine inter frame decodes end-to-end: a gradient reference sits in the DPB,
+# an all-skip 64x64 NEWMV block round-trips through the inter tile lane, and the
+# decoded pixels are compared EXHAUSTIVELY against an INDEPENDENT motion-compensated
+# prediction computed straight through the 0.7.60-verified MC driver — the decode
+# path and the expectation share no code above av1_mc_pred_block itself.
+include "src/main.cyr"
+
+# the reference frame: value (x + 2*y) & 255 — a gradient distinct at every small
+# shift, so a wrong MV, plane, reference, or filter shows immediately.
+fn it_ref_frame(): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            dr_frame_set(f, 0, x, y, (x + (2 * y)) & 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+# an INTER frame header record (FRAME_IS_INTRA stays 0): 64x64 mono, base_q 40,
+# single tile, fixed EIGHTTAP (no interp symbols), skip_mode_present off,
+# reference_select off (forced single), is_motion_mode_switchable off (SIMPLE
+# forced, no motion-mode symbols), every ref_frame_idx -> slot 0.
+fn it_fh(): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_WIDTH, 64);
+    store64(fh + AV1FH_FRAME_HEIGHT, 64);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 64);
+    store64(fh + AV1FH_MI_COLS, 16);
+    store64(fh + AV1FH_MI_ROWS, 16);
+    store64(fh + AV1FH_BASE_Q_IDX, 40);
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_SELECT);
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    store64(fh + AV1FH_TILE_COLS, 1);
+    store64(fh + AV1FH_TILE_ROWS, 1);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    store64(fh + AV1FH_MI_COL_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 16);
+    store64(fh + AV1FH_MI_ROW_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 16);
+    return fh;
+}
+fn it_refs(): i64 {
+    var refs = av1_ref_state_new();
+    store64(refs + AV1REF_UPSCALED_W + 0, 64);
+    store64(refs + AV1REF_FRAME_W + 0, 64);
+    store64(refs + AV1REF_FRAME_H + 0, 64);
+    return refs;
+}
+fn it_seq(): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_BITDEPTH, 8);
+    store64(s + AV1_SEQ_NUM_PLANES, 1);
+    return s;
+}
+# the block source: an all-skip single-ref NEWMV block (the 0.7.84 scope).
+fn it_blk(mvr, mvc): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIP, 1);
+    store64(b + AV1FB_ISINTER, 1);
+    var ib = b + AV1FB_IB;
+    store64(ib + AV1IB_REF0, AV1_LAST_FRAME);
+    store64(ib + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib + AV1IB_YMODE, AV1_NEWMV);
+    store64(ib + AV1IB_MV0 + AV1MV_ROW, mvr);
+    store64(ib + AV1IB_MV0 + AV1MV_COL, mvc);
+    store64(ib + AV1IB_MOTIONMODE, AV1_MM_SIMPLE);
+    store64(ib + AV1IB_INTERP + 0, AV1_EIGHTTAP);
+    store64(ib + AV1IB_INTERP + 8, AV1_EIGHTTAP);
+    store64(ib + AV1IB_CT + AV1CT_COMPIDX, 1);
+    return b;
+}
+# encode one 64x64 all-skip inter SB (PARTITION_NONE) into a tile payload.
+fn it_enc_tile(dpb, refs, seq, fh, blk, out_len): i64 {
+    var oe = alloc(8);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    assert_eq(av1_tile_set_inter_ctx(et, fh, refs, seq, dpb), DR_OK, "encode tile inter ctx");
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    return av1_encode_inter_tile(et, pp, pf, 1, out_len);
+}
+# THE MILESTONE: a genuine inter tile decodes to motion-compensated pixels.
+fn test_inter_tile_e2e() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, ref);                 # the reference into every slot
+    var refs = it_refs();
+    var seq = it_seq();
+    # MV (16, 8) 1/8-pel = 2 luma rows down, 1 col right — integer, so the MC is an
+    # exact shift with edge clamping.
+    var blk = it_blk(16, 8);
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, blk, &tlen);
+    assert_eq(tlen > 0, 1, "encoded an inter tile payload");
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    assert_eq(av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb), DR_OK, "decode tile inter ctx");
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
+    "THE MILESTONE: an inter tile decodes end-to-end");
+    # the expectation, computed INDEPENDENTLY through the MC driver.
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP),
+    DR_OK, "independent MC prediction");
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "decoded pixels == the independent MC prediction (all 4096)");
+    # spot known answer: the MV points INTO the reference (7.11.3.3 adds it), so
+    # out(x, y) = ref(x + 1, y + 2) — at (10, 10): 11 + 2*12 = 35.
+    assert_eq(dr_frame_get(df, 0, 10, 10), ((10 + 1) + (2 * (10 + 2))) & 255,
+    "spot KA: the shifted gradient");
+    # far-edge clamp: out(63, 63) <- ref(64, 65), clamped to ref(63, 63) = 189.
+    assert_eq(dr_frame_get(df, 0, 63, 63), (63 + (2 * 63)) & 255,
+    "edge clamp: out-of-frame reference samples clamp to the edge");
+    # the MI grid was populated (future blocks' scans read what this block stored).
+    var cell = av1_mv_grid_cell(load64(dt + AV1TILE_MVGRID), 16, 4, 4);
+    assert_eq(load64(cell + AV1MIR_REF0), AV1_LAST_FRAME, "MI grid: ref stored");
+    assert_eq(load64(cell + AV1MIR_MV0ROW), 16, "MI grid: mv row stored");
+    assert_eq(load64(cell + AV1MIR_AVAIL), 1, "MI grid: avail marked");
+    # the SkipModes grid too (the 5.11.11 ctx source for later blocks).
+    assert_eq(av1_grid_get(dt, AV1TILE_SKIPMODES, 4, 4), 0, "SkipModes stored (0)");
+    assert_eq(av1_grid_get(dt, AV1TILE_SKIPS, 4, 4), 1, "Skips stored (1)");
+    return 0;
+}
+# a second MV + a second block value: quarter-pel motion exercises the 8-tap filter
+# through the whole lane (the independent MC is the oracle).
+fn test_inter_tile_subpel() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var blk = it_blk(0 - 6, 10);                 # (-0.75, +1.25) luma px: subpel taps
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, blk, &tlen);
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "subpel inter tile decodes");
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 0 - 6, 10, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "subpel decoded pixels == the independent 8-tap MC");
+    return 0;
+}
+# the frame-level route (av1_frame_dec_group's inter branch) yields the same pixels;
+# without a DPB the same frame is REJECTED, never silently garbage.
+fn test_inter_frame_route() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var blk = it_blk(16, 8);
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, blk, &tlen);
+    var oe = alloc(8);
+    var out = av1_decode_frame_ref(seq, fh, dpb, refs, tb, tlen, oe);
+    assert_eq(load64(oe), DR_OK, "frame-level inter decode ok");
+    assert_eq(out != 0, 1, "frame returned");
+    assert_eq(dr_frame_get(out, 0, 10, 10), ((10 + 1) + (2 * (10 + 2))) & 255,
+    "frame-level pixels match the tile-level decode");
+    var oe2 = alloc(8);
+    assert_eq(av1_decode_frame_ref(seq, fh, 0, 0, tb, tlen, oe2), 0, "no DPB -> no frame");
+    assert_eq(load64(oe2), DR_ERR_UNSUPPORTED, "no DPB -> UNSUPPORTED, never garbage");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
+    test_inter_tile_e2e();
+    test_inter_tile_subpel();
+    test_inter_frame_route();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
