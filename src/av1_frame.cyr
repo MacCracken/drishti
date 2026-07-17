@@ -283,6 +283,18 @@ fn av1_get_relative_dist(s, a, b): i64 {
     return diff;
 }
 
+# av1_ref_dist — the clamped ABSOLUTE order-hint distance from the current frame to the
+# reference indexed by `ref` (spec 7.11.3.15 dist[]): Clip3(0, 31, Abs(get_relative_dist(
+# OrderHints[ref], OrderHint))). 31 = MAX_FRAME_DISTANCE (spec §3). Abs is av1_max(d, 0-d)
+# (two's-complement negate, NOT ~). Feeds BOTH the jnt distance weights (7.11.3.15) and the
+# compound_idx fwd_eq_bck context (5.11.29). Returns 0 when enable_order_hint is off (via
+# av1_get_relative_dist). Caller must ensure `ref` is a real inter ref (LAST..ALTREF); a
+# single-ref/INTRA/NONE ref would index OrderHints out of range.
+fn av1_ref_dist(s, fh, ref): i64 {
+    var d = av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, ref), av1_fh_order_hint(fh));
+    return av1_clip3(0, 31, av1_max(d, 0 - d));
+}
+
 # Segmentation feature tables (5.9.14): Segmentation_Feature_Bits /
 # _Signed / _Max, indexed by feature j in [0, SEG_LVL_MAX).
 fn av1_seg_feature_bits(j): i64 {

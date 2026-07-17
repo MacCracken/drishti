@@ -6,32 +6,36 @@
 
 ## Version
 
-**0.7.87** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND AVERAGE INTER PREDICTION.** A
-two-reference inter block predicts from BOTH refs and averages them — the first compound mode. Scope is
-COMPOUND_AVERAGE only (comp_group_idx==0 && compound_idx==1); jnt/wedge/diffwtd/inter-intra/non-SIMPLE
-motion stay refused DR_ERR_UNSUPPORTED on both lanes. The compound (prep) precision path in
-av1_mc_put_8tap (spec 7.11.3.2 / dav1d prep_8tap, 3-source verified) keeps ib extra bits and SKIPS Clip1
-(ib=4 @8/10-bit, 2 @12-bit): 2D V-round >>6, 1D >>(6-ib), integer <<ib; the single-ref path is
-byte-unchanged. av1_mc_pred_compound predicts ref0→Av1_McTmp + ref1→Av1_McOut at bit_depth+ib, then
-combines Clip1(Round2(tmp0+tmp1, ib+1)) (dav1d avg_c, PREP_BIAS=0, signed i64); av1_mc_pred_block was
-refactored into av1_mc_pred_core(...,compound) reused twice. Decode/encode un-gate (av1_intertile):
-dispatch to av1_mc_pred_compound (ref0/mv0 + ref1/mv1) on AVERAGE, else the mirror gate latches
-UNSUPPORTED; compound needs reference_select; an unpopulated ref1 DPB slot → DR_ERR_BOUNDS
-(av1_mc_pred_core ref==0 backstop). THE PROOF (tests/av1_mc_driver.tcyr, tests/av1_intertile.tcyr): the
-AVERAGE math vs an integer-MV exhaustive oracle (1024 px) + subpel self-average sanity (all three prep
-paths); a skip=1 NEW_NEWMV round-trip (dual-ref DPB LAST→slot0 / ALTREF→slot6) EXHAUSTIVELY equal to an
-independent av1_mc_pred_compound oracle (4096 px); a missing-ref adversarial (empty ALTREF → BOUNDS, no
-OOB); and the scope-gate reject on BOTH lanes for DISTANCE + DIFFWTD (minted by hand-finishing the symbol
-encoder after the encode gate discards, then decoded). Mutations, 0 survivors: the 4 prep shifts + the
-combine, the decode dispatch / ref1 source / mv1 source, and both gate clauses on both lanes (DISTANCE
-witnesses compound_idx, DIFFWTD witnesses comp_group_idx). THE REVIEW (3 dims, worktree-isolated,
-patch-applied): precision CLEAN (+ an independent hardcoded-tap Python oracle matching a 2D-subpel block),
-memory-safety CLEAN (Av1_McTmp sizing/stride, no scratch aliasing — tmp0 survives the second prediction —
-overflow, missing-ref, hostile-dims all double-guarded, probe-verified at 128x128), one CONFIRMED finding —
-the gate REJECT path had ZERO coverage on both lanes (||→&& shipped green) — now closed + mutation-verified.
-Also rolled in this cut: the av1_reset_block_context tile-relative rebase + the use_128x128_superblock
-rejection gate (both pre-existing, review-recorded). Next: **compound distance/wedge/diffwtd, OBMC/warp +
-the temporal scan**. **Prior: THE VAR-TX INTER RESIDUAL.**
+**0.7.88** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND DISTANCE (jnt) INTER PREDICTION.** A
+two-reference block with compound_idx==0 blends its two predictions with ORDER-HINT DISTANCE WEIGHTS (the
+closer ref weighted more) — the direct extension of 0.7.87 AVERAGE (same prep intermediates, weighted
+combine). Scope stays comp_group_idx==0 (AVERAGE + DISTANCE); only masked wedge/diffwtd stays refused
+UNSUPPORTED on both lanes. av1_dist_wtd_fwd (spec 7.11.3.15, src/av1_mc.cyr) returns FwdWeight->ref0 (Bck=
+16-Fwd->ref1) from the two clamped abs order-hint distances: d0=dist1, d1=dist0 (THE SWAP), order=(d0<=d1),
+a 3-row ratio search over Quant_Dist_Weight=[2,3,2,5,2,7,1,31] selecting Quant_Dist_Lookup=[9,7,11,5,12,4,
+13,3] (rows sum to 16). av1_ref_dist (src/av1_frame.cyr) = Clip3(0,31,Abs(get_relative_dist(OrderHints[ref],
+OrderHint))), reusing the existing 5.9.4 helper. The weighted combine (av1_mc_pred_compound, generalized):
+Clip1(Round2(tmp0*fwd + tmp1*bck, ib+4)); the 4 is DIST_PRECISION_BITS, not ib. AVERAGE is now the fwd=bck=8
+special case — BIT-EXACT with the old Round2(tmp0+tmp1, ib+1) (8*(t0+t1)>>(ib+4) ≡ (t0+t1)>>(ib+1), proven +
+regression-witnessed). Decode computes the weights once per block (8/8 unless compound_idx==0), threads them
+per plane; un-gate both lanes to admit compound_idx==0. 3-source verified (compound_distance.md) — NOT the
+hallucinated {8,8},{7,9},{6,10} an early web fetch produced (also sums to 16 — tables pinned by EXACT pair,
+not sum). THE PROOF (tests/av1_mc_driver.tcyr, tests/av1_intertile.tcyr): the combine vs an INDEPENDENT
+integer-MV oracle (ref0*Fwd+ref1*Bck+8)>>4 (1024 px, incl. 8/8==AVERAGE bit-exact + DISTANCE-differs
+witnesses); the weights + av1_ref_dist vs the new spec-literal scripts/refs/dist_wtd_ref.py (equal->7/9, the
+SWAP witness 13 vs 3, order boundary, zero-dist/order-hint-off->Lookup[3]); the Quant tables pinned to EXACT
+values; a jnt DISTANCE round-trip (unequal-dist refs, Fwd=13) EXHAUSTIVELY equal to the av1_mc_pred_compound
+(Fwd=13) oracle AND differing from the AVERAGE oracle. Mutations, 0 survivors: the combine shift + weight
+pairing die in the driver's INDEPENDENT oracle (the round-trip can't see combine-internal bugs — it shares
+av1_mc_pred_compound), the swap / order boundary / table values die in the weight tests, the decode
+threading dies in the round-trip. THE REVIEW (3 dims, worktree-isolated, patch-applied): weight-math CLEAN,
+memory-safety CLEAN (OrderHints[ref] cannot OOB — ref∈[1,7] via parse-validation + the compound guard + a
+belt-and-suspenders ref1!=INTRA check; no overflow; the ratio search terminates; order-hints-off handled).
+DEFERRED (review-flagged, roadmap): the fwd_eq_bck compound_idx CDF-ctx fix (5.11.29) is UN-witnessable in
+this pre-conformance arc (it shifts one binary symbol's context; a self-consistent round-trip can't see it
+fail and it doesn't change the coded bytes) — it lands WITH conformance testing, not shipped untested; the
+ctx stays fwd_eq_bck=0 (unchanged since 0.7.87, correct for drishti's own round-trips). Next: **compound
+wedge/diffwtd + inter-intra blends, OBMC/warp + the temporal scan**. **Prior: COMPOUND AVERAGE (0.7.87).**
 The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
 ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
 var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready

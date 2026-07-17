@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.88] - 2026-07-17
+
+**COMPOUND DISTANCE (jnt) INTER PREDICTION.** A two-reference block whose `compound_idx == 0` now blends
+its two predictions with ORDER-HINT DISTANCE WEIGHTS instead of a straight average — the closer reference
+gets more weight. This is the direct extension of 0.7.87 AVERAGE: identical prep intermediates, a weighted
+combine. Scope stays `comp_group_idx == 0` (AVERAGE + DISTANCE); only masked wedge/diffwtd
+(`comp_group_idx == 1`) remains refused `DR_ERR_UNSUPPORTED` on both lanes.
+
+### Added
+
+- **The distance-weight process** (spec 7.11.3.15): `av1_dist_wtd_fwd(s, fh, ref0, ref1)` returns FwdWeight
+  (applied to ref0; BckWeight = 16 - FwdWeight to ref1) from the two clamped absolute order-hint distances —
+  `d0 = dist1`, `d1 = dist0` (the spec's swap), `order = (d0 <= d1)`, then a 3-row ratio-search over
+  `Quant_Dist_Weight = [2,3, 2,5, 2,7, 1,31]` selecting from `Quant_Dist_Lookup = [9,7, 11,5, 12,4, 13,3]`
+  (every row sums to 16 = DIST_PRECISION). `av1_ref_dist` (`src/av1_frame.cyr`) =
+  `Clip3(0, 31, Abs(get_relative_dist(OrderHints[ref], OrderHint)))`, reusing the existing 5.9.4
+  `av1_get_relative_dist`. **3-source verified** (spec + libaom + dav1d, `compound_distance.md`) — NOT the
+  hallucinated `{8,8},{7,9},{6,10}` an early web fetch produced (which also sums to 16 — the tables are
+  pinned by EXACT pair, not sum).
+- **The weighted combine** (`av1_mc_pred_compound`, generalized): `Clip1(Round2(tmp0*fwd + tmp1*bck,
+  ib + 4))`. The `4` is DIST_PRECISION_BITS (weight-sum log2), not `ib`. AVERAGE is now the `fwd = bck = 8`
+  special case, which is BIT-EXACT with the old `Round2(tmp0 + tmp1, ib + 1)` (`8·(t0+t1) >> (ib+4)` ≡
+  `(t0+t1) >> (ib+1)`, proven + regression-witnessed). The decode dispatch computes the weights once per
+  block from `seq`/`fh`/`ref0`/`ref1` (8/8 unless `compound_idx == 0`) and threads them per plane.
+- **The decode/encode un-gate**: both lanes now admit `compound_idx == 0`; the reject narrows to masked
+  compound only.
+
+**Proofs** (`tests/av1_mc_driver.tcyr`, `tests/av1_intertile.tcyr`): the weighted combine against an
+INDEPENDENT integer-MV oracle `(ref0*Fwd + ref1*Bck + 8) >> 4` (1024 px, incl. the `8/8`-equals-AVERAGE
+bit-exact witness + a DISTANCE-differs-from-AVERAGE assertion); the weight procedure + `av1_ref_dist`
+against the new spec-literal `scripts/refs/dist_wtd_ref.py` (equal → 7/9, the ref0/ref1 SWAP witness → 13
+vs 3, the order boundary, the zero-distance / order-hint-off degenerate → Lookup[3]); the Quant tables
+pinned to EXACT values; and a jnt DISTANCE round-trip (unequal-distance refs, Fwd=13) with decoded pixels
+EXHAUSTIVELY equal to the `av1_mc_pred_compound(Fwd=13)` oracle AND differing from the AVERAGE oracle
+(proving the decode threaded distance weights). **Mutation-verified — 0 survivors**: the combine shift and
+weight pairing die in the driver's INDEPENDENT oracle (the round-trip can't see combine-internal bugs — it
+shares `av1_mc_pred_compound`); the d0/d1 swap, the `order` boundary, and the table values die in the weight
+tests; the decode weight threading dies in the round-trip. The complementary decomposition (independent
+combine oracle + round-trip wiring witness) leaves no gap.
+
+**The adversarial review (3 dimensions, worktree-isolated, patch-applied):** weight-math CLEAN (loop /
+tables / swap / combine / AVERAGE bit-exactness all mutation-verified + Python-oracle-matched);
+memory-safety CLEAN (`OrderHints[ref]` cannot OOB — every path guarantees `ref ∈ [1,7]` via ref-parse
+validation + the compound guard + the belt-and-suspenders `ref1 != INTRA` check; no combine overflow; the
+ratio search always terminates; order-hints-off is handled). A review-flagged addition — the `fwd_eq_bck`
+compound_idx CDF-context fix (5.11.29) — was found UN-witnessable in this pre-conformance arc (it shifts a
+single binary symbol's context, which a self-consistent round-trip cannot see fail, and empirically does
+not change the coded bytes) and was **deferred with conformance testing** rather than shipped untested;
+the compound_idx context stays `fwd_eq_bck = 0` (unchanged since 0.7.87), which is correct for drishti's own
+round-trips and only matters against external jnt streams.
+
 ## [0.7.87] - 2026-07-17
 
 **COMPOUND AVERAGE INTER PREDICTION.** A two-reference inter block now predicts from BOTH references

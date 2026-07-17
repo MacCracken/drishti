@@ -2225,7 +2225,7 @@ fn test_ir_compound() {
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "compound tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP, 8, 8);
     var diff = 0;
     y = 0;
     while (y < 64) {
@@ -2356,12 +2356,156 @@ fn it_comp_gate_reject(en_masked, en_jnt, groupidx, compidx, ctype, tag): i64 {
     return 0;
 }
 fn test_ir_compound_gates() {
-    # DISTANCE: comp_group_idx=0, compound_idx=0 (enable_jnt_comp) -> the compound_idx clause.
-    it_comp_gate_reject(0, 1, 0, 0, AV1_COMPOUND_DISTANCE,
-    "decode gate: DISTANCE (compound_idx=0) refused, not mis-read as AVERAGE");
+    # 0.7.88: DISTANCE (compound_idx=0) is now IN SCOPE (see test_ir_compound_distance).
+    # Only MASKED compound (comp_group_idx==1: wedge/diffwtd) stays rejected on both lanes.
     # DIFFWTD: comp_group_idx=1 (enable_masked_compound) -> the comp_group_idx clause.
     it_comp_gate_reject(1, 0, 1, 1, AV1_COMPOUND_DIFFWTD,
     "decode gate: DIFFWTD (comp_group_idx=1) refused, not mis-read as AVERAGE");
+    return 0;
+}
+
+# ============ DISTANCE-WEIGHTED (jnt) COMPOUND (0.7.88) ============
+# The Quant_Dist tables (spec 7.11.3.15) pinned to EXACT values — NOT sum-only (the
+# hallucinated {8,8},{7,9},{6,10} also sum to 16). Mirror scripts/refs/dist_wtd_ref.py.
+fn test_dist_tables() {
+    assert_eq(av1_quant_dist_weight(0), 2, "Weight[0][0]");
+    assert_eq(av1_quant_dist_weight(1), 3, "Weight[0][1]");
+    assert_eq(av1_quant_dist_weight(2), 2, "Weight[1][0]");
+    assert_eq(av1_quant_dist_weight(3), 5, "Weight[1][1]");
+    assert_eq(av1_quant_dist_weight(4), 2, "Weight[2][0]");
+    assert_eq(av1_quant_dist_weight(5), 7, "Weight[2][1]");
+    assert_eq(av1_quant_dist_weight(6), 1, "Weight[3][0]");
+    assert_eq(av1_quant_dist_weight(7), 31, "Weight[3][1]");
+    assert_eq(av1_quant_dist_lookup(0), 9, "Lookup[0][0]");
+    assert_eq(av1_quant_dist_lookup(1), 7, "Lookup[0][1]");
+    assert_eq(av1_quant_dist_lookup(2), 11, "Lookup[1][0]");
+    assert_eq(av1_quant_dist_lookup(3), 5, "Lookup[1][1]");
+    assert_eq(av1_quant_dist_lookup(4), 12, "Lookup[2][0]");
+    assert_eq(av1_quant_dist_lookup(5), 4, "Lookup[2][1]");
+    assert_eq(av1_quant_dist_lookup(6), 13, "Lookup[3][0]");
+    assert_eq(av1_quant_dist_lookup(7), 3, "Lookup[3][1]");
+    var i = 0;
+    while (i < 4) {
+        assert_eq(av1_quant_dist_lookup(i * 2) + av1_quant_dist_lookup((i * 2) + 1), 16,
+        "Lookup row sums to 16");
+        i = i + 1;
+    }
+    return 0;
+}
+# (seq, fh) carrying order hints: enable_order_hint=1, bits=7; fh.OrderHint + OrderHints[
+# LAST]/[ALTREF]. Returns seq; fh in Dwt_Fh. Exercises av1_ref_dist/_dist_wtd_fwd/_fwd_eq_bck.
+var Dwt_Fh = 0;
+fn dwt_env(oh_ref0, oh_ref1, oh_cur): i64 {
+    var s = it_seq();
+    store64(s + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(s + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var fh = it_fh();
+    store64(fh + AV1FH_ORDER_HINT, oh_cur);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), oh_ref0);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), oh_ref1);
+    Dwt_Fh = fh;
+    return s;
+}
+fn dwt_fwd(oh_ref0, oh_ref1, oh_cur): i64 {
+    var s = dwt_env(oh_ref0, oh_ref1, oh_cur);
+    return av1_dist_wtd_fwd(s, Dwt_Fh, AV1_LAST_FRAME, AV1_ALTREF_FRAME);
+}
+fn test_ir_dist_weights() {
+    var s = dwt_env(8, 20, 10);
+    assert_eq(av1_ref_dist(s, Dwt_Fh, AV1_LAST_FRAME), 2, "ref_dist LAST = 2");
+    assert_eq(av1_ref_dist(s, Dwt_Fh, AV1_ALTREF_FRAME), 10, "ref_dist ALTREF = 10");
+    # av1_dist_wtd_fwd vs scripts/refs/dist_wtd_ref.py known FwdWeights (Fwd -> ref0).
+    assert_eq(dwt_fwd(8, 20, 10), 13, "Fwd dist0=2,dist1=10 -> 13 (ref0 closer)");
+    assert_eq(dwt_fwd(20, 8, 10), 3, "Fwd dist0=10,dist1=2 -> 3 (SWAP witness)");
+    assert_eq(dwt_fwd(9, 11, 10), 7, "Fwd equal dist (1,1) -> 7 (never 8/8)");
+    assert_eq(dwt_fwd(10, 10, 10), 3, "Fwd zero-dist -> Lookup[3] = 3");
+    assert_eq(dwt_fwd(9, 12, 10), 11, "Fwd dist0=1,dist1=2 -> 11 (order boundary)");
+    assert_eq(dwt_fwd(12, 9, 10), 5, "Fwd dist0=2,dist1=1 -> 5");
+    # enable_order_hint OFF -> both distances collapse to 0 -> equal -> Lookup[3] Fwd=3.
+    var soff = dwt_env(8, 20, 10);
+    store64(soff + AV1_SEQ_ENABLE_ORDER_HINT, 0);
+    assert_eq(av1_ref_dist(soff, Dwt_Fh, AV1_LAST_FRAME), 0, "order_hint off -> dist 0");
+    assert_eq(av1_dist_wtd_fwd(soff, Dwt_Fh, AV1_LAST_FRAME, AV1_ALTREF_FRAME), 3,
+    "order_hint off -> Fwd = 3");
+    return 0;
+}
+# DISTANCE (jnt) ROUND-TRIP: a skip=1 compound_idx==0 block with UNEQUAL-distance refs
+# (dist0=2 LAST, dist1=10 ALTREF -> Fwd=13). Decoded pixels EXHAUSTIVELY equal the verified
+# av1_mc_pred_compound oracle at the SAME weights, AND differ from the AVERAGE oracle (proving
+# the decode threaded distance weights, not 8/8). enable_jnt_comp so compound_idx is coded.
+fn test_ir_compound_distance() {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    store64(fh + AV1FH_ORDER_HINT, 10);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 8);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), 20);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_JNT_COMP, 1);
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var blk = it_blk_comp(16, 8, 0 - 8, 24);
+    var ct = (blk + AV1FB_IB) + AV1IB_CT;
+    store64(ct + AV1CT_COMPIDX, 0);                        # DISTANCE (jnt)
+    store64(ct + AV1CT_TYPE, AV1_COMPOUND_DISTANCE);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "distance tile encoded");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "distance tile decodes");
+    var fwd = av1_dist_wtd_fwd(seq, fh, AV1_LAST_FRAME, AV1_ALTREF_FRAME);
+    assert_eq(fwd, 13, "round-trip Fwd = 13 (dist0=2, dist1=10)");
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
+    fwd, 16 - fwd);
+    var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
+    8, 8);
+    var diff = 0;
+    var adiff = 0;
+    y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            var got = dr_frame_get(df, 0, x, y);
+            if (got != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            if (got != dr_frame_get(af, 0, x, y)) { adiff = adiff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "compound DISTANCE block: decode == av1_mc_pred_compound(Fwd=13) oracle (4096)");
+    assert_eq(adiff > 0, 1, "decoded DISTANCE differs from the AVERAGE oracle (weights threaded)");
     return 0;
 }
 
@@ -2395,6 +2539,9 @@ fn main() {
     test_ir_compound();
     test_ir_compound_missing_ref();
     test_ir_compound_gates();
+    test_dist_tables();
+    test_ir_dist_weights();
+    test_ir_compound_distance();
     test_ir_vartx_edge_clamp();
     test_ir_vartx_32();
     test_ir_vartx_intertx_grid();

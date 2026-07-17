@@ -217,7 +217,7 @@ fn test_mc_compound_avg() {
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     # ref0 MV (row 16=+2px, col 8=+1px); ref1 MV (row -8=-1px, col 24=+3px). Filter 0.
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8),
     DR_OK, "compound-average decodes");
     var diff = 0;
     y = 0;
@@ -252,7 +252,7 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
     var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     av1_mc_pred_block(s, ref, 0, 0, 0, 32, 32, mvr, mvc, 0, 0);
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0);
+    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8);
     var big = 0;
     var y = 0;
     while (y < 32) {
@@ -266,6 +266,73 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
         y = y + 1;
     }
     assert_eq(big, 0, tag);
+    return 0;
+}
+
+# COMPOUND DISTANCE (jnt, 0.7.88): with INTEGER MVs + explicit weights the combine collapses
+# to (ref0[s0]*Fwd + ref1[s1]*Bck + 8) >> 4 (prep = pixel<<ib; combine >>(ib+4), the 2^ib
+# cancels). Fwd->ref0, Bck->ref1. SAME two gradient refs + MVs + edge clamp as the AVERAGE
+# oracle above — the ONLY change is the weighting. Independent (scripts/refs/dist_wtd_ref.py).
+fn mcd_dist_oracle(r0, r1, fwd, bck, tag): i64 {
+    var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck),
+    DR_OK, tag);
+    var diff = 0;
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            var x0 = x + 1;
+            if (x0 > 31) { x0 = 31; }
+            var y0 = y + 2;
+            if (y0 > 31) { y0 = 31; }
+            var x1 = x + 3;
+            if (x1 > 31) { x1 = 31; }
+            var y1 = y - 1;
+            if (y1 < 0) { y1 = 0; }
+            var exp = ((dr_frame_get(r0, 0, x0, y0) * fwd) + (dr_frame_get(r1, 0, x1, y1) * bck) + 8) >>> 4;
+            if (dr_frame_get(d, 0, x, y) != exp) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
+fn test_mc_compound_dist() {
+    var r0 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var r1 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            dr_frame_set(r0, 0, x, y, (x + (2 * y)) & 255);
+            dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    mcd_dist_oracle(r0, r1, 13, 3, "DISTANCE Fwd=13 == (r0*13+r1*3+8)>>4 (1024 px)");
+    mcd_dist_oracle(r0, r1, 3, 13, "DISTANCE Fwd=3 == (r0*3+r1*13+8)>>4 (1024 px)");
+    mcd_dist_oracle(r0, r1, 7, 9, "DISTANCE Fwd=7 == (r0*7+r1*9+8)>>4 (1024 px)");
+    # Fwd=Bck=8 must be BIT-IDENTICAL to the plain average (Option A regression witness).
+    mcd_dist_oracle(r0, r1, 8, 8, "DISTANCE Fwd=8 == AVERAGE oracle (bit-exact)");
+    # DISTANCE (13/3) must actually DIFFER from AVERAGE (8/8) — else the mode is untested.
+    var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var dd = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8);
+    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3);
+    var ndiff = 0;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            if (dr_frame_get(da, 0, x, y) != dr_frame_get(dd, 0, x, y)) { ndiff = ndiff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(ndiff > 0, 1, "DISTANCE (13/3) DIFFERS from AVERAGE (8/8) — mode observable");
     return 0;
 }
 
@@ -284,6 +351,8 @@ fn main() {
     test_mc_pred_rejects();
     test_group("compound-average MC (7.11.3.1 isCompound)");
     test_mc_compound_avg();
+    test_group("compound-distance MC (7.11.3.15 jnt weights)");
+    test_mc_compound_dist();
     return assert_summary();
 }
 
