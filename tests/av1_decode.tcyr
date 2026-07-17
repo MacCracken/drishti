@@ -724,6 +724,33 @@ fn test_frame_decode_truncated() {
     assert_eq(load64(oe) != DR_OK, 1, "truncated tile -> decode error surfaced");
     return 0;
 }
+# use_128x128_superblock=1 must be REJECTED, not silently mis-parsed. The tile SB loop
+# (av1_decode_tile) hardcodes 64x64 SBs — it steps by AV1_SB4 and calls
+# av1_decode_partition with BLOCK_64X64 — so a 128-SB stream would decode only the
+# top-left 64x64 of each superblock (garbage partition/positions). The gate in
+# av1_frame_dec_new latches DR_ERR_UNSUPPORTED before any tile runs, at the one chokepoint
+# every decode path shares. SB128 is the SOLE difference from test_frame_decode_plain:
+# same valid keyframe payload, same fh. Mutation-verify: delete that gate and this test
+# flips UNSUPPORTED -> DR_OK (the 64x64 payload decodes, the flag ignored) — i.e. the
+# mis-parse ships green.
+fn test_frame_decode_sb128_rejected() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    assert_eq(olen > 0, 1, "encoded a keyframe tile");
+    var oe = alloc(8);
+    var seq128 = frame_mk_seq(0);
+    store64(seq128 + AV1_SEQ_SB128, 1);        # signal 128x128 superblocks
+    var frame = av1_decode_frame(seq128, frame_mk_fh(1, 1, 0, 0), out, olen, oe);
+    assert_eq(frame, 0, "use_128x128_superblock -> no frame (clean reject, no crash/garbage)");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "use_128x128_superblock -> DR_ERR_UNSUPPORTED");
+    # direction: the identical payload with SB128=0 decodes cleanly, so the reject is
+    # driven by the flag, not the bytes (av1_seq_use_128x128 is the sole gate input).
+    var oe2 = alloc(8);
+    var frame0 = av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe2);
+    assert_eq(load64(oe2), DR_OK, "same payload, SB128=0 -> decodes (flag is the gate)");
+    assert_eq(frame0 != 0, 1, "SB128=0 -> a frame");
+    return 0;
+}
 
 # ================================================================
 # OBU-stream walk (av1_decode_obus): dispatch + error paths. (The full
@@ -1156,6 +1183,7 @@ fn main() {
     test_frame_decode_10bit_cdef();
     test_frame_decode_dimbomb();
     test_frame_decode_truncated();
+    test_frame_decode_sb128_rejected();
     test_group("OBU-stream walk (av1_decode_obus)");
     test_obus_bad_args();
     test_obus_td_only();

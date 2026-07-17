@@ -23,6 +23,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exactly those. Mutation-verified: the above and left loops each flipped back to absolute
   independently — 12 and 11 assertions red respectively; restore byte-identical, 27106/27106 green.
 
+- **`use_128x128_superblock` was read but never gated — a 128-SB stream was silently mis-parsed,
+  not rejected** (the 0.7.85 review's recorded note, pre-existing, codebase-wide; affects both intra
+  and inter, since they share the SB loop). `av1_seq_use_128x128` (`src/av1_seq.cyr`) parses the
+  flag, but the tile superblock loop (`av1_decode_tile`) hardcodes 64x64 SBs — it steps by `AV1_SB4`,
+  calls `av1_decode_partition` with `BLOCK_64X64`, and `av1_residual` uses `sbMask=15` — so a sequence
+  signalling `use_128x128_superblock=1` decoded only the top-left 64x64 of each superblock (wrong
+  partition tree / positions, arithmetic-decoder desync) and returned `DR_OK` on garbage rather than
+  rejecting the stream — a "trust no input byte" violation (CLAUDE.md). Now latched
+  `DR_ERR_UNSUPPORTED` in `av1_frame_dec_new`, the one chokepoint every decode path shares
+  (`av1_decode_frame`/`_ref`, `av1_decode_obus`, `av1_decode_stream`), before any tile runs.
+  Witnessed in `tests/av1_decode.tcyr` (`test_frame_decode_sb128_rejected`): the valid `_plain`
+  keyframe payload with `SB128=1` set now rejects `DR_ERR_UNSUPPORTED` (frame 0, no crash/garbage),
+  while the byte-identical payload with `SB128=0` still decodes `DR_OK` — the flag is the sole gate
+  input. Mutation-verified: removing the gate flips the test `UNSUPPORTED → DR_OK` (the 64x64
+  mis-parse ships green); restore byte-identical, 195/195.
+
 ## [0.7.85] - 2026-07-17
 
 **THE NON-SKIP INTER RESIDUAL (uniform-tx).** A genuine non-skip inter block now decodes with the
