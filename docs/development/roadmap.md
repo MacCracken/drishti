@@ -271,13 +271,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   decode as one call, with the Av1InterBlock record + the full encoder inverse) and the **5.11.15
   OUTER DISPATCH** 0.7.83 (`av1_inter_frame_mode_info` + `read_skip_mode` 5.11.11 + the is_inter
   selection; segmentation reads / delta-q/lf / the intra fork remain hard-gated deferrals of this
-  list) are in too; next
-  the INTER TILE DECODE itself, then
+  list) are in too, and **THE INTER TILE DECODE 0.7.84 — THE MILESTONE, REACHED**
+  (`src/av1_intertile.cyr`: a genuine skip-path inter frame decodes end-to-end, raw bytes →
+  motion-compensated pixels from the DPB, through `av1_decode_stream`); next the NON-SKIP
+  INTER RESIDUAL (var-tx reads + inter coeffs — also makes the two 0.7.84 tracked mutation
+  residuals killable), then
   `warp_estimation` (7.11.3.8) turns the
-  samples into a model, and
-  the inter tile decode that lets
-  `av1_decode_stream` decode a genuine inter frame referencing the DPB, then the temporal scan (needs the
-  DPB's deferred saved MVs), then compound/OBMC/warp + scaled-reference/BILINEAR MC; all table-free, dav1d
+  samples into a model, the compound/inter-intra blends + OBMC, the temporal scan (needs the
+  DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free, dav1d
   `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.

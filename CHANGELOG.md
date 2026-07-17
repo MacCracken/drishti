@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.84] - 2026-07-16
+
+**THE INTER TILE DECODE — the milestone of the inter arc.** A genuine AV1 inter frame decodes
+end-to-end: raw entropy-coded bytes → the complete mode-info decode (0.7.62–0.7.83) →
+motion-compensated pixels from a DPB reference, through `decode_block`/`decode_tile` and
+`av1_decode_stream`.
+
+- **New module `src/av1_intertile.cyr`** (after av1_dpb, per the enum-visibility rule; the block/tile
+  dispatchers forward into it): `av1_tile_set_inter_ctx` (frame handles + shared frame-addressed MV +
+  SkipModes grids + reusable scan records + the cdef bundle), `av1_decode_block_inter` (the 5.11.15
+  driver → the skip scope gate → `compute_prediction` per plane via `av1_mc_pred_block` from
+  `av1_dpb_ref_frame` → the 5.11.4 storage loops + SkipModes + LoopfilterTxSizes), the paired
+  `av1_encode_block_inter`, and the `av1_decode/encode_inter_tile` drivers (intra contexts + the four
+  per-tile adaptive inter CDF families). Scope gates reject `DR_ERR_UNSUPPORTED`, each roadmap-tracked:
+  the non-skip inter residual, compound averaging, inter-intra blending, OBMC/warp, scaled refs.
+- **`Av1Tile` grew 424 → 544** (the inter context + `AV1TILE_IERR`, a STICKY inter-lane error latch —
+  the partition walk discards block returns, so gate/scope errors latch per block and the tile driver
+  surfaces them; later blocks no-op once latched). `av1_tile_share_grids` shares the new grids.
+- **Frame/stream wiring**: `Av1FrameDec` carries DPB + refs (`av1_frame_dec_set_inter`);
+  `av1_frame_dec_group` routes non-intra frames to the inter tile (UNSUPPORTED without a DPB — never
+  silent garbage); `av1_decode_frame_ref` threads the state; `av1_decode_stream` feeds its DPB + refs
+  into both the FRAME-OBU and TILE_GROUP paths.
+
+**The milestone proof** (`tests/av1_intertile.tcyr`, 58 assertions): a gradient reference
+(`(x + 2y) & 255`, distinct at every shift) in the DPB; all-skip NEWMV tiles decode and the pixels are
+compared EXHAUSTIVELY against an INDEPENDENT `av1_mc_pred_block` computation (no shared code above the
+MC driver itself) — integer MV (4096 px), sub-pel (8-tap taps live), dual-filter (SMOOTH-x/SHARP-y,
+`en_dual`), and a 2×2-superblock 128×128 frame with four distinct MVs (16384 px; per-block scan-ctx
+reconfiguration + both neighbour-threading directions + per-quadrant MI-grid values). The spot KAs
+initially had the MV sign backwards — the exhaustive oracle overruled the author, per design. Plus: the
+frame-level route equals the tile-level decode; no-DPB rejects UNSUPPORTED; a leaf-built non-skip
+payload is REJECTED at the scope gate (never mispredicted); the SkipModes store pinned via a planted
+sentinel; MI/Skips grid population asserted.
+
+**The byte-stream layer**: a bit-exact NON-still sequence header + KEY and INTER frame-header builders
+(every field's packing commented, verified by parse-back — every built byte consumed, 13 field pins),
+then TD + SEQ + KEY(fh+tile) + INTER(fh+tile) through `av1_decode_stream`: two frames decode from pure
+bytes, the inter frame is the output, the DPB updates. (The intra encode lane is skip-only, so the
+in-stream reference is flat — this layer pins parse → threading → routing; pixel strength lives in the
+gradient record-level tests. A content-bearing stream E2E arrives with the non-skip encode lane,
+roadmap.md.)
+
+All **mutation-verified — 13 mutations, 11 killed, 2 tracked residuals**: MV row/col swap → 6 failures,
+filt swap → 1 (after the dual-filter case), ref-slot swap → crash caught, plane-origin swap → 1 (after
+the multi-SB case), the skip scope gate dropped → 1, the inter dispatch dropped → 14, MI store dropped →
+crash caught, the sticky latch unsurfaced → 1, SkipModes store dropped → 1 (after the sentinel), plus
+the null-`plan_tx` crash found live during development. TRACKED RESIDUALS (roadmap.md): the skip-ctx
+neighbour THREADING is mutation-resistant while every block is skip=1 (all candidate CDF rows favor
+skip; becomes killable with mixed skip patterns in the non-skip bite), and the in-tile skip-mode ctx is
+exercised only at zero (skip_mode needs compound refs).
+
+**The adversarial review (36 agents, 4 slices) confirmed 16 findings — all folded in:**
+
+- **THE MAJOR (a real spec deviation the mono-fixture monoculture hid): sub-8×8 chroma.** For a block
+  whose chroma unit SPANS SIBLING blocks (bw4 or bh4 = 1 under subsampling), spec `compute_prediction`
+  predicts the FULL even-aligned unit at the HasChroma block using the SIBLINGS' MVs from the MI grid —
+  the per-block footprint MC emitted stale frame contents as chroma (reproduced: 12 of 16 U pixels never
+  written, decode accepted DR_OK). Fixed per the "never silent garbage" convention: a **geometry gate on
+  BOTH lanes** rejects sibling-span chroma blocks `DR_ERR_UNSUPPORTED` BEFORE any symbol work (the
+  sibling-MV chroma loop is its own bite, roadmap.md). Witnessed decode-side by a LEAF-BUILT 4:2:0
+  8×8 VERT payload and write-side by the mirrored plan refusal.
+- **Lossless TxSize**: skip-inter blocks now honor `read_tx_size`'s Lossless early-out (base_q 0 →
+  TX_4X4, both lanes) instead of max-rect — the recorded InterTxSizes/LoopfilterTxSizes were wrong for
+  lossless streams.
+- **The ICDEF cdef-plan slot**: now COPIED from `set_cdef_ctx` (it was hard-zeroed with a comment
+  promising "the encode lane sets it" — nothing did), and a cdef-wired encode tile WITHOUT a plan is
+  refused up front instead of null-dereffing in `av1_write_cdef` on a non-skip block.
+- **Test-adequacy repairs** (each review-confirmed survivable, each now mutation-killed): 4:2:0
+  three-plane two-SB E2E with per-plane exhaustive oracles (chroma had ZERO coverage; two SBs because at
+  the origin the extent clamps mask a dropped subsampling shift); reference-frame SELECTION pinned
+  (GOLDEN → DPB slot 3 with a DIFFERENT frame in slot 0 — hardcoding LAST or slot 0 was
+  oracle-invisible); a NON-SB-aligned 48×48 frame pins the visible-extent clamps (exhaustive + raw
+  border-zero probes — deleting both clamps had survived); tile-window availability pinned DIRECTLY on
+  `av1_inter_block_setup` (frame-absolute `r>0/c>0` had survived); `share_grids`' MVGRID/SKIPMODES
+  entries pinned structurally (incl. set_inter_ctx preservation); encode-lane IERR surfacing witnessed
+  (buffer 0 + out_len 0); the write-side LFTX store pinned; the KEY header gets its own parse-back (9
+  field pins) and the INTER parse-back pins frame_height.
+- **13 more mutations, ALL killed** (after two test-strengthening rounds the campaign itself forced):
+  both chroma-span gates, both lossless overrides, ref-hardcode at the lookup AND slot-hardcode in the
+  DPB, both clamps, frame-absolute avail, the share entries, the ICDEF copy, the encode IERR surface,
+  chroma-never-predicted (paired), chroma-shift-dropped (paired).
+- Recorded, not in this cut: `reset_block_context`'s absolute-vs-rebased strip indexing (pre-existing on
+  the intra lane, inert in the all-skip scope — flagged for the non-skip bite); square-fixture geometry
+  and byte-granular tail consumption in the header parse-backs (note-level; heights now pinned).
+
+Suite: `tests/av1_intertile.tcyr` 58 → 98 assertions.
+
 ## [0.7.83] - 2026-07-16
 
 **Inter prediction — `inter_frame_mode_info` (spec 5.11.15), the OUTER DISPATCH.** The last mode-info

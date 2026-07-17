@@ -121,7 +121,9 @@ enum Av1TileOff {
     AV1TILE_CCMV      = 512;  # per-tile adaptive mvcdf blob
     AV1TILE_SKIPMODES = 520;  # SkipModes grid (frame-addressed; shared)
     AV1TILE_ICDEF     = 528;  # the 5.11.15 driver's 7-slot cdef record (0 = splice off)
-    AV1TILE_SIZE      = 536;
+    AV1TILE_IERR      = 536;  # STICKY inter-lane error (the partition walk discards
+    #                           block returns; the tile driver reads this after the loop)
+    AV1TILE_SIZE      = 544;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -188,6 +190,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_CCMV, 0);
     store64(tile + AV1TILE_SKIPMODES, 0);
     store64(tile + AV1TILE_ICDEF, 0);
+    store64(tile + AV1TILE_IERR, 0);
     # frame-addressed grids default to the tile dims (single tile spans the frame);
     # a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new.
     store64(tile + AV1TILE_FMI_COLS, mi_cols);

@@ -6,7 +6,41 @@
 
 ## Version
 
-**0.7.83** — cut 2026-07-16, not yet tagged (user's git). **Inter prediction — INTER_FRAME_MODE_INFO
+**0.7.84** — cut 2026-07-16, not yet tagged (user's git). **THE INTER TILE DECODE — THE MILESTONE.**
+A genuine AV1 inter frame decodes END-TO-END: raw bytes → the complete mode-info decode → motion-
+compensated pixels from a DPB reference, through decode_block/decode_tile AND av1_decode_stream. NEW
+module `src/av1_intertile.cyr` (after av1_dpb, the enum-visibility rule; the block/tile dispatchers
+forward into it): av1_tile_set_inter_ctx + av1_decode_block_inter (5.11.15 driver → the skip scope
+gate → compute_prediction per plane via av1_mc_pred_block from av1_dpb_ref_frame → the 5.11.4 storage
+loops) + the paired encoder + the inter tile drivers (four per-tile adaptive inter CDF families).
+Av1Tile grew 424→544 (the inter context + AV1TILE_IERR — a STICKY inter-lane error latch: the partition
+walk discards block returns, so gate errors latch per block and the tile driver surfaces them).
+Av1FrameDec carries DPB+refs; av1_frame_dec_group routes non-intra frames (UNSUPPORTED without a DPB);
+av1_decode_stream threads its DPB+refs into both OBU paths. SCOPE (each gated UNSUPPORTED,
+roadmap-tracked): non-skip inter residual / compound / inter-intra blend / OBMC-warp / scaled refs.
+THE PROOF (tests/av1_intertile.tcyr, 98): gradient-reference tiles decode with pixels EXHAUSTIVELY
+equal to an INDEPENDENT av1_mc_pred_block computation — integer (4096 px), sub-pel, dual-filter,
+a 2x2-SB 128x128 frame with four MVs (16384 px; both neighbour-threading directions + per-quadrant
+MI values), 4:2:0 THREE-PLANE two-SB (per-plane exhaustive oracles), GOLDEN→slot-3 reference
+SELECTION over a decoy slot 0, and a NON-SB-aligned 48x48 frame (extent clamps + raw border-zero
+probes); the spot KAs initially had the MV sign BACKWARDS and the exhaustive oracle overruled the
+author, as designed. Plus the BYTE-STREAM layer: bit-exact non-still SEQ + KEY + INTER header builders
+(parse-back verified, every byte consumed, KEY + INTER field pins incl. heights) through
+av1_decode_stream — two frames from pure bytes. THE REVIEW (36 agents, 4 slices) confirmed 16 findings,
+all folded in-cut — the MAJOR was a real spec deviation the mono monoculture hid: sub-8x8 blocks whose
+chroma unit SPANS SIBLINGS (compute_prediction predicts the full unit from sibling MVs) emitted stale
+chroma as DR_OK; now geometry-GATED UNSUPPORTED on both lanes before any symbol work (the sibling-MV
+loop is its own bite, roadmap.md), witnessed by a leaf-built 4:2:0 payload. Also fixed: lossless
+skip-inter TxSize (read_tx_size's TX_4X4 early-out, both lanes), the ICDEF cdef-plan slot (copied, and
+a plan-less cdef-wired encode is refused, never a null deref), and eight test-adequacy repairs.
+26 mutations total: 24 killed (13 original + 13 review-hardening, two of which forced their own test
+strengthening: write-side LFTX pin, two-SB chroma), 2 TRACKED residuals (skip-ctx threading is
+value-lucky while all blocks skip; in-tile skip-mode ctx only at zero — both become killable with the
+non-skip bite; roadmap.md). Recorded, not in-cut: reset_block_context's absolute-vs-rebased strips
+(pre-existing intra-lane, inert all-skip; flagged for the non-skip bite). Next: **the NON-SKIP INTER
+RESIDUAL** (var-tx reads + inter coeffs — makes the residuals real and the two tracked residuals
+killable), then compound/OBMC/warp + the temporal scan.
+**Prior: INTER_FRAME_MODE_INFO 0.7.83
 (spec 5.11.15), THE OUTER DISPATCH.** The last mode-info layer before the inter tile decode:
 `src/av1_intermode.cyr` adds the Skip_Mode CDF (§10, refcdf blob 168→177, per-value absolute pins),
 **av1_read_skip_mode(_sym)** (the full 5.11.11 six-condition gate), **av1_read_is_inter** (the 5.11.15
@@ -202,13 +236,13 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 ## Gates (all green, 2026-07-16)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 37 suites / **26,980 assertions**: drishti 51 · bits
+- `make test` — 38 suites / **27,078 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 4,253 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 4,253 · av1_intertile 98 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — exit 0; `make lint` — exit 0, clean for **every** module

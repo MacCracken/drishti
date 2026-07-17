@@ -112,6 +112,7 @@ fn test_inter_tile_e2e() {
     var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
     av1_tile_grids_new(dt);
     assert_eq(av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb), DR_OK, "decode tile inter ctx");
+    av1_grid_set(dt, AV1TILE_SKIPMODES, 4, 4, 7);    # the store-observability sentinel
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
     "THE MILESTONE: an inter tile decodes end-to-end");
     # the expectation, computed INDEPENDENTLY through the MC driver.
@@ -141,9 +142,13 @@ fn test_inter_tile_e2e() {
     assert_eq(load64(cell + AV1MIR_REF0), AV1_LAST_FRAME, "MI grid: ref stored");
     assert_eq(load64(cell + AV1MIR_MV0ROW), 16, "MI grid: mv row stored");
     assert_eq(load64(cell + AV1MIR_AVAIL), 1, "MI grid: avail marked");
-    # the SkipModes grid too (the 5.11.11 ctx source for later blocks).
+    # the SkipModes grid too (the 5.11.11 ctx source for later blocks) — SENTINEL:
+    # sm = 0 is also the unwritten default, so plant 7 pre-decode; the store must
+    # overwrite it (the grid is unread within the 0.7.84 scope; roadmap.md).
     assert_eq(av1_grid_get(dt, AV1TILE_SKIPMODES, 4, 4), 0, "SkipModes stored (0)");
     assert_eq(av1_grid_get(dt, AV1TILE_SKIPS, 4, 4), 1, "Skips stored (1)");
+    # the LoopfilterTxSizes fill (the future inter deblock's tx source): max-rect.
+    assert_eq(av1_lftx_get(dt, 0, 4, 4), av1_max_tx_size_rect(12), "LFTX stored (max rect)");
     return 0;
 }
 # a second MV + a second block value: quarter-pel motion exercises the 8-tap filter
@@ -203,12 +208,894 @@ fn test_inter_frame_route() {
     return 0;
 }
 
+# ================================================================
+# The BYTE-STREAM E2E: a real (non-still) sequence header + a KEY frame + an INTER
+# frame, every field's bit packing commented, through av1_decode_stream. The intra
+# encode lane is skip-only, so the in-stream keyframe is flat 128 — this layer
+# therefore pins the HEADER PARSE -> refs/DPB threading -> routing (the MV-pixel
+# strength lives in the gradient record-level tests above); a content-bearing
+# stream E2E arrives with the non-skip encode lane (roadmap.md).
+# ================================================================
+fn its_append(bw, src, n): i64 {
+    var i = 0;
+    while (i < n) { dr_bw_put_bits(bw, load8(src + i), 8); i = i + 1; }
+    return 0;
+}
+fn its_wrap(bw, type, payload, plen): i64 {
+    av1_obu_write_header(bw, type, 0, 0, 0, 1, plen);
+    if (plen > 0) { its_append(bw, payload, plen); }
+    return 0;
+}
+# a NON-still sequence header: profile 0, 8-bit mono, 64x64 max, one operating
+# point, every optional tool off. Field-for-field against av1_seq_parse.
+fn its_build_seq(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0                       f(3)
+    dr_bw_put_bit(bw, 0);            # still_picture = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # reduced_still_picture_header = 0      f(1)
+    dr_bw_put_bit(bw, 0);            # timing_info_present_flag = 0          f(1)
+    dr_bw_put_bit(bw, 0);            # initial_display_delay_present = 0     f(1)
+    dr_bw_put_bits(bw, 0, 5);        # operating_points_cnt_minus_1 = 0      f(5)
+    dr_bw_put_bits(bw, 0, 12);       # operating_point_idc[0] = 0            f(12)
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0 (<= 7: no tier)  f(5)
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15         f(4)
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15        f(4)
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_width_minus_1 = 63 -> 64    f(16)
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63 -> 64   f(16)
+    dr_bw_put_bit(bw, 0);            # frame_id_numbers_present_flag = 0     f(1)
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0            f(1)
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra = 0               f(1)
+    dr_bw_put_bit(bw, 0);            # enable_intra_edge_filter = 0          f(1)
+    dr_bw_put_bit(bw, 0);            # enable_interintra_compound = 0        f(1)
+    dr_bw_put_bit(bw, 0);            # enable_masked_compound = 0            f(1)
+    dr_bw_put_bit(bw, 0);            # enable_warped_motion = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # enable_dual_filter = 0                f(1)
+    dr_bw_put_bit(bw, 0);            # enable_order_hint = 0 (no jnt/refmvs) f(1)
+    dr_bw_put_bit(bw, 0);            # seq_choose_screen_content_tools = 0   f(1)
+    dr_bw_put_bit(bw, 0);            # seq_force_screen_content_tools = 0    f(1)
+    dr_bw_put_bit(bw, 0);            # enable_superres = 0                   f(1)
+    dr_bw_put_bit(bw, 0);            # enable_cdef = 0                       f(1)
+    dr_bw_put_bit(bw, 0);            # enable_restoration = 0                f(1)
+    dr_bw_put_bit(bw, 0);            # color_config: high_bitdepth = 0       f(1)
+    dr_bw_put_bit(bw, 1);            # mono_chrome = 1                       f(1)
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0    f(1)
+    dr_bw_put_bit(bw, 0);            # color_range = 0                       f(1)
+    dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0         f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# the KEY frame header for that sequence (error_resilient implied 1, refresh
+# implied 255, sizes from the sequence maxima).
+fn its_build_key_fh(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
+    dr_bw_put_bits(bw, 0, 2);        # frame_type = KEY                      f(2)
+    dr_bw_put_bit(bw, 1);            # show_frame = 1 (KEY+show: err_res implied) f(1)
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1                f(1)
+    #                                  allow_sct: force_sct = 0 -> no bit
+    dr_bw_put_bit(bw, 0);            # frame_size_override_flag = 0          f(1)
+    #                                  order_hint: 0 bits; primary_ref: intra
+    #                                  refresh: KEY+show -> implied 255
+    #                                  frame_size: override 0 -> no bits
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0   f(1)
+    #                                  allow_intrabc: allow_sct 0 -> no bit
+    #                                  disable_fe_update: implied (cdf off)
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1 (1 SB: no incr bits) f(1)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40                       f(8)
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0             f(1)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0                   f(1)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
+    #                                  cdef/lr: enables off -> no bits
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1 -> TX_MODE_SELECT  f(1)
+    #                                  reference_mode/skip_mode/warp: intra -> none
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    #                                  global motion: intra -> no bits
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# the INTER frame header: error_resilient 1 (primary_ref/use_ref_mvs/warp gated
+# off), refresh 255, every ref_frame_idx = 0, fixed EIGHTTAP, base_q 40.
+fn its_build_inter_fh(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
+    dr_bw_put_bits(bw, 1, 2);        # frame_type = INTER                    f(2)
+    dr_bw_put_bit(bw, 1);            # show_frame = 1                        f(1)
+    dr_bw_put_bit(bw, 1);            # error_resilient_mode = 1              f(1)
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1                f(1)
+    #                                  allow_sct/force_int: no bits (force_sct 0)
+    dr_bw_put_bit(bw, 0);            # frame_size_override_flag = 0          f(1)
+    #                                  order_hint 0 bits; primary_ref: err_res
+    dr_bw_put_bits(bw, 255, 8);      # refresh_frame_flags = 255             f(8)
+    #                                  ref_order_hint loop: order hints off
+    #                                  short_signaling: order hints off -> no bit
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[0] = 0 (LAST -> slot 0) f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[1] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[2] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[3] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[4] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[5] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[6] = 0                  f(3)
+    #                                  frame_size: override 0 -> no bits
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0   f(1)
+    dr_bw_put_bit(bw, 1);            # allow_high_precision_mv = 1           f(1)
+    dr_bw_put_bit(bw, 0);            # is_filter_switchable = 0              f(1)
+    dr_bw_put_bits(bw, 0, 2);        # interpolation_filter = EIGHTTAP       f(2)
+    dr_bw_put_bit(bw, 0);            # is_motion_mode_switchable = 0         f(1)
+    #                                  use_ref_frame_mvs: err_res -> no bit
+    #                                  disable_fe_update: implied (cdf off)
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1         f(1)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40                       f(8)
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0             f(1)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0                   f(1)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1                    f(1)
+    dr_bw_put_bit(bw, 0);            # reference_select = 0                  f(1)
+    #                                  skip_mode: not allowed -> no bit
+    #                                  allow_warped_motion: err_res -> no bit
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST] = 0                   f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST2] = 0                  f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST3] = 0                  f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[GOLDEN] = 0                 f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[BWDREF] = 0                 f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF2] = 0                f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF] = 0                 f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# the flat-128 KEY tile payload (skip DC, one 64x64 SB).
+fn its_enc_key_tile(out_len): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pm = alloc(8);
+    store64(pm + 0, mi);
+    var pt = alloc(8);
+    store64(pt + 0, av1_max_tx_size_rect(12));
+    var oe = alloc(8);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 0, 0, 1);
+    av1_tile_grids_new(et);
+    return av1_encode_intra_tile(et, pp, pm, pt, 1, out_len);
+}
+# the inter header round-trips through the REAL parser: every field lands where the
+# builder put it (this pins the builder AND the parse path symmetrically).
+fn test_inter_header_parseback() {
+    var slen = 0;
+    var sb = its_build_seq(&slen);
+    var se = alloc(8);
+    var seq = av1_seq_parse(sb, slen, se);
+    assert_eq(load64(se), DR_OK, "the non-still sequence header parses");
+    assert_eq(av1_seq_num_planes(seq), 1, "seq: mono");
+    assert_eq(av1_seq_enable_order_hint(seq), 0, "seq: order hints off");
+    var flen = 0;
+    var fb = its_build_inter_fh(&flen);
+    var refs = av1_ref_state_new();
+    var fe = alloc(8);
+    var fh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, fb, flen, fe);
+    assert_eq(load64(fe), DR_OK, "the INTER frame header parses");
+    assert_eq(av1_fh_frame_type(fh), 1, "fh: INTER");
+    assert_eq(av1_fh_frame_is_intra(fh), 0, "fh: not intra");
+    assert_eq(av1_fh_frame_width(fh), 64, "fh: width 64");
+    assert_eq(av1_fh_frame_height(fh), 64, "fh: height 64");
+    assert_eq(av1_fh_refresh_frame_flags(fh), 255, "fh: refresh 255");
+    assert_eq(av1_fh_ref_frame_idx(fh, 0), 0, "fh: LAST -> slot 0");
+    assert_eq(av1_fh_allow_high_precision_mv(fh), 1, "fh: allow_hp");
+    assert_eq(av1_fh_interpolation_filter(fh), 0, "fh: EIGHTTAP fixed");
+    assert_eq(av1_fh_is_motion_mode_switchable(fh), 0, "fh: mm not switchable");
+    assert_eq(av1_fh_skip_mode_present(fh), 0, "fh: skip_mode off");
+    assert_eq(av1_fh_reference_select(fh), 0, "fh: single reference");
+    assert_eq(av1_fh_base_q_idx(fh), 40, "fh: base_q 40");
+    assert_eq(av1_fh_disable_cdf_update(fh), 1, "fh: cdf update off");
+    assert_eq((av1_fh_bits_consumed(fh) + 7) >> 3, flen, "every built byte consumed");
+    return 0;
+}
+# THE STREAM MILESTONE LAYER: TD + SEQ + KEY(fh+tile) + INTER(fh+tile) through
+# av1_decode_stream — real parsed headers drive the inter tile lane.
+fn test_inter_stream_e2e() {
+    var slen = 0;
+    var sb = its_build_seq(&slen);
+    var kflen = 0;
+    var kfb = its_build_key_fh(&kflen);
+    var ktlen = 0;
+    var ktb = its_enc_key_tile(&ktlen);
+    assert_eq(ktlen > 0, 1, "key tile encoded");
+    # the inter tile payload: the encode-side recs MATCH what the parser will
+    # produce (allow_hp 1, fixed EIGHTTAP, skip_mode off, single ref, base_q 40).
+    var dpb0 = av1_dpb_new();
+    var ref0 = it_ref_frame();
+    var fh0 = it_fh();
+    av1_dpb_store(dpb0, fh0, ref0);
+    var itlen = 0;
+    var itb = it_enc_tile(dpb0, it_refs(), it_seq(), fh0, it_blk(16, 8), &itlen);
+    assert_eq(itlen > 0, 1, "inter tile encoded");
+    var iflen = 0;
+    var ifb = its_build_inter_fh(&iflen);
+    var bw = dr_bw_init(512);
+    its_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    its_wrap(bw, AV1_OBU_SEQUENCE_HEADER, sb, slen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, kfb, kflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ktb, ktlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, ifb, iflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, itb, itlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var out = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "THE STREAM MILESTONE: key + INTER decode from bytes");
+    assert_eq(load64(oc), 2, "two frames decoded");
+    assert_eq(out != 0, 1, "the inter frame is the output");
+    # the keyframe is flat 128 (skip-only intra lane), so the MC output is 128 —
+    # this layer pins parse + threading + routing; pixels are pinned by the
+    # gradient record-level tests above.
+    assert_eq(dr_frame_get(out, 0, 20, 20), 128, "inter frame pixels (flat reference)");
+    assert_eq(av1_dpb_count(dpb), 8, "the inter frame refreshed the DPB");
+    assert_eq(av1_dpb_frame(dpb, 0), out, "DPB slot 0 = the inter frame");
+    return 0;
+}
+
+# FOUR superblocks (128x128, 2x2) with DISTINCT MVs: pins the plane-coordinate
+# wiring, the per-block scan-ctx reconfiguration, and BOTH neighbour-threading
+# directions (SB4 reads SB2 above and SB3 left). KNOWN RESIDUAL: the skip-ctx
+# THREADING itself (above/left_skip -> av1_skip_ctx) is mutation-resistant here —
+# in an all-skip tile every candidate CDF row favors skip = 1, so a one-sided
+# zeroing survives by value-luck; it becomes load-bearing (and killable) with
+# mixed skip patterns when the non-skip inter residual lands (roadmap.md).
+fn test_inter_tile_two_sb() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 128) {
+        var x0 = 0;
+        while (x0 < 128) {
+            dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255);
+            x0 = x0 + 1;
+        }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_FRAME_HEIGHT, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_ROWS, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 32);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    store64(refs + AV1REF_FRAME_H + 0, 128);
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var ef = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(32);
+    var pf = alloc(32);
+    var k = 0;
+    while (k < 4) { store64(pp + (k * 8), AV1_PARTITION_NONE); k = k + 1; }
+    store64(pf + 0, it_blk(16, 8));
+    store64(pf + 8, it_blk(0 - 8, 24));
+    store64(pf + 16, it_blk(8, 0 - 16));
+    store64(pf + 24, it_blk(0 - 24, 0 - 8));
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "four-SB inter tile encoded");
+    var df = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "four-SB inter tile decodes");
+    var xf = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(xf, ref, 0, 64, 0, 64, 64, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(xf, ref, 0, 0, 64, 64, 64, 8, 0 - 16, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(xf, ref, 0, 64, 64, 64, 64, 0 - 24, 0 - 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 128) {
+        var x = 0;
+        while (x < 128) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "all four SBs' pixels == the per-block MC oracle (16384 px)");
+    # each SB's MI cells carry THEIR mv (per-block reconfiguration, all quadrants).
+    var g2 = av1_mv_grid_cell(load64(dt + AV1TILE_MVGRID), 32, 4, 20);
+    assert_eq(load64(g2 + AV1MIR_MV0COL), 24, "SB2's MI mv col");
+    var g4 = av1_mv_grid_cell(load64(dt + AV1TILE_MVGRID), 32, 20, 20);
+    assert_eq(load64(g4 + AV1MIR_MV0ROW), 0 - 24, "SB4's MI mv row");
+    return 0;
+}
+# distinct x/y filters through the lane (en_dual on, SWITCHABLE): a filt_x/filt_y
+# swap in the MC wiring changes the taps and the oracle catches it.
+fn test_inter_tile_dual_filter() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    store64(fh + AV1FH_INTERP_FILTER, AV1_INTERP_SWITCHABLE);
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var s = it_seq();
+    store64(s + AV1_SEQ_ENABLE_DUAL_FILTER, 1);
+    var blk = it_blk(0 - 6, 10);                 # subpel: the taps matter
+    store64(blk + AV1FB_IB + AV1IB_INTERP + 0, 2);   # dir 0 (y): SHARP
+    store64(blk + AV1FB_IB + AV1IB_INTERP + 8, 1);   # dir 1 (x): SMOOTH
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, s, fh, blk, &tlen);
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, s, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "dual-filter tile decodes");
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    # the oracle: filt_x = InterpFilters[1] = SMOOTH(1), filt_y = [0] = SHARP(2).
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 0 - 6, 10, 1, 2);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "dual-filter pixels == the (SMOOTH x, SHARP y) oracle");
+    return 0;
+}
+# the 0.7.84 SCOPE GATE by decode: a leaf-built payload with skip = 0 parses its
+# mode info and is then rejected UNSUPPORTED (the non-skip inter residual is the
+# next bite, roadmap.md) — never silently mispredicted.
+fn test_inter_nonskip_gated() {
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, it_ref_frame());
+    # the decoder's nb at (0,0) with avail 0/0 over an EMPTY grid — derive the same
+    # ctxs here for the leaf writers.
+    var g = av1_mv_grid_new(16, 16);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 16, 0, 0, 0, 0);
+    var ctxi = ib_ctx_like(g);
+    av1_mvctx_set_refs(ctxi, 1, AV1_REF_NONE);
+    av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
+    av1_find_mv_stack(ctxi, 0);
+    var ncc = av1_ncdf_new();
+    var ccr = av1_refcdf_new();
+    var cim = av1_imcdf_new();
+    var scr = alloc(AV1CCTX_SIZE);
+    var enc = av1_sym_enc_init(96, 1);
+    # the leaf-built payload: PARTITION_NONE at 64x64 (ctx from the empty grids,
+    # bsl = mi_width_log2(12)) + skip(0) + is_inter(1) + the 5.11.23 symbols; the
+    # driver parses the mode info and the scope gate must then fire.
+    var ct = av1_tile_new(dr_frame_new(64, 64, 1, 0, 0, 8, 8, alloc(8)), 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(ct);
+    av1_write_partition(enc, ncc, av1_partition_ctx(ct, 0, 0, 12, 0, 0),
+    av1_mi_width_log2(12), AV1_PARTITION_NONE);
+    av1_write_skip(enc, ncc, av1_skip_ctx(0, 0, 0, 0), 0);
+    av1_write_is_inter_sym(enc, ccr, av1_is_inter_ctx(nb), 1);
+    av1_single_ref_ctxs(nb, scr);
+    av1_write_single_ref(enc, ccr, scr, AV1_LAST_FRAME);
+    av1_write_inter_mode(enc, cim, ctxi, AV1_NEARESTMV);
+    var olen = 0;
+    var ob = av1_sym_enc_finish(enc, &olen);
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, ob, olen, 1), DR_ERR_UNSUPPORTED,
+    "a non-skip inter block is REJECTED (scope gate), never mispredicted");
+    # and the WRITE side refuses a non-skip source outright.
+    var blk = it_blk(16, 8);
+    store64(blk + AV1FB_SKIP, 0);
+    var tl2 = 0;
+    var oe2 = alloc(8);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var eb = av1_encode_inter_tile(et, pp, pf, 1, &tl2);
+    assert_eq(eb, 0, "the write-side gate: no payload buffer");
+    assert_eq(tl2, 0, "the write-side gate: out_len 0");
+    assert_eq(av1_sym_enc_err(load64(et + AV1TILE_ENC)) != DR_OK, 0,
+    "the write-side gate leaves no sticky error");
+    return 0;
+}
+fn ib_ctx_like(g): i64 {
+    var ctx = av1_mvctx_new();
+    av1_mvctx_set_grid(ctx, g, 16, 16);
+    av1_mvctx_set_tile(ctx, 0, 16, 0, 16);
+    av1_mvctx_set_block(ctx, 0, 0, 12);
+    av1_mvctx_set_precision(ctx, 1, 0);
+    av1_mvctx_set_stack(ctx, av1_mv_stack_new());
+    return ctx;
+}
+
+# ================================================================
+# The 0.7.84 REVIEW HARDENING (wf_966b51ca): chroma coverage, reference-frame
+# selection, the non-aligned-frame clamps, tile-window availability, grid
+# sharing, lossless TxSize, the cdef-plan encode refusal.
+# ================================================================
+# a parameterized encode-tile builder (it_enc_tile is hardcoded 64x64 mono).
+fn itx_enc_tile(dpb, refs, seq, fh, blk, w, h, planes, sx, sy, mic, mir, bq, out_len): i64 {
+    var oe = alloc(8);
+    var ef = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
+    var et = av1_tile_new(ef, mic, mir, bq, 1, 0, planes);
+    av1_tile_grids_new(et);
+    assert_eq(av1_tile_set_inter_ctx(et, fh, refs, seq, dpb), DR_OK, "itx encode tile ctx");
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    return av1_encode_inter_tile(et, pp, pf, 1, out_len);
+}
+# 4:2:0 CHROMA: a three-plane, TWO-superblock inter tile (128x64) decodes with
+# EVERY plane exhaustively equal to the per-plane MC oracle (the review found the
+# chroma lane had ZERO coverage — every prior fixture was mono). Two SBs so the
+# second block sits at a NONZERO column: the chroma coordinate subsampling
+# ((c*4)>>subx) is load-bearing there — at the origin the extent clamps mask it.
+fn test_inter_tile_chroma_e2e() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(128, 64, 3, 1, 1, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 128) {
+            dr_frame_set(ref, 0, x, y, (x + (2 * y)) & 255);
+            if ((x < 64) && (y < 32)) {
+                dr_frame_set(ref, 1, x, y, ((2 * x) + y) & 255);       # U gradient
+                dr_frame_set(ref, 2, x, y, (x + (3 * y)) & 255);       # V gradient
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_NUM_PLANES, 3);
+    store64(seq + AV1_SEQ_SUBX, 1);
+    store64(seq + AV1_SEQ_SUBY, 1);
+    var ef = dr_frame_new(128, 64, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 32, 16, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(16);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    store64(pp + 8, AV1_PARTITION_NONE);
+    var pf = alloc(16);
+    store64(pf + 0, it_blk(16, 8));
+    store64(pf + 8, it_blk(0 - 8, 24));
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "4:2:0 two-SB inter tile encoded");
+    var df = dr_frame_new(128, 64, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 32, 16, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "4:2:0 inter tile decodes");
+    # the oracle, per plane per block: the MV stays in 1/8 LUMA pel; the driver
+    # derives the chroma subsampling split (compute_prediction, 7.11.3). SB2's
+    # chroma sits at plane col 32 = (16 mi * 4) >> 1.
+    var xf = dr_frame_new(128, 64, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(xf, ref, 0, 64, 0, 64, 64, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var p = 1;
+    while (p < 3) {
+        av1_mc_pred_block(xf, ref, p, 0, 0, 32, 32, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        av1_mc_pred_block(xf, ref, p, 32, 0, 32, 32, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        p = p + 1;
+    }
+    p = 0;
+    while (p < 3) {
+        var lw = 128 >> (p != 0);
+        var lh = 64 >> (p != 0);
+        var diff = 0;
+        var y2 = 0;
+        while (y2 < lh) {
+            var x2 = 0;
+            while (x2 < lw) {
+                if (dr_frame_get(df, p, x2, y2) != dr_frame_get(xf, p, x2, y2)) { diff = diff + 1; }
+                x2 = x2 + 1;
+            }
+            y2 = y2 + 1;
+        }
+        assert_eq(diff, 0, "4:2:0 plane == the per-plane MC oracle (exhaustive)");
+        p = p + 1;
+    }
+    return 0;
+}
+# the SIBLING-SPAN CHROMA GATE: a sub-8x8 block whose chroma unit spans siblings
+# (spec compute_prediction predicts the full unit from the MI grid's sibling MVs —
+# its own bite, roadmap.md) is REJECTED on both lanes, never silent garbage. The
+# decode payload is LEAF-BUILT: partition VERT at 8x8 + block (0,0)'s symbols;
+# block (0,1) has chroma (odd MiCol) and must gate BEFORE reading any symbol.
+fn test_inter_chroma_span_gated() {
+    var oe = alloc(8);
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 8);
+    store64(fh + AV1FH_FRAME_HEIGHT, 8);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 8);
+    store64(fh + AV1FH_MI_COLS, 2);
+    store64(fh + AV1FH_MI_ROWS, 2);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 2);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 2);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 8);
+    store64(refs + AV1REF_FRAME_W + 0, 8);
+    store64(refs + AV1REF_FRAME_H + 0, 8);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_NUM_PLANES, 3);
+    store64(seq + AV1_SEQ_SUBX, 1);
+    store64(seq + AV1_SEQ_SUBY, 1);
+    var ref = dr_frame_new(8, 8, 3, 1, 1, 8, 8, oe);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    # the leaf writers, mirroring the decoder's fresh-tile ctxs at (0,0).
+    var g = av1_mv_grid_new(2, 2);
+    var nb = av1_nbctx_new();
+    av1_nbctx_setup(nb, g, 2, 0, 0, 0, 0);
+    var ctxi = av1_mvctx_new();
+    av1_mvctx_set_grid(ctxi, g, 2, 2);
+    av1_mvctx_set_tile(ctxi, 0, 2, 0, 2);
+    av1_mvctx_set_block(ctxi, 0, 0, 1);              # BLOCK_4X8 = 1
+    av1_mvctx_set_precision(ctxi, 1, 0);
+    av1_mvctx_set_stack(ctxi, av1_mv_stack_new());
+    av1_mvctx_set_refs(ctxi, 1, AV1_REF_NONE);
+    av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
+    av1_find_mv_stack(ctxi, 0);
+    var ncc = av1_ncdf_new();
+    var ccr = av1_refcdf_new();
+    var cim = av1_imcdf_new();
+    var scr = alloc(AV1CCTX_SIZE);
+    var enc = av1_sym_enc_init(64, 1);
+    var ct = av1_tile_new(dr_frame_new(8, 8, 3, 1, 1, 8, 8, alloc(8)), 2, 2, 40, 1, 0, 3);
+    av1_tile_grids_new(ct);
+    # 64x64/32x32/16x16 are forced SPLIT (the 2x2-mi frame): NO symbols until 8x8.
+    av1_write_partition(enc, ncc, av1_partition_ctx(ct, 0, 0, 3, 0, 0),
+    av1_mi_width_log2(3), AV1_PARTITION_VERT);
+    av1_write_skip(enc, ncc, av1_skip_ctx(0, 0, 0, 0), 1);           # block (0,0): skip
+    av1_write_is_inter_sym(enc, ccr, av1_is_inter_ctx(nb), 1);
+    av1_single_ref_ctxs(nb, scr);
+    av1_write_single_ref(enc, ccr, scr, AV1_LAST_FRAME);
+    av1_write_inter_mode(enc, cim, ctxi, AV1_NEARESTMV);             # empty stack: mv (0,0)
+    var olen = 0;
+    var ob = av1_sym_enc_finish(enc, &olen);
+    var df = dr_frame_new(8, 8, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 2, 2, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, ob, olen, 1), DR_ERR_UNSUPPORTED,
+    "a sibling-span chroma block is REJECTED by decode (geometry gate)");
+    # and the WRITE side refuses the same plan (two 4x8 blocks, 4:2:0).
+    var ef = dr_frame_new(8, 8, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 2, 2, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    # the encode plan spells out EVERY consumed entry, including the forced-split
+    # levels (the walker consumes one entry per >=8x8 recursion): 64/32/16 SPLIT,
+    # then VERT at 8x8.
+    var pp = alloc(32);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_SPLIT);
+    store64(pp + 16, AV1_PARTITION_SPLIT);
+    store64(pp + 24, AV1_PARTITION_VERT);
+    var pf = alloc(16);
+    store64(pf + 0, it_blk(0, 0));
+    store64(pf + 8, it_blk(0, 0));
+    var elen = 0;
+    assert_eq(av1_encode_inter_tile(et, pp, pf, 1, &elen), 0,
+    "a sibling-span chroma plan is REFUSED by encode");
+    assert_eq(elen, 0, "the refused encode emits no bytes");
+    return 0;
+}
+# REFERENCE-FRAME SELECTION: GOLDEN maps to DPB slot 3 (the gradient); slot 0
+# holds a DIFFERENT frame (flat 200) — a decoder that hardcodes LAST or slot 0
+# yields flat pixels and the oracle catches it (the review found every prior
+# fixture used LAST -> slot 0, so the selection was oracle-invisible).
+fn test_inter_ref_selection() {
+    var oe = alloc(8);
+    var flat = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    dr_frame_fill(flat, 0, 200);
+    var grad = it_ref_frame();
+    var fh = it_fh();
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 247);    # slots 0..7 except 3: flat
+    av1_dpb_store(dpb, fh, flat);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 8);      # slot 3: the gradient
+    av1_dpb_store(dpb, fh, grad);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    store64(fh + AV1FH_REF_FRAME_IDX + 24, 3);       # ref_frame_idx[GOLDEN-LAST] = 3
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 24, 64);
+    store64(refs + AV1REF_FRAME_W + 24, 64);
+    store64(refs + AV1REF_FRAME_H + 24, 64);
+    var seq = it_seq();
+    var blk = it_blk(16, 8);
+    store64(blk + AV1FB_IB + AV1IB_REF0, AV1_GOLDEN_FRAME);
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, blk, &tlen);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "GOLDEN-ref tile decodes");
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, grad, 0, 0, 0, 64, 64, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "pixels come from GOLDEN's slot (the gradient), not slot 0");
+    assert_eq(load64(av1_mv_grid_cell(load64(dt + AV1TILE_MVGRID), 16, 4, 4) + AV1MIR_REF0),
+    AV1_GOLDEN_FRAME, "MI grid: GOLDEN stored");
+    return 0;
+}
+# a NON-SB-ALIGNED frame (48x48, one 64x64 block overhanging): the visible-extent
+# clamps bind. The decode must (a) match the 48x48 oracle exhaustively and (b)
+# write NOTHING outside the visible frame — the border stays zero (the review
+# found deleting both clamps survived: every prior fixture was SB-aligned).
+fn test_inter_edge_clamp() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(48, 48, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 48) {
+        var x0 = 0;
+        while (x0 < 48) {
+            dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255);
+            x0 = x0 + 1;
+        }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 48);
+    store64(fh + AV1FH_FRAME_HEIGHT, 48);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 48);
+    store64(fh + AV1FH_MI_COLS, 12);
+    store64(fh + AV1FH_MI_ROWS, 12);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 12);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 12);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 48);
+    store64(refs + AV1REF_FRAME_W + 0, 48);
+    store64(refs + AV1REF_FRAME_H + 0, 48);
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var tlen = 0;
+    var tb = itx_enc_tile(dpb, refs, seq, fh, it_blk(16, 8), 48, 48, 1, 0, 0, 12, 12, 40, &tlen);
+    assert_eq(tlen > 0, 1, "48x48 inter tile encoded");
+    var df = dr_frame_new(48, 48, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 12, 12, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "48x48 inter tile decodes");
+    var xf = dr_frame_new(48, 48, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 48, 48, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 48) {
+        var x = 0;
+        while (x < 48) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "visible 48x48 == the MC oracle (exhaustive)");
+    # the overhang wrote NOTHING: rows/cols past the visible frame stay zero
+    # (read the plane raw — dr_frame_get would be defined only for the frame).
+    var pptr = load64(df + DR_FRAME_PLANE_PTR);
+    var pstride = load64(df + DR_FRAME_PLANE_STRIDE);
+    assert_eq(load16(pptr + (((50 * pstride) + 10) * 2)), 0, "no writes below the frame");
+    assert_eq(load16(pptr + (((10 * pstride) + 50) * 2)), 0, "no writes right of the frame");
+    return 0;
+}
+# LOSSLESS (base_q 0): read_tx_size's Lossless early-out forces TX_4X4 for skip
+# inter blocks too — the recorded LoopfilterTxSizes must be 0, not max-rect.
+fn test_inter_lossless_tx4x4() {
+    var oe = alloc(8);
+    var ref = it_ref_frame();
+    var fh = it_fh();
+    store64(fh + AV1FH_BASE_Q_IDX, 0);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 0, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, it_blk(16, 8));
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    # BOTH lanes record TX_4X4 into their grids (the write side stores too).
+    assert_eq(av1_lftx_get(et, 0, 4, 4), 0, "lossless LFTX on the WRITE side too");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 0, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "lossless inter tile decodes");
+    assert_eq(dr_frame_get(df, 0, 10, 10), ((10 + 1) + (2 * (10 + 2))) & 255,
+    "lossless pixels: the shifted gradient");
+    assert_eq(av1_lftx_get(dt, 0, 4, 4), 0, "lossless LFTX = TX_4X4, not max-rect");
+    return 0;
+}
+# TILE-WINDOW availability (5.11.4): a windowed tile's above/left availability is
+# tile-relative, not frame-absolute — pinned DIRECTLY on av1_inter_block_setup
+# (the review found replacing av1_is_inside with r>0/c>0 survived the suite).
+fn test_inter_window_avail() {
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_window(dt, 8, 0, 16, 16);           # cols 8..16: a right-half tile
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, it_ref_frame());
+    av1_tile_set_inter_ctx(dt, fh, it_refs(), it_seq(), dpb);
+    var st = alloc(40);
+    # the tile-origin block: LEFT (frame col 7) is outside the WINDOW -> avail 0
+    # (frame-absolute c>0 would say 1); ABOVE is outside the frame -> avail 0.
+    av1_inter_block_setup(dt, 0, 8, 3, st);
+    assert_eq(load64(st + 0), 0, "window origin: avail_u 0");
+    assert_eq(load64(st + 8), 0, "window origin: avail_l 0 (tile-relative, not frame)");
+    # an interior block reads its planted neighbours through the grids.
+    av1_grid_set(dt, AV1TILE_SKIPS, 3, 12, 1);
+    av1_grid_set(dt, AV1TILE_SKIPS, 4, 11, 1);
+    av1_grid_set(dt, AV1TILE_SKIPMODES, 3, 12, 1);
+    av1_grid_set(dt, AV1TILE_SKIPMODES, 4, 11, 1);
+    av1_inter_block_setup(dt, 4, 12, 3, st);
+    assert_eq(load64(st + 0), 1, "interior: avail_u 1");
+    assert_eq(load64(st + 8), 1, "interior: avail_l 1");
+    assert_eq(load64(st + 16), 1, "interior: above_skip read");
+    assert_eq(load64(st + 24), 1, "interior: left_skip read");
+    assert_eq(load64(st + 32), 2, "interior: skip-mode ctx = above + left");
+    return 0;
+}
+# GRID SHARING: av1_tile_share_grids hands the frame-addressed MV grid and the
+# SkipModes grid to the next tile, and set_inter_ctx PRESERVES them (alloc only
+# if absent) — pinned structurally (the review found the two share lines had no
+# witness).
+fn test_inter_share_grids() {
+    var oe = alloc(8);
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, it_ref_frame());
+    var refs = it_refs();
+    var seq = it_seq();
+    var t1 = av1_tile_new(dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe), 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(t1);
+    av1_tile_set_inter_ctx(t1, fh, refs, seq, dpb);
+    assert_eq(load64(t1 + AV1TILE_MVGRID) != 0, 1, "tile 1 allocated the MV grid");
+    var t2 = av1_tile_new(dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe), 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(t2);
+    av1_tile_share_grids(t2, t1);
+    av1_tile_set_inter_ctx(t2, fh, refs, seq, dpb);
+    assert_eq(load64(t2 + AV1TILE_MVGRID), load64(t1 + AV1TILE_MVGRID),
+    "tile 2 SHARES tile 1's MV grid (set_inter_ctx preserved it)");
+    assert_eq(load64(t2 + AV1TILE_SKIPMODES), load64(t1 + AV1TILE_SKIPMODES),
+    "tile 2 SHARES tile 1's SkipModes grid");
+    return 0;
+}
+# a CDEF-wired encode tile WITHOUT a cdef plan is REFUSED (the plan slot is the
+# write lane's; unset it would null-deref in av1_write_cdef on a non-skip block).
+fn test_inter_cdef_plan_refused() {
+    var oe = alloc(8);
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, it_ref_frame());
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    assert_eq(av1_tile_set_cdef_ctx(et, 1, 3, 0, 0, 0), DR_OK, "cdef ctx wired, NO plan");
+    av1_tile_set_inter_ctx(et, fh, it_refs(), it_seq(), dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, it_blk(16, 8));
+    var elen = 0;
+    assert_eq(av1_encode_inter_tile(et, pp, pf, 1, &elen), 0,
+    "a cdef-wired encode tile without a plan is REFUSED, never a null deref");
+    assert_eq(elen, 0, "the refused cdef encode emits no bytes");
+    # and a WIRED plan is carried into the ICDEF bundle (the write lane's slot).
+    var plan = alloc(8);
+    var e2 = av1_tile_new(dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe), 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(e2);
+    av1_tile_set_cdef_ctx(e2, 1, 3, 0, 0, plan);
+    av1_tile_set_inter_ctx(e2, fh, it_refs(), it_seq(), dpb);
+    assert_eq(load64(load64(e2 + AV1TILE_ICDEF) + 48), plan, "ICDEF carries the cdef plan");
+    return 0;
+}
+# the KEY header builder round-trips through the REAL parser too (the review
+# found its only witness was the stream E2E's flat pixels).
+fn test_key_header_parseback() {
+    var slen = 0;
+    var sb = its_build_seq(&slen);
+    var se = alloc(8);
+    var seq = av1_seq_parse(sb, slen, se);
+    var klen = 0;
+    var kb = its_build_key_fh(&klen);
+    var refs = av1_ref_state_new();
+    var fe = alloc(8);
+    var fh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, kb, klen, fe);
+    assert_eq(load64(fe), DR_OK, "the KEY frame header parses");
+    assert_eq(av1_fh_frame_type(fh), 0, "key fh: KEY");
+    assert_eq(av1_fh_frame_is_intra(fh), 1, "key fh: intra");
+    assert_eq(av1_fh_frame_width(fh), 64, "key fh: width 64");
+    assert_eq(av1_fh_frame_height(fh), 64, "key fh: height 64");
+    assert_eq(av1_fh_refresh_frame_flags(fh), 255, "key fh: refresh 255 (implied)");
+    assert_eq(av1_fh_base_q_idx(fh), 40, "key fh: base_q 40");
+    assert_eq(av1_fh_tx_mode(fh), AV1_TX_MODE_SELECT, "key fh: TX_MODE_SELECT");
+    assert_eq(av1_fh_disable_cdf_update(fh), 1, "key fh: cdf update off");
+    assert_eq((av1_fh_bits_consumed(fh) + 7) >> 3, klen, "every KEY byte consumed");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
     test_inter_tile_e2e();
     test_inter_tile_subpel();
+    test_inter_tile_two_sb();
+    test_inter_tile_dual_filter();
     test_inter_frame_route();
+    test_inter_nonskip_gated();
+    test_group("the review hardening: chroma, ref selection, clamps, windows");
+    test_inter_tile_chroma_e2e();
+    test_inter_chroma_span_gated();
+    test_inter_ref_selection();
+    test_inter_edge_clamp();
+    test_inter_lossless_tx4x4();
+    test_inter_window_avail();
+    test_inter_share_grids();
+    test_inter_cdef_plan_refused();
+    test_group("the byte-stream layer: real headers drive the inter lane");
+    test_inter_header_parseback();
+    test_inter_stream_e2e();
     return assert_summary();
 }
 
