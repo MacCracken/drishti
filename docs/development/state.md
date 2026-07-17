@@ -6,25 +6,32 @@
 
 ## Version
 
-**0.7.86** — cut 2026-07-17, not yet tagged (user's git). **THE VAR-TX INTER RESIDUAL.** TX_MODE_SELECT
-non-skip inter blocks now decode: the luma transform partition (txfm_split) is read (read_var_tx_size,
-5.11.37) and each leaf reconstructs onto the MC prediction (transform_tree, 5.11.36) — un-gating the last
-tx-mode path (0.7.85 was uniform-tx only). The txfm_split CONTEXT (spec 9.3, av1_txfm_split_ctx) reads the
-frame InterTxSizes/Skips/IsInters/MiSizes grids — the spec keeps NO separate txfm strips, so writing
-InterTxSizes per leaf IS the ctx update (the #1-risk simplification the CDF retrieval surfaced). New
-Default_Txfm_Partition_Cdf (21 binary ctx, 3-source verified, pinned). A per-4x4 TxTypes grid
-(AV1TILE_TXTYPES) replaces 0.7.85's single-scalar chroma co-location: a var-tx block has MANY luma leaves
-each with its own inter_tx_type, so each leaf broadcasts its TxType into the grid and chroma reads the
-co-located cell. The encode inverse: write_var_tx_size + transform_tree_encode via a per-leaf AV1FB_VARTX
-plan; av1_block_write_grids gained a write_intertx flag so var-tx per-leaf InterTxSizes survive the store
-(neighbour ctx reads them). Un-gate: skip==0 && TX_MODE_SELECT && sub_size>BLOCK_4X4 && base_q!=0. Av1Tile
-544->552, Av1BlockInfo 232->240. THE PROOF (tests/av1_intertile.tcyr): the txfm_split ctx vs the new
-spec-literal scripts/refs/var_tx_ref.py (11 KAs); round-trip with pixels EXHAUSTIVELY equal to an
-INDEPENDENT per-leaf oracle — mono 16x16->4x TX_8X8, 4:2:0 (chroma grid co-location), mixed-depth (8x8->4x
-TX_4X4), 32x32->16x TX_8X8 (depth-2 forced 8x8 leaf), + an InterTxSizes grid witness. 10+ mutations, 0 survivors (two — chroma co-location + InterTxSizes suppression — needed dedicated tests the round-trip
-missed). The 15-agent adversarial review found + fixed a CRITICAL OOB (read/write_var_tx_size filled InterTxSizes with NO edge clamp -> heap overflow on a var-tx block overhanging a non-64-aligned frame; now clamped, canary-witnessed) + two dead-code coverage gaps (the get_above/left skip-inter neighbour branch and transform_tree's non-square w>h/w<h recursion, both now covered + mutation-verified) + defensive fixes (encode cursor bound, encode scope-gate symmetry). Deferred (roadmap): var-tx luma LoopfilterTxSizes is still written
-UNIFORMLY (inert while deblock is off). Next: **compound/OBMC/warp + the temporal scan**. **Prior: THE
-NON-SKIP INTER RESIDUAL (uniform-tx).**
+**0.7.87** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND AVERAGE INTER PREDICTION.** A
+two-reference inter block predicts from BOTH refs and averages them — the first compound mode. Scope is
+COMPOUND_AVERAGE only (comp_group_idx==0 && compound_idx==1); jnt/wedge/diffwtd/inter-intra/non-SIMPLE
+motion stay refused DR_ERR_UNSUPPORTED on both lanes. The compound (prep) precision path in
+av1_mc_put_8tap (spec 7.11.3.2 / dav1d prep_8tap, 3-source verified) keeps ib extra bits and SKIPS Clip1
+(ib=4 @8/10-bit, 2 @12-bit): 2D V-round >>6, 1D >>(6-ib), integer <<ib; the single-ref path is
+byte-unchanged. av1_mc_pred_compound predicts ref0→Av1_McTmp + ref1→Av1_McOut at bit_depth+ib, then
+combines Clip1(Round2(tmp0+tmp1, ib+1)) (dav1d avg_c, PREP_BIAS=0, signed i64); av1_mc_pred_block was
+refactored into av1_mc_pred_core(...,compound) reused twice. Decode/encode un-gate (av1_intertile):
+dispatch to av1_mc_pred_compound (ref0/mv0 + ref1/mv1) on AVERAGE, else the mirror gate latches
+UNSUPPORTED; compound needs reference_select; an unpopulated ref1 DPB slot → DR_ERR_BOUNDS
+(av1_mc_pred_core ref==0 backstop). THE PROOF (tests/av1_mc_driver.tcyr, tests/av1_intertile.tcyr): the
+AVERAGE math vs an integer-MV exhaustive oracle (1024 px) + subpel self-average sanity (all three prep
+paths); a skip=1 NEW_NEWMV round-trip (dual-ref DPB LAST→slot0 / ALTREF→slot6) EXHAUSTIVELY equal to an
+independent av1_mc_pred_compound oracle (4096 px); a missing-ref adversarial (empty ALTREF → BOUNDS, no
+OOB); and the scope-gate reject on BOTH lanes for DISTANCE + DIFFWTD (minted by hand-finishing the symbol
+encoder after the encode gate discards, then decoded). Mutations, 0 survivors: the 4 prep shifts + the
+combine, the decode dispatch / ref1 source / mv1 source, and both gate clauses on both lanes (DISTANCE
+witnesses compound_idx, DIFFWTD witnesses comp_group_idx). THE REVIEW (3 dims, worktree-isolated,
+patch-applied): precision CLEAN (+ an independent hardcoded-tap Python oracle matching a 2D-subpel block),
+memory-safety CLEAN (Av1_McTmp sizing/stride, no scratch aliasing — tmp0 survives the second prediction —
+overflow, missing-ref, hostile-dims all double-guarded, probe-verified at 128x128), one CONFIRMED finding —
+the gate REJECT path had ZERO coverage on both lanes (||→&& shipped green) — now closed + mutation-verified.
+Also rolled in this cut: the av1_reset_block_context tile-relative rebase + the use_128x128_superblock
+rejection gate (both pre-existing, review-recorded). Next: **compound distance/wedge/diffwtd, OBMC/warp +
+the temporal scan**. **Prior: THE VAR-TX INTER RESIDUAL.**
 The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
 ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
 var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready

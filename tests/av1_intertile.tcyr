@@ -2159,6 +2159,212 @@ fn test_vt_cdf_pins() {
     return 0;
 }
 
+# COMPOUND AVERAGE (0.7.87): a skip=1 two-reference block predicts from BOTH refs +
+# averages. Round-trip (encode -> decode) with pixels EXHAUSTIVELY equal to the
+# verified av1_mc_pred_compound oracle. skip=1 keeps it pure prediction (no residual).
+fn it_blk_comp(mvr0, mvc0, mvr1, mvc1): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIP, 1);
+    store64(b + AV1FB_ISINTER, 1);
+    var ib = b + AV1FB_IB;
+    store64(ib + AV1IB_ISCOMP, 1);
+    store64(ib + AV1IB_REF0, AV1_LAST_FRAME);
+    store64(ib + AV1IB_REF1, AV1_ALTREF_FRAME);
+    store64(ib + AV1IB_YMODE, AV1_NEW_NEWMV);
+    store64(ib + AV1IB_MV0 + AV1MV_ROW, mvr0);
+    store64(ib + AV1IB_MV0 + AV1MV_COL, mvc0);
+    store64(ib + AV1IB_MV1 + AV1MV_ROW, mvr1);
+    store64(ib + AV1IB_MV1 + AV1MV_COL, mvc1);
+    store64(ib + AV1IB_MOTIONMODE, AV1_MM_SIMPLE);
+    store64(ib + AV1IB_INTERP + 0, AV1_EIGHTTAP);
+    store64(ib + AV1IB_INTERP + 8, AV1_EIGHTTAP);
+    store64(ib + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
+    store64(ib + AV1IB_CT + AV1CT_COMPIDX, 1);
+    return b;
+}
+fn test_ir_compound() {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var seq = it_seq();
+    var blk = it_blk_comp(16, 8, 0 - 8, 24);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "compound tile encoded");
+    assert_eq(av1_sym_enc_err(load64(et + AV1TILE_ENC)), DR_OK, "compound no enc err");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "compound tile decodes");
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "compound AVERAGE block: decode == av1_mc_pred_compound oracle (4096)");
+    return 0;
+}
+
+# ADVERSARIAL (0.7.87): a compound block whose ALTREF ref resolves to an EMPTY DPB slot
+# must be rejected with DR_ERR_BOUNDS (av1_intertile.cyr ref1frame==0 guard) — never an
+# OOB read into a null frame. The bytes are a valid compound stream; only the decode-side
+# DPB is starved (slot 6 never stored), mirroring a stream that names an unavailable ref.
+fn test_ir_compound_missing_ref() {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var seq = it_seq();
+    var blk = it_blk_comp(16, 8, 0 - 8, 24);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "missing-ref: compound tile encoded");
+    # decode with a STARVED DPB: only slot 0 populated, slot 6 (ALTREF) absent.
+    var dpb2 = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb2, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb2);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_ERR_BOUNDS,
+    "missing-ref: compound with empty ALTREF slot -> BOUNDS (no OOB)");
+    return 0;
+}
+
+# SCOPE-GATE REJECT (0.7.87, review-driven): only COMPOUND_AVERAGE (comp_group_idx==0 &&
+# compound_idx==1) is in scope. A DISTANCE (compound_idx=0, needs enable_jnt_comp) or a
+# DIFFWTD (comp_group_idx=1, needs enable_masked_compound) compound block must be REFUSED
+# with DR_ERR_UNSUPPORTED on BOTH lanes — never silently mis-predicted as plain average.
+# The encode tile writes the mode-info then latches the gate (discarding the tile), so we
+# finish the symbol encoder BY HAND to mint the genuine non-AVERAGE stream and drive it
+# straight into the decode gate. Covers both gate clauses: DISTANCE exercises compound_idx,
+# DIFFWTD exercises comp_group_idx (mutating the gate || -> && lets one family through).
+fn it_comp_gate_reject(en_masked, en_jnt, groupidx, compidx, ctype, tag): i64 {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_MASKED, en_masked);
+    store64(seq + AV1_SEQ_ENABLE_JNT_COMP, en_jnt);
+    var blk = it_blk_comp(16, 8, 0 - 8, 24);
+    var ct = (blk + AV1FB_IB) + AV1IB_CT;
+    store64(ct + AV1CT_GROUPIDX, groupidx);
+    store64(ct + AV1CT_COMPIDX, compidx);
+    store64(ct + AV1CT_TYPE, ctype);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(load64(et + AV1TILE_IERR), DR_ERR_UNSUPPORTED, "non-avg compound: encode gate refuses");
+    assert_eq(tlen, 0, "non-avg compound: encode finalizes no tile");
+    var blen = 0;
+    var bb = av1_sym_enc_finish(load64(et + AV1TILE_ENC), &blen);
+    assert_eq(blen > 0, 1, "non-avg compound: partial mode-info bytes present");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, bb, blen, 1), DR_ERR_UNSUPPORTED, tag);
+    return 0;
+}
+fn test_ir_compound_gates() {
+    # DISTANCE: comp_group_idx=0, compound_idx=0 (enable_jnt_comp) -> the compound_idx clause.
+    it_comp_gate_reject(0, 1, 0, 0, AV1_COMPOUND_DISTANCE,
+    "decode gate: DISTANCE (compound_idx=0) refused, not mis-read as AVERAGE");
+    # DIFFWTD: comp_group_idx=1 (enable_masked_compound) -> the comp_group_idx clause.
+    it_comp_gate_reject(1, 0, 1, 1, AV1_COMPOUND_DIFFWTD,
+    "decode gate: DIFFWTD (comp_group_idx=1) refused, not mis-read as AVERAGE");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
@@ -2186,6 +2392,9 @@ fn main() {
     test_ir_420();
     test_ir_zero();
     test_ir_vartx();
+    test_ir_compound();
+    test_ir_compound_missing_ref();
+    test_ir_compound_gates();
     test_ir_vartx_edge_clamp();
     test_ir_vartx_32();
     test_ir_vartx_intertx_grid();

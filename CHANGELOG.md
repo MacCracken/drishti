@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.87] - 2026-07-17
+
+**COMPOUND AVERAGE INTER PREDICTION.** A two-reference inter block now predicts from BOTH references
+and averages them — the first compound mode. Scope is `COMPOUND_AVERAGE` only (`comp_group_idx == 0 &&
+compound_idx == 1`); distance-weighted (jnt), wedge, diffwtd, inter-intra and non-SIMPLE motion stay
+cleanly refused with `DR_ERR_UNSUPPORTED` on both lanes.
+
+### Added
+
+- **The compound (prep) precision path in `av1_mc_put_8tap`** (spec 7.11.3.2 InterRound / dav1d
+  `prep_8tap`): a new `compound` flag makes each MC pass keep `ib` extra intermediate bits and SKIP
+  `Clip1` — `ib = 4` (8/10-bit) / `2` (12-bit). Per path: 2D vertical round `>>6` (not `6+ib`); H-only
+  or V-only 1D `>>(6-ib)`; integer (no-subpel) `<< ib`. The single-ref (`compound=0`) path is byte-for-byte
+  unchanged. **3-source verified** (spec + libaom + dav1d).
+- **`av1_mc_pred_compound`** — predicts ref0 into a new `Av1_McTmp` scratch and ref1 into `Av1_McOut`
+  (each at `bit_depth+ib` precision via the prep path), then combines `Clip1(Round2(tmp0 + tmp1, ib+1))`
+  (dav1d `avg_c`, PREP_BIAS = 0 — drishti carries signed i64 intermediates). `av1_mc_pred_block` was
+  refactored into `av1_mc_pred_core(out, dst, ref, …, compound)` (validation + gather + emu-edge +
+  `put_8tap` → `out`) with a thin single-ref wrapper, so the compound driver reuses the exact same
+  gather/edge/kernel path twice.
+- **The decode/encode un-gate** (`av1_intertile.cyr`): a compound block dispatches to
+  `av1_mc_pred_compound` (ref0/mv0 + ref1/mv1) when `comp_group_idx == 0 && compound_idx == 1`, else the
+  mirror gate on each lane latches `DR_ERR_UNSUPPORTED`. Compound requires `reference_select`. A block
+  naming an unpopulated DPB slot for ref1 is refused `DR_ERR_BOUNDS` before any dereference (the
+  `av1_mc_pred_core` `ref == 0` guard is the real backstop).
+
+**Proofs** (`tests/av1_mc_driver.tcyr`, `tests/av1_intertile.tcyr`): the AVERAGE math against an
+INTEGER-MV exhaustive oracle `(ref0 + ref1 + 1) >> 1` (1024 px, two distinct gradient refs, edge-clamped)
+plus a subpel self-average sanity across all three prep paths (2D / H-only / V-only, each within 1 of the
+single-ref prediction); a round-trip (skip=1 compound `NEW_NEWMV`, dual-ref DPB LAST→slot0 / ALTREF→slot6,
+distinct gradients) with decoded pixels EXHAUSTIVELY equal to an INDEPENDENT `av1_mc_pred_compound` oracle
+(4096 px); an adversarial missing-ref case (empty ALTREF slot → `DR_ERR_BOUNDS`, no OOB); and the
+scope-gate reject on BOTH lanes for DISTANCE (`compound_idx=0`, enable_jnt_comp) and DIFFWTD
+(`comp_group_idx=1`, enable_masked_compound) — minted by finishing the symbol encoder by hand after the
+encode gate discards, then driven straight into the decode gate. **Mutation-verified — 0 survivors**: the
+four prep shift widths + the combine shift, the decode dispatch / ref1 source / mv1 source, and both gate
+clauses on both lanes (`||→&&`, and each clause dropped independently; DISTANCE witnesses `compound_idx`,
+DIFFWTD witnesses `comp_group_idx`).
+
+**The adversarial review (3 dimensions, worktree-isolated, patch-applied):** precision CLEAN (all four
+paths + combine mutation-verified, plus an independent hardcoded-tap Python oracle matching all 64 px of a
+2D-subpel interior block); memory-safety CLEAN (`Av1_McTmp` sizing / stride, no scratch aliasing — tmp0
+survives the second prediction, overflow, missing-ref and hostile-dims all double-guarded and probe-verified
+at 128×128). One CONFIRMED finding — the scope-gate REJECT path had zero test coverage on both lanes
+(mutating `||→&&` shipped green) — now closed by the DISTANCE/DIFFWTD gate-reject tests above and
+mutation-verified.
+
 ### Fixed
 
 - **`av1_reset_block_context` (5.11.5) indexed the coeff-context strips ABSOLUTE, the rest of the

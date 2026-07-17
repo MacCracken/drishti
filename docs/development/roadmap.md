@@ -280,9 +280,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   `av1_txtype`/`av1_noncoeffcdf`), and **THE VAR-TX INTER RESIDUAL 0.7.86** (`av1_read_var_tx_size` +
   the `txfm_split` CDF/ctx + `av1_transform_tree` + the per-4x4 `TxTypes` grid — TX_MODE_SELECT non-skip
   inter blocks now decode, each luma transform-partition leaf reconstructed onto the MC prediction; the
-  encode inverse + a per-leaf plan land too); next
-  `warp_estimation` (7.11.3.8) turns the
-  samples into a model, the compound/inter-intra blends + OBMC, the temporal scan (needs the
+  encode inverse + a per-leaf plan land too), and **COMPOUND AVERAGE INTER PREDICTION 0.7.87**
+  (`av1_mc_pred_compound` + the `put_8tap` prep/`ib` precision path — a two-reference block predicts from
+  BOTH refs and averages them; scope `COMPOUND_AVERAGE` only, jnt/wedge/diffwtd/inter-intra/non-SIMPLE
+  refused on both lanes); next the remaining **compound distance/wedge/diffwtd + inter-intra** blends,
+  `warp_estimation` (7.11.3.8) turning the
+  samples into a model, OBMC, the temporal scan (needs the
   DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free, dav1d
   `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths

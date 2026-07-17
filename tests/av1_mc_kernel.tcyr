@@ -32,26 +32,26 @@ fn test_put_8tap() {
     var soff = (4 * 16) + 4;      # block top-left at (row 4, col 4)
     var d = alloc(64 * 8);        # output scratch (up to 8x8)
     # 1. integer (mx=0,my=0) -> copies the block. out[0] = src[4][4] = (148+44+20)&255 = 212.
-    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 0, 0, 8);
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 0, 0, 8, 0);
     assert_eq(mc_checksum(d, 64), 301936, "put_8tap integer 8x8");
     assert_eq(load64(d + 0), 212, "integer out[0] = src block top-left");
     # 2. horizontal only, REGULAR half-pel (mx=8).
-    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 0, 0, 8);
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 0, 0, 8, 0);
     assert_eq(mc_checksum(d, 64), 298113, "put_8tap H-only 8x8 REGULAR mx8");
     # 3. vertical only, REGULAR half-pel (my=8).
-    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 8, 0, 8);
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 8, 0, 8, 0);
     assert_eq(mc_checksum(d, 64), 289226, "put_8tap V-only 8x8 REGULAR my8");
     # 4. the 2-pass H+V path (mx=8,my=8) -- checksum + spot pixels.
-    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 8, 0, 8);
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 8, 0, 8, 0);
     assert_eq(mc_checksum(d, 64), 281124, "put_8tap H+V 8x8 REGULAR mx8my8");
     assert_eq(load64(d + 0), 184, "H+V out[0] = 184");
     assert_eq(load64(d + (27 * 8)), 124, "H+V out[27] = 124");
     assert_eq(load64(d + (63 * 8)), 50, "H+V out[63] = 50");
     # 5. H+V 4x4 -> the w<=4 filter set (3), mx=5 my=11.
-    av1_mc_put_8tap(d, 0, 4, src, soff, 16, 4, 4, 5, 11, 0, 8);
+    av1_mc_put_8tap(d, 0, 4, src, soff, 16, 4, 4, 5, 11, 0, 8, 0);
     assert_eq(mc_checksum(d, 16), 11391, "put_8tap H+V 4x4 (w<=4 set) mx5my11");
     # 6. H+V 8x8 SHARP (filter_type = SHARP|SHARP<<2 = 10), mx=3 my=13.
-    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 3, 13, 10, 8);
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 3, 13, 10, 8, 0);
     assert_eq(mc_checksum(d, 64), 274009, "put_8tap H+V 8x8 SHARP mx3my13");
     return 0;
 }

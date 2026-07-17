@@ -22,7 +22,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.86 (AV1 decode: THE VAR-TX INTER RESIDUAL — TX_MODE_SELECT non-skip inter blocks decode, the luma transform partition (txfm_split) read and each leaf reconstructed onto the MC prediction; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: compound/OBMC/warp + the temporal scan)
+## Status — 0.7.87 (AV1 decode: COMPOUND AVERAGE INTER PREDICTION — a two-reference inter block predicts from BOTH refs and averages them (COMPOUND_AVERAGE only; jnt/wedge/diffwtd/inter-intra/non-SIMPLE motion refused on both lanes), over the var-tx inter residual; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: compound distance/wedge/diffwtd, OBMC/warp + the temporal scan)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (27,420 suite assertions + 1,140 fuzz
