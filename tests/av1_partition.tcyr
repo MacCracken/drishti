@@ -249,6 +249,139 @@ fn test_decode_partition_tree() {
     return 0;
 }
 
+# ---- reset_block_context on a WINDOWED (non-first) tile: tile-relative strips ----
+# The Above/Left level+DC strips are PER-TILE and tile-relative (the 0.7.50
+# convention: coeffs() rebases absolute plane coords via av1_coeff_ctx_col/row;
+# the 5.11.2 clears wipe the whole tile strip). reset_block_context (5.11.5)
+# receives ABSOLUTE mi coords, so it must rebase by the tile's plane origin —
+# the spec's absolute `MiCol >> subX` transcribed literally cleared the WRONG
+# slots for any non-first tile (and overran the tile-sized strip once MiColStart
+# exceeded extent+pad). Poison BOTH candidate slot ranges with distinct
+# sentinels and pin which one is cleared — the absolute convention goes red on
+# every line. 4:2:0 three-plane tile so the chroma `>> subX` rebase is live.
+fn test_reset_block_context_windowed() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(128, 128, 3, 1, 1, 8, 8, oe);   # 32x32 MI, 4:2:0
+    var t = av1_tile_new(frame, 8, 8, 40, 1, 0, 3);          # tile extent 8x8 MI
+    av1_tile_set_frame_mi(t, 32, 32);
+    av1_tile_grids_new(t);
+    av1_tile_set_window(t, 16, 16, 24, 24);                  # a NON-FIRST tile
+    # an 8x8 block (bw4=bh4=2) at ABSOLUTE (row 18, col 20): luma rebased cols
+    # 20-16 = 4,5, rows 18-16 = 2,3. Chroma (sub 1): col (20>>1)-(16>>1) = 2,
+    # row (18>>1)-(16>>1) = 1 (one slot each — the range halves).
+    var al0 = load64(t + AV1TILE_ALVL);        # luma strips
+    var ad0 = load64(t + AV1TILE_ADC);
+    var ll0 = load64(t + AV1TILE_LLVL);
+    var ld0 = load64(t + AV1TILE_LDC);
+    var al1 = load64(t + AV1TILE_ALVL + 8);    # chroma-U strips
+    var ll1 = load64(t + AV1TILE_LLVL + 8);
+    store64(al0 + (4 * 8), 11);  store64(al0 + (5 * 8), 11);    # rebased cols
+    store64(al0 + (20 * 8), 22); store64(al0 + (21 * 8), 22);   # absolute cols
+    store64(ad0 + (4 * 8), 11);  store64(ad0 + (20 * 8), 22);
+    store64(ll0 + (2 * 8), 33);  store64(ll0 + (3 * 8), 33);    # rebased rows
+    store64(ll0 + (18 * 8), 44); store64(ll0 + (19 * 8), 44);   # absolute rows
+    store64(ld0 + (2 * 8), 33);  store64(ld0 + (18 * 8), 44);
+    store64(al1 + (2 * 8), 55);  store64(al1 + (10 * 8), 66);   # chroma rebased/absolute
+    store64(ll1 + (1 * 8), 55);  store64(ll1 + (9 * 8), 66);
+    av1_reset_block_context(t, 20, 18, 2, 2, 1);   # (tile, mi_col, mi_row, bw4, bh4, chroma)
+    assert_eq(load64(al0 + (4 * 8)), 0, "luma above rebased col 4 CLEARED");
+    assert_eq(load64(al0 + (5 * 8)), 0, "luma above rebased col 5 CLEARED");
+    assert_eq(load64(ad0 + (4 * 8)), 0, "luma above-DC rebased col CLEARED");
+    assert_eq(load64(al0 + (20 * 8)), 22, "luma above ABSOLUTE col 20 untouched");
+    assert_eq(load64(al0 + (21 * 8)), 22, "luma above ABSOLUTE col 21 untouched");
+    assert_eq(load64(ad0 + (20 * 8)), 22, "luma above-DC ABSOLUTE untouched");
+    assert_eq(load64(ll0 + (2 * 8)), 0, "luma left rebased row 2 CLEARED");
+    assert_eq(load64(ll0 + (3 * 8)), 0, "luma left rebased row 3 CLEARED");
+    assert_eq(load64(ld0 + (2 * 8)), 0, "luma left-DC rebased row CLEARED");
+    assert_eq(load64(ll0 + (18 * 8)), 44, "luma left ABSOLUTE row 18 untouched");
+    assert_eq(load64(ll0 + (19 * 8)), 44, "luma left ABSOLUTE row 19 untouched");
+    assert_eq(load64(ld0 + (18 * 8)), 44, "luma left-DC ABSOLUTE untouched");
+    assert_eq(load64(al1 + (2 * 8)), 0, "chroma above rebased (subsampled) CLEARED");
+    assert_eq(load64(al1 + (10 * 8)), 66, "chroma above ABSOLUTE untouched");
+    assert_eq(load64(ll1 + (1 * 8)), 0, "chroma left rebased (subsampled) CLEARED");
+    assert_eq(load64(ll1 + (9 * 8)), 66, "chroma left ABSOLUTE untouched");
+    return 0;
+}
+
+# ---- decode-level: a NON-FIRST tile whose strip state differs under the two
+# conventions. Block A (non-skip, one DC level) organically writes culLevel /
+# dcCategory into the above+left strips at TILE-REBASED slots (the coeffs path,
+# 0.7.50); skip block B directly below at the SAME columns must clear the above
+# slots A wrote (5.11.5). Under the absolute convention B clears elsewhere and
+# A's stale levels survive to poison the next block's coeff contexts. ----
+fn test_decode_block_windowed_reset() {
+    var base_q = 40;
+    var ncc = av1_noncoeff_cdf_blob();
+    # the stream, hand-encoded in decode_block read order (as test_decode_block).
+    var miA = av1_modeinfo_new();
+    store64(miA + AV1MI_SKIP, 0);
+    store64(miA + AV1MI_YMODE, AV1_DC_PRED);
+    store64(miA + AV1MI_UVMODE, AV1_DC_PRED);
+    var miB = av1_modeinfo_new();
+    store64(miB + AV1MI_SKIP, 1);
+    store64(miB + AV1MI_YMODE, AV1_DC_PRED);
+    store64(miB + AV1MI_UVMODE, AV1_DC_PRED);
+    var ttx = av1_txtypectx_new();
+    store64(ttx + AV1TTC_BASE_Q, base_q);
+    var qsrc = alloc(64 * 8);
+    az(qsrc, 64);
+    store64(qsrc + 0, 5);                 # one DC level -> culLevel 5, dcCategory 2
+    var al = alloc(64 * 8); var ll = alloc(64 * 8); var ad = alloc(64 * 8); var ce = alloc(64 * 8);
+    az(al, 64); az(ll, 64); az(ad, 64); az(ce, 64);
+    var enc = av1_sym_enc_init(256, 1);
+    # block A at ABSOLUTE (r 8, c 8) = the window origin: no neighbours.
+    av1_intra_frame_mode_info_encode(enc, ncc, miA, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8);
+    av1_write_tx_size(enc, ncc, 3, 0, AV1_TX_MODE_SELECT, 1,
+    av1_tx_depth_ctx(0, 0, 0, 0, av1_max_tx_size_rect(3)), 1);            # TX_8X8
+    av1_coeffs_encode(enc, av1_ccdf_new(0), ncc, 0, 1, ttx, AV1_DCT_DCT,
+    0, 0, 8, 8, 8, 8, al, ll, ad, ce, qsrc, 1);
+    # block B at (r 10, c 8), directly below A: above nbr = A (DC, skip 0, TX_8X8).
+    av1_intra_frame_mode_info_encode(enc, ncc, miB, 3, 0, 1, AV1_DC_PRED, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 8);
+    av1_write_tx_size(enc, ncc, 3, 0, AV1_TX_MODE_SELECT, 1,
+    av1_tx_depth_ctx(1, 1, 0, 0, av1_max_tx_size_rect(3)), 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    # the windowed decode tile: window [8,16) x [8,16) of a 16x16-MI frame.
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 8, 8, base_q, 1, 0, 1);
+    av1_tile_set_frame_mi(tile, 16, 16);
+    av1_tile_grids_new(tile);
+    av1_tile_set_window(tile, 8, 8, 16, 16);
+    store64(tile + AV1TILE_SD, av1_sym_dec_init(out, olen, 1));
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, ncc);
+    av1_clear_above_context(tile, 1);
+    av1_clear_left_context(tile, 1);
+    av1_bd_clear(tile, 8, 8, 16, 1);
+    av1_decode_block(tile, 8, 8, 3);      # A: non-skip 8x8 at the window origin
+    var al0 = load64(tile + AV1TILE_ALVL);
+    var ad0 = load64(tile + AV1TILE_ADC);
+    var ll0 = load64(tile + AV1TILE_LLVL);
+    # direction proof: A's coeffs REALLY wrote the rebased slots (else the final
+    # zero-asserts would be vacuous — a test must be able to fail).
+    assert_eq(load64(al0 + 0), 5, "A wrote culLevel 5 at REBASED above slot 0");
+    assert_eq(load64(al0 + 8), 5, "A wrote culLevel 5 at REBASED above slot 1");
+    assert_eq(load64(ad0 + 0), 2, "A wrote dcCategory 2 at REBASED above-DC slot 0");
+    assert_eq(load64(ll0 + 0), 5, "A wrote culLevel 5 at REBASED left slot 0");
+    # poison the slots only the ABSOLUTE convention would touch (B's cols/rows),
+    # and B's own REBASED left rows (stale state a prior non-skip block would
+    # leave there — the fixed reset must clear exactly these).
+    store64(al0 + (8 * 8), 77);  store64(al0 + (9 * 8), 77);     # absolute cols 8,9
+    store64(ll0 + (10 * 8), 88); store64(ll0 + (11 * 8), 88);    # absolute rows 10,11
+    store64(ll0 + (2 * 8), 99);  store64(ll0 + (3 * 8), 99);     # rebased rows 2,3
+    av1_decode_block(tile, 10, 8, 3);     # B: skip 8x8 directly below A
+    assert_eq(av1_sym_dec_err(load64(tile + AV1TILE_SD)), DR_OK, "windowed 2-block decode ok");
+    assert_eq(load64(al0 + 0), 0, "B's reset CLEARED A's rebased above slot 0");
+    assert_eq(load64(al0 + 8), 0, "B's reset CLEARED A's rebased above slot 1");
+    assert_eq(load64(ad0 + 0), 0, "B's reset CLEARED the rebased above-DC slot");
+    assert_eq(load64(ll0 + (2 * 8)), 0, "B's reset CLEARED its rebased left row 2");
+    assert_eq(load64(ll0 + (3 * 8)), 0, "B's reset CLEARED its rebased left row 3");
+    assert_eq(load64(al0 + (8 * 8)), 77, "ABSOLUTE above slots untouched");
+    assert_eq(load64(ll0 + (10 * 8)), 88, "ABSOLUTE left slots untouched");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Partition_Subsize / is_inside / partition ctx");
@@ -264,6 +397,9 @@ fn main() {
     test_decode_block();
     test_group("decode_partition tree round-trip");
     test_decode_partition_tree();
+    test_group("reset_block_context — tile-relative strips (windowed tile)");
+    test_reset_block_context_windowed();
+    test_decode_block_windowed_reset();
     return assert_summary();
 }
 

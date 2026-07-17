@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`av1_reset_block_context` (5.11.5) indexed the coeff-context strips ABSOLUTE, the rest of the
+  path tile-relative** (the 0.7.84 review's recorded note, pre-existing intra-lane). The per-tile
+  Above/Left level+DC strips are tile-relative everywhere else (the 0.7.50 `av1_coeff_ctx_col/row`
+  rebase in coeffs, the 5.11.2 whole-strip clears), but the skip-block reset transcribed the spec's
+  frame-absolute `MiCol >> subX` literally: on any non-first tile it cleared the WRONG slots (a
+  prior block's stale levels survive to poison the next block's coeff contexts), and once
+  MiColStart exceeded extent+pad it overran the tile-sized strip — an OOB heap write. Now rebased
+  by the tile's plane origin (`- (MiColStart >> subX)`), one convention throughout. Inert in every
+  shipping fixture (tile 0 rebases to identity; the all-skip inter scope never reads levels) —
+  fixed ahead of the non-skip inter residual bite that would have made it live.
+  Witnessed in `tests/av1_partition.tcyr` by (a) a poisoned-sentinel convention pin on a windowed
+  4:2:0 tile — both candidate slot ranges sentineled, rebased must clear, absolute must survive,
+  chroma subsampled rebase live — and (b) a decode-level windowed-tile test: a non-skip block's
+  coeffs organically write culLevel/dcCategory at rebased slots, the skip block below must clear
+  exactly those. Mutation-verified: the above and left loops each flipped back to absolute
+  independently — 12 and 11 assertions red respectively; restore byte-identical, 27106/27106 green.
+
 ## [0.7.84] - 2026-07-16
 
 **THE INTER TILE DECODE — the milestone of the inter arc.** A genuine AV1 inter frame decodes

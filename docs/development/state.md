@@ -37,7 +37,10 @@ a plan-less cdef-wired encode is refused, never a null deref), and eight test-ad
 strengthening: write-side LFTX pin, two-SB chroma), 2 TRACKED residuals (skip-ctx threading is
 value-lucky while all blocks skip; in-tile skip-mode ctx only at zero — both become killable with the
 non-skip bite; roadmap.md). Recorded, not in-cut: reset_block_context's absolute-vs-rebased strips
-(pre-existing intra-lane, inert all-skip; flagged for the non-skip bite). Next: **the NON-SKIP INTER
+(pre-existing intra-lane, inert all-skip; flagged for the non-skip bite) — **FIXED post-cut
+(unreleased)**: rebased tile-relative to match the 0.7.50 coeff-ctx convention, witnessed by a
+windowed-tile sentinel pin + a decode-level non-first-tile test, both mutation-verified (CHANGELOG
+Unreleased). Next: **the NON-SKIP INTER
 RESIDUAL** (var-tx reads + inter coeffs — makes the residuals real and the two tracked residuals
 killable), then compound/OBMC/warp + the temporal scan.
 **Prior: INTER_FRAME_MODE_INFO 0.7.83
