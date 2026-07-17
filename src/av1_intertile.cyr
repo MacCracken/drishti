@@ -192,12 +192,104 @@ fn av1_ierr_latch(tile, e): i64 {
 }
 
 # ================================================================
+# VAR-TX (0.7.86) — the txfm_split ctx + read_var_tx_size recursion (spec 5.11.37 +
+# the parsing-process ctx 9.3). The above/left tx context is READ BACK from the
+# frame grids (InterTxSizes / Skips / IsInters / MiSizes) — the spec keeps no
+# separate txfm strips; writing InterTxSizes per leaf IS the ctx update.
+# ================================================================
+# get_above_tx_width / get_left_tx_height (spec 9.3): the neighbour's tx dim. At the
+# block's top/left edge a skipped-inter neighbour reports its block dim, an
+# unavailable one reports 64; otherwise Tx_Width/Height[InterTxSizes[neighbour]].
+fn av1_get_above_tx_width(tile, row, col, mi_row, avail_u): i64 {
+    if (row == mi_row) {
+        if (avail_u == 0) { return 64; }
+        var above = av1_mv_grid_cell(load64(tile + AV1TILE_MVGRID),
+        load64(tile + AV1TILE_FMI_COLS), row - 1, col);
+        if ((av1_grid_get(tile, AV1TILE_SKIPS, row - 1, col) != 0)
+        && (load64(above + AV1MIR_ISINTER) != 0)) {
+            return av1_block_width(av1_grid_get(tile, AV1TILE_MISIZES, row - 1, col));
+        }
+    }
+    return av1_tx_width(av1_grid_get(tile, AV1TILE_INTERTX, row - 1, col));
+}
+fn av1_get_left_tx_height(tile, row, col, mi_col, avail_l): i64 {
+    if (col == mi_col) {
+        if (avail_l == 0) { return 64; }
+        var left = av1_mv_grid_cell(load64(tile + AV1TILE_MVGRID),
+        load64(tile + AV1TILE_FMI_COLS), row, col - 1);
+        if ((av1_grid_get(tile, AV1TILE_SKIPS, row, col - 1) != 0)
+        && (load64(left + AV1MIR_ISINTER) != 0)) {
+            return av1_block_height(av1_grid_get(tile, AV1TILE_MISIZES, row, col - 1));
+        }
+    }
+    return av1_tx_height(av1_grid_get(tile, AV1TILE_INTERTX, row, col - 1));
+}
+# txfm_split ctx (spec 9.3): ctx = (Tx_Size_Sqr_Up[txSz] != maxTxSz)*3 +
+# (TX_SIZES-1-maxTxSz)*6 + above + left, maxTxSz = the block's largest square tx.
+fn av1_txfm_split_ctx(tile, row, col, tx_sz, mi_size, mi_row, mi_col, avail_u, avail_l): i64 {
+    var above = 0;
+    if (av1_get_above_tx_width(tile, row, col, mi_row, avail_u) < av1_tx_width(tx_sz)) { above = 1; }
+    var left = 0;
+    if (av1_get_left_tx_height(tile, row, col, mi_col, avail_l) < av1_tx_height(tx_sz)) { left = 1; }
+    var size = av1_block_width(mi_size);
+    if (av1_block_height(mi_size) > size) { size = av1_block_height(mi_size); }
+    if (size > 64) { size = 64; }
+    var max_tx = av1_find_tx_size(size, size);
+    var c = 0;
+    if (av1_tx_size_sqr_up(tx_sz) != max_tx) { c = 3; }
+    return c + ((5 - 1 - max_tx) * 6) + above + left;
+}
+# read_var_tx_size (spec 5.11.37): recursively read txfm_split, filling InterTxSizes
+# per non-split leaf. tx_sz==TX_4X4 or depth==MAX_VARTX_DEPTH forces a leaf (no
+# symbol). Returns DR_OK; the symbol decoder's sticky error surfaces at the driver.
+fn av1_read_var_tx_size(tile, row, col, tx_sz, depth, mi_size, mi_row, mi_col, avail_u, avail_l): i64 {
+    if ((row >= load64(tile + AV1TILE_ROW_END)) || (col >= load64(tile + AV1TILE_COL_END))) {
+        return DR_OK;
+    }
+    var sd = load64(tile + AV1TILE_SD);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var w4 = av1_tx_width(tx_sz) >> 2;
+    var h4 = av1_tx_height(tx_sz) >> 2;
+    var split = 0;
+    if ((tx_sz != AV1_TX_4X4) && (depth != AV1_MAX_VARTX_DEPTH)) {
+        var ctx = av1_txfm_split_ctx(tile, row, col, tx_sz, mi_size, mi_row, mi_col, avail_u, avail_l);
+        split = av1_sym_read_symbol(sd, av1_ncdf_txfm_partition(ncc, ctx), 2);
+    }
+    if (split != 0) {
+        var sub = av1_split_tx_size(tx_sz);
+        var stepw = av1_tx_width(sub) >> 2;
+        var steph = av1_tx_height(sub) >> 2;
+        var i = 0;
+        while (i < h4) {
+            var j = 0;
+            while (j < w4) {
+                av1_read_var_tx_size(tile, row + i, col + j, sub, depth + 1,
+                mi_size, mi_row, mi_col, avail_u, avail_l);
+                j = j + stepw;
+            }
+            i = i + steph;
+        }
+    } else {
+        var i = 0;
+        while (i < h4) {
+            var j = 0;
+            while (j < w4) {
+                av1_grid_set(tile, AV1TILE_INTERTX, row + i, col + j, tx_sz);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return DR_OK;
+}
+# ================================================================
 # The NON-SKIP INTER RESIDUAL (0.7.85, UNIFORM-TX): decode the inter coeffs and
 # ADD the reconstructed residual onto the motion-compensated prediction already in
 # the frame buffer. Distinct from the intra transform_block (av1_residual.cyr): NO
 # intra prediction / CfL (MC did the prediction), and the tx set / tx_type are the
 # INTER family. UNIFORM tx only (TX_MODE_LARGEST / ONLY_4X4): one uniform tx per
-# plane, no txfm_split (var-tx is a later bite, gated in av1_decode_block_inter).
+# plane, no txfm_split. VAR-TX (TX_MODE_SELECT) walks transform_tree over the leaves
+# read_var_tx_size recorded (0.7.86).
 # ================================================================
 fn av1_transform_block_inter(tile, r, c, sub_size, plane, tx_sz, x, y): i64 {
     var frame = load64(tile + AV1TILE_FRAME);

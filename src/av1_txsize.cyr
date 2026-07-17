@@ -23,11 +23,24 @@ enum Av1TxSizeConst {
     AV1_TX_4X4         = 0;
     AV1_TX_MODE_SELECT = 2;    # tx_mode: ONLY_4X4=0, TX_MODE_LARGEST=1, SELECT=2
     AV1_MAX_TX_DEPTH   = 2;    # tx_depth encodes only 0..2
+    AV1_MAX_VARTX_DEPTH = 2;   # read_var_tx_size recursion cap (spec 5.11.37)
+    AV1_TX_SIZES_ALL   = 19;   # the 19 rect+square TxSize enum values
 }
 
 # Tx_Width / Tx_Height in samples (= 1 << the log2 from av1_itx).
 fn av1_tx_width(txsize): i64 { return 1 << av1_tx_width_log2(txsize); }
 fn av1_tx_height(txsize): i64 { return 1 << av1_tx_height_log2(txsize); }
+# find_tx_size (spec 5.11.36): the TxSize enum whose (Tx_Width, Tx_Height) exactly
+# equals (w, h) pixels — the leaf-tx lookup for transform_tree. Returns TX_4X4 if
+# no match (defensive; a valid transform_tree leaf always matches).
+fn av1_find_tx_size(w, h): i64 {
+    var t = 0;
+    while (t < AV1_TX_SIZES_ALL) {
+        if ((av1_tx_width(t) == w) && (av1_tx_height(t) == h)) { return t; }
+        t = t + 1;
+    }
+    return AV1_TX_4X4;
+}
 
 # ================================================================
 # Tables — one lazily-built blob (63 i64):

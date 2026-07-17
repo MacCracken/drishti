@@ -25,7 +25,7 @@ fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1695 * 8);   # 1693 entries (intra 0..1633 + inter tx-type 1634..1692) + pad
+    var t = alloc(1758 * 8);   # 1756 entries (+ txfm_partition 1693..1755) + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -263,17 +263,41 @@ fn av1_noncoeff_cdf_blob(): i64 {
     store64(t + (1684 * 8), 4167);  store64(t + (1685 * 8), 32768); store64(t + (1686 * 8), 0);
     store64(t + (1687 * 8), 1998);  store64(t + (1688 * 8), 32768); store64(t + (1689 * 8), 0);
     store64(t + (1690 * 8), 748);   store64(t + (1691 * 8), 32768); store64(t + (1692 * 8), 0);
+    # txfm_partition (var-tx txfm_split) CDF: 21 binary contexts (spec §10
+    # Default_Txfm_Split_Cdf; 3-source verified == libaom default_txfm_partition_cdf
+    # == dav1d txpart). {v, 32768, 0} per ctx @ 1693..1755.
+    store64(t + (1693 * 8), 28581); store64(t + (1694 * 8), 32768); store64(t + (1695 * 8), 0);
+    store64(t + (1696 * 8), 23846); store64(t + (1697 * 8), 32768); store64(t + (1698 * 8), 0);
+    store64(t + (1699 * 8), 20847); store64(t + (1700 * 8), 32768); store64(t + (1701 * 8), 0);
+    store64(t + (1702 * 8), 24315); store64(t + (1703 * 8), 32768); store64(t + (1704 * 8), 0);
+    store64(t + (1705 * 8), 18196); store64(t + (1706 * 8), 32768); store64(t + (1707 * 8), 0);
+    store64(t + (1708 * 8), 12133); store64(t + (1709 * 8), 32768); store64(t + (1710 * 8), 0);
+    store64(t + (1711 * 8), 18791); store64(t + (1712 * 8), 32768); store64(t + (1713 * 8), 0);
+    store64(t + (1714 * 8), 10887); store64(t + (1715 * 8), 32768); store64(t + (1716 * 8), 0);
+    store64(t + (1717 * 8), 11005); store64(t + (1718 * 8), 32768); store64(t + (1719 * 8), 0);
+    store64(t + (1720 * 8), 27179); store64(t + (1721 * 8), 32768); store64(t + (1722 * 8), 0);
+    store64(t + (1723 * 8), 20004); store64(t + (1724 * 8), 32768); store64(t + (1725 * 8), 0);
+    store64(t + (1726 * 8), 11281); store64(t + (1727 * 8), 32768); store64(t + (1728 * 8), 0);
+    store64(t + (1729 * 8), 26549); store64(t + (1730 * 8), 32768); store64(t + (1731 * 8), 0);
+    store64(t + (1732 * 8), 19308); store64(t + (1733 * 8), 32768); store64(t + (1734 * 8), 0);
+    store64(t + (1735 * 8), 14224); store64(t + (1736 * 8), 32768); store64(t + (1737 * 8), 0);
+    store64(t + (1738 * 8), 28015); store64(t + (1739 * 8), 32768); store64(t + (1740 * 8), 0);
+    store64(t + (1741 * 8), 21546); store64(t + (1742 * 8), 32768); store64(t + (1743 * 8), 0);
+    store64(t + (1744 * 8), 14400); store64(t + (1745 * 8), 32768); store64(t + (1746 * 8), 0);
+    store64(t + (1747 * 8), 28165); store64(t + (1748 * 8), 32768); store64(t + (1749 * 8), 0);
+    store64(t + (1750 * 8), 22401); store64(t + (1751 * 8), 32768); store64(t + (1752 * 8), 0);
+    store64(t + (1753 * 8), 16088); store64(t + (1754 * 8), 32768); store64(t + (1755 * 8), 0);
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1693 * 8);   # intra 0..1633 + inter tx-type 1634..1692
+    var cc = alloc(1756 * 8);   # + txfm_partition 1693..1755
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1693) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < 1756) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -304,6 +328,8 @@ fn av1_ncdf_intra_tx_set2(cc, sqr, dir): i64 { return cc + ((1388 + ((sqr * 13) 
 fn av1_ncdf_inter_tx_set1(cc, sqr): i64 { return cc + ((1634 + (sqr * 17)) * 8); }
 fn av1_ncdf_inter_tx_set2(cc): i64 { return cc + (1668 * 8); }
 fn av1_ncdf_inter_tx_set3(cc, sqr): i64 { return cc + ((1681 + (sqr * 3)) * 8); }
+# txfm_partition (var-tx): 21 binary contexts (stride 3 = 1 sym + 32768 + count) @ 1693.
+fn av1_ncdf_txfm_partition(cc, ctx): i64 { return cc + ((1693 + (ctx * 3)) * 8); }
 # loop-restoration type CDFs: use_wiener / use_sgrproj (2-symbol), restoration_type (3-symbol).
 fn av1_ncdf_use_wiener(cc): i64 { return cc + (1624 * 8); }
 fn av1_ncdf_use_sgrproj(cc): i64 { return cc + (1627 * 8); }
