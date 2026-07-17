@@ -39,6 +39,62 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   input. Mutation-verified: removing the gate flips the test `UNSUPPORTED → DR_OK` (the 64x64
   mis-parse ships green); restore byte-identical, 195/195.
 
+## [0.7.86] - 2026-07-17
+
+**THE VAR-TX INTER RESIDUAL.** TX_MODE_SELECT non-skip inter blocks now decode — the luma transform
+partition (`txfm_split`) is read and each leaf transform is reconstructed onto the MC prediction. This
+un-gates the last tx-mode path (0.7.85 covered only TX_MODE_LARGEST / uniform tx).
+
+- **`read_var_tx_size`** (spec 5.11.37) + the **`txfm_split` context** (spec 9.3): `av1_txfm_split_ctx`
+  (`(Tx_Size_Sqr_Up != maxTxSz)*3 + (TX_SIZES-1-maxTxSz)*6 + above + left`) with `av1_get_above_tx_width`
+  / `av1_get_left_tx_height` reading the frame **InterTxSizes / Skips / IsInters / MiSizes grids** — the
+  spec keeps NO separate txfm strips; writing InterTxSizes per leaf IS the ctx update. New
+  `Default_Txfm_Partition_Cdf` (21 binary contexts, spec §10, **3-source verified** vs libaom + dav1d) in
+  `av1_noncoeffcdf.cyr`, absolute-offset pinned.
+- **`transform_tree`** (spec 5.11.36): the luma leaf walk (recurse halving the longer side / quadrant when
+  square until (w,h) fits the recorded `InterTxSizes` leaf, then `find_tx_size` + transform_block).
+- **A per-4×4 `TxTypes` grid** (`AV1TILE_TXTYPES`, mirroring InterTxSizes): a var-tx block has MANY luma
+  leaves each with its own `inter_tx_type`, so 0.7.85's single-scalar chroma co-location shortcut is
+  replaced — each luma leaf broadcasts its TxType into the grid, chroma reads the co-located cell.
+- **The encode inverse**: `av1_write_var_tx_size` (reproduces a target InterTxSizes layout) +
+  `av1_transform_tree_encode` (per-leaf coeffs via the new `AV1FB_VARTX` plan). `av1_block_write_grids`
+  gained a `write_intertx` flag so a var-tx block's per-leaf InterTxSizes survive the store (neighbour
+  txfm_split ctx reads them). The decode/encode **un-gate**: `skip==0 && TX_MODE_SELECT && sub_size>BLOCK_4X4
+  && base_q!=0`. `Av1Tile` 544→552, `Av1BlockInfo` 232→240 (layout-guard test updated).
+
+**Proofs** (`tests/av1_intertile.tcyr`): the `txfm_split` ctx verified against the new spec-literal
+`scripts/refs/var_tx_ref.py` (11 known answers across all context groups); round-trip (encode→decode) with
+pixels compared EXHAUSTIVELY against an INDEPENDENT per-leaf oracle (MC + per-leaf `av1_reconstruct` with
+each leaf's own tx type) — mono 16×16→4×TX_8X8, **4:2:0** (chroma co-locates the top-left leaf's type via
+the grid), **mixed-depth** (8×8→4×TX_4X4, the depth-2 path), **32×32→16×TX_8X8** (depth-2 forced 8×8 leaf,
+the depth-gate not the TX_4X4 gate), and an **InterTxSizes grid witness** (the per-leaf tx sizes survive the
+store — a conformance detail the self-consistent round-trip can't see). All **mutation-verified — 8
+mutations, 0 survivors**: the ctx group multiplier / neighbour polarity / sub-split term, the leaf-boundary
+condition, the forced-leaf depth gate, the read ctx, the chroma co-location, and the InterTxSizes
+suppression (the last two each needed a dedicated test the round-trip missed). The obsolete 0.7.85
+non-skip-gated tests were removed (their premise — non-skip rejected — is gone); a null-vplan encode is
+refused, not crashed.
+
+**The adversarial review (15 agents, 4 dimensions, worktree-isolated) confirmed 10 findings — all fixed:**
+
+- **A CRITICAL OOB heap write (reproduced)**: `read_var_tx_size` (and its encode twin `write_var_tx_size`)
+  filled InterTxSizes across the full tx footprint with NO ROW_END/COL_END clamp — a var-tx block
+  overhanging a non-64-aligned frame edge overran the frame-sized MI grid (heap overflow + neighbour
+  InterTxSizes corruption), reachable from a legal/hostile bitstream. Fixed: clamp both fills to the tile
+  window (mirroring `av1_block_write_grids`); witnessed by an edge-overhang canary test (mutation-verified).
+  A "trust no input byte" violation caught before it shipped.
+- **Two "dead code" test-adequacy gaps** (code correct, mutations survived): the `get_above/left_tx_width`
+  **skip-inter neighbour** branch (`Block_Width`↔`Block_Height` survived — no test reached a block edge with
+  a skipped-inter neighbour) and `transform_tree`'s **non-square (w>h / w<h)** recursion (every fixture was
+  square). Closed with a direct skip-inter ctx test (non-square neighbour blocks pin width-vs-height) and a
+  **16×8** var-tx round-trip; both mutation-verified.
+- **Robustness (defensive)**: `av1_transform_tree_encode` now bounds the leaf cursor against the plan count;
+  `av1_encode_block_inter` mirrors the decode compound / inter-intra / non-SIMPLE-motion scope gates.
+- Deferred (documented, inert while deblock is off): var-tx luma `LoopfilterTxSizes` is written uniformly,
+  not per-leaf; and the chroma co-location `Max()`/subsampling is exercised only at a plane origin.
+
+Final: **38 suites / 27,420 assertions / 0 failed**; inter suite → 405.
+
 ## [0.7.85] - 2026-07-17
 
 **THE NON-SKIP INTER RESIDUAL (uniform-tx).** A genuine non-skip inter block now decodes with the

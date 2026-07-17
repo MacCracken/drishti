@@ -563,70 +563,6 @@ fn test_inter_tile_dual_filter() {
     assert_eq(diff, 0, "dual-filter pixels == the (SMOOTH x, SHARP y) oracle");
     return 0;
 }
-# the 0.7.84 SCOPE GATE by decode: a leaf-built payload with skip = 0 parses its
-# mode info and is then rejected UNSUPPORTED (the non-skip inter residual is the
-# next bite, roadmap.md) — never silently mispredicted.
-fn test_inter_nonskip_gated() {
-    var fh = it_fh();
-    var refs = it_refs();
-    var seq = it_seq();
-    var dpb = av1_dpb_new();
-    av1_dpb_store(dpb, fh, it_ref_frame());
-    # the decoder's nb at (0,0) with avail 0/0 over an EMPTY grid — derive the same
-    # ctxs here for the leaf writers.
-    var g = av1_mv_grid_new(16, 16);
-    var nb = av1_nbctx_new();
-    av1_nbctx_setup(nb, g, 16, 0, 0, 0, 0);
-    var ctxi = ib_ctx_like(g);
-    av1_mvctx_set_refs(ctxi, 1, AV1_REF_NONE);
-    av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
-    av1_find_mv_stack(ctxi, 0);
-    var ncc = av1_ncdf_new();
-    var ccr = av1_refcdf_new();
-    var cim = av1_imcdf_new();
-    var scr = alloc(AV1CCTX_SIZE);
-    var enc = av1_sym_enc_init(96, 1);
-    # the leaf-built payload: PARTITION_NONE at 64x64 (ctx from the empty grids,
-    # bsl = mi_width_log2(12)) + skip(0) + is_inter(1) + the 5.11.23 symbols; the
-    # driver parses the mode info and the scope gate must then fire.
-    var ct = av1_tile_new(dr_frame_new(64, 64, 1, 0, 0, 8, 8, alloc(8)), 16, 16, 40, 1, 0, 1);
-    av1_tile_grids_new(ct);
-    av1_write_partition(enc, ncc, av1_partition_ctx(ct, 0, 0, 12, 0, 0),
-    av1_mi_width_log2(12), AV1_PARTITION_NONE);
-    av1_write_skip(enc, ncc, av1_skip_ctx(0, 0, 0, 0), 0);
-    av1_write_is_inter_sym(enc, ccr, av1_is_inter_ctx(nb), 1);
-    av1_single_ref_ctxs(nb, scr);
-    av1_write_single_ref(enc, ccr, scr, AV1_LAST_FRAME);
-    av1_write_inter_mode(enc, cim, ctxi, AV1_NEARESTMV);
-    var olen = 0;
-    var ob = av1_sym_enc_finish(enc, &olen);
-    var oe = alloc(8);
-    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
-    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
-    av1_tile_grids_new(dt);
-    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
-    assert_eq(av1_decode_inter_tile(dt, ob, olen, 1), DR_ERR_UNSUPPORTED,
-    "a non-skip inter block is REJECTED (scope gate), never mispredicted");
-    # and the WRITE side refuses a non-skip source outright.
-    var blk = it_blk(16, 8);
-    store64(blk + AV1FB_SKIP, 0);
-    var tl2 = 0;
-    var oe2 = alloc(8);
-    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
-    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
-    av1_tile_grids_new(et);
-    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
-    var pp = alloc(8);
-    store64(pp + 0, AV1_PARTITION_NONE);
-    var pf = alloc(8);
-    store64(pf + 0, blk);
-    var eb = av1_encode_inter_tile(et, pp, pf, 1, &tl2);
-    assert_eq(eb, 0, "the write-side gate: no payload buffer");
-    assert_eq(tl2, 0, "the write-side gate: out_len 0");
-    assert_eq(av1_sym_enc_err(load64(et + AV1TILE_ENC)) != DR_OK, 0,
-    "the write-side gate leaves no sticky error");
-    return 0;
-}
 fn ib_ctx_like(g): i64 {
     var ctx = av1_mvctx_new();
     av1_mvctx_set_grid(ctx, g, 16, 16);
@@ -1358,16 +1294,163 @@ fn test_ir_zero() {
 }
 
 # ============ var-tx gate ============
-fn test_ir_vartx_gated() {
+# a var-tx leaf-coeff buffer: DC (+ optional AC at raster 1) for an 8x8 leaf.
+fn ir_leaf_coeff(dc, ac): i64 {
+    var b = alloc(1024 * 8);
+    memset(b, 0, 1024 * 8);
+    store64(b + 0, dc);
+    if (ac != 0) { store64(b + (1 * 8), ac); }
+    return b;
+}
+# THE VAR-TX ROUND-TRIP (0.7.86): a 16x16 luma block SPLIT into 4x TX_8X8, each leaf
+# a DISTINCT tx type + residual. Encode (write_var_tx_size + per-leaf coeffs) ->
+# decode -> pixels compared EXHAUSTIVELY against an INDEPENDENT oracle (MC + per-leaf
+# reconstruct). transform_tree visits leaves TL, TR, BL, BR.
+fn test_ir_vartx() {
     var ref = ir_ref(16, 16, 1, 0, 0);
-    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_SELECT);   # SELECT + non-skip + >4x4 -> gated
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_SELECT);   # var-tx
     var refs = ir_refs(16, 16);
     var seq = ir_seq(1, 0, 0);
-    var coeff = alloc(1024 * 8);
-    memset(coeff, 0, 1024 * 8);
-    store64(coeff + 0, 50);
-    var resid = ir_resid1(AV1_DCT_DCT, 1, coeff);
-    var blk = ir_blk(16, 8, resid);
+    # target layout: every 4x4 luma cell -> TX_8X8 (1) = a single-level split.
+    var target = alloc(16 * 8);
+    var i = 0;
+    while (i < 16) { store64(target + (i * 8), 1); i = i + 1; }
+    var c0 = ir_leaf_coeff(60, 0 - 20);
+    var c1 = ir_leaf_coeff(0 - 40, 25);
+    var c2 = ir_leaf_coeff(50, 0);
+    var c3 = ir_leaf_coeff(0 - 30, 0);
+    var leaves = alloc(4 * 3 * 8);
+    store64(leaves + (0 * 8), AV1_ADST_DCT);   store64(leaves + (1 * 8), 2);  store64(leaves + (2 * 8), c0);
+    store64(leaves + (3 * 8), AV1_DCT_ADST);   store64(leaves + (4 * 8), 2);  store64(leaves + (5 * 8), c1);
+    store64(leaves + (6 * 8), AV1_ADST_ADST);  store64(leaves + (7 * 8), 1);  store64(leaves + (8 * 8), c2);
+    store64(leaves + (9 * 8), AV1_IDTX);       store64(leaves + (10 * 8), 1); store64(leaves + (11 * 8), c3);
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 4);
+    store64(vplan + (3 * 8), leaves);
+    var blk = ir_blk(16, 8, 0);
+    av1_fb_set_vartx(blk, vplan);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
+    # oracle: MC the 16x16, then reconstruct each 8x8 leaf (TX_8X8=1) with its type.
+    var oe = alloc(8);
+    var xf = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 16, 16, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var q_dc = av1_get_dc_quant(8, 40, 0);
+    var q_ac = av1_get_ac_quant(8, 40, 0);
+    av1_reconstruct(xf, 0, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(60, 0 - 20), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 8, 0, 1, AV1_DCT_ADST, 0, ir_leaf_coeff(0 - 40, 25), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 0, 8, 1, AV1_ADST_ADST, 0, ir_leaf_coeff(50, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 8, 8, 1, AV1_IDTX, 0, ir_leaf_coeff(0 - 30, 0), q_dc, q_ac);
+    assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0,
+    "var-tx 16x16 -> 4x TX_8X8: decode == independent per-leaf oracle (256)");
+    return 0;
+}
+# VAR-TX edge clamp (review CRITICAL): a var-tx leaf-fill that overhangs the tile
+# window must NOT write past ROW_END/COL_END — the InterTxSizes grid is frame-sized
+# (no SB padding). A CANARY past the grid must survive; without the clamp the fill
+# OOBs the heap / corrupts a neighbour's InterTxSizes.
+fn test_ir_vartx_edge_clamp() {
+    var oe = alloc(8);
+    var f = dr_frame_new(48, 48, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(f, 12, 12, 40, 1, 0, 1);
+    av1_tile_grids_new(t);
+    store64(t + AV1TILE_FMI_COLS, 12);
+    store64(t + AV1TILE_COL_END, 12);
+    store64(t + AV1TILE_ROW_END, 12);
+    # a 12x12 (=144-cell) InterTxSizes grid + 32 canary cells past the end.
+    var grid = alloc((144 + 32) * 8);
+    var k = 0;
+    while (k < 176) { store64(grid + (k * 8), 0); k = k + 1; }
+    var can = 0;
+    while (can < 32) { store64(grid + ((144 + can) * 8), 0 - 999); can = can + 1; }
+    store64(t + AV1TILE_INTERTX, grid);
+    # a TX_32X32 forced leaf (depth == MAX_VARTX_DEPTH -> no symbol) at (8,8): its 8x8
+    # footprint spans cols/rows 8..15, but only 8..11 are inside the 12x12 window.
+    av1_read_var_tx_size(t, 8, 8, 3, AV1_MAX_VARTX_DEPTH, 9, 8, 8, 0, 0);
+    var bad = 0;
+    can = 0;
+    while (can < 32) {
+        if (load64(grid + ((144 + can) * 8)) != (0 - 999)) { bad = bad + 1; }
+        can = can + 1;
+    }
+    assert_eq(bad, 0, "var-tx edge leaf-fill clamps to the window (no OOB past the grid)");
+    assert_eq(load64(grid + ((8 * 12 + 8) * 8)), 3, "in-window leaf cell filled");
+    assert_eq(load64(grid + ((11 * 12 + 11) * 8)), 3, "in-window leaf corner filled");
+    return 0;
+}
+# VAR-TX at depth 2 with a NON-4x4 forced leaf: a 32x32 block split 32->16->8, so
+# the 8x8 leaves are forced (depth == MAX_VARTX_DEPTH, no symbol) — NOT by the
+# TX_4X4 gate. Kills the depth-gate mutant. Uniform leaves (order-independent).
+fn test_ir_vartx_32() {
+    var ref = ir_ref(32, 32, 1, 0, 0);
+    var fh = ir_fh(32, 32, 8, 8, AV1_TX_MODE_SELECT);
+    var refs = ir_refs(32, 32);
+    var seq = ir_seq(1, 0, 0);
+    var target = alloc(64 * 8);
+    var i = 0;
+    while (i < 64) { store64(target + (i * 8), 1); i = i + 1; }   # all TX_8X8
+    var leaves = alloc(16 * 3 * 8);
+    i = 0;
+    while (i < 16) {
+        store64(leaves + ((i * 3 + 0) * 8), AV1_DCT_DCT);
+        store64(leaves + ((i * 3 + 1) * 8), 1);
+        store64(leaves + ((i * 3 + 2) * 8), ir_leaf_coeff(30, 0));
+        i = i + 1;
+    }
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 16);
+    store64(vplan + (3 * 8), leaves);
+    var blk = ir_blk(16, 8, 0);
+    av1_fb_set_vartx(blk, vplan);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 1, 32, 32, 1, 0, 0, 8, 8);
+    var oe = alloc(8);
+    var xf = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 32, 32, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var q_dc = av1_get_dc_quant(8, 40, 0);
+    var q_ac = av1_get_ac_quant(8, 40, 0);
+    var yy = 0;
+    while (yy < 32) {
+        var xx = 0;
+        while (xx < 32) {
+            av1_reconstruct(xf, 0, xx, yy, 1, AV1_DCT_DCT, 0, ir_leaf_coeff(30, 0), q_dc, q_ac);
+            xx = xx + 8;
+        }
+        yy = yy + 8;
+    }
+    assert_eq(ir_diff(df, xf, 32, 32, 1, 0, 0), 0,
+    "var-tx 32x32 -> 16x TX_8X8 (depth-2 forced leaf): decode == oracle (1024)");
+    return 0;
+}
+# the InterTxSizes grid records the PER-LEAF tx after a var-tx decode+store (NOT the
+# block max) — witnesses that the store suppresses the uniform InterTxSizes write,
+# which the self-consistent round-trip cannot see (a conformance-only detail).
+fn test_ir_vartx_intertx_grid() {
+    var ref = ir_ref(16, 16, 1, 0, 0);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_SELECT);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    var target = alloc(16 * 8);
+    var i = 0;
+    while (i < 16) { store64(target + (i * 8), 1); i = i + 1; }
+    var leaves = alloc(4 * 3 * 8);
+    i = 0;
+    while (i < 4) {
+        store64(leaves + ((i * 3 + 0) * 8), AV1_DCT_DCT);
+        store64(leaves + ((i * 3 + 1) * 8), 1);
+        store64(leaves + ((i * 3 + 2) * 8), ir_leaf_coeff(20, 0));
+        i = i + 1;
+    }
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 4);
+    store64(vplan + (3 * 8), leaves);
+    var blk = ir_blk(16, 8, 0);
+    av1_fb_set_vartx(blk, vplan);
+    # encode
     var dpb = av1_dpb_new();
     av1_dpb_store(dpb, fh, ref);
     var oe = alloc(8);
@@ -1380,8 +1463,187 @@ fn test_ir_vartx_gated() {
     var pf = alloc(8);
     store64(pf + 0, blk);
     var tlen = 0;
-    assert_eq(av1_encode_inter_tile(et, pp, pf, 1, &tlen), 0, "var-tx non-skip REFUSED by encode");
-    assert_eq(tlen, 0, "var-tx encode emits no bytes");
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    # decode, keeping the tile to inspect its InterTxSizes grid.
+    var df = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 4, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "var-tx grid tile decodes");
+    # every 4x4 cell holds TX_8X8 (1), not the block-max TX_16X16 (2).
+    assert_eq(av1_grid_get(dt, AV1TILE_INTERTX, 0, 0), 1, "InterTxSizes[0][0] = TX_8X8 (per-leaf)");
+    assert_eq(av1_grid_get(dt, AV1TILE_INTERTX, 3, 3), 1, "InterTxSizes[3][3] = TX_8X8 (per-leaf, not max)");
+    return 0;
+}
+# VAR-TX NON-SQUARE (review: transform_tree w>h branch was dead): a 16x8 block
+# (BLOCK_16X8, via PARTITION_HORZ) splits to 2x TX_8X8; transform_tree(16,8) takes
+# the w>h branch (two horizontal halves). Round-trip vs a per-leaf oracle.
+fn test_ir_vartx_rect() {
+    var ref = ir_ref(16, 8, 1, 0, 0);
+    var fh = ir_fh(16, 8, 4, 2, AV1_TX_MODE_SELECT);
+    var refs = ir_refs(16, 8);
+    var seq = ir_seq(1, 0, 0);
+    var target = alloc(8 * 8);                       # fmi 4x2 = 8 cells
+    var i = 0;
+    while (i < 8) { store64(target + (i * 8), 1); i = i + 1; }   # TX_8X8
+    var leaves = alloc(2 * 3 * 8);
+    store64(leaves + (0 * 8), AV1_ADST_DCT);
+    store64(leaves + (1 * 8), 2);
+    store64(leaves + (2 * 8), ir_leaf_coeff(50, 0 - 20));
+    store64(leaves + (3 * 8), AV1_DCT_ADST);
+    store64(leaves + (4 * 8), 1);
+    store64(leaves + (5 * 8), ir_leaf_coeff(0 - 35, 0));
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 2);
+    store64(vplan + (3 * 8), leaves);
+    var blk = ir_blk(8, 0 - 4, 0);
+    av1_fb_set_vartx(blk, vplan);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(16, 8, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 4, 2, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(3 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + (1 * 8), AV1_PARTITION_SPLIT);
+    store64(pp + (2 * 8), AV1_PARTITION_HORZ);       # 16x16 -> two 16x8 (top is inside)
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "rect var-tx encoded");
+    var df = dr_frame_new(16, 8, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 4, 2, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "rect var-tx decodes");
+    var xf = dr_frame_new(16, 8, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 16, 8, 8, 0 - 4, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var q_dc = av1_get_dc_quant(8, 40, 0);
+    var q_ac = av1_get_ac_quant(8, 40, 0);
+    av1_reconstruct(xf, 0, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(50, 0 - 20), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 8, 0, 1, AV1_DCT_ADST, 0, ir_leaf_coeff(0 - 35, 0), q_dc, q_ac);
+    assert_eq(ir_diff(df, xf, 16, 8, 1, 0, 0), 0,
+    "rect var-tx 16x8 -> 2x TX_8X8 (transform_tree w>h): decode == oracle (128)");
+    return 0;
+}
+# VAR-TX 4:2:0: the same 4x TX_8X8 luma split with chroma. The 8x8 chroma tx
+# co-locates the TOP-LEFT luma leaf's tx type via the TxTypes grid (the whole reason
+# for the grid) — witnessed by exhaustive per-plane oracle equality.
+fn test_ir_vartx_420() {
+    var ref = ir_ref(16, 16, 3, 1, 1);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_SELECT);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(3, 1, 1);
+    var target = alloc(16 * 8);
+    var i = 0;
+    while (i < 16) { store64(target + (i * 8), 1); i = i + 1; }   # TX_8X8
+    var leaves = alloc(4 * 3 * 8);
+    store64(leaves + (0 * 8), AV1_ADST_DCT);
+    store64(leaves + (1 * 8), 2);
+    store64(leaves + (2 * 8), ir_leaf_coeff(60, 0 - 20));
+    store64(leaves + (3 * 8), AV1_DCT_ADST);
+    store64(leaves + (4 * 8), 1);
+    store64(leaves + (5 * 8), ir_leaf_coeff(0 - 40, 0));
+    store64(leaves + (6 * 8), AV1_ADST_ADST);
+    store64(leaves + (7 * 8), 1);
+    store64(leaves + (8 * 8), ir_leaf_coeff(50, 0));
+    store64(leaves + (9 * 8), AV1_IDTX);
+    store64(leaves + (10 * 8), 1);
+    store64(leaves + (11 * 8), ir_leaf_coeff(0 - 30, 0));
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 4);
+    store64(vplan + (3 * 8), leaves);
+    store64(vplan + (4 * 8), 1);  store64(vplan + (5 * 8), ir_leaf_coeff(40, 0));   # U
+    store64(vplan + (6 * 8), 1);  store64(vplan + (7 * 8), ir_leaf_coeff(0 - 35, 0)); # V
+    var blk = ir_blk(0 - 6, 10, 0);
+    av1_fb_set_vartx(blk, vplan);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 3, 1, 1, 4, 4);
+    var oe = alloc(8);
+    var xf = dr_frame_new(16, 16, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 16, 16, 0 - 6, 10, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(xf, ref, 1, 0, 0, 8, 8, 0 - 6, 10, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(xf, ref, 2, 0, 0, 8, 8, 0 - 6, 10, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var q_dc = av1_get_dc_quant(8, 40, 0);
+    var q_ac = av1_get_ac_quant(8, 40, 0);
+    av1_reconstruct(xf, 0, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(60, 0 - 20), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 8, 0, 1, AV1_DCT_ADST, 0, ir_leaf_coeff(0 - 40, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 0, 8, 1, AV1_ADST_ADST, 0, ir_leaf_coeff(50, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 8, 8, 1, AV1_IDTX, 0, ir_leaf_coeff(0 - 30, 0), q_dc, q_ac);
+    # chroma co-locates the TL luma leaf tx type = ADST_DCT (in the 8x8 inter set).
+    av1_reconstruct(xf, 1, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(40, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 2, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(0 - 35, 0), q_dc, q_ac);
+    assert_eq(ir_diff(df, xf, 16, 16, 3, 1, 1), 0,
+    "var-tx 4:2:0: all planes == oracle; chroma co-locates the TL leaf type");
+    return 0;
+}
+# VAR-TX mixed-depth: 16x16 -> 4x TX_8X8, and the TOP-LEFT 8x8 further -> 4x TX_4X4
+# (depth 2, the forced-leaf-no-symbol path). 7 luma leaves.
+fn test_ir_vartx_mixed() {
+    var ref = ir_ref(16, 16, 1, 0, 0);
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_SELECT);
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    # target: TL 2x2 mi cells (0,0)(0,1)(1,0)(1,1) = TX_4X4 (0); the rest TX_8X8 (1).
+    var target = alloc(16 * 8);
+    var i = 0;
+    while (i < 16) { store64(target + (i * 8), 1); i = i + 1; }
+    store64(target + (0 * 8), 0);  store64(target + (1 * 8), 0);
+    store64(target + (4 * 8), 0);  store64(target + (5 * 8), 0);   # row 1 (stride 4): cells (1,0),(1,1)
+    # leaves in transform_tree order: TL 8x8 splits to 4x TX_4X4 (its own quadrants),
+    # then TR, BL, BR 8x8. => 4 TX_4X4 + 3 TX_8X8 = 7.
+    var leaves = alloc(7 * 3 * 8);
+    store64(leaves + (0 * 8), AV1_DCT_DCT);
+    store64(leaves + (1 * 8), 1);
+    store64(leaves + (2 * 8), ir_leaf_coeff(30, 0));
+    store64(leaves + (3 * 8), AV1_DCT_DCT);
+    store64(leaves + (4 * 8), 1);
+    store64(leaves + (5 * 8), ir_leaf_coeff(0 - 25, 0));
+    store64(leaves + (6 * 8), AV1_DCT_DCT);
+    store64(leaves + (7 * 8), 1);
+    store64(leaves + (8 * 8), ir_leaf_coeff(20, 0));
+    store64(leaves + (9 * 8), AV1_DCT_DCT);
+    store64(leaves + (10 * 8), 1);
+    store64(leaves + (11 * 8), ir_leaf_coeff(0 - 18, 0));
+    store64(leaves + (12 * 8), AV1_ADST_DCT);
+    store64(leaves + (13 * 8), 1);
+    store64(leaves + (14 * 8), ir_leaf_coeff(45, 0));
+    store64(leaves + (15 * 8), AV1_DCT_ADST);
+    store64(leaves + (16 * 8), 1);
+    store64(leaves + (17 * 8), ir_leaf_coeff(0 - 40, 0));
+    store64(leaves + (18 * 8), AV1_IDTX);
+    store64(leaves + (19 * 8), 1);
+    store64(leaves + (20 * 8), ir_leaf_coeff(35, 0));
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 7);
+    store64(vplan + (3 * 8), leaves);
+    var blk = ir_blk(8, 0 - 4, 0);
+    av1_fb_set_vartx(blk, vplan);
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
+    var oe = alloc(8);
+    var xf = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 16, 16, 8, 0 - 4, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var q_dc = av1_get_dc_quant(8, 40, 0);
+    var q_ac = av1_get_ac_quant(8, 40, 0);
+    # the 4 TX_4X4 leaves of the TL 8x8 (transform_tree quadrant order within it).
+    av1_reconstruct(xf, 0, 0, 0, 0, AV1_DCT_DCT, 0, ir_leaf_coeff(30, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 4, 0, 0, AV1_DCT_DCT, 0, ir_leaf_coeff(0 - 25, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 0, 4, 0, AV1_DCT_DCT, 0, ir_leaf_coeff(20, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 4, 4, 0, AV1_DCT_DCT, 0, ir_leaf_coeff(0 - 18, 0), q_dc, q_ac);
+    # then the TR, BL, BR 8x8 leaves.
+    av1_reconstruct(xf, 0, 8, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(45, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 0, 8, 1, AV1_DCT_ADST, 0, ir_leaf_coeff(0 - 40, 0), q_dc, q_ac);
+    av1_reconstruct(xf, 0, 8, 8, 1, AV1_IDTX, 0, ir_leaf_coeff(35, 0), q_dc, q_ac);
+    assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0,
+    "var-tx mixed-depth (8x8 -> 4x TX_4X4): decode == per-leaf oracle (256)");
     return 0;
 }
 
@@ -1838,6 +2100,35 @@ fn test_vt_ctx_edge() {
     assert_eq(av1_txfm_split_ctx(t, 0, 0, 2, 6, 0, 0, 0, 0), 12, "edge: unavail neighbours -> above/left 0");
     return 0;
 }
+# the block-EDGE skip-inter neighbour branch of get_above/left (spec 9.3): a SKIPPED
+# inter neighbour reports its BLOCK dim (width above / height left). Uses NON-SQUARE
+# neighbour blocks so Block_Width != Block_Height — pins that get_above uses the WIDTH
+# and get_left the HEIGHT (review: this branch was dead / block_width<->height survived).
+fn test_vt_ctx_skip_neighbour() {
+    var t = vt_tile();
+    store64(t + AV1TILE_MVGRID, av1_mv_grid_new(16, 16));   # for the IsInter read
+    # ABOVE: block at (4,4); its above neighbour (3,4) is a skip inter BLOCK_16X8
+    # (width 16, height 8). get_above_tx_width -> Block_Width = 16.
+    av1_grid_set(t, AV1TILE_SKIPS, 3, 4, 1);
+    av1_grid_set(t, AV1TILE_MISIZES, 3, 4, 5);   # BLOCK_16X8
+    store64(av1_mv_grid_cell(load64(t + AV1TILE_MVGRID), 16, 3, 4) + AV1MIR_ISINTER, 1);
+    # above_txw = 16, tx TX_16X16 width 16 -> above=(16<16)=0. left unavail -> 0. ctx 12.
+    assert_eq(av1_txfm_split_ctx(t, 4, 4, 2, 6, 4, 4, 1, 0), 12,
+    "ctx: skip-inter above neighbour uses Block_Width (16X8 -> 16, above=0)");
+    # LEFT: left neighbour (4,3) a skip inter BLOCK_8X16 (width 8, height 16).
+    # get_left_tx_height -> Block_Height = 16 -> left=(16<16)=0. ctx 12.
+    av1_grid_set(t, AV1TILE_SKIPS, 4, 3, 1);
+    av1_grid_set(t, AV1TILE_MISIZES, 4, 3, 4);   # BLOCK_8X16
+    store64(av1_mv_grid_cell(load64(t + AV1TILE_MVGRID), 16, 4, 3) + AV1MIR_ISINTER, 1);
+    assert_eq(av1_txfm_split_ctx(t, 4, 4, 2, 6, 4, 4, 1, 1), 12,
+    "ctx: skip-inter left neighbour uses Block_Height (8X16 -> 16, left=0)");
+    # and a skip-inter neighbour SMALLER than the tx flips above/left to 1: an above
+    # BLOCK_8X8 (width 8 < 16) -> above=1.
+    av1_grid_set(t, AV1TILE_MISIZES, 3, 4, 3);   # BLOCK_8X8
+    assert_eq(av1_txfm_split_ctx(t, 4, 4, 2, 6, 4, 4, 1, 0), 13,
+    "ctx: skip-inter above 8x8 (width 8 < 16) -> above=1");
+    return 0;
+}
 fn test_vt_cdf_pins() {
     var cc = av1_ncdf_new();
     assert_eq(load64(cc + (1693 * 8)), 28581, "txfm_split cdf@1693");
@@ -1876,7 +2167,6 @@ fn main() {
     test_inter_tile_two_sb();
     test_inter_tile_dual_filter();
     test_inter_frame_route();
-    test_inter_nonskip_gated();
     test_group("the review hardening: chroma, ref selection, clamps, windows");
     test_inter_tile_chroma_e2e();
     test_inter_chroma_span_gated();
@@ -1895,7 +2185,13 @@ fn main() {
     test_ir_inter3();
     test_ir_420();
     test_ir_zero();
-    test_ir_vartx_gated();
+    test_ir_vartx();
+    test_ir_vartx_edge_clamp();
+    test_ir_vartx_32();
+    test_ir_vartx_intertx_grid();
+    test_ir_vartx_420();
+    test_ir_vartx_rect();
+    test_ir_vartx_mixed();
     test_group("inter tx-type: CDF/table pins, round-trip, chroma co-location");
     test_ir_cdf_pins();
     test_ir_txtype_roundtrip();
@@ -1903,6 +2199,7 @@ fn main() {
     test_group("var-tx foundations: txfm_split ctx + CDF pins");
     test_vt_ctx();
     test_vt_ctx_edge();
+    test_vt_ctx_skip_neighbour();
     test_vt_cdf_pins();
     test_group("review hardening: full pins, luma-all-zero sync, reduced_tx, rect");
     test_ir_full_cdf_pins();

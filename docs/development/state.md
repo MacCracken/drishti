@@ -6,7 +6,25 @@
 
 ## Version
 
-**0.7.85** — cut 2026-07-17, not yet tagged (user's git). **THE NON-SKIP INTER RESIDUAL (uniform-tx).**
+**0.7.86** — cut 2026-07-17, not yet tagged (user's git). **THE VAR-TX INTER RESIDUAL.** TX_MODE_SELECT
+non-skip inter blocks now decode: the luma transform partition (txfm_split) is read (read_var_tx_size,
+5.11.37) and each leaf reconstructs onto the MC prediction (transform_tree, 5.11.36) — un-gating the last
+tx-mode path (0.7.85 was uniform-tx only). The txfm_split CONTEXT (spec 9.3, av1_txfm_split_ctx) reads the
+frame InterTxSizes/Skips/IsInters/MiSizes grids — the spec keeps NO separate txfm strips, so writing
+InterTxSizes per leaf IS the ctx update (the #1-risk simplification the CDF retrieval surfaced). New
+Default_Txfm_Partition_Cdf (21 binary ctx, 3-source verified, pinned). A per-4x4 TxTypes grid
+(AV1TILE_TXTYPES) replaces 0.7.85's single-scalar chroma co-location: a var-tx block has MANY luma leaves
+each with its own inter_tx_type, so each leaf broadcasts its TxType into the grid and chroma reads the
+co-located cell. The encode inverse: write_var_tx_size + transform_tree_encode via a per-leaf AV1FB_VARTX
+plan; av1_block_write_grids gained a write_intertx flag so var-tx per-leaf InterTxSizes survive the store
+(neighbour ctx reads them). Un-gate: skip==0 && TX_MODE_SELECT && sub_size>BLOCK_4X4 && base_q!=0. Av1Tile
+544->552, Av1BlockInfo 232->240. THE PROOF (tests/av1_intertile.tcyr): the txfm_split ctx vs the new
+spec-literal scripts/refs/var_tx_ref.py (11 KAs); round-trip with pixels EXHAUSTIVELY equal to an
+INDEPENDENT per-leaf oracle — mono 16x16->4x TX_8X8, 4:2:0 (chroma grid co-location), mixed-depth (8x8->4x
+TX_4X4), 32x32->16x TX_8X8 (depth-2 forced 8x8 leaf), + an InterTxSizes grid witness. 10+ mutations, 0 survivors (two — chroma co-location + InterTxSizes suppression — needed dedicated tests the round-trip
+missed). The 15-agent adversarial review found + fixed a CRITICAL OOB (read/write_var_tx_size filled InterTxSizes with NO edge clamp -> heap overflow on a var-tx block overhanging a non-64-aligned frame; now clamped, canary-witnessed) + two dead-code coverage gaps (the get_above/left skip-inter neighbour branch and transform_tree's non-square w>h/w<h recursion, both now covered + mutation-verified) + defensive fixes (encode cursor bound, encode scope-gate symmetry). Deferred (roadmap): var-tx luma LoopfilterTxSizes is still written
+UNIFORMLY (inert while deblock is off). Next: **compound/OBMC/warp + the temporal scan**. **Prior: THE
+NON-SKIP INTER RESIDUAL (uniform-tx).**
 The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
 ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
 var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready
@@ -260,13 +278,13 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 ## Gates (all green, 2026-07-16)
 
 - `make build` — smoke exercises one real operation per family, exit 0
-- `make test` — 38 suites / **27,352 assertions**: drishti 51 · bits
+- `make test` — 38 suites / **27,420 assertions**: drishti 51 · bits
   1,211 · ivf 889 · frame 73 · av1 185 · av1_frame 140 · av1_symbol 362 ·
   av1_itx 160 · av1_intra 202 · av1_quant 1,569 · av1_recon 4,209 ·
   av1_scan 137 · av1_coeff 47 · av1_coeffcdf 3,450 · av1_coeffs 3,851 ·
   av1_noncoeffcdf 1,820 · av1_modeinfo 344 · av1_txsize 169 · av1_txtype
   142 · av1_residual 64 · av1_partition 216 · av1_tile 33 · av1_deblock 56 ·
-  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 4,254 · av1_intertile 343 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
+  av1_cdef 42 · av1_superres 167 · av1_mc 187 · av1_mc_kernel 10 · av1_mc_emu_edge 15 · av1_mc_driver 157 · av1_mv 1,528 · av1_intermode 4,254 · av1_intertile 405 · av1_dpb 82 · av1_lr 80 · av1_decode 190 · h264 326 · h265 276 · vpx 287
 - `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — exit 0; `make lint` — exit 0, clean for **every** module

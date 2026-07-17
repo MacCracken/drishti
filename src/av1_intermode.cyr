@@ -2602,13 +2602,14 @@ fn av1_write_is_inter(enc, cc, nb, fh, skip_mode, segment_id, is_inter): i64 {
 # The inter_frame_mode_info output: the frame-level block fields + the embedded
 # Av1InterBlock (valid when ISINTER).
 enum Av1BlockInfoOff {
-    AV1FB_SEGID    = 0;     # segment_id (0 while the segmentation reads are deferred)
+    AV1FB_SEGID    = 0;     # segment_id (0 while segmentation reads are deferred; roadmap.md)
     AV1FB_SKIPMODE = 8;
     AV1FB_SKIP     = 16;
     AV1FB_ISINTER  = 24;
     AV1FB_IB       = 32;    # embedded Av1InterBlock (AV1IB_SIZE = 192)
     AV1FB_RESID    = 224;   # encode-only: residual-coeff plan ptr (0 = zero residual)
-    AV1FB_SIZE     = 232;
+    AV1FB_VARTX    = 232;   # encode-only: var-tx plan ptr (0 = uniform tx)
+    AV1FB_SIZE     = 240;
 }
 fn av1_blockinfo_new(): i64 {
     var b = alloc(AV1FB_SIZE);
@@ -2625,6 +2626,10 @@ fn av1_fb_ib(b): i64 { return b + AV1FB_IB; }
 # then per plane p a pair at [1 + p*2]=eob, [2 + p*2]=coeff-buffer ptr.
 fn av1_fb_resid(b): i64 { return load64(b + AV1FB_RESID); }
 fn av1_fb_set_resid(b, plan): i64 { store64(b + AV1FB_RESID, plan); return 0; }
+# var-tx plan (encode-only): [0]=target InterTxSizes grid, [1]=leaf cursor, [2]=leaf
+# count, [3]=luma leaf array ({tx_type,eob,coeff} x N), [4..7]=chroma {eob,coeff} pairs.
+fn av1_fb_vartx(b): i64 { return load64(b + AV1FB_VARTX); }
+fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # inter_frame_mode_info (5.11.15) — the outer driver. The neighbour cache
 # (av1_nbctx_setup) is built HERE, at the spec's preamble position, from the ctx's
 # grid; ctx carries the block geometry as for 5.11.23. above_skip/left_skip and

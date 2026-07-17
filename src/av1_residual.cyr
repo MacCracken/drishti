@@ -123,7 +123,8 @@ enum Av1TileOff {
     AV1TILE_ICDEF     = 528;  # the 5.11.15 driver's 7-slot cdef record (0 = splice off)
     AV1TILE_IERR      = 536;  # STICKY inter-lane error (the partition walk discards
     #                           block returns; the tile driver reads this after the loop)
-    AV1TILE_SIZE      = 544;
+    AV1TILE_TXTYPES   = 544;  # per-4x4 luma TxTypes grid (var-tx chroma co-location; shared)
+    AV1TILE_SIZE      = 552;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -261,6 +262,7 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_UVMODES, load64(src + AV1TILE_UVMODES));
     store64(dst + AV1TILE_SKIPS, load64(src + AV1TILE_SKIPS));
     store64(dst + AV1TILE_INTERTX, load64(src + AV1TILE_INTERTX));
+    store64(dst + AV1TILE_TXTYPES, load64(src + AV1TILE_TXTYPES));
     store64(dst + AV1TILE_LFTX + 0, load64(src + AV1TILE_LFTX + 0));
     store64(dst + AV1TILE_LFTX + 8, load64(src + AV1TILE_LFTX + 8));
     store64(dst + AV1TILE_LFTX + 16, load64(src + AV1TILE_LFTX + 16));
@@ -299,7 +301,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(8 * 8);
+    var offs = alloc(9 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -307,8 +309,9 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 40, AV1TILE_LFTX + 0);
     store64(offs + 48, AV1TILE_LFTX + 8);
     store64(offs + 56, AV1TILE_LFTX + 16);
+    store64(offs + 64, AV1TILE_TXTYPES);
     var g = 0;
-    while (g < 8) {
+    while (g < 9) {
         var arr = alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;

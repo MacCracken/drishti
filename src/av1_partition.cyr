@@ -229,7 +229,8 @@ fn av1_block_neighbours(tile, r, c, avail_u, avail_l, out): i64 {
 # position is outside the frame and is never read as a neighbour (is_inside /
 # the avail flags reject r>=MiRows / c>=MiCols). Without the clamp an edge block
 # on a non-64-aligned frame is an OOB heap write (trust-no-input-byte).
-fn av1_block_write_grids(tile, r, c, bw4, bh4, mi_size, y_mode, uv_mode, skip, tx_size, has_chroma): i64 {
+fn av1_block_write_grids(tile, r, c, bw4, bh4, mi_size, y_mode, uv_mode, skip, tx_size,
+has_chroma, write_intertx): i64 {
     # clamp to the tile WINDOW end (absolute); grids are frame-addressed so r,c are absolute.
     var row_end = load64(tile + AV1TILE_ROW_END);
     var col_end = load64(tile + AV1TILE_COL_END);
@@ -241,7 +242,9 @@ fn av1_block_write_grids(tile, r, c, bw4, bh4, mi_size, y_mode, uv_mode, skip, t
             if (has_chroma) { av1_grid_set(tile, AV1TILE_UVMODES, r + y, c + x, uv_mode); }
             av1_grid_set(tile, AV1TILE_MISIZES, r + y, c + x, mi_size);
             av1_grid_set(tile, AV1TILE_SKIPS, r + y, c + x, skip);
-            av1_grid_set(tile, AV1TILE_INTERTX, r + y, c + x, tx_size);
+            # var-tx already filled InterTxSizes per-leaf (read_var_tx_size) — a uniform
+            # write would clobber the per-leaf tx sizes that neighbour ctx reads.
+            if (write_intertx != 0) { av1_grid_set(tile, AV1TILE_INTERTX, r + y, c + x, tx_size); }
             x = x + 1;
         }
         y = y + 1;
@@ -318,7 +321,7 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     av1_residual(tile, blk);
 
     av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),
-    load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma);
+    load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma, 1);
     return av1_sym_dec_err(sd);
 }
 
@@ -354,7 +357,7 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var skip = load64(mi + AV1MI_SKIP);
     if (skip) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
     av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),
-    load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma);
+    load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma, 1);
     return av1_sym_enc_err(enc);
 }
 

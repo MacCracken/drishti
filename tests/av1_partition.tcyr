@@ -68,7 +68,7 @@ fn test_partition_ctx() {
 # (3,3): reaching the assert proves no OOB, and the in-frame cells are written.
 fn test_grid_write_clamp() {
     var t = mono_tile(3, 3, 40);
-    av1_block_write_grids(t, 2, 2, 2, 2, 3, AV1_DC_PRED, 0, 1, 1, 0);
+    av1_block_write_grids(t, 2, 2, 2, 2, 3, AV1_DC_PRED, 0, 1, 1, 0, 1);
     assert_eq(av1_grid_get(t, AV1TILE_MISIZES, 2, 2), 3, "in-frame edge cell written");
     assert_eq(av1_grid_get(t, AV1TILE_YMODES, 2, 2), AV1_DC_PRED, "in-frame YMode written");
     assert_eq(1, 1, "overhanging grid write clamped (no OOB)");
