@@ -1220,6 +1220,90 @@ fn test_wedge_mask() {
     return 0;
 }
 
+# ---- av1_warp_pred_block (7.11.3.5 driver) vs scripts/refs/warp_driver_ref.py ----
+# the ref-port plane fill: value(r,c) = (r*29 + c*17 + salt) % mask + add.
+fn warp_fill(f, plane, salt): i64 {
+    var bd = dr_frame_bit_depth(f);
+    var mask = 251;
+    var add = 3;
+    if (bd != 8) {
+        mask = 4093;
+        add = 1;
+    }
+    var pw = dr_frame_plane_width(f, plane);
+    var ph = dr_frame_plane_height(f, plane);
+    var r = 0;
+    while (r < ph) {
+        var c = 0;
+        while (c < pw) {
+            dr_frame_set(f, plane, c, r, ((((r * 29) + (c * 17)) + salt) % mask) + add);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return 0;
+}
+# the shared ASYMMETRIC warp model (matches warp_driver_ref.py WM + shear) — alpha!=beta AND
+# gamma!=delta so the KATs witness the -4a-7b / -4g-4d seed fold (a symmetric model can't).
+fn warp_model_of(w0, w1, w2, w3, w4, w5): i64 {
+    var m = av1_warp_model_new();
+    store64(m + AV1WM_MAT + (0 * 8), w0);
+    store64(m + AV1WM_MAT + (1 * 8), w1);
+    store64(m + AV1WM_MAT + (2 * 8), w2);
+    store64(m + AV1WM_MAT + (3 * 8), w3);
+    store64(m + AV1WM_MAT + (4 * 8), w4);
+    store64(m + AV1WM_MAT + (5 * 8), w5);
+    store64(m + AV1WM_ALPHA, 256);
+    store64(m + AV1WM_BETA, 64);
+    store64(m + AV1WM_GAMMA, 128);
+    store64(m + AV1WM_DELTA, 320);
+    return m;
+}
+fn warp_model(): i64 { return warp_model_of(0, 0, 65536 + 1024, 512, 0 - 512, 65536 + 1536); }
+# a negative-translation variant (same 2x2 + shear) — projects a low block off the top-left so
+# dst_x/dst_y go negative, witnessing the arithmetic >>>16 / >>>subx.
+fn warp_model_neg(): i64 {
+    return warp_model_of(0 - 598000, 0 - 598000, 65536 + 1024, 512, 0 - 512, 65536 + 1536);
+}
+fn warp_dcase(fw, fh, planes, subx, suby, bd, plane, x, y, w, h, salt, wm, cs, p00, plast, tag): i64 {
+    var ref = dr_frame_new(fw, fh, planes, subx, suby, bd, 0, Mcd_Err);
+    assert_eq(load64(Mcd_Err), DR_OK, tag);
+    warp_fill(ref, plane, salt);
+    var d = dr_frame_new(fw, fh, planes, subx, suby, bd, 0, Mcd_Err);
+    assert_eq(load64(Mcd_Err), DR_OK, tag);
+    dr_frame_fill(d, plane, 7);
+    assert_eq(av1_warp_pred_block(d, ref, plane, x, y, w, h, wm), DR_OK, tag);
+    assert_eq(mcd_cs(d, plane, x, y, w, h), cs, tag);
+    assert_eq(dr_frame_get(d, plane, x, y), p00, tag);
+    assert_eq(dr_frame_get(d, plane, (x + w) - 1, (y + h) - 1), plast, tag);
+    return 0;
+}
+fn test_warp_pred_block() {
+    # luma: 8x8 + 16x16 (multi-8x8 loop) + a top-left block driving emu_edge padding.
+    warp_dcase(40, 40, 1, 0, 0, 8, 0, 8, 8, 8, 8, 0, warp_model(), 244338, 129, 211, "warp L 8x8");
+    warp_dcase(40, 40, 1, 0, 0, 8, 0, 8, 8, 16, 16, 0, warp_model(), 4259170, 129, 76, "warp L 16x16");
+    warp_dcase(40, 40, 1, 0, 0, 8, 0, 0, 0, 8, 8, 7, warp_model(), 293230, 11, 84, "warp L edge (emu_edge)");
+    # chroma 4:2:0: an 8x8 chroma block, and a 4x4 chroma block (crop of the same 8x8 kernel).
+    warp_dcase(48, 48, 3, 1, 1, 8, 1, 4, 4, 8, 8, 5, warp_model(), 296155, 200, 0, "warp C 8x8 4:2:0");
+    warp_dcase(48, 48, 3, 1, 1, 8, 1, 4, 4, 4, 4, 5, warp_model(), 10995, 200, 84, "warp C 4x4 crop");
+    # 12-bit (ib=2 in the kernel).
+    warp_dcase(40, 40, 1, 0, 0, 12, 0, 8, 8, 16, 16, 9, warp_model(), 26900505, 387, 1086, "warp L 16x16 12-bit");
+    # negative projection (WM_NEG) -> witnesses the arithmetic >>>16 (luma) and >>>subx (chroma).
+    warp_dcase(40, 40, 1, 0, 0, 8, 0, 0, 0, 8, 8, 3, warp_model_neg(), 12480, 6, 6, "warp L neg proj");
+    warp_dcase(48, 48, 3, 1, 1, 8, 1, 0, 0, 8, 8, 3, warp_model_neg(), 91609, 6, 122, "warp C neg proj");
+    # crop confinement: a 4x4 chroma block runs the 8x8 kernel but writes ONLY its 4x4 —
+    # the cells beyond the block stay the dst sentinel (7). Witnesses the write-back crop.
+    var cref = dr_frame_new(48, 48, 3, 1, 1, 8, 0, Mcd_Err);
+    warp_fill(cref, 1, 5);
+    var cd = dr_frame_new(48, 48, 3, 1, 1, 8, 0, Mcd_Err);
+    dr_frame_fill(cd, 1, 7);
+    assert_eq(av1_warp_pred_block(cd, cref, 1, 4, 4, 4, 4, warp_model()), DR_OK, "warp crop confine ok");
+    assert_eq(dr_frame_get(cd, 1, 7, 7), 84, "warp crop: last valid cell (3,3)=84");
+    assert_eq(dr_frame_get(cd, 1, 8, 4), 7, "warp crop: col beyond block untouched (sentinel 7)");
+    assert_eq(dr_frame_get(cd, 1, 4, 8), 7, "warp crop: row beyond block untouched (sentinel 7)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     Mcd_Err = alloc(8);
@@ -1248,6 +1332,8 @@ fn main() {
     test_ii_smooth_mask();
     test_group("inter-intra orchestration (7.11.3.14 blend)");
     test_mc_interintra();
+    test_group("warp prediction driver (7.11.3.5 setup + gather + kernel + crop)");
+    test_warp_pred_block();
     test_group("wedge inter-intra (7.11.3.11 mask + blend)");
     test_mc_interintra_wedge();
     return assert_summary();

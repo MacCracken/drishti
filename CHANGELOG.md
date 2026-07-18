@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.97] - 2026-07-18
+
+**WARP PREDICTION DRIVER.** The block-level warp motion-compensation driver (spec 7.11.3.5) — per 8×8
+sub-block it projects the block centre through the warp model to the integer source position + the sub-pixel
+phase seeds, gathers the padded reference block, calls the 0.7.96 kernel, and writes the result back. Handles
+luma and subsampled chroma. This assembles the whole warp pixel path (model → shear → filter → **warped
+block**); only the tile-decode wiring / LOCALWARP un-gate remains. Verified standalone, like `av1_mc_pred_block`.
+
+### Added
+
+- **`av1_warp_pred_block(dst, ref, plane, x, y, w, h, wm)`** in `av1_mc.cyr`: loops 8×8 plane-pixel sub-blocks;
+  per sub-block derives `src = (centre)<<sub → project through wmmat → x4 = >>>sub → ix4 = >>>16, sx4 = &0xffff`
+  and the seed `mx = (sx4 − 4·alpha − 7·beta) & ~0x3f` (`my` with `−4·gamma − 4·delta`), gathers a 15×15 block
+  at `(ix4−7, iy4−7)` (rect-copy + `emu_edge`, like `av1_mc_pred_core`), calls `av1_warp_affine_8x8`, and
+  writes the 8×8 output back **cropped** to the block (so a 4×4 chroma / non-multiple-of-8 extent writes only
+  its valid cells). Chroma lifts the centre `<<sub` into the luma grid the wmmat is defined in and drops the
+  projection `>>>sub` back. **Reconciled** against the spec + the **cached dav1d `warp_affine`** driver +
+  libaom; the oracle `scripts/refs/warp_driver_ref.py` reuses the 0.7.96 kernel ref.
+
+The seed fold is `−4·alpha − 7·**beta**` (the horizontal pass spans 15 rows, so `beta`'s loop origin is −7)
+and `−4·gamma − 4·**delta**` (the vertical pass spans 8). The 7-vs-4 asymmetry is invisible to a symmetric
+warp model, so the KATs use an **asymmetric** model (`alpha≠beta` AND `gamma≠delta`). The `&~0x3f` mask is a
+proven no-op given `setup_shear`'s multiple-of-64 reduction, applied anyway to match the reference decoders.
+
+**Proofs** (`tests/av1_mc_driver.tcyr`): 9 KATs vs the ref port — luma 8×8 / 16×16 (multi-sub-block) / a
+top-left block driving `emu_edge` padding, 4:2:0 chroma 8×8 and a 4×4 crop, 12-bit, plus a strongly-negative
+projection (both axes off-frame) that witnesses the arithmetic `>>>16`/`>>>sub` on both axes and the ≥32768
+residue masks; plus a crop-confinement assertion (cells beyond the block stay the sentinel).
+**Mutation-verified — 18 mutations killed**: the seed fold (each of the 4/7/4/4 factors, via the asymmetric
+model), the projection (centre, coefficient pairing), the gather geometry (`ix4−7`/`iy4−7`/`soff=48`), all
+four arithmetic shifts, both residue masks, the chroma `<<sub` lift, and the write-back crop (row + col).
+
+**The adversarial review (2 dimensions, worktree-isolated, patch-applied, every finding verified):** the
+per-8×8 derivation (vs the cached dav1d driver) and the memory-safety / chroma / gather / crop / off-frame
+handling are CLEAN — no findings raised in either dimension.
+
 ## [0.7.96] - 2026-07-17
 
 **BLOCK WARP KERNEL.** The per-8×8 warp motion-compensation kernel (spec 7.11.3.5) — a two-pass separable

@@ -22,7 +22,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.96 (AV1 decode: BLOCK WARP KERNEL — the per-8x8 warp motion-compensation kernel (7.11.3.5), a two-pass separable filter applying the warp model's shear params through the Warped_Filters table to produce warped pixels; the model→shear→filter→warp-pixels chain is now complete bar the block-level driver; verified standalone like put_8tap, not yet wired — LOCALWARP stays gated until the warp driver; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: the warp driver (mx/my derivation + gather + sub-block loop + un-gate LOCALWARP), then OBMC + the temporal scan)
+## Status — 0.7.97 (AV1 decode: WARP PREDICTION DRIVER — the block-level warp motion compensation (7.11.3.5): per 8x8 sub-block it projects the block centre through the warp model to the source position + sub-pixel seeds, gathers the padded reference, runs the 0.7.96 kernel, and writes back cropped (luma + subsampled chroma); the whole warp pixel path (model→shear→filter→warped-block) is now assembled — only the LOCALWARP tile-decode un-gate remains; verified standalone like av1_mc_pred_block; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: un-gate LOCALWARP (wire warp_estimation→setup_shear→this driver into the inter tile decode), then OBMC + the temporal scan)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (27,420 suite assertions + 1,140 fuzz

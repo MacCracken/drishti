@@ -6,7 +6,41 @@
 
 ## Version
 
-**0.7.96** — cut 2026-07-17, not yet tagged (user's git). **BLOCK WARP KERNEL.** The per-8x8 warp
+**0.7.97** — cut 2026-07-18, not yet tagged (user's git). **WARP PREDICTION DRIVER.** The block-level warp
+motion compensation (spec 7.11.3.5) — per 8x8 sub-block it projects the block centre through the warp model
+to the integer source position + sub-pixel phase seeds, gathers the padded reference, calls the 0.7.96 kernel,
+and writes back cropped. Handles luma + subsampled chroma. This assembles the whole warp pixel path
+(model→shear→filter→warped-block); only the LOCALWARP tile-decode un-gate remains. Verified STANDALONE like
+av1_mc_pred_block. av1_mc.cyr: av1_warp_pred_block(dst,ref,plane,x,y,w,h,wm) — loops 8x8 plane-pixel
+sub-blocks; per sub-block src=(centre)<<sub → project through wmmat (av1_warp_model_param 0..5) → x4=>>>sub →
+ix4=>>>16, sx4=&0xffff → seed mx=(sx4-4*alpha-7*beta)&~0x3f, my=(sy4-4*gamma-4*delta)&~0x3f; gather 15x15 at
+(ix4-7,iy4-7) via the rect-copy+av1_mc_emu_edge pattern; call av1_warp_affine_8x8; write the 8x8 output back
+CROPPED (only cells within the block → 4x4 chroma / non-mult-of-8 write just their valid cells). Chroma lifts
+the centre <<sub into the LUMA grid the wmmat is defined in, drops the projection >>>sub back; shear+wmmat are
+plane-independent (setup_shear derives them once). Reuses Av1_McRect/Gather/Out scratch + the emu_edge pattern
+(like av1_mc_pred_core). Reconciled vs spec + the CACHED dav1d recon_tmpl.c warp_affine (authoritative) +
+libaom; oracle scripts/refs/warp_driver_ref.py reuses the 0.7.96 kernel ref. 0.7.97 LESSONS: (a) the SEED FOLD
+is -4*alpha-7*BETA (H pass spans 15 rows → beta origin i1=-7) and -4*gamma-4*DELTA (V pass spans 8) — the
+7-vs-4 asymmetry is INVISIBLE to a symmetric model, so the KATs use an ASYMMETRIC model (alpha!=beta AND
+gamma!=delta); the kernel starts its loop at r=0 so the DRIVER must pre-fold (kernel does NOT). (b) the &~0x3f
+(=(0-64)) mask is a PROVEN no-op given setup_shear's mult-of-64 reduction (the sub-64 residue never carries in
+the kernel's offs=64+Round2(tmx,10)); applied anyway to match dav1d/libaom + the ported kernel. (c) the
+arithmetic >>>16/>>>sub matter ONLY when the projection goes NEGATIVE (a block near a frame edge projecting
+off-frame) — witnessed by a strongly-negative-translation model (both axes off-frame); a logical shift there
+yields a huge positive index. (d) the residue masks (sx4/sy4 & 0xffff) are only witnessed when the residue
+>= 32768 (bit 15 set) — the neg model's residues cross it. (e) TWO self-inflicted KAT/model mismatches
+surfaced mid-loop (updated the ref-port model + KAT but forgot the test's model builder) — the ref port is the
+oracle only when the test's inputs match it EXACTLY. THE PROOF (tests/av1_mc_driver.tcyr): 9 KATs — luma
+8x8/16x16/edge, 4:2:0 chroma 8x8 + a 4x4 crop, 12-bit, a strong-neg projection (arith-shift + residue-mask
+witness), + a crop-confinement assert. MUTATIONS, 18 killed: the seed fold (each 4/7/4/4 factor via the
+asymmetric model), the projection, the gather geometry (ix4-7/iy4-7/soff=48), all four arithmetic shifts, both
+residue masks, the chroma <<sub lift, the write-back crop (row+col). THE REVIEW (2 dims, worktree-isolated,
+patch-applied, verified): the per-8x8 derivation (vs cached dav1d) + memory-safety/chroma/gather/crop/off-frame
+CLEAN — no findings in either dimension. Next: **un-gate LOCALWARP — wire warp_estimation→setup_shear→
+av1_warp_pred_block into the inter tile decode so warped inter blocks decode to pixels; then OBMC + the
+temporal scan**. **Prior: BLOCK WARP KERNEL (0.7.96).**
+
+**0.7.96** — **BLOCK WARP KERNEL.** The per-8x8 warp
 motion-compensation kernel (spec 7.11.3.5) — a two-pass separable filter applying the warp model's shear
 params (0.7.94) through the Warped_Filters table (0.7.95) to produce warped reference pixels. The pixel stage
 of the warp arc; the model→shear→filter→warp-pixels chain is complete bar the block-level driver. Verified

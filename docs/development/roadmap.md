@@ -312,13 +312,16 @@ Baseline (0.7.0): OBU layer + sequence header.
   the per-8x8 warp motion-compensation kernel: a two-pass separable filter applying the shear params through
   Warped_Filters, `Round2(·,7−ib)` H into a signed mid then `Clip1(Round2(·,7+ib))` V — the FULL 7±ib rounds
   because the warp table sums to 128, NOT put_8tap's 6±ib; verified standalone against the cached dav1d
-  `warp_affine_8x8_c`; NOT yet wired). DEFERRED to
+  `warp_affine_8x8_c`; NOT yet wired), and **WARP PREDICTION DRIVER 0.7.97** (`av1_warp_pred_block` 7.11.3.5 —
+  per 8x8 sub-block projects the block centre through the wmmat to the source position + the sub-pixel phase
+  seeds (`mx=(sx4−4α−7β)&~0x3f`), gathers the 15x15 padded reference via `emu_edge`, runs the 0.7.96 kernel,
+  writes back cropped; luma + subsampled chroma; verified standalone against the cached dav1d `warp_affine`
+  driver; the whole warp pixel path is now assembled). DEFERRED to
   the conformance era: the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary
   symbol's context, un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors,
   not on the pre-conformance decode lane; likewise the warp `LS_MAT`-clamp. Next
-  **the warp DRIVER** (7.11.3.5 setup — the mx/my/dx/dy derivation from wmmat, the per-8x8 sub-block loop, the
-  emu_edge gather feeding the 0.7.96 kernel, then un-gating LOCALWARP so warped inter blocks decode to
-  pixels), OBMC, the temporal scan (needs the
+  **un-gate LOCALWARP** (wire `warp_estimation`→`setup_shear`→`av1_warp_pred_block` into the inter tile decode
+  so warped inter blocks decode to pixels end-to-end), OBMC, the temporal scan (needs the
   DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar the warp filter, dav1d
   `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
