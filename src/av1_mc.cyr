@@ -838,6 +838,130 @@ fn av1_wedge_mask_build(sub_size, wedge_idx, wedge_sign, fill_w, fill_h): i64 {
     return DR_OK;
 }
 
+# ================================================================
+# INTER-INTRA prediction (spec 7.11.3.13 SMOOTH mask + 7.11.3.14 interintra blend). A single-ref
+# inter block (interintra flag) blends its inter MC prediction with an INTRA prediction. 0.7.91 =
+# SMOOTH interintra (wedge_interintra deferred to 0.7.92). CRITICAL: the blend is FINAL precision
+# (both preds at pixel range) — Round2(m*intra + (64-m)*inter, 6), NO ib, NO Clip1 (unlike the
+# compound ib+6/Clip1 combine). m weights the INTRA prediction. 3-source verified (interintra.md).
+# ================================================================
+# Ii_Weights_1d[128] (spec 7.11.3.13): the smooth-mask 1-D weights, monotone 60..1. Lazy blob.
+var Av1_IiWeights = 0;
+fn av1_iifill8(t, o, v0, v1, v2, v3, v4, v5, v6, v7) {
+    store64(t + ((o + 0) * 8), v0);   store64(t + ((o + 1) * 8), v1);
+    store64(t + ((o + 2) * 8), v2);   store64(t + ((o + 3) * 8), v3);
+    store64(t + ((o + 4) * 8), v4);   store64(t + ((o + 5) * 8), v5);
+    store64(t + ((o + 6) * 8), v6);   store64(t + ((o + 7) * 8), v7);
+    return 0;
+}
+fn av1_ii_weight_tbl(): i64 {
+    if (Av1_IiWeights != 0) { return Av1_IiWeights; }
+    var t = alloc(128 * 8);
+    if (t == 0) { return 0; }
+    av1_iifill8(t, 0, 60, 58, 56, 54, 52, 50, 48, 47);
+    av1_iifill8(t, 8, 45, 44, 42, 41, 39, 38, 37, 35);
+    av1_iifill8(t, 16, 34, 33, 32, 31, 30, 29, 28, 27);
+    av1_iifill8(t, 24, 26, 25, 24, 23, 22, 22, 21, 20);
+    av1_iifill8(t, 32, 19, 19, 18, 18, 17, 16, 16, 15);
+    av1_iifill8(t, 40, 15, 14, 14, 13, 13, 12, 12, 12);
+    av1_iifill8(t, 48, 11, 11, 10, 10, 10, 9, 9, 9);
+    av1_iifill8(t, 56, 8, 8, 8, 8, 7, 7, 7, 7);
+    av1_iifill8(t, 64, 6, 6, 6, 6, 6, 5, 5, 5);
+    av1_iifill8(t, 72, 5, 5, 4, 4, 4, 4, 4, 4);
+    av1_iifill8(t, 80, 4, 4, 3, 3, 3, 3, 3, 3);
+    av1_iifill8(t, 88, 3, 3, 3, 2, 2, 2, 2, 2);
+    av1_iifill8(t, 96, 2, 2, 2, 2, 2, 2, 2, 2);
+    av1_iifill8(t, 104, 2, 2, 1, 1, 1, 1, 1, 1);
+    av1_iifill8(t, 112, 1, 1, 1, 1, 1, 1, 1, 1);
+    av1_iifill8(t, 120, 1, 1, 1, 1, 1, 1, 1, 1);
+    Av1_IiWeights = t;
+    return t;
+}
+# av1_ii_weight(idx): Ii_Weights_1d[idx], clamped to [0,127] (trust-no-input; gated sizes keep
+# idx <= 124 anyway).
+fn av1_ii_weight(idx): i64 {
+    var i = idx;
+    if (i < 0) { i = 0; }
+    if (i > 127) { i = 127; }
+    return load64(av1_ii_weight_tbl() + (i * 8));
+}
+# av1_ii_smooth_mask_build — fill Av1_McMask (stride fill_w) with the SMOOTH interintra weights
+# (spec 7.11.3.13). m weights INTRA. sizeScale = 128/Max(nom_w,nom_h) (NOMINAL plane dims). Per
+# ii_mode: 0=DC (flat 32), 1=V (row-indexed), 2=H (col-indexed), 3=SMOOTH (Min(row,col)-indexed).
+# REGENERATED per plane (call on every plane) — the interintra smooth mask is NOT subsampled.
+fn av1_ii_smooth_mask_build(nom_w, nom_h, fill_w, fill_h, ii_mode): i64 {
+    var mx = nom_w;
+    if (nom_h > nom_w) { mx = nom_h; }
+    var scale = 128 / mx;
+    var r = 0;
+    while (r < fill_h) {
+        var c = 0;
+        while (c < fill_w) {
+            var m = 32;
+            if (ii_mode == 1) {
+                m = av1_ii_weight(r * scale);
+            } else {
+                if (ii_mode == 2) {
+                    m = av1_ii_weight(c * scale);
+                } else {
+                    if (ii_mode == 3) {
+                        var mn = r;
+                        if (c < r) { mn = c; }
+                        m = av1_ii_weight(mn * scale);
+                    }
+                }
+            }
+            store64(Av1_McMask + (((r * fill_w) + c) * 8), m);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    Av1_McMaskW = fill_w;
+    Av1_McMaskH = fill_h;
+    return DR_OK;
+}
+# av1_mc_pred_interintra — one plane of a SMOOTH interintra block. Inter -> Av1_McOut at FINAL
+# precision (compound=0), intra -> frame (predict_intra writes it), then the final-precision blend
+# reads intra back. sub_size = NOMINAL luma block size; w/h = the (equal, in-scope) fill extent.
+# ii_mode 0/1/2/3; intra mode = ii_mode for 0/1/2, 9 (SMOOTH_PRED) for 3. angle_delta/filter = 0.
+fn av1_mc_pred_interintra(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y,
+ii_mode, sub_size, have_l, have_u, mi_cols, mi_rows): i64 {
+    if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
+    var e = av1_mc_pred_core(Av1_McOut, dst, ref, plane, x, y, w, h, mv_row, mv_col,
+    filt_x, filt_y, 0);
+    if (e != DR_OK) { return e; }
+    var imode = ii_mode;
+    if (ii_mode == 3) { imode = 9; }                # II_SMOOTH_PRED -> AV1_SMOOTH_PRED
+    var sx = 0;
+    var sy = 0;
+    if (plane > 0) {
+        sx = dr_frame_subx(dst);
+        sy = dr_frame_suby(dst);
+    }
+    var log2w = (av1_mi_width_log2(sub_size) + 2) - sx;
+    var log2h = (av1_mi_height_log2(sub_size) + 2) - sy;
+    e = av1_intra_predict(dst, plane, x, y, have_l, have_u, 0, 0, imode, 0, 0, 0, 0, 0,
+    log2w, log2h, mi_cols, mi_rows);
+    if (e != DR_OK) { return e; }
+    if (av1_ii_smooth_mask_build(1 << log2w, 1 << log2h, w, h, ii_mode) != DR_OK) {
+        return DR_ERR_OOM;
+    }
+    var r = 0;
+    while (r < h) {
+        var c = 0;
+        while (c < w) {
+            var m = load64(Av1_McMask + (((r * w) + c) * 8));
+            var intra = dr_frame_get(dst, plane, x + c, y + r);
+            var inter = load64(Av1_McOut + (((r * w) + c) * 8));
+            dr_frame_set(dst, plane, x + c, y + r,
+            av1_round2((m * intra) + ((64 - m) * inter), 6));
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return DR_OK;
+}
+
 # COMPOUND MC (7.11.3.1 isCompound): MC from BOTH references at intermediate precision, then a
 # combine. comp_mode==0 = SCALAR (AVERAGE fwd=bck=8; DISTANCE FwdWeight/16-Fwd) ->
 # Clip1(Round2(t0*fwd + t1*bck, ib+4)) (AVERAGE 8/8 is BIT-EXACT with the old ib+1 form).

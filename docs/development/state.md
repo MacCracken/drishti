@@ -6,34 +6,34 @@
 
 ## Version
 
-**0.7.90** — cut 2026-07-17, not yet tagged (user's git). **COMPOUND WEDGE (MASKED) INTER PREDICTION.** The
-second masked mode: comp_group_idx==1 && type==COMPOUND_WEDGE blends the two predictions through a per-pixel
-mask from a WEDGE CODEBOOK (an oriented soft boundary) indexed by block size + wedge_index + wedge_sign.
-Reuses the 0.7.89 DIFFWTD blend + chroma subsample UNCHANGED; the new piece is the codebook + 2D generation.
-Closes the masked family (DIFFWTD + WEDGE both in scope; only inter-intra, the ref1==INTRA path, stays
-gated). av1_mc.cyr: three 1-D master ramps (av1_wm_odd/even/vert, 0..64) lazily expanded to a 6x64x64 master
-blob (av1_wedge_master_tbl — Stage 1 OBLIQUE63+VERTICAL via the shift-per-2-rows slope; Stage 2 derives
-OBLIQUE27=transpose, OBLIQUE117/153=hflip/transpose+64-complement, HORIZONTAL); a 3x16 Wedge_Codebook
-(av1_wedge_cb_tbl, packed dir*64+xoff*8+yoff; shape=TALL/WIDE/SQUARE). av1_wedge_mask_build (Stage 3):
-xoff/yoff = 32-((off*dim)>>3), a perimeter-average flipSign canonicalization, Mask = raw or 64-raw per
-inv = wedge_sign XOR flipSign. Geometry uses NOMINAL block dims (av1_block_width/height), fill uses the
-edge-clamped extent (a frame-edge block gets the top-left of the nominal mask). Fills Av1_McMask ->
-comp_mode==2 -> the DIFFWTD blend runs unchanged. Un-gate both lanes for type==WEDGE. 3-source verified
-(compound_wedge.md). THE PROOF (tests/av1_mc_driver.tcyr, av1_intertile.tcyr): a COMPREHENSIVE 288-checksum
-(every eligible size x 16 idx x 2 signs) position-weight-checksummed vs the new spec-literal
-scripts/refs/wedge_ref.py — catches any codebook/master/oblique/flipSign/shape bug on any index/size/dir;
-two HAND-COMPUTABLE anchors (KAT-A VERTICAL, KAT-B HORIZONTAL) pinning the ref port to spec-derived values;
-a clamped-fill witness for nominal-vs-clamped geometry; a WEDGE round-trip (32x32 via SPLIT, both signs)
-EXHAUSTIVELY equal to the av1_mc_pred_compound(comp_mode=2) oracle AND differing from AVERAGE. Mutations, 0
-survivors EXCEPT the two provably-equivalent transforms the spec sign-convention analysis predicts (dropping
-the O117/O153 64-complement is exactly cancelled by flipSign; an offset on a direction's invariant axis is a
-no-op) — a real transpose error in those planes IS caught (56 red). THE REVIEW (2 dims, worktree-isolated):
-math CLEAN (288 checksums + hand anchors + transpose mutation), wiring+bounds CLEAN (gate mirror, comp_mode
-exclusivity, master reads bounded [8,55] for every codebook entry, wedge_idx entropy-bounded [0,15]). Two
-CONFIRMED findings FIXED: (F1) av1_wedge_mask_build checked the master OOM but not the codebook table (wild
-read on a specific OOM) — now guarded symmetrically; (F2) the nominal-vs-clamped split had no test (mutating
-to clamped dims shipped green) — CLOSED with the clamped-fill witness, mutation-verified. Next: **inter-intra
-blends, OBMC/warp + the temporal scan**. **Prior: COMPOUND DIFFWTD (masked) (0.7.89).**
+**0.7.91** — cut 2026-07-17, not yet tagged (user's git). **SMOOTH INTER-INTRA PREDICTION.** A single-ref
+inter block with the interintra flag (ref1==INTRA) blends its inter MC prediction with an INTRA prediction
+of the same block via a smooth mask. Unlike compound (two inter preds at intermediate precision), inter-intra
+crosses the inter/intra boundary — the keyframe intra predictor (av1_intra_predict) is invoked UNCHANGED from
+the inter tile path. Scope = SMOOTH interintra (II_DC/V/H/SMOOTH); WEDGE interintra deferred to 0.7.92; a
+frame-edge OVERHANG is refused (av1_intra_predict writes the NOMINAL block, no write-clamp). av1_mc.cyr:
+av1_ii_weight (the 128-entry Ii_Weights_1d monotone 60..1 table) + av1_ii_smooth_mask_build (sizeScale =
+128/Max(w,h); II_DC=flat 32, II_V=row Ii_Weights[i*scale], II_H=col [j*scale], II_SMOOTH=[Min(i,j)*scale];
+m weights INTRA). CHROMA REGENERATES the mask at the chroma block size, NOT subsampled from luma (a cross-
+source discrepancy — 4:2:0 32x32 V chroma row0 = 60, not the averaged 56). av1_mc_pred_interintra: inter ->
+Av1_McOut at FINAL precision (av1_mc_pred_core compound=0), intra -> frame (av1_intra_predict; II_SMOOTH->
+SMOOTH_PRED=9), blend reads intra back = Round2(m*intra + (64-m)*inter, 6) — NO ib, NO Clip1 (both preds at
+pixel precision, convex combo stays in range; the compound ib+6/Clip1 combine would corrupt it). Un-gate both
+lanes for SMOOTH interintra. 3-source verified (interintra.md). THE PROOF (tests/av1_mc_driver.tcyr,
+av1_intertile.tcyr): the smooth mask vs a 28-checksum pin (size x mode) vs the new spec-literal
+scripts/refs/interintra_ref.py; an orchestration test running av1_intra_predict INDEPENDENTLY into a temp
+frame + integer-MV-0 inter (== ref pixel) + the ref-verified mask, recomputing the blend (catches wrong
+shift/clip/operand-order without sharing the blend); a 4:2:0 CHROMA case witnessing regeneration; a decode
+round-trip (32x32 via SPLIT, DC/V/SMOOTH) equal to the oracle AND differing from pure-inter. Mutations, 0
+survivors: the blend shift/operand/mode-remap/chroma-regen/inter-precision die in the driver's INDEPENDENT
+orchestration oracle (the round-trip shares av1_mc_pred_interintra), the decode dispatch dies in the
+round-trip. THE REVIEW (2 dims, worktree-isolated): math CLEAN (Ii_Weights + V/H orientation + chroma regen +
+blend precision + mode remap), invocation+gate+memory-safety CLEAN (av1_intra_predict arg positions +
+avail_u/avail_l wiring, intra-then-inter-then-blend ordering no-clobber, overhang gate sufficient incl.
+chroma, buffers bounded). One CONFIRMED finding FIXED: (F1) the encode gate mirrored the wedge+motion rejects
+but NOT the decode's overhang reject (an overhanging interintra block would encode but decode-reject) — the
+encode gate now mirrors it in full. Next: **WEDGE interintra (0.7.92), OBMC/warp + the temporal scan**.
+**Prior: COMPOUND WEDGE (masked) (0.7.90).**
 The first inter path that codes coefficients: a non-skip inter block decodes with the reconstructed residual
 ADDED onto the MC prediction. Scope = UNIFORM tx (TX_MODE_LARGEST / ONLY_4X4, one uniform tx per plane);
 var-tx (TX_MODE_SELECT recursion) stays a cleanly-gated later bite. The coeff loop was already inter-ready

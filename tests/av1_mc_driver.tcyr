@@ -891,6 +891,182 @@ fn test_wedge_clamp() {
     return 0;
 }
 
+# SMOOTH interintra mask KATs (0.7.91) vs scripts/refs/interintra_ref.py (spec-literal). Builds
+# the mask into Av1_McMask and pins a position-weighted checksum per (size, mode). V is row-
+# indexed, H col-indexed, SMOOTH min(i,j), DC flat 32; each direction/size distinct.
+fn test_ii_smooth_mask() {
+    av1_mc_drv_scratch();
+    av1_ii_smooth_mask_build(8, 8, 8, 8, 0);
+    assert_eq(wedge_cs(8, 8), 66560, "ii smooth mask 8x8 mode0 vs ref");
+    av1_ii_smooth_mask_build(8, 8, 8, 8, 1);
+    assert_eq(wedge_cs(8, 8), 15684, "ii smooth mask 8x8 mode1 vs ref");
+    av1_ii_smooth_mask_build(8, 8, 8, 8, 2);
+    assert_eq(wedge_cs(8, 8), 33128, "ii smooth mask 8x8 mode2 vs ref");
+    av1_ii_smooth_mask_build(8, 8, 8, 8, 3);
+    assert_eq(wedge_cs(8, 8), 40482, "ii smooth mask 8x8 mode3 vs ref");
+    av1_ii_smooth_mask_build(16, 16, 16, 16, 0);
+    assert_eq(wedge_cs(16, 16), 1052672, "ii smooth mask 16x16 mode0 vs ref");
+    av1_ii_smooth_mask_build(16, 16, 16, 16, 1);
+    assert_eq(wedge_cs(16, 16), 214416, "ii smooth mask 16x16 mode1 vs ref");
+    av1_ii_smooth_mask_build(16, 16, 16, 16, 2);
+    assert_eq(wedge_cs(16, 16), 479856, "ii smooth mask 16x16 mode2 vs ref");
+    av1_ii_smooth_mask_build(16, 16, 16, 16, 3);
+    assert_eq(wedge_cs(16, 16), 572320, "ii smooth mask 16x16 mode3 vs ref");
+    av1_ii_smooth_mask_build(32, 32, 32, 32, 0);
+    assert_eq(wedge_cs(32, 32), 16793600, "ii smooth mask 32x32 mode0 vs ref");
+    av1_ii_smooth_mask_build(32, 32, 32, 32, 1);
+    assert_eq(wedge_cs(32, 32), 3152960, "ii smooth mask 32x32 mode1 vs ref");
+    av1_ii_smooth_mask_build(32, 32, 32, 32, 2);
+    assert_eq(wedge_cs(32, 32), 7279680, "ii smooth mask 32x32 mode2 vs ref");
+    av1_ii_smooth_mask_build(32, 32, 32, 32, 3);
+    assert_eq(wedge_cs(32, 32), 8611892, "ii smooth mask 32x32 mode3 vs ref");
+    av1_ii_smooth_mask_build(16, 8, 16, 8, 0);
+    assert_eq(wedge_cs(16, 8), 264192, "ii smooth mask 16x8 mode0 vs ref");
+    av1_ii_smooth_mask_build(16, 8, 16, 8, 1);
+    assert_eq(wedge_cs(16, 8), 148432, "ii smooth mask 16x8 mode1 vs ref");
+    av1_ii_smooth_mask_build(16, 8, 16, 8, 2);
+    assert_eq(wedge_cs(16, 8), 116024, "ii smooth mask 16x8 mode2 vs ref");
+    av1_ii_smooth_mask_build(16, 8, 16, 8, 3);
+    assert_eq(wedge_cs(16, 8), 198471, "ii smooth mask 16x8 mode3 vs ref");
+    av1_ii_smooth_mask_build(8, 16, 8, 16, 0);
+    assert_eq(wedge_cs(8, 16), 264192, "ii smooth mask 8x16 mode0 vs ref");
+    av1_ii_smooth_mask_build(8, 16, 8, 16, 1);
+    assert_eq(wedge_cs(8, 16), 54088, "ii smooth mask 8x16 mode1 vs ref");
+    av1_ii_smooth_mask_build(8, 16, 8, 16, 2);
+    assert_eq(wedge_cs(8, 16), 220192, "ii smooth mask 8x16 mode2 vs ref");
+    av1_ii_smooth_mask_build(8, 16, 8, 16, 3);
+    assert_eq(wedge_cs(8, 16), 229095, "ii smooth mask 8x16 mode3 vs ref");
+    av1_ii_smooth_mask_build(32, 16, 32, 16, 0);
+    assert_eq(wedge_cs(32, 16), 4202496, "ii smooth mask 32x16 mode0 vs ref");
+    av1_ii_smooth_mask_build(32, 16, 32, 16, 1);
+    assert_eq(wedge_cs(32, 16), 2193792, "ii smooth mask 32x16 mode1 vs ref");
+    av1_ii_smooth_mask_build(32, 16, 32, 16, 2);
+    assert_eq(wedge_cs(32, 16), 1788448, "ii smooth mask 32x16 mode2 vs ref");
+    av1_ii_smooth_mask_build(32, 16, 32, 16, 3);
+    assert_eq(wedge_cs(32, 16), 2971089, "ii smooth mask 32x16 mode3 vs ref");
+    av1_ii_smooth_mask_build(16, 32, 16, 32, 0);
+    assert_eq(wedge_cs(16, 32), 4202496, "ii smooth mask 16x32 mode0 vs ref");
+    av1_ii_smooth_mask_build(16, 32, 16, 32, 1);
+    assert_eq(wedge_cs(16, 32), 790048, "ii smooth mask 16x32 mode1 vs ref");
+    av1_ii_smooth_mask_build(16, 32, 16, 32, 2);
+    assert_eq(wedge_cs(16, 32), 3312768, "ii smooth mask 16x32 mode2 vs ref");
+    av1_ii_smooth_mask_build(16, 32, 16, 32, 3);
+    assert_eq(wedge_cs(16, 32), 3434817, "ii smooth mask 16x32 mode3 vs ref");
+    return 0;
+}
+
+# INTER-INTRA orchestration (0.7.91): av1_mc_pred_interintra must (a) MC the inter into Av1_McOut
+# at FINAL precision, (b) intra-predict into the frame, (c) blend Round2(m*intra + (64-m)*inter, 6)
+# — NO ib, NO clip. Independent oracle: run av1_intra_predict SEPARATELY into tf (same 32x32 block
+# at (0,0), no neighbors), MC a gradient ref at integer MV 0 (inter == ref pixel), recompute the
+# blend with the ref-verified smooth mask. Catches a wrong blend shift/clip/operand-order.
+fn ii_orch_case(r0, ii_mode, tag): i64 {
+    var oe = alloc(8);
+    var imode = ii_mode;
+    if (ii_mode == 3) { imode = 9; }
+    var tf = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_intra_predict(tf, 0, 0, 0, 0, 0, 0, 0, imode, 0, 0, 0, 0, 0, 5, 5, 8, 8);
+    var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, ii_mode,
+    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+    av1_ii_smooth_mask_build(32, 32, 32, 32, ii_mode);
+    var diff = 0;
+    var i = 0;
+    while (i < 32) {
+        var j = 0;
+        while (j < 32) {
+            var m = load64(Av1_McMask + (((i * 32) + j) * 8));
+            var intra = dr_frame_get(tf, 0, j, i);
+            var inter = dr_frame_get(r0, 0, j, i);
+            var exp = av1_round2((m * intra) + ((64 - m) * inter), 6);
+            if (dr_frame_get(df, 0, j, i) != exp) { diff = diff + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
+# CHROMA interintra (4:2:0): the SMOOTH mask is REGENERATED at the chroma block size (spec
+# 7.11.3.13), NOT subsampled from luma (the interintra.md §2 discrepancy). Plane 1 = 16x16 chroma
+# for a 32x32 luma block; mask sizeScale = 128/16 = 8 (chroma res). A subsample would give wrong
+# weights (V row0 = 60 regenerated, vs 56 averaged).
+fn ii_orch_chroma(r0, ii_mode, tag): i64 {
+    var oe = alloc(8);
+    var imode = ii_mode;
+    if (ii_mode == 3) { imode = 9; }
+    var tf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_intra_predict(tf, 1, 0, 0, 0, 0, 0, 0, imode, 0, 0, 0, 0, 0, 4, 4, 8, 8);
+    var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    assert_eq(av1_mc_pred_interintra(df, r0, 1, 0, 0, 16, 16, 0, 0, 0, 0, ii_mode,
+    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+    av1_ii_smooth_mask_build(16, 16, 16, 16, ii_mode);
+    var diff = 0;
+    var i = 0;
+    while (i < 16) {
+        var j = 0;
+        while (j < 16) {
+            var m = load64(Av1_McMask + (((i * 16) + j) * 8));
+            var intra = dr_frame_get(tf, 1, j, i);
+            var inter = dr_frame_get(r0, 1, j, i);
+            var exp = av1_round2((m * intra) + ((64 - m) * inter), 6);
+            if (dr_frame_get(df, 1, j, i) != exp) { diff = diff + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
+
+fn test_mc_interintra() {
+    var oe = alloc(8);
+    var r0 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) { dr_frame_set(r0, 0, x, y, ((x * 5) + (y * 3)) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    ii_orch_case(r0, 0, "interintra DC: blend == Round2(m*intra+(64-m)*inter,6) (1024 px)");
+    ii_orch_case(r0, 1, "interintra V: independent blend oracle (1024 px)");
+    ii_orch_case(r0, 2, "interintra H: independent blend oracle (1024 px)");
+    ii_orch_case(r0, 3, "interintra SMOOTH: independent blend oracle (1024 px)");
+    # interintra must DIFFER from pure-inter (mask/intra actually applied).
+    var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 1, AV1_BLOCK_32X32, 0, 0, 8, 8);
+    var pf = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(pf, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0);
+    var nd = 0;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(pf, 0, x, y)) { nd = nd + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(nd > 0, 1, "interintra differs from pure-inter (intra blended in)");
+    var oe2 = alloc(8);
+    var r3 = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe2);
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(r3, p);
+        var ph = dr_frame_plane_height(r3, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) { dr_frame_set(r3, p, xx, yy, ((xx * 5) + (yy * 3) + (p * 11)) & 255); xx = xx + 1; }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    ii_orch_chroma(r3, 1, "interintra CHROMA V (regenerated 16x16, not subsampled)");
+    ii_orch_chroma(r3, 3, "interintra CHROMA SMOOTH (regenerated)");
+    return 0;
+}
+
 fn test_wedge_mask() {
     var exp = alloc(32 * 8);
     # KAT-A: 16x16 idx6 = {VERT,2,4}, sign0 -> row0 = 64-Vert[28+j], col-invariant.
@@ -973,6 +1149,10 @@ fn main() {
     test_wedge_mask();
     test_wedge_cs();
     test_wedge_clamp();
+    test_group("inter-intra SMOOTH mask (7.11.3.13)");
+    test_ii_smooth_mask();
+    test_group("inter-intra orchestration (7.11.3.14 blend)");
+    test_mc_interintra();
     return assert_summary();
 }
 

@@ -733,9 +733,22 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }
-    # inter-intra blending (ref1 == INTRA_FRAME) + OBMC / warped motion: later bites (roadmap.md).
+    # inter-intra (ref1 == INTRA_FRAME, 0.7.91): SMOOTH interintra blends the inter MC with an
+    # intra prediction. WEDGE interintra is a later bite (0.7.92, roadmap.md). A frame-edge
+    # OVERHANG is refused: av1_intra_predict writes the NOMINAL block (it does not clamp the
+    # write to the plane), so a block whose nominal extent exceeds the plane would write OOB.
+    var is_ii = 0;
     if (av1_ib_ref(ib, 1) == AV1_INTRA_FRAME) {
-        return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
+        if (av1_interintra_wedge(av1_ib_ii(ib)) != 0) {
+            return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
+        }
+        if (((c * 4) + av1_block_width(sub_size)) > dr_frame_plane_width(frame, 0)) {
+            return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
+        }
+        if (((r * 4) + av1_block_height(sub_size)) > dr_frame_plane_height(frame, 0)) {
+            return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
+        }
+        is_ii = 1;
     }
     if (av1_ib_motion_mode(ib) != AV1_MM_SIMPLE) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
@@ -831,8 +844,15 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                     mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
                     sub_size, cwidx, cwsign);
                 } else {
-                    em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
-                    mv_row, mv_col, filt_x, filt_y);
+                    if (is_ii != 0) {
+                        em = av1_mc_pred_interintra(frame, refframe, plane, x, y, w, h,
+                        mv_row, mv_col, filt_x, filt_y, av1_interintra_mode(av1_ib_ii(ib)),
+                        sub_size, load64(st + 8), load64(st + 0),
+                        load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
+                    } else {
+                        em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
+                        mv_row, mv_col, filt_x, filt_y);
+                    }
                 }
                 if (em != DR_OK) { return av1_ierr_latch(tile, em); }
             }
@@ -894,7 +914,22 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }
-    if ((av1_ib_ref(eib, 1) == AV1_INTRA_FRAME) || (av1_ib_motion_mode(eib) != AV1_MM_SIMPLE)) {
+    # SMOOTH interintra (ref1==INTRA, wedge_interintra==0, non-overhang) is in scope (0.7.91);
+    # WEDGE interintra is a later bite (0.7.92); non-SIMPLE motion (OBMC/warp) stays out of scope.
+    # MIRROR the decode gates in full — including the frame-edge OVERHANG reject, else the encoder
+    # would emit a stream the decode refuses (review F1).
+    var e_ii_reject = 0;
+    if (av1_ib_ref(eib, 1) == AV1_INTRA_FRAME) {
+        if (av1_interintra_wedge(av1_ib_ii(eib)) != 0) { e_ii_reject = 1; }
+        var eframe = load64(tile + AV1TILE_FRAME);
+        if (((c * 4) + av1_block_width(sub_size)) > dr_frame_plane_width(eframe, 0)) {
+            e_ii_reject = 1;
+        }
+        if (((r * 4) + av1_block_height(sub_size)) > dr_frame_plane_height(eframe, 0)) {
+            e_ii_reject = 1;
+        }
+    }
+    if ((e_ii_reject != 0) || (av1_ib_motion_mode(eib) != AV1_MM_SIMPLE)) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
     }
     # VAR-TX (0.7.86): a non-skip TX_MODE_SELECT inter block > 4x4 non-lossless writes

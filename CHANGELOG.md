@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.91] - 2026-07-17
+
+**SMOOTH INTER-INTRA PREDICTION.** A single-reference inter block carrying the interintra flag now blends
+its inter motion-compensated prediction with an INTRA prediction of the same block, per pixel, through a
+smooth mask. Unlike the compound modes (two inter predictions blended at intermediate precision), inter-intra
+crosses the inter/intra boundary — the win is that drishti's keyframe intra predictor is invoked, unchanged,
+from the inter tile path. Scope is SMOOTH interintra (the four `II_DC/V/H/SMOOTH` modes); WEDGE interintra
+is deferred to 0.7.92, and a frame-edge overhang is refused (the intra predictor writes the nominal block).
+
+### Added
+
+- **The intra-mode variant (SMOOTH) mask** (spec 7.11.3.13) in `av1_mc.cyr`: `av1_ii_weight` (the 128-entry
+  `Ii_Weights_1d` monotone 60..1 table, lazy) + `av1_ii_smooth_mask_build` — `sizeScale = 128/Max(w,h)`,
+  per mode `II_DC`=flat 32, `II_V`=row-indexed `Ii_Weights[i·scale]`, `II_H`=col-indexed `[j·scale]`,
+  `II_SMOOTH`=`[Min(i,j)·scale]`. The mask weights the INTRA prediction. **3-source verified**
+  (`interintra.md`). **Chroma REGENERATES the mask at the chroma block size (not subsampled from luma)** —
+  a cross-source discrepancy resolved by a numeric proof in favor of spec+libaom (a 4:2:0 32×32 V-mode
+  chroma row-0 weight is 60, not the 56 an average would give).
+- **`av1_mc_pred_interintra`**: one plane of an interintra block — the inter MC runs into `Av1_McOut` at
+  FINAL pixel precision (`av1_mc_pred_core` with `compound=0`), `av1_intra_predict` writes the intra
+  prediction into the frame (mode-mapped: `II_SMOOTH`→`SMOOTH_PRED`), then the blend reads the intra back
+  and combines `Round2(m·intra + (64−m)·inter, 6)`. **No `ib` term, no `Clip1`** — both operands are already
+  at pixel precision and a convex combination stays in range (this differs from the compound `ib+6`/`Clip1`
+  combine — reusing it would corrupt every pixel).
+- **The decode/encode un-gate**: both lanes now admit SMOOTH interintra (`ref1==INTRA` &&
+  `wedge_interintra==0` && non-overhang); WEDGE interintra + non-SIMPLE motion stay refused.
+
+**Proofs** (`tests/av1_mc_driver.tcyr`, `tests/av1_intertile.tcyr`): the smooth mask against a 28-checksum
+pin over every size × mode vs the new spec-literal `scripts/refs/interintra_ref.py`; an orchestration test
+that runs `av1_intra_predict` INDEPENDENTLY into a temp frame, MCs a gradient ref at integer MV 0
+(inter == ref pixel), and recomputes the blend with the ref-verified mask — catching a wrong blend
+shift/clip/operand-order without sharing `av1_mc_pred_interintra`'s blend; a 4:2:0 CHROMA orchestration
+case witnessing regeneration (not subsampling); and a decode round-trip (32×32 via SPLIT, DC/V/SMOOTH) equal
+to the oracle AND differing from pure-inter. **Mutation-verified — 0 survivors**: the blend shift, operand
+order, mode remap, chroma regeneration, and the inter-precision (`compound=0`) die in the driver's
+INDEPENDENT orchestration oracle (the round-trip shares `av1_mc_pred_interintra`); the decode dispatch dies
+in the round-trip.
+
+**The adversarial review (2 dimensions, worktree-isolated, patch-applied):** mask+blend+mode math CLEAN
+(Ii_Weights + V/H orientation + chroma regeneration + blend precision + mode remap all verified against an
+independent reference + mutation); intra-invocation + gate + memory-safety CLEAN (the `av1_intra_predict`
+arg positions + neighbor-availability wiring correct, the intra-then-inter-then-blend ordering has no
+clobber, the overhang gate proven sufficient incl. chroma, buffers bounded). One CONFIRMED finding fixed:
+(F1) the encode gate mirrored the wedge + motion rejects but not the decode's OVERHANG reject — an
+overhanging interintra block would encode but decode-reject; the encode gate now mirrors it in full.
+
 ## [0.7.90] - 2026-07-17
 
 **COMPOUND WEDGE (MASKED) INTER PREDICTION.** The second masked compound mode: a two-reference block with
