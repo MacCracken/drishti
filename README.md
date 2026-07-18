@@ -22,7 +22,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.91 (AV1 decode: SMOOTH INTER-INTRA PREDICTION — a single-ref inter block blends its inter MC with an INTRA prediction (the keyframe intra predictor invoked from the inter path) via a smooth mask; SMOOTH interintra in scope, WEDGE interintra next; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: WEDGE interintra, OBMC/warp + the temporal scan)
+## Status — 0.7.92 (AV1 decode: WEDGE INTER-INTRA PREDICTION — the second interintra variant completes the masked-interintra family: a single-ref inter block blends its inter MC with an INTRA prediction (the keyframe intra predictor invoked from the inter path) through a WEDGE mask from the compound codebook (chroma subsamples the luma mask); every interintra mode now decodes; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: OBMC/warp + the temporal scan)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (27,420 suite assertions + 1,140 fuzz

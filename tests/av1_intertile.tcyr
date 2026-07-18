@@ -2620,23 +2620,26 @@ fn test_ir_compound_wedge() {
 # interintra-eligible) as sub-block 0 at (0,0) — no above/left neighbors, so the intra prediction
 # is deterministic and the oracle (a fresh av1_mc_pred_interintra) matches. Sub-blocks 1-3 are
 # plain single-ref inter. Proves the decode tile un-gated + threaded the interintra params.
-fn it_blk_ii(mvr, mvc, ii_mode): i64 {
+fn it_blk_ii(mvr, mvc, ii_mode, is_wedge, wedge_idx): i64 {
     var b = it_blk(mvr, mvc);
     var ib = b + AV1FB_IB;
     store64(ib + AV1IB_REF1, AV1_INTRA_FRAME);
     var ii = ib + AV1IB_II;
     store64(ii + AV1II_INTERINTRA, 1);
     store64(ii + AV1II_MODE, ii_mode);
-    store64(ii + AV1II_WEDGE, 0);
+    store64(ii + AV1II_WEDGE, is_wedge);
+    store64(ii + AV1II_WEDGEIDX, wedge_idx);
     return b;
 }
 fn test_ir_interintra() {
-    it_interintra_roundtrip(0, "interintra DC");
-    it_interintra_roundtrip(1, "interintra V");
-    it_interintra_roundtrip(3, "interintra SMOOTH");
+    it_interintra_roundtrip(0, 0, 0, "interintra SMOOTH DC");
+    it_interintra_roundtrip(1, 0, 0, "interintra SMOOTH V");
+    it_interintra_roundtrip(3, 0, 0, "interintra SMOOTH SMOOTH");
+    it_interintra_roundtrip(0, 1, 0, "interintra WEDGE idx0 (DC intra)");
+    it_interintra_roundtrip(0, 1, 6, "interintra WEDGE idx6");
     return 0;
 }
-fn it_interintra_roundtrip(ii_mode, tag): i64 {
+fn it_interintra_roundtrip(ii_mode, is_wedge, wedge_idx, tag): i64 {
     var oe = alloc(8);
     var r0 = it_ref_frame();
     var fh = it_fh();
@@ -2647,7 +2650,7 @@ fn it_interintra_roundtrip(ii_mode, tag): i64 {
     var refs = it_refs();
     var seq = it_seq();
     store64(seq + AV1_SEQ_ENABLE_INTERINTRA, 1);
-    var iiblk = it_blk_ii(16, 8, ii_mode);
+    var iiblk = it_blk_ii(16, 8, ii_mode, is_wedge, wedge_idx);
     var plain = it_blk(0 - 8, 24);
     var pp = alloc(5 * 8);
     store64(pp + 0, AV1_PARTITION_SPLIT);
@@ -2675,7 +2678,7 @@ fn it_interintra_roundtrip(ii_mode, tag): i64 {
     # oracle: block 0 (0,0), no neighbors -> deterministic.
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_interintra(xf, r0, 0, 0, 0, 32, 32, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP, ii_mode,
-    AV1_BLOCK_32X32, 0, 0, 16, 16);
+    is_wedge, wedge_idx, AV1_BLOCK_32X32, 0, 0, 16, 16);
     # pure-inter reference for the differs-witness.
     var pfr = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(pfr, r0, 0, 0, 0, 32, 32, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);

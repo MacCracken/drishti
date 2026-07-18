@@ -292,10 +292,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   3×16 codebook; closes the masked family, both DIFFWTD + WEDGE in scope), and **SMOOTH INTER-INTRA 0.7.91**
   (`av1_ii_smooth_mask_build` 7.11.3.13 + `av1_mc_pred_interintra` — a single-ref inter block blends its MC
   with an INTRA prediction (the keyframe `av1_intra_predict` invoked from the inter path) via a smooth mask;
-  final-precision blend, chroma-regenerated mask; overhang refused). DEFERRED to the conformance era:
+  final-precision blend, chroma-regenerated mask; overhang refused), and **WEDGE INTER-INTRA 0.7.92**
+  (the `is_wedge` branch of `av1_mc_pred_interintra` — the second interintra variant blends the MC with an
+  INTRA prediction through a WEDGE mask from the compound codebook 7.11.3.11, built on LUMA at the nominal
+  size with `wedge_sign` forced 0 and chroma SUBSAMPLING the luma mask (unlike smooth's per-plane regen);
+  reuses the verified codebook + the final-precision blend — **closes the masked-interintra family, every
+  AV1 interintra mode now decodes**). DEFERRED to the conformance era:
   the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary symbol's context,
   un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors, not on the
-  pre-conformance decode lane. Next **WEDGE inter-intra (0.7.92, reusing the wedge codebook)**,
+  pre-conformance decode lane. Next
   `warp_estimation` (7.11.3.8) turning the
   samples into a model, OBMC, the temporal scan (needs the
   DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free, dav1d

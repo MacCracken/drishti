@@ -4,6 +4,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.92] - 2026-07-17
+
+**WEDGE INTER-INTRA PREDICTION.** The second (and final) interintra variant: a single-reference inter block
+carrying the interintra flag with `wedge_interintra==1` now blends its inter motion-compensated prediction
+with an INTRA prediction through a **wedge** mask drawn from the compound wedge codebook (0.7.90), rather than
+the smooth mask (0.7.91). This completes the masked-interintra family — every AV1 interintra mode now decodes.
+The delta over 0.7.91 is small and reuses verified machinery: the wedge codebook (`av1_wedge_mask_build`,
+288-checksum-verified) and the final-precision interintra blend both stand unchanged.
+
+### Added
+
+- **The wedge branch of `av1_mc_pred_interintra`** (spec 7.11.3.11 mask, 7.11.3.13 blend), extended with
+  `is_wedge`/`wedge_idx` params: WEDGE builds the codebook mask on **LUMA only** (plane 0) at the NOMINAL
+  block size with `wedge_sign` forced 0 (interintra never signals a sign); **chroma SUBSAMPLES the plane-0
+  mask** via `av1_diffwtd_mask_at` — exactly like compound wedge, and **unlike** SMOOTH interintra, which
+  regenerates the mask at each plane's dims. The blend is the same FINAL-precision `Round2(m·intra +
+  (64−m)·inter, 6)` — no `ib`, no `Clip1` — reused verbatim from 0.7.91. **3-source verified**
+  (`interintra.md` §3).
+- **The decode/encode un-gate**: both lanes now admit WEDGE interintra (the `wedge_interintra==0` rejection
+  is removed from both gates); the frame-edge overhang + non-SIMPLE motion rejects stay, and the gates still
+  mirror. The decode dispatch threads `av1_interintra_wedge` + `av1_interintra_wedge_idx` into the MC call
+  (`wedge_idx` is entropy-bounded to [0,15] by a 16-symbol CDF → `shape·16 + wedge_idx ∈ [0,47]` never OOBs
+  the 48-entry codebook).
+
+**Proofs** (`tests/av1_mc_driver.tcyr`, `tests/av1_intertile.tcyr`): a LUMA orchestration test that builds
+the wedge mask INDEPENDENTLY (`av1_wedge_mask_build`), MCs a gradient ref at integer MV 0, invokes
+`av1_intra_predict` into a temp frame, and recomputes the blend — catching a wrong mask/shift/operand
+without sharing the MC blend; a 4:2:0 CHROMA orchestration case whose oracle 2×2-averages the luma wedge mask
+MANUALLY (independent of `av1_diffwtd_mask_at`), run over both a row-invariant VERTICAL wedge (idx6) AND an
+OBLIQUE wedge (idx1 = O63, whose transition band crosses the bottom-right quadrant) so the `plane==0`
+build-guard is witnessed; and a decode round-trip (32×32 via SPLIT, WEDGE idx0/idx6) equal to the oracle AND
+differing from pure-inter. **Mutation-verified — 0 survivors**: the `is_wedge` mask-build branch, the
+subsampled chroma read, the forced `wedge_sign`, the decode-dispatch wedge threading, and the `plane==0`
+build guard each go red.
+
+**The adversarial review (worktree-isolated, patch-applied):** the wedge-interintra delta CLEAN — the
+mask-build/chroma-subsample branches match their read branches, plane-0-before-chroma ordering is guaranteed
+by the decode plane loop (and `Av1_McMask` survives the intervening intra/inter calls), the gates mirror and
+the codebook index is bounded, and SMOOTH interintra is unregressed. No correctness or memory-safety
+findings. One mutation-coverage gap flagged and closed: the sole chroma case (idx6) is a row-invariant
+wedge whose constant bottom-right quadrant lets an erroneously-rebuilt-at-chroma mask reproduce the correct
+subsamples — the added oblique idx1 case makes the `plane==0` guard fail red under mutation.
+
 ## [0.7.91] - 2026-07-17
 
 **SMOOTH INTER-INTRA PREDICTION.** A single-reference inter block carrying the interintra flag now blends

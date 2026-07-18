@@ -967,7 +967,7 @@ fn ii_orch_case(r0, ii_mode, tag): i64 {
     var tf = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
     av1_intra_predict(tf, 0, 0, 0, 0, 0, 0, 0, imode, 0, 0, 0, 0, 0, 5, 5, 8, 8);
     var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
-    assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, ii_mode,
+    assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, ii_mode, 0, 0,
     AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     av1_ii_smooth_mask_build(32, 32, 32, 32, ii_mode);
     var diff = 0;
@@ -998,7 +998,7 @@ fn ii_orch_chroma(r0, ii_mode, tag): i64 {
     var tf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
     av1_intra_predict(tf, 1, 0, 0, 0, 0, 0, 0, imode, 0, 0, 0, 0, 0, 4, 4, 8, 8);
     var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
-    assert_eq(av1_mc_pred_interintra(df, r0, 1, 0, 0, 16, 16, 0, 0, 0, 0, ii_mode,
+    assert_eq(av1_mc_pred_interintra(df, r0, 1, 0, 0, 16, 16, 0, 0, 0, 0, ii_mode, 0, 0,
     AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     av1_ii_smooth_mask_build(16, 16, 16, 16, ii_mode);
     var diff = 0;
@@ -1034,7 +1034,7 @@ fn test_mc_interintra() {
     ii_orch_case(r0, 3, "interintra SMOOTH: independent blend oracle (1024 px)");
     # interintra must DIFFER from pure-inter (mask/intra actually applied).
     var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
-    av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 1, AV1_BLOCK_32X32, 0, 0, 8, 8);
+    av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 1, 0, 0, AV1_BLOCK_32X32, 0, 0, 8, 8);
     var pf = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(pf, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0);
     var nd = 0;
@@ -1064,6 +1064,101 @@ fn test_mc_interintra() {
     }
     ii_orch_chroma(r3, 1, "interintra CHROMA V (regenerated 16x16, not subsampled)");
     ii_orch_chroma(r3, 3, "interintra CHROMA SMOOTH (regenerated)");
+    return 0;
+}
+
+# WEDGE interintra (0.7.92): reuses the wedge codebook mask (wedge_sign forced 0) + the interintra
+# final-precision blend. Chroma SUBSAMPLES the plane-0 luma wedge mask (unlike SMOOTH which
+# regenerates). Independent oracle: intra via av1_intra_predict into tf, inter = ref at MV 0, mask
+# via av1_wedge_mask_build (luma) / a manual 2x2 average (chroma). ii_mode=0 (DC intra) throughout.
+fn iiw_luma(r0, wedge_idx, tag): i64 {
+    var oe = alloc(8);
+    var tf = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_intra_predict(tf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 8, 8);
+    var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 1, wedge_idx,
+    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+    av1_wedge_mask_build(AV1_BLOCK_32X32, wedge_idx, 0, 32, 32);
+    var diff = 0;
+    var i = 0;
+    while (i < 32) {
+        var j = 0;
+        while (j < 32) {
+            var m = load64(Av1_McMask + (((i * 32) + j) * 8));
+            var intra = dr_frame_get(tf, 0, j, i);
+            var inter = dr_frame_get(r0, 0, j, i);
+            var exp = av1_round2((m * intra) + ((64 - m) * inter), 6);
+            if (dr_frame_get(df, 0, j, i) != exp) { diff = diff + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
+fn iiw_chroma(r0, wedge_idx, tag): i64 {
+    var oe = alloc(8);
+    var tf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_intra_predict(tf, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 8, 8);
+    var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    # plane 0 builds the luma wedge mask (into Av1_McMask); plane 1 subsamples it.
+    assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 1, wedge_idx,
+    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+    assert_eq(av1_mc_pred_interintra(df, r0, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 1, wedge_idx,
+    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+    # oracle mask = the luma wedge mask 2x2-averaged (manual, independent of av1_diffwtd_mask_at).
+    av1_wedge_mask_build(AV1_BLOCK_32X32, wedge_idx, 0, 32, 32);
+    var diff = 0;
+    var cy = 0;
+    while (cy < 16) {
+        var cx = 0;
+        while (cx < 16) {
+            var s = load64(Av1_McMask + ((((cy * 2) * 32) + (cx * 2)) * 8))
+            + load64(Av1_McMask + ((((cy * 2) * 32) + ((cx * 2) + 1)) * 8))
+            + load64(Av1_McMask + (((((cy * 2) + 1) * 32) + (cx * 2)) * 8))
+            + load64(Av1_McMask + (((((cy * 2) + 1) * 32) + ((cx * 2) + 1)) * 8));
+            var m = av1_round2(s, 2);
+            var intra = dr_frame_get(tf, 1, cx, cy);
+            var inter = dr_frame_get(r0, 1, cx, cy);
+            var exp = av1_round2((m * intra) + ((64 - m) * inter), 6);
+            if (dr_frame_get(df, 1, cx, cy) != exp) { diff = diff + 1; }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
+fn test_mc_interintra_wedge() {
+    var oe = alloc(8);
+    var r0 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) { dr_frame_set(r0, 0, x, y, ((x * 5) + (y * 3)) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    iiw_luma(r0, 0, "wedge interintra luma idx0 (independent blend + wedge mask)");
+    iiw_luma(r0, 6, "wedge interintra luma idx6");
+    var r3 = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(r3, p);
+        var ph = dr_frame_plane_height(r3, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) { dr_frame_set(r3, p, xx, yy, ((xx * 5) + (yy * 3) + (p * 11)) & 255); xx = xx + 1; }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    iiw_chroma(r3, 6, "wedge interintra CHROMA idx6 (subsampled luma wedge mask)");
+    # idx1 SQUARE = O63 oblique (dir=3): the transition band crosses the bottom-right 16x16
+    # quadrant, so a mask erroneously rebuilt at chroma (top-left-quadrant + edge-clamp) diverges
+    # from the true full-32x32 subsample -> this witnesses the plane==0 build guard (idx6 alone
+    # can't: its row-invariant V band leaves the bottom-right constant, which clamping reproduces).
+    iiw_chroma(r3, 1, "wedge interintra CHROMA idx1 O63 oblique (witnesses plane-0 build guard)");
     return 0;
 }
 
@@ -1153,6 +1248,8 @@ fn main() {
     test_ii_smooth_mask();
     test_group("inter-intra orchestration (7.11.3.14 blend)");
     test_mc_interintra();
+    test_group("wedge inter-intra (7.11.3.11 mask + blend)");
+    test_mc_interintra_wedge();
     return assert_summary();
 }
 
