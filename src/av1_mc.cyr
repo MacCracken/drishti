@@ -801,6 +801,14 @@ fn av1_mc_pred_block(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y
     }
     return DR_OK;
 }
+# av1_mc_out_buf — hand the driver's filtered-output scratch (Av1_McOut, <=128x128 i64, stride = the w
+# passed to av1_mc_pred_core) to the OBMC path (av1_intertile), which MC's each neighbour overlap into it
+# via av1_mc_pred_core(..., compound=0) then blends. Free scratch once the plane's own MC flushed to the
+# frame. Returns 0 on OOM. (The driver's var is module-local to av1_mc; this is its cross-module handle.)
+fn av1_mc_out_buf(): i64 {
+    if (av1_mc_drv_scratch() != DR_OK) { return 0; }
+    return Av1_McOut;
+}
 # av1_warp_pred_block (spec 7.11.3.5 driver / dav1d recon_tmpl.c warp_affine) — warp-MC
 # prediction of a w x h plane block into `dst` from `ref` using the warp model `wm`
 # (Av1WarpModel: wmmat[0..5] + shear alpha/beta/gamma/delta from setup_shear 0.7.94). Per 8x8
@@ -1271,6 +1279,37 @@ fn av1_ii_weight(idx): i64 {
     if (i < 0) { i = 0; }
     if (i > 127) { i = 127; }
     return load64(av1_ii_weight_tbl() + (i * 8));
+}
+# Obmc_Mask (spec 7.11.3.9 get_obmc_mask) — the raised-cosine OVERLAP-BLEND weight table, one raw
+# constant (no generation formula). SELF-INDEXED: the length-`len` mask (len in {2,4,8,16,32}) lives at
+# blob[len .. len+len-1], so &blob[len] is the mask (O(1), matches dav1d's addressing). The values are the
+# SPEC own-weights: the blend weights the CURRENT prediction by mask[d] and the neighbour by (64-mask[d]),
+# where d is the distance INTO the overlap from the neighbour edge — so mask rises from ~36 (neighbour-heavy
+# edge) to 64 (own-only, blend no-op). 64 - these == dav1d_obmc_masks byte-for-byte (KAT anchor). The
+# trailing len/4 entries are exactly 64 (why dav1d only touches (len*3)>>2); drishti blends spec-literal.
+# Blob is 64 i64: [0,1] pad; [2,3]=len2; [4..7]=len4; [8..15]=len8; [16..31]=len16; [32..63]=len32.
+var Av1_ObmcMask = 0;
+fn av1_obmc_mask_tbl(): i64 {
+    if (Av1_ObmcMask != 0) { return Av1_ObmcMask; }
+    var t = alloc(64 * 8);
+    if (t == 0) { return 0; }
+    av1_iifill8(t, 0, 0, 0, 45, 64, 39, 50, 59, 64);       # pad[0,1] + len2{45,64} + len4{39,50,59,64}
+    av1_iifill8(t, 8, 36, 42, 48, 53, 57, 61, 64, 64);      # len8
+    av1_iifill8(t, 16, 34, 37, 40, 43, 46, 49, 52, 54);     # len16[0..7]
+    av1_iifill8(t, 24, 56, 58, 60, 61, 64, 64, 64, 64);     # len16[8..15]
+    av1_iifill8(t, 32, 33, 35, 36, 38, 40, 41, 43, 44);     # len32[0..7]
+    av1_iifill8(t, 40, 45, 47, 48, 50, 51, 52, 53, 55);     # len32[8..15]
+    av1_iifill8(t, 48, 56, 57, 58, 59, 60, 60, 61, 62);     # len32[16..23]
+    av1_iifill8(t, 56, 64, 64, 64, 64, 64, 64, 64, 64);     # len32[24..31]
+    Av1_ObmcMask = t;
+    return t;
+}
+# av1_obmc_mask(len, i): the own-weight at distance i into a length-`len` overlap. A non-mask length or an
+# out-of-range i returns 64 (own-only -> the blend is a no-op; trust-no-input backstop).
+fn av1_obmc_mask(len, i): i64 {
+    if ((len != 2) && (len != 4) && (len != 8) && (len != 16) && (len != 32)) { return 64; }
+    if ((i < 0) || (i >= len)) { return 64; }
+    return load64(av1_obmc_mask_tbl() + ((len + i) * 8));
 }
 # av1_ii_smooth_mask_build — fill Av1_McMask (stride fill_w) with the SMOOTH interintra weights
 # (spec 7.11.3.13). m weights INTRA. sizeScale = 128/Max(nom_w,nom_h) (NOMINAL plane dims). Per

@@ -6,6 +6,40 @@
 
 ## Version
 
+**0.7.101** — cut 2026-07-18, not yet tagged (user's git). **OBMC — overlapped block motion compensation
+(spec 7.11.3.9/10).** The SECOND inter motion mode after LOCALWARP: an OBMC block decodes to overlap-blended
+pixels (its own MC smoothed at the top/left edges with the above-row + left-col neighbours). The mode-info
+read (av1_read_use_obmc) was already wired; the inter tile decode used to REJECT AV1_MM_OBMC. av1_mc.cyr:
+the Obmc_Mask table (av1_obmc_mask_tbl self-indexed [64], own-weights == 64 - dav1d_obmc_masks) +
+av1_obmc_mask(len,i) + av1_mc_out_buf() (scratch handle). av1_intertile.cyr: av1_obmc_predict (two-pass) +
+av1_obmc_overlap (per-neighbour MC via av1_mc_pred_core compound=0 + in-place blend Round2(m*own+(64-m)*nb,6),
+above indexes mask by ROW/left by COL, table from NOMINAL extent). ABOVE pass gated mi_row>ROW_START AND
+plane residual size>=BLOCK_8X8; LEFT pass gated mi_col>COL_START, NO size gate (the spec asymmetry — a 4:2:0
+8x8-luma block blends its LEFT chroma neighbour but not ABOVE). Scan: odd cells x|1/y|1, step4=clip3(2,16,·),
+up to min(4, mi_width/height_log2) inter neighbours, intra stepped over. Neighbour MC uses the NEIGHBOUR's
+interp filters. Sequential in-place (above then left; top-left corner blends twice). AV1_MM_OBMC admitted in
+decode+encode gates; an OBMC block is always single-ref/non-interintra/non-warp (read_motion_mode forces
+SIMPLE otherwise) so it took the plain translation MC. Reconciled vs spec + cached dav1d recon_tmpl.c obmc +
+libaom (3-source understand workflow; the one disagreement — chroma above-gate asymmetry — resolved to spec).
+PROOF (tests/av1_intertile.tcyr + scripts/refs/obmc_ref.py spec-literal oracle, integer-MV MC = shift):
+test_obmc_e2e (4-SB tile, BR OBMC decodes == ref checksum 375934 + spots); test_obmc_mask (62 entries vs
+64-dav1d); test_obmc_chroma_gate (direct call, luma above blends / chroma above skipped / chroma left
+blends); test_obmc_edge_gate (top/left-edge passes skipped). MUTATIONS (8): mask table, blend orientation,
+mask orientation (row/col), blend rounding, chroma above-gate, above mi_row>ROW_START, left mi_col>COL_START,
+the intra step-over / REF0>INTRA skip (a multi-neighbour A/B-intra/C/D scan; the unconditional advance is
+the never-infinite-loop guard). THE REVIEW (2 dims, verify): NO shipped-code defects — spec-conformance
+found []. 7 CONFIRMED findings, all test-COVERAGE gaps (minor/nit); closed the intra-step-over + the stale
+comment; DEFERRED (code verified spec-correct, need new fixture infra): the x|1 odd-cell probe (4-wide
+neighbour), step4 clip [2,16] bounds (4-/128-wide), mask-length NOMINAL-vs-clamped (non-8-aligned edge),
+fractional-MV + neighbour interp filter (un-witnessable with integer MVs — 8-tap is identity), the top-edge
+gate witness robustness (rides the OOB bounds-guard; a cross-tile row makes it deterministic). INCIDENT: a
+review agent ran `git checkout` on the shared live tree (reverting uncommitted work) then restored from a
+md5-verified backup — [[review-agents-need-worktree-isolation]] still applies; isolate review worktrees.
+LESSON: gradient x+2y makes own==nb when dx+2*dy coincide -> a blend is secretly identity + witnesses
+nothing; the ref-anchored checksum + DISTINCT-contribution MVs are the guard. 38 suites, **28,483** suite +
+**1,140** fuzz assertions, all green. Next: **the temporal MV scan (7.10.2.5/6, needs the DPB's saved motion
+fields), then compound GLOBAL_GLOBALMV + inter-intra warp-blend, then scaled-reference/BILINEAR MC.**
+
 **0.7.100** — cut 2026-07-18, not yet tagged (user's git). **GLOBALWARP — the global-motion warp path
 (spec 7.11.3.1 useWarp==2).** A single-ref GLOBALMV block whose reference carries a >TRANSLATION global
 model now decodes to GLOBALLY-WARPED pixels (previously it fell through to a translation MC). Second warp

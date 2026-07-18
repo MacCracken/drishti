@@ -1352,6 +1352,318 @@ fn test_inter_tile_globalwarp_ii_rejected() {
     "gw-ii: GLOBALMV inter-intra + would-warp GM is REJECTED (not silently translation-blended)");
     return 0;
 }
+# an OBMC block record (mirrors it_blk but motion_mode = OBMC).
+fn it_blk_obmc(mvr, mvc): i64 {
+    var b = it_blk(mvr, mvc);
+    store64((b + AV1FB_IB) + AV1IB_MOTIONMODE, AV1_MM_OBMC);
+    return b;
+}
+# THE Obmc_Mask KAT (0.7.101): av1_obmc_mask(len,i) == the spec own-weight == 64 - dav1d_obmc_masks[len+i].
+# The dav1d values are the INDEPENDENT anchor (a different representation from the spec table drishti
+# stores) — pinned as literals, so a single flipped table entry fails its assert. Also the defensive
+# guards (invalid len / out-of-range i -> 64, the trust-no-input backstop).
+fn test_obmc_mask() {
+    var dv = alloc(64 * 8);          # dav1d_obmc_masks, self-indexed [len+i]; drishti = 64 - dv
+    store64(dv + (2 * 8), 19);  store64(dv + (3 * 8), 0);
+    store64(dv + (4 * 8), 25);  store64(dv + (5 * 8), 14); store64(dv + (6 * 8), 5);  store64(dv + (7 * 8), 0);
+    store64(dv + (8 * 8), 28);  store64(dv + (9 * 8), 22); store64(dv + (10 * 8), 16); store64(dv + (11 * 8), 11);
+    store64(dv + (12 * 8), 7);  store64(dv + (13 * 8), 3); store64(dv + (14 * 8), 0);  store64(dv + (15 * 8), 0);
+    store64(dv + (16 * 8), 30); store64(dv + (17 * 8), 27); store64(dv + (18 * 8), 24); store64(dv + (19 * 8), 21);
+    store64(dv + (20 * 8), 18); store64(dv + (21 * 8), 15); store64(dv + (22 * 8), 12); store64(dv + (23 * 8), 10);
+    store64(dv + (24 * 8), 8);  store64(dv + (25 * 8), 6); store64(dv + (26 * 8), 4);  store64(dv + (27 * 8), 3);
+    store64(dv + (28 * 8), 0);  store64(dv + (29 * 8), 0); store64(dv + (30 * 8), 0);  store64(dv + (31 * 8), 0);
+    store64(dv + (32 * 8), 31); store64(dv + (33 * 8), 29); store64(dv + (34 * 8), 28); store64(dv + (35 * 8), 26);
+    store64(dv + (36 * 8), 24); store64(dv + (37 * 8), 23); store64(dv + (38 * 8), 21); store64(dv + (39 * 8), 20);
+    store64(dv + (40 * 8), 19); store64(dv + (41 * 8), 17); store64(dv + (42 * 8), 16); store64(dv + (43 * 8), 14);
+    store64(dv + (44 * 8), 13); store64(dv + (45 * 8), 12); store64(dv + (46 * 8), 11); store64(dv + (47 * 8), 9);
+    store64(dv + (48 * 8), 8);  store64(dv + (49 * 8), 7); store64(dv + (50 * 8), 6);  store64(dv + (51 * 8), 5);
+    store64(dv + (52 * 8), 4);  store64(dv + (53 * 8), 4); store64(dv + (54 * 8), 3);  store64(dv + (55 * 8), 2);
+    store64(dv + (56 * 8), 0);  store64(dv + (57 * 8), 0); store64(dv + (58 * 8), 0);  store64(dv + (59 * 8), 0);
+    store64(dv + (60 * 8), 0);  store64(dv + (61 * 8), 0); store64(dv + (62 * 8), 0);  store64(dv + (63 * 8), 0);
+    var lens = alloc(5 * 8);
+    store64(lens + 0, 2); store64(lens + 8, 4); store64(lens + 16, 8); store64(lens + 24, 16); store64(lens + 32, 32);
+    var li = 0;
+    while (li < 5) {
+        var ln = load64(lens + (li * 8));
+        var i = 0;
+        while (i < ln) {
+            assert_eq(av1_obmc_mask(ln, i), 64 - load64(dv + ((ln + i) * 8)), "obmc mask entry == 64 - dav1d");
+            i = i + 1;
+        }
+        li = li + 1;
+    }
+    assert_eq(av1_obmc_mask(3, 0), 64, "obmc mask: non-mask len -> 64");
+    assert_eq(av1_obmc_mask(8, 8), 64, "obmc mask: i >= len -> 64");
+    assert_eq(av1_obmc_mask(8, 0 - 1), 64, "obmc mask: i < 0 -> 64");
+    assert_eq(av1_obmc_mask(2, 0), 45, "obmc mask: len2[0] spot");
+    return 0;
+}
+# THE OBMC MILESTONE (0.7.101): an OBMC inter block decodes to overlap-blended pixels end-to-end. 4 SBs
+# (128x128): TL any, TR (above) Mv (0,40), BL (left) Mv (40,0), BR OBMC Mv (16,8) — all integer MVs so the
+# MC is a pure edge-clamped shift (the OBMC-specific scan/extents/mask/blend is what's under test; the
+# 8-tap MC is pinned by 0.7.58). The BR block's own MC is committed, then OBMC blends TR onto the top 64x32
+# (mask by row) + BL onto the left 32x64 (mask by col), the top-left 32x32 corner blended twice. Verified
+# pixel-exact against the spec-literal scripts/refs/obmc_ref.py (independent known-answer: checksum + spots).
+fn test_obmc_e2e() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 128) {
+        var x0 = 0;
+        while (x0 < 128) {
+            dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255);
+            x0 = x0 + 1;
+        }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_FRAME_HEIGHT, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_ROWS, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 32);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, 1);   # allow the @@use_obmc read/write
+    store64(fh + AV1FH_ALLOW_WARPED, 0);             # warp disabled -> the use_obmc branch (not the 3-way)
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    store64(refs + AV1REF_FRAME_H + 0, 128);
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var ef = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(32);
+    var pf = alloc(32);
+    var k = 0;
+    while (k < 4) { store64(pp + (k * 8), AV1_PARTITION_NONE); k = k + 1; }
+    store64(pf + 0, it_blk(16, 8));         # TL (not a BR neighbour)
+    store64(pf + 8, it_blk(0, 24));         # TR = BR's ABOVE neighbour, Mv (0, 24)
+    store64(pf + 16, it_blk(40, 0));        # BL = BR's LEFT neighbour, Mv (40, 0)
+    store64(pf + 24, it_blk_obmc(16, 8));   # BR OBMC, Mv (16, 8)
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "obmc: 4-SB tile encoded (OBMC BR)");
+    var df = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "obmc: 4-SB tile decodes (BR OBMC blends)");
+    # the BR 64x64 block == the spec-literal obmc_ref.py known answer (checksum over all 4096 px).
+    var cs = 0;
+    var yy = 64;
+    while (yy < 128) {
+        var xx = 64;
+        while (xx < 128) {
+            cs = cs + dr_frame_get(df, 0, xx, yy);
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(cs, 375934, "obmc: BR block checksum == spec-literal obmc_ref.py");
+    assert_eq(dr_frame_get(df, 0, 64, 64), 199, "obmc: top-left corner (above THEN left, double-blend)");
+    assert_eq(dr_frame_get(df, 0, 104, 64), 236, "obmc: above-only strip (col 40 >= 32)");
+    assert_eq(dr_frame_get(df, 0, 64, 104), 23, "obmc: left-only strip (row 40 >= 32)");
+    assert_eq(dr_frame_get(df, 0, 104, 104), 61, "obmc: interior unchanged (own MC only)");
+    assert_eq(dr_frame_get(df, 0, 127, 64), 125, "obmc: top-row right edge");
+    return 0;
+}
+# populate one MI cell as an 8x8 inter neighbour (av1_mv_grid_set omits the interp filters OBMC needs).
+fn obmc_set_nb(grid, fmi_cols, r, c, mvr, mvc) {
+    var cell = av1_mv_grid_cell(grid, fmi_cols, r, c);
+    store64(cell + AV1MIR_AVAIL, 1);
+    store64(cell + AV1MIR_ISINTER, 1);
+    store64(cell + AV1MIR_MISIZE, AV1_BLOCK_8X8);
+    store64(cell + AV1MIR_REF0, AV1_LAST_FRAME);
+    store64(cell + AV1MIR_REF1, AV1_REF_NONE);
+    store64(cell + AV1MIR_MV0ROW, mvr);
+    store64(cell + AV1MIR_MV0COL, mvc);
+    store64(cell + AV1MIR_INTERP0, AV1_EIGHTTAP);
+    store64(cell + AV1MIR_INTERP1, AV1_EIGHTTAP);
+    return 0;
+}
+# THE CHROMA ABOVE-GATE ASYMMETRY (0.7.101, the one reconciled spec disagreement): the above pass is
+# gated on the plane's residual size >= BLOCK_8X8, but the LEFT pass is NOT. So a 4:2:0 8x8-luma OBMC
+# block (chroma 4x4 = BLOCK_4X4 < BLOCK_8X8) blends its LEFT chroma neighbour but NOT its ABOVE — while
+# LUMA (8x8 >= BLOCK_8X8) blends both. Direct av1_obmc_predict call on a hand-built neighbour grid.
+# Witnesses the residual-size gate: a mutation moving it onto the left pass (or dropping it) would blend
+# the chroma ABOVE and the "chroma above unchanged" asserts go red.
+fn test_obmc_chroma_gate() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(64, 64, 3, 1, 1, 8, 8, oe);
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(ref, p);
+        var ph = dr_frame_plane_height(ref, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) {
+                dr_frame_set(ref, p, xx, yy, ((xx + (2 * yy)) + (p * 13)) & 255);
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_NUM_PLANES, 3);
+    store64(seq + AV1_SEQ_SUBX, 1);
+    store64(seq + AV1_SEQ_SUBY, 1);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var frame = dr_frame_new(64, 64, 3, 1, 1, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 3);
+    av1_tile_grids_new(tile);
+    av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb);
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
+    # OBMC block: 8x8 at mi (4,4) = pixel (16,16). Fill the above row (mi 3) + left col (mi 3) with
+    # 8x8 inter neighbours (MVs set in the loop below: above (32,0) = 4px down, left (0,32) = 4px right).
+    # INTEGER-chroma MVs (luma multiples of 16 -> pure chroma shift, no subpel) with DISTINCT gradient
+    # (x+2y) contributions dx+2*dy so every blended pixel provably differs from own in BOTH luma and
+    # chroma: own luma12/chroma6, above luma8/chroma4, left luma4/chroma2.
+    var k = 0;
+    while (k < 8) {
+        obmc_set_nb(grid, fmi_cols, 3, k, 32, 0);       # above row: luma (0,4)->8, chroma (0,2)->4
+        obmc_set_nb(grid, fmi_cols, k, 3, 0, 32);       # left col:  luma (4,0)->4, chroma (2,0)->2
+        k = k + 1;
+    }
+    # commit the block's own MC (Mv (32,32) -> luma (4,4)->12, chroma (2,2)->6) to all 3 planes.
+    av1_mc_pred_block(frame, ref, 0, 16, 16, 8, 8, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(frame, ref, 1, 8, 8, 4, 4, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(frame, ref, 2, 8, 8, 4, 4, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    # snapshot own chroma-U at the ABOVE-only pixels (row 0, cols 2/3 — above-region but NOT left-region)
+    # and a LEFT pixel (col 0, row 3 — left-region but NOT above-region), plus a luma above-only pixel.
+    var own_u_20 = dr_frame_get(frame, 1, 10, 8);       # chroma U col 2 row 0
+    var own_u_30 = dr_frame_get(frame, 1, 11, 8);       # chroma U col 3 row 0
+    var own_u_03 = dr_frame_get(frame, 1, 8, 11);       # chroma U col 0 row 3
+    var own_y_60 = dr_frame_get(frame, 0, 22, 16);      # luma col 6 row 0 (above-only)
+    # run OBMC per plane (luma subX/subY 0; chroma 1/1).
+    assert_eq(av1_obmc_predict(tile, frame, 0, 4, 4, AV1_BLOCK_8X8, 0, 0), DR_OK, "obmc chroma: luma pass");
+    assert_eq(av1_obmc_predict(tile, frame, 1, 4, 4, AV1_BLOCK_8X8, 1, 1), DR_OK, "obmc chroma: U pass");
+    assert_eq(av1_obmc_predict(tile, frame, 2, 4, 4, AV1_BLOCK_8X8, 1, 1), DR_OK, "obmc chroma: V pass");
+    # LUMA above blends (8x8 >= BLOCK_8X8): the above-only luma pixel changed.
+    assert_eq(dr_frame_get(frame, 0, 22, 16) != own_y_60, 1, "obmc chroma: LUMA above blends");
+    # CHROMA above is SKIPPED (4x4 < BLOCK_8X8): the above-only chroma pixels are UNCHANGED.
+    assert_eq(dr_frame_get(frame, 1, 10, 8), own_u_20, "obmc chroma: U above SKIPPED (col 2 row 0 unchanged)");
+    assert_eq(dr_frame_get(frame, 1, 11, 8), own_u_30, "obmc chroma: U above SKIPPED (col 3 row 0 unchanged)");
+    # CHROMA left DOES blend (no size gate): the left-only chroma pixel changed.
+    assert_eq(dr_frame_get(frame, 1, 8, 11) != own_u_03, 1, "obmc chroma: U left blends (col 0 row 3 changed)");
+    return 0;
+}
+# THE TILE-BOUNDARY GATES (0.7.101): the above pass runs only for mi_row > tile row-start, the left only
+# for mi_col > tile col-start — so an OBMC block on the tile's top / left edge does NOT scan the
+# nonexistent row / col -1. A top-edge block (LEFT neighbour only) and a left-edge block (ABOVE neighbour
+# only) both decode cleanly (DR_OK); mutating `>` to `>=` makes the skipped pass read cell -1, whose
+# garbage MiSize trips the bounds-guard -> DR_ERR_BOUNDS (the assert then reddens).
+fn test_obmc_edge_gate() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 64) {
+        var x0 = 0;
+        while (x0 < 64) { dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255); x0 = x0 + 1; }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var fmi_cols = 16;
+    # TOP-EDGE block at mi(0,4) = pixel (16,0): a LEFT neighbour (col 3), NO above (row -1).
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb);
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var k = 0;
+    while (k < 8) { obmc_set_nb(grid, fmi_cols, k, 3, 0, 32); k = k + 1; }
+    av1_mc_pred_block(frame, ref, 0, 16, 0, 8, 8, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    assert_eq(av1_obmc_predict(tile, frame, 0, 0, 4, AV1_BLOCK_8X8, 0, 0), DR_OK,
+    "obmc edge: top-edge block decodes (above pass skipped, no row -1 read)");
+    # LEFT-EDGE block at mi(4,0) = pixel (0,16): an ABOVE neighbour (row 3), NO left (col -1).
+    var frame2 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile2 = av1_tile_new(frame2, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(tile2);
+    av1_tile_set_inter_ctx(tile2, fh, refs, seq, dpb);
+    var grid2 = load64(tile2 + AV1TILE_MVGRID);
+    var k2 = 0;
+    while (k2 < 8) {
+        obmc_set_nb(grid2, fmi_cols, 3, k2, 32, 0);      # above row (row 3) for the left-edge block
+        # col 15: the cell that grid index (candRow*fmi_cols - 1) WRAPS to when a `>=` mutation reads
+        # col -1 — populated inter so the mutated left pass wrongly blends it (else the wrap is empty).
+        obmc_set_nb(grid2, fmi_cols, k2, 15, 0, 32);
+        k2 = k2 + 1;
+    }
+    av1_mc_pred_block(frame2, ref, 0, 0, 16, 8, 8, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var own2_04 = dr_frame_get(frame2, 0, 0, 20);        # block (0,16) row 4: below the above strip, col 0
+    assert_eq(av1_obmc_predict(tile2, frame2, 0, 4, 0, AV1_BLOCK_8X8, 0, 0), DR_OK,
+    "obmc edge: left-edge block decodes (left pass skipped, no col -1 read)");
+    # the left strip below the above region stays own (left pass skipped); a `>=` mutation would blend
+    # the wrapped col-15 neighbour here.
+    assert_eq(dr_frame_get(frame2, 0, 0, 20), own2_04, "obmc edge: left-edge left pass skipped (col 0 unchanged)");
+    return 0;
+}
+# populate one MI cell as an 8x8 INTRA block (REF0 = INTRA_FRAME) — an OBMC scan must STEP OVER it.
+fn obmc_set_intra(grid, fmi_cols, r, c) {
+    var cell = av1_mv_grid_cell(grid, fmi_cols, r, c);
+    store64(cell + AV1MIR_AVAIL, 1);
+    store64(cell + AV1MIR_MISIZE, AV1_BLOCK_8X8);
+    store64(cell + AV1MIR_REF0, AV1_INTRA_FRAME);
+    store64(cell + AV1MIR_REF1, AV1_REF_NONE);
+    return 0;
+}
+# THE MULTI-NEIGHBOUR SCAN + INTRA STEP-OVER (0.7.101): a 32x32 OBMC block whose above row is A(inter),
+# B(INTRA), C(inter), D(inter) 8x8 blocks. The scan blends A/C/D (up to nLimit=min(4,MiWidthLog2=3)=3) and
+# STEPS OVER B (the step advances UNCONDITIONALLY — moving it inside the inter test would infinite-loop, a
+# hard-rule violation; this test COMPLETING witnesses the no-hang, and B's slice staying == own witnesses
+# the REF0>INTRA_FRAME skip). Direct av1_obmc_predict call.
+fn test_obmc_scan_intra() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 64) {
+        var x0 = 0;
+        while (x0 < 64) { dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255); x0 = x0 + 1; }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb);
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var fmi_cols = 16;
+    # 32x32 OBMC block at mi(8,8) = pixel (32,32). Above row (mi 7): four 8x8 neighbours (each spans 2
+    # cells) with DISTINCT integer MVs; B (cells 10-11) is INTRA. own MV (16,16).
+    obmc_set_nb(grid, fmi_cols, 7, 8, 32, 0);  obmc_set_nb(grid, fmi_cols, 7, 9, 32, 0);    # A cols 32-39
+    obmc_set_intra(grid, fmi_cols, 7, 10);     obmc_set_intra(grid, fmi_cols, 7, 11);        # B (intra) 40-47
+    obmc_set_nb(grid, fmi_cols, 7, 12, 0, 32); obmc_set_nb(grid, fmi_cols, 7, 13, 0, 32);    # C cols 48-55
+    obmc_set_nb(grid, fmi_cols, 7, 14, 32, 32); obmc_set_nb(grid, fmi_cols, 7, 15, 32, 32);  # D cols 56-63
+    av1_mc_pred_block(frame, ref, 0, 32, 32, 32, 32, 16, 16, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var own_a = dr_frame_get(frame, 0, 36, 32);    # A slice, top row
+    var own_b = dr_frame_get(frame, 0, 44, 32);    # B slice (intra -> stays own)
+    var own_c = dr_frame_get(frame, 0, 52, 32);    # C slice
+    # BLOCK_32X32 = 9. The call COMPLETING is the no-infinite-loop witness (mutation: advance-inside-if).
+    assert_eq(av1_obmc_predict(tile, frame, 0, 8, 8, 9, 0, 0), DR_OK,
+    "obmc scan: 32x32 block, intra neighbour stepped over (no hang)");
+    assert_eq(dr_frame_get(frame, 0, 44, 32), own_b, "obmc scan: B (intra) slice unchanged (REF0>INTRA skip)");
+    assert_eq(dr_frame_get(frame, 0, 36, 32) != own_a, 1, "obmc scan: A (inter) slice blended");
+    assert_eq(dr_frame_get(frame, 0, 52, 32) != own_c, 1, "obmc scan: C (inter) slice blended (past the intra)");
+    return 0;
+}
 # distinct x/y filters through the lane (en_dual on, SWITCHABLE): a filt_x/filt_y
 # swap in the MC wiring changes the taps and the oracle catches it.
 fn test_inter_tile_dual_filter() {
@@ -3545,6 +3857,11 @@ fn main() {
     test_inter_tile_globalwarp_unrealizable();
     test_inter_tile_globalwarp_force_int();
     test_inter_tile_globalwarp_ii_rejected();
+    test_obmc_mask();
+    test_obmc_e2e();
+    test_obmc_chroma_gate();
+    test_obmc_edge_gate();
+    test_obmc_scan_intra();
     test_inter_tile_dual_filter();
     test_inter_frame_route();
     test_group("the review hardening: chroma, ref selection, clamps, windows");

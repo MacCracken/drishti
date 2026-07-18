@@ -196,6 +196,117 @@ fn av1_ierr_latch(tile, e): i64 {
 }
 
 # ================================================================
+# OBMC — overlapped block motion compensation (spec 7.11.3.9 overlapped_motion_compensation +
+# 7.11.3.10 overlap_blending). Runs per plane AFTER the block's own translation MC is committed to the
+# frame: it blends the ABOVE-row and LEFT-col inter neighbours' predictions into the block's top / left
+# overlap strips with the raised-cosine Obmc_Mask. In place, sequential: the above pass runs fully, then
+# the left pass reads the above-modified frame (the top-left corner is legitimately blended twice — above
+# then left). Reconciled vs spec + cached dav1d recon_tmpl.c obmc + libaom (0.7.101).
+# ================================================================
+# av1_obmc_overlap — MC one neighbour (its Mv[0] + own interp filters) into the driver scratch at
+# (predX,predY) edge-clamped to mc_w x mc_h, then blend it into the frame. pass 0 (above) indexes the mask
+# by ROW i with length predH; pass 1 (left) by COL j with length predW (the mask table is chosen from the
+# NOMINAL predW/predH, NOT the edge-clamped extent). m weights the CURRENT (in-frame) pixel, 64-m the
+# neighbour: CurrFrame = Round2(m*own + (64-m)*nb, 6), no Clip1 (a weighted average of two in-range pixels
+# stays in range). The neighbour MC is single-ref (compound=0) -> final Clip1'd pixels.
+fn av1_obmc_overlap(tile, frame, plane, cell, dpb, fh, predX, predY, predW, predH, pass, pw, ph): i64 {
+    var mc_w = av1_min(predW, pw - predX);
+    var mc_h = av1_min(predH, ph - predY);
+    if ((mc_w <= 0) || (mc_h <= 0)) { return DR_OK; }
+    var nref = av1_dpb_ref_frame(dpb, fh, load64(cell + AV1MIR_REF0));
+    if (nref == 0) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }
+    var buf = av1_mc_out_buf();
+    if (buf == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
+    # neighbour list-0 MV + the NEIGHBOUR's interp filters (dir0 = vertical = filt_y, dir1 = horizontal =
+    # filt_x — the same mapping the block's own MC uses at av1_ib_interp(ib,0/1)).
+    var em = av1_mc_pred_core(buf, frame, nref, plane, predX, predY, mc_w, mc_h,
+    load64(cell + AV1MIR_MV0ROW), load64(cell + AV1MIR_MV0COL),
+    load64(cell + AV1MIR_INTERP1), load64(cell + AV1MIR_INTERP0), 0);
+    if (em != DR_OK) { return av1_ierr_latch(tile, em); }
+    var mlen = predW;
+    if (pass == 0) { mlen = predH; }
+    var i = 0;
+    while (i < mc_h) {
+        var j = 0;
+        while (j < mc_w) {
+            var m = av1_obmc_mask(mlen, j);
+            if (pass == 0) { m = av1_obmc_mask(mlen, i); }
+            var own = dr_frame_get(frame, plane, predX + j, predY + i);
+            var nb = load64(buf + (((i * mc_w) + j) * 8));
+            dr_frame_set(frame, plane, predX + j, predY + i, av1_round2((m * own) + ((64 - m) * nb), 6));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+# av1_obmc_predict — the two-pass driver (7.11.3.9). subX/subY are the per-plane subsampling (0 for luma).
+# ABOVE pass: gated on mi_row > tile row start AND the plane's residual size >= BLOCK_8X8 (so a 4:2:0
+# 8x8-luma block, whose chroma is 4x4, skips its ABOVE chroma neighbour — a spec asymmetry: the LEFT pass
+# has NO size gate). Each pass scans the odd MI cells (candCol/candRow = x|1 / y|1) of the neighbour row/col,
+# stepping by the neighbour's block dim clipped to [2,16], taking up to Min(4, MiWidth/HeightLog2) inter
+# neighbours; an intra neighbour is stepped over (the step advances unconditionally).
+fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i64 {
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
+    var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);
+    var dpb = load64(tile + AV1TILE_DPB);
+    var fh = load64(tile + AV1TILE_FH);
+    var bw4 = av1_num_4x4_w(sub_size);
+    var bh4 = av1_num_4x4_h(sub_size);
+    var nom_w = (bw4 * 4) >> subX;                  # NOMINAL plane overlap dims (pre-edge-clamp)
+    var nom_h = (bh4 * 4) >> subY;
+    var pw = dr_frame_plane_width(frame, plane);
+    var ph = dr_frame_plane_height(frame, plane);
+    # ABOVE pass.
+    if ((mi_row > load64(tile + AV1TILE_ROW_START))
+    && (av1_get_plane_residual_size(sub_size, plane, subX, subY) >= AV1_BLOCK_8X8)) {
+        var nlim = av1_min(4, av1_mi_width_log2(sub_size));
+        var ncount = 0;
+        var x4 = mi_col;
+        var xend = av1_min(fmi_cols, mi_col + bw4);
+        while ((ncount < nlim) && (x4 < xend)) {
+            var acell = av1_mv_grid_cell(grid, fmi_cols, mi_row - 1, x4 | 1);
+            var asz = load64(acell + AV1MIR_MISIZE);
+            if ((asz < 0) || (asz >= AV1_MV_BLOCK_SIZES)) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }
+            var astep = av1_clip3(2, 16, av1_num_4x4_w(asz));
+            if (load64(acell + AV1MIR_REF0) > AV1_INTRA_FRAME) {
+                ncount = ncount + 1;
+                var apw = av1_min(nom_w, (astep * 4) >> subX);
+                var aph = av1_min(nom_h >> 1, 32 >> subY);
+                var eo = av1_obmc_overlap(tile, frame, plane, acell, dpb, fh,
+                (x4 * 4) >> subX, (mi_row * 4) >> subY, apw, aph, 0, pw, ph);
+                if (eo != DR_OK) { return eo; }
+            }
+            x4 = x4 + astep;
+        }
+    }
+    # LEFT pass (no residual-size gate).
+    if (mi_col > load64(tile + AV1TILE_COL_START)) {
+        var nlim2 = av1_min(4, av1_mi_height_log2(sub_size));
+        var ncount2 = 0;
+        var y4 = mi_row;
+        var yend = av1_min(fmi_rows, mi_row + bh4);
+        while ((ncount2 < nlim2) && (y4 < yend)) {
+            var lcell = av1_mv_grid_cell(grid, fmi_cols, y4 | 1, mi_col - 1);
+            var lsz = load64(lcell + AV1MIR_MISIZE);
+            if ((lsz < 0) || (lsz >= AV1_MV_BLOCK_SIZES)) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }
+            var lstep = av1_clip3(2, 16, av1_num_4x4_h(lsz));
+            if (load64(lcell + AV1MIR_REF0) > AV1_INTRA_FRAME) {
+                ncount2 = ncount2 + 1;
+                var lpw = av1_min(nom_w >> 1, 32 >> subX);
+                var lph = av1_min(nom_h, (lstep * 4) >> subY);
+                var eo2 = av1_obmc_overlap(tile, frame, plane, lcell, dpb, fh,
+                (mi_col * 4) >> subX, (y4 * 4) >> subY, lpw, lph, 1, pw, ph);
+                if (eo2 != DR_OK) { return eo2; }
+            }
+            y4 = y4 + lstep;
+        }
+    }
+    return DR_OK;
+}
+
+# ================================================================
 # VAR-TX (0.7.86) — the txfm_split ctx + read_var_tx_size recursion (spec 5.11.37 +
 # the parsing-process ctx 9.3). The above/left tx context is READ BACK from the
 # frame grids (InterTxSizes / Skips / IsInters / MiSizes) — the spec keeps no
@@ -749,7 +860,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     }
     # motion mode: SIMPLE + LOCALWARP (0.7.98) are in scope; OBMC stays out (roadmap.md).
     var mm = av1_ib_motion_mode(ib);
-    if ((mm != AV1_MM_SIMPLE) && (mm != AV1_MM_LOCALWARP)) {
+    if ((mm != AV1_MM_SIMPLE) && (mm != AV1_MM_LOCALWARP) && (mm != AV1_MM_OBMC)) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
     }
     # read_block_tx_size's var-tx branch (5.11.16): fill InterTxSizes for luma by
@@ -914,6 +1025,14 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                     }
                 }
                 if (em != DR_OK) { return av1_ierr_latch(tile, em); }
+                # OBMC (7.11.3.9): blend the above/left inter neighbours onto the block's own prediction,
+                # in place. An OBMC block is always single-ref, non-inter-intra, non-warp — read_motion_mode
+                # forces SIMPLE for compound / ref1==INTRA / a would-global-warp GLOBALMV block
+                # (av1_intermode.cyr:2116-2120) — so it took the plain translation MC just above.
+                if (mm == AV1_MM_OBMC) {
+                    var eob = av1_obmc_predict(tile, frame, plane, r, c, sub_size, sx, sy);
+                    if (eob != DR_OK) { return av1_ierr_latch(tile, eob); }
+                }
             }
         }
         plane = plane + 1;
@@ -987,7 +1106,8 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         }
     }
     var emm = av1_ib_motion_mode(eib);
-    if ((e_ii_reject != 0) || ((emm != AV1_MM_SIMPLE) && (emm != AV1_MM_LOCALWARP))) {
+    if ((e_ii_reject != 0) || ((emm != AV1_MM_SIMPLE) && (emm != AV1_MM_LOCALWARP)
+    && (emm != AV1_MM_OBMC))) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
     }
     # VAR-TX (0.7.86): a non-skip TX_MODE_SELECT inter block > 4x4 non-lossless writes

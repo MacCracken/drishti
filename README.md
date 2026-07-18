@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.100 (AV1 decode: BOTH WARP MODES DECODE TO PIXELS — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100): a LOCALWARP inter block decodes to per-block warped pixels (find_warp_samples → warp_estimation → setup_shear → warp driver), and a GLOBALMV block whose reference carries a >TRANSLATION global-motion model decodes to globally-warped pixels (gm_params → setup_shear → warp driver, spec 7.11.3.1 useWarp==2); both flow through the per-plane useWarp gate (≥8 warps, else translation) and the translation fallbacks; 0.7.99 closed the deferred useWarp-gate coverage witnesses; compound GLOBAL_GLOBALMV warp is a deferred follow-on; 8/10/12-bit, multi-tile, superres; next: OBMC, then the temporal scan)
+## Status — 0.7.101 (AV1 decode: THREE INTER MOTION MODES DECODE TO PIXELS — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101): a LOCALWARP block decodes to per-block warped pixels, a GLOBALMV block with a >TRANSLATION global model decodes to globally-warped pixels (spec 7.11.3.1 useWarp), and an OBMC block decodes to overlap-blended pixels (spec 7.11.3.9/10 — its own MC smoothed at the top/left edges with the above-row + left-col neighbours' predictions, via a raised-cosine Obmc_Mask); all flow through the per-plane inter dispatch + translation fallbacks; 8/10/12-bit, multi-tile, superres; next: the temporal MV scan, then compound-global / inter-intra warp-blend, then scaled-reference MC)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (28,395 suite assertions + 1,140 fuzz
+derived, and adversarially tested (28,483 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

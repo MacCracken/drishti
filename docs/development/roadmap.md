@@ -332,12 +332,16 @@ Baseline (0.7.0): OBU layer + sequence header.
   is `av1_warp_model_from_global` (gm_params ARE wmmat, so no least-squares) → `setup_shear`, reusing the same
   per-plane useWarp gate + `av1_warp_pred_block`; gated `!force_integer_mv && !is_scaled` per dav1d
   `gmv_warp_allowed`; the `Mv[0]==global MV` translation fallback covers useWarp==0; a GLOBALMV **inter-intra**
-  block that would warp is REJECTED, not silently translation-blended — the review caught that). Next
-  **inter-intra + GLOBALWARP warp-blend** (warp the inter part inside `av1_mc_pred_interintra`, currently
-  rejected) and **compound GLOBAL_GLOBALMV warp** (each ref warped + blended — the compound MC path doesn't warp yet), OBMC,
-  the temporal scan (needs the DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar
-  the warp filter, dav1d `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory
-  `av1-decode-remaining-tracks`.
+  block that would warp is REJECTED, not silently translation-blended — the review caught that), and
+  **OBMC 0.7.101** (overlapped block MC, spec 7.11.3.9/10 — the SECOND motion mode: an OBMC block's own MC
+  is smoothed at the top/left edges with the above-row + left-col neighbours via a raised-cosine `Obmc_Mask`;
+  `av1_obmc_predict` two-pass scan + `av1_obmc_overlap` blend, gated per the spec asymmetry (above pass has a
+  residual-size gate, left pass none); verified pixel-exact vs a spec-literal `obmc_ref.py`). Next
+  **the temporal MV scan** (spec 7.10.2.5/6 — un-defers the temporal MV candidates in find_mv_stack; needs
+  the DPB's saved motion fields, 7.9), then **inter-intra + GLOBALWARP warp-blend** + **compound
+  GLOBAL_GLOBALMV warp** (both warp-into-a-scratch follow-ons), then scaled-reference/BILINEAR MC; all
+  table-free bar the warp filter + Obmc_Mask, dav1d `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand).
+  See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

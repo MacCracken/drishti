@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.101] - 2026-07-18
+
+**OBMC — overlapped block motion compensation (spec 7.11.3.9 / 7.11.3.10).** The second inter motion mode
+after LOCALWARP: an `OBMC` inter block now decodes to overlap-blended pixels — its own MC is smoothed at the
+top and left edges with predictions from the above-row and left-column neighbours. Previously the inter tile
+decode rejected `AV1_MM_OBMC` outright; the mode-info read (`av1_read_use_obmc`) was already wired.
+
+### Added
+
+- **The `Obmc_Mask` table** (`av1_mc.cyr`): `av1_obmc_mask_tbl()` (a self-indexed `[64]` blob — the
+  length-`len` mask lives at `[len..len+len-1]`) + `av1_obmc_mask(len, i)` (guards a non-mask length / an
+  out-of-range `i` → 64, the own-only no-op). The values are the spec own-weights (`64 - dav1d_obmc_masks`,
+  KAT-anchored). `av1_mc_out_buf()` hands the MC driver's scratch to the OBMC path.
+- **The OBMC driver** (`av1_intertile.cyr`): `av1_obmc_predict` (the two-pass 7.11.3.9 scan) + `av1_obmc_overlap`
+  (per-neighbour MC + blend). Per plane, AFTER the block's own MC: an **above pass** (gated `mi_row >
+  ROW_START` **and** the plane's residual size `>= BLOCK_8X8`) and a **left pass** (gated `mi_col > COL_START`,
+  **no** size gate — the spec asymmetry, so a 4:2:0 8×8-luma block blends its LEFT chroma neighbour but not
+  ABOVE). Each scans the odd MI cells (`x|1` / `y|1`) of the neighbour row/col, stepping by the neighbour's
+  block dim clipped to `[2,16]`, up to `Min(4, MiWidth/HeightLog2)` inter neighbours (intra ones stepped
+  over); MCs the neighbour's `Mv[0]` with the **neighbour's** interp filters (`compound=0` → final pixels)
+  into the scratch; blends in place `Round2(m*own + (64-m)*nb, 6)` — the above pass indexes the mask by ROW,
+  the left by COL, the table chosen from the NOMINAL overlap (not the edge-clamped extent). Sequential:
+  above fully, then left reads the above-modified frame (the top-left corner blends twice). `AV1_MM_OBMC`
+  is admitted in the decode + encode motion-mode gates; an OBMC block is always single-ref / non-inter-intra
+  / non-warp (`read_motion_mode` forces SIMPLE otherwise), so it took the plain translation MC.
+- **Reconciled** against spec 7.11.3.9/10 + cached dav1d `recon_tmpl.c:obmc` + libaom via a 3-source
+  understand workflow (the one disagreement — the chroma above-gate asymmetry — resolved to the spec).
+
+**Proofs** (`tests/av1_intertile.tcyr` + `scripts/refs/obmc_ref.py`): a spec-literal Python reference
+(integer-MV MC = pixel shift) is the independent oracle. `test_obmc_e2e` — a 4-superblock tile whose BR OBMC
+block decodes **pixel-exact to the ref checksum + spots**. `test_obmc_mask` — all 62 mask entries vs
+`64 - dav1d_obmc_masks`. `test_obmc_chroma_gate` — a 4:2:0 8×8 block: luma blends above, chroma does not
+(chroma left does). `test_obmc_edge_gate` — top/left-edge blocks skip the out-of-frame pass. **Mutation-verified**
+(each reddens a test): the mask table, the blend orientation, the mask orientation (row vs col), the blend
+rounding, the chroma above residual-size gate, both tile-boundary gates, and the intra-neighbour step-over /
+`REF0 > INTRA` skip (a multi-neighbour A/B-intra/C/D scan — also the never-infinite-loop guard).
+
+The **adversarial review** (2 dims, verify) found **no shipped-code defects** — the OBMC code is
+spec-correct. Its 7 confirmed findings are all test-coverage gaps (minor/nit); the highest-value ones (the
+intra step-over + multi-neighbour scan, and the stale fixture comment) are closed above. **Deferred coverage
+witnesses** (code verified-correct; each needs new fixture infra): the odd-cell `x|1` probe (needs a 4-wide
+neighbour so even/odd cells differ), the `step4` clip `[2,16]` bounds (needs 4-/128-wide neighbours), the
+mask-length NOMINAL-vs-edge-clamped selection (needs a non-8-aligned frame edge), fractional-MV OBMC +
+the neighbour's own interp filter (un-witnessable with the integer-MV fixtures — the 8-tap filter is the
+identity), and the top-tile-edge gate's witness robustness (currently rides the OOB bounds-guard; a
+cross-tile row would make it deterministic).
+
 ## [0.7.100] - 2026-07-18
 
 **GLOBALWARP — the global-motion warp path (spec 7.11.3.1 useWarp==2).** A single-ref `GLOBALMV` inter
