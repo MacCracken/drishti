@@ -1290,6 +1290,58 @@ fn test_tmvs_save() {
     }
     return 0;
 }
+# THE MV PROJECTION LEAVES KAT (0.7.103) vs scripts/refs/mv_projection_ref.py. Div_Mult (formula-cross-check
+# + spec-literal spot anchors), get_mv_projection (negative rounding + num/den clips + the ±16383 clamp),
+# project (the negate-shift-negate trap + all window rejects), get_block_position (both-valid + one-invalid).
+fn test_mv_projection_leaves() {
+    # Div_Mult: every entry == floor(16384/i) [the test computes 16384/i independently of the table], plus
+    # spec-literal spot anchors (16384/5461/3276/1024/528) and the [0]=0 sentinel.
+    assert_eq(av1_mv_div_mult(0), 0, "Div_Mult[0] = 0");
+    var i = 1;
+    while (i < 32) {
+        assert_eq(av1_mv_div_mult(i), 16384 / i, "Div_Mult[i] = floor(16384/i)");
+        i = i + 1;
+    }
+    assert_eq(av1_mv_div_mult(1), 16384, "Div_Mult[1] spec anchor");
+    assert_eq(av1_mv_div_mult(3), 5461, "Div_Mult[3] spec anchor");
+    assert_eq(av1_mv_div_mult(5), 3276, "Div_Mult[5] spec anchor");
+    assert_eq(av1_mv_div_mult(16), 1024, "Div_Mult[16] spec anchor");
+    assert_eq(av1_mv_div_mult(31), 528, "Div_Mult[31] spec anchor");
+    assert_eq(av1_mv_div_mult(99), 0, "Div_Mult out-of-range -> 0");
+    # get_mv_projection cases (baked from the ref): (mv_row, mv_col, num, den) -> (projRow, projCol).
+    var o = alloc(16);
+    av1_get_mv_projection(100, 0 - 200, 2, 4, o);
+    assert_eq(load64(o + 0), 50, "proj basic row"); assert_eq(load64(o + 8), 0 - 100, "proj basic col (neg round)");
+    av1_get_mv_projection(0 - 100, 100, 3, 7, o);
+    assert_eq(load64(o + 0), 0 - 43, "proj neg row round2_signed"); assert_eq(load64(o + 8), 43, "proj col");
+    av1_get_mv_projection(1, 1, 0 - 31, 2, o);   # half-boundary: round2_signed=-16, NOT plain round2=-15
+    assert_eq(load64(o + 0), 0 - 16, "proj ties-away (round2_signed not round2)");
+    av1_get_mv_projection(100, 100, 50, 4, o);
+    assert_eq(load64(o + 0), 775, "proj num>31 clipped to 31");
+    av1_get_mv_projection(100, 100, 0 - 50, 4, o);
+    assert_eq(load64(o + 0), 0 - 775, "proj num<-31 clipped to -31");
+    av1_get_mv_projection(100, 100, 2, 40, o);
+    assert_eq(load64(o + 0), 6, "proj den>31 clamped to 31");
+    av1_get_mv_projection(16383, 0, 31, 1, o);
+    assert_eq(load64(o + 0), 16383, "proj clamps to +16383");
+    av1_get_mv_projection(0 - 16383, 0, 31, 1, o);
+    assert_eq(load64(o + 0), 0 - 16383, "proj clamps to -16383");
+    # av1_mv_project_pos: newpos or -1.
+    assert_eq(av1_mv_project_pos(10, 0, 1, 34, 0), 10, "project delta 0 -> v8");
+    assert_eq(av1_mv_project_pos(10, 128, 1, 34, 0), 12, "project +2");
+    assert_eq(av1_mv_project_pos(10, 0 - 128, 1, 34, 0), 8, "project -2 (negate-shift-negate)");
+    assert_eq(av1_mv_project_pos(10, 0 - 200, 1, 34, 8), 7, "project -200 NON-mult: negate-shift-negate=7");
+    assert_eq(av1_mv_project_pos(10, 0 - 256, 1, 34, 0), 0 - 1, "project -4 < base8 window reject");
+    assert_eq(av1_mv_project_pos(2, 0 - 256, 1, 34, 0), 0 - 1, "project nv<0 reject");
+    assert_eq(av1_mv_project_pos(30, 512, 1, 34, 0), 0 - 1, "project nv>=max8 reject");
+    assert_eq(av1_mv_project_pos(10, 512, 1, 34, 8), 18, "project +8 valid with maxOff8=8");
+    # av1_get_block_position: [PosY8, PosX8] + validity.
+    var o2 = alloc(16);
+    assert_eq(av1_get_block_position(5, 5, 1, 128, 128, 20, 20, o2), 1, "blockpos both valid");
+    assert_eq(load64(o2 + 0), 7, "blockpos PosY8"); assert_eq(load64(o2 + 8), 7, "blockpos PosX8");
+    assert_eq(av1_get_block_position(5, 5, 1, 0, 4096, 20, 20, o2), 0, "blockpos col out-of-window -> invalid");
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -1332,6 +1384,7 @@ fn main() {
     test_scan_col_odd_parity();
     test_group("temporal-MV producer (0.7.102)");
     test_tmvs_save();
+    test_mv_projection_leaves();
     test_scan_compound_global();
     test_group("find_mv_stack driver (7.10.2) + extra_search + context/clamping");
     test_driver_above_left();

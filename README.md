@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.102 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV PRODUCER — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels (per-block warp / global-motion warp / overlap-blend), and 0.7.102 starts temporal MV prediction: an inter frame's per-8×8 motion field is now saved into the DPB (spec 7.19/7.20) for a future frame's temporal candidates — Bite 1 of 3, output-neutral, with motion_field_estimation (7.9) and the scan (7.10.2.5/6) to follow; 8/10/12-bit, multi-tile, superres; next: the temporal projection + scan, then compound-global / inter-intra warp-blend, then scaled-reference MC)
+## Status — 0.7.103 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc underway — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels (per-block warp / global-motion warp / overlap-blend); temporal MV prediction is being built bite-by-bite: 0.7.102 saves each inter frame's per-8×8 motion field into the DPB (spec 7.19/7.20), and 0.7.103 adds the projection arithmetic (spec 7.9.3/4 — Div_Mult + get_mv_projection + get_block_position) — both output-neutral, with motion_field_estimation (7.9) and the scan (7.10.2.5/6) to follow; 8/10/12-bit, multi-tile, superres; next: the estimation driver + the scan, then compound-global / inter-intra warp-blend, then scaled-reference MC)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (28,516 suite assertions + 1,140 fuzz
+derived, and adversarially tested (28,576 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

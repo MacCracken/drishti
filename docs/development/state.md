@@ -6,6 +6,24 @@
 
 ## Version
 
+**0.7.103** — cut 2026-07-18, not yet tagged (user's git). **MV-PROJECTION LEAVES (temporal-MV Bite 2a).**
+The pure projection arithmetic motion_field_estimation (7.9) will use, landed as un-wired OUTPUT-NEUTRAL
+leaves + KATs (the warp_estimation/setup_shear pattern) to de-risk the hardest arithmetic in isolation.
+av1_mv.cyr: Div_Mult[32] (spec 7.9.3, floor(16384/i), formula-generated + KAT-anchored to the 32 spec
+values); av1_get_mv_projection (clippedDenom=Min(31,den), clippedNum=Clip3(-31,31,num), each comp
+Clip3(-16383,16383, Round2Signed(mv*cn*DivMult[cd], 14)) — USES av1_round2_signed NOT plain round2, and no
+int32 overflow trick since the product fits i64); av1_mv_project_pos (7.9.4 project — offset8 negate-shift-
+negate with LOGICAL >> on the positive operand, -1 outside the window); av1_get_block_position (PosY8 maxOff
+0 / PosX8 maxOff 8). PROOF scripts/refs/mv_projection_ref.py + a KAT: Div_Mult all 32, get_mv_projection with
+a HALF-BOUNDARY case pinning Round2Signed vs plain Round2 (-16 vs -15) + num/den clips + the ±16383 clamp,
+project with a NON-64-multiple negative pinning negate-shift-negate vs arithmetic >>> (7 vs 6) + all 4 window
+rejects. MUTATIONS (5): Div_Mult generator, Round2Signed->Round2, num clip, den clamp, negate-shift-negate.
+Output-neutral (leaves not wired). 38 suites, **28,576** suite + **1,140** fuzz assertions, all green.
+LESSON: av1_round2 is ARITHMETIC (>>>) so it AGREES with round2_signed except at half-boundaries — the
+witness needs a ties-away case (mv=1,num=-31,den=2), and the negate-shift-negate needs a non-64-multiple.
+Next: **Bite 2b = the 7.9.1 driver (useLast/refStamp) + 7.9.2 projection + the MotionFieldMvs scratch + the
+frame-start hook (still output-neutral), then Bite 3 = the temporal scan (7.10.2.5/6).**
+
 **0.7.102** — cut 2026-07-18, not yet tagged (user's git). **Temporal-MV PRODUCER (Bite 1 of 3).** The
 first piece of temporal motion-vector prediction (the sole remaining find_mv_stack deferral). At inter-frame
 decode end, the per-8x8 motion field is saved into the DPB slots the frame refreshes, so a FUTURE frame can

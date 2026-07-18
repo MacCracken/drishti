@@ -4,6 +4,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.103] - 2026-07-18
+
+**MV-projection leaves (temporal-MV Bite 2a)** — the pure arithmetic `motion_field_estimation` (spec 7.9)
+will use to scale + project a reference's saved MV onto the current 8×8 grid. Landed as **un-wired,
+output-neutral leaves with KATs** (the warp_estimation/setup_shear pattern) so the hardest arithmetic — the
+signed rounding, the reciprocal scale, and the negate-shift-negate offset trap — is de-risked in isolation.
+
+### Added
+
+- **`Div_Mult[32]`** (`av1_mv.cyr`, spec 7.9.3): the reciprocal table `Div_Mult[i] = floor(16384/i)` for
+  `i∈1..31`, `[0]=0` — a clear formula (unlike the warp-filter table), so formula-generated and KAT-anchored
+  to the 32 spec-literal values.
+- **`av1_get_mv_projection`** (spec 7.9.3): `clippedDenom=Min(31,den)`, `clippedNum=Clip3(-31,31,num)`, then
+  each component `Clip3(-16383, 16383, Round2Signed(mv * clippedNum * Div_Mult[clippedDenom], 14))`. The
+  product fits i64, so drishti needs no int32 overflow trick — and uses `av1_round2_signed` (ties away from
+  zero), **not** a plain `av1_round2` (which rounds negatives toward −∞).
+- **`av1_mv_project_pos`** (spec 7.9.4 `project`): advances an 8×8 coord by `offset8 = delta>>6` (positive)
+  / `0-((0-delta)>>6)` (negative — the negate-shift-negate form with a LOGICAL shift on the positive
+  operand; a plain arithmetic `>>>` on a negative delta mis-projects); returns `-1` outside the valid
+  window. **`av1_get_block_position`** (7.9.4) projects `(x8,y8)` into `(PosY8,PosX8)` (`MAX_OFFSET` 0/8).
+
+**Proofs** (`scripts/refs/mv_projection_ref.py` spec-literal oracle + a KAT): `Div_Mult` all 32 (formula
+cross-check + spec anchors); `get_mv_projection` incl. a **half-boundary** case that distinguishes
+`Round2Signed` from plain `Round2` (−16 vs −15), the num/den clips, and the ±16383 clamp; `project` incl. a
+**non-64-multiple** negative case that distinguishes negate-shift-negate from arithmetic `>>>` (7 vs 6) plus
+all four window rejects. **Mutation-verified**: the `Div_Mult` generator, `Round2Signed`→`Round2`, the num
+clip, the den clamp, and the negate-shift-negate offset — each reddens its witness. Output-neutral: nothing
+calls the leaves yet (the 7.9 driver + hook is Bite 2b, the scan Bite 3).
+
 ## [0.7.102] - 2026-07-18
 
 **Temporal-MV producer (Bite 1 of 3)** — the first piece of temporal motion-vector prediction (the last
