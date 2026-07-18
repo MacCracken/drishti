@@ -765,6 +765,593 @@ fn test_inter_tile_localwarp_chroma() {
     assert_eq(difUt > 0, 1, "warp chroma: U plane warped, != translation");
     return 0;
 }
+# a 4:2:0 inter ctx for a W x H frame: a per-plane gradient ref in the DPB, warp +
+# switchable-motion-mode enabled. Fills fh/refs/seq and stores the ref; returns the ref
+# frame. (Shared by the three nested-SPLIT warp-gate witnesses below.)
+fn itw_ctx420(w, h, mic, mir, fh, refs, seq, dpb): i64 {
+    var oe = alloc(8);
+    var ref = dr_frame_new(w, h, 3, 1, 1, 8, 8, oe);
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(ref, p);
+        var ph = dr_frame_plane_height(ref, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) {
+                dr_frame_set(ref, p, xx, yy, ((xx + (2 * yy)) + (p * 13)) & 255);
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    store64(fh + AV1FH_FRAME_WIDTH, w);
+    store64(fh + AV1FH_FRAME_HEIGHT, h);
+    store64(fh + AV1FH_UPSCALED_WIDTH, w);
+    store64(fh + AV1FH_MI_COLS, mic);
+    store64(fh + AV1FH_MI_ROWS, mir);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, mic);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, mir);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, 1);
+    store64(fh + AV1FH_ALLOW_WARPED, 1);
+    store64(refs + AV1REF_UPSCALED_W + 0, w);
+    store64(refs + AV1REF_FRAME_W + 0, w);
+    store64(refs + AV1REF_FRAME_H + 0, h);
+    store64(seq + AV1_SEQ_NUM_PLANES, 3);
+    store64(seq + AV1_SEQ_SUBX, 1);
+    store64(seq + AV1_SEQ_SUBY, 1);
+    av1_dpb_store(dpb, fh, ref);
+    return ref;
+}
+# WITNESS (0.7.99): the per-plane useWarp gate at the CHROMA nw==8 BOUNDARY. A 16x16-luma
+# LOCALWARP block (4:2:0) -> 8x8 chroma -> nominal chroma nw == 8 EXACTLY -> chroma WARPS.
+# Placed by a nested SPLIT (64 forced-split -> 32 SPLIT -> 4x 16x16) so the BR 16x16 at pixel
+# (16,16) finds its TR (above) + BL (left) 16x16 siblings as warp samples. Kills the 0.7.98
+# review's F2b survivor: `nw = (bw4*4) >> sx` mutated to `>> (sx+1)` makes chroma nw = 16>>2 = 4
+# < 8, gating the chroma to TRANSLATION -> "decoded U == direct chroma warp" goes red.
+fn test_inter_tile_localwarp_chroma8() {
+    var oe = alloc(8);
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    var ref = itw_ctx420(32, 32, 8, 8, fh, refs, seq, dpb);
+    var pp = alloc(48);
+    store64(pp + 0, AV1_PARTITION_SPLIT);     # 64 SB (forced: frame < 64)
+    store64(pp + 8, AV1_PARTITION_SPLIT);     # 32 TL (the only in-frame 32-quad)
+    store64(pp + 16, AV1_PARTITION_NONE);     # 16 (0,0)
+    store64(pp + 24, AV1_PARTITION_NONE);     # 16 (0,4)
+    store64(pp + 32, AV1_PARTITION_NONE);     # 16 (4,0)
+    store64(pp + 40, AV1_PARTITION_NONE);     # 16 (4,4) -> LOCALWARP
+    # neighbour MVs keep |mv| within the warp-sample threshold (16 for a <=16x16 block,
+    # av1_mv.cyr add_sample) so both are VALID samples -> a genuine num==2 affine model
+    # (not the force-kept single-sample degenerate case).
+    var pf = alloc(32);
+    store64(pf + 0, it_blk(16, 8));            # 16(0,0) TL (not a BR neighbour)
+    store64(pf + 8, it_blk(0, 16));            # 16(0,4) TR = BR's ABOVE sample
+    store64(pf + 16, it_blk(16, 0));           # 16(4,0) BL = BR's LEFT sample
+    store64(pf + 24, it_blk_warp(0, 0));       # 16(4,4) BR LOCALWARP, Mv (0,0)
+    var ef = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "chroma8: 16x16-warp 4:2:0 tile encoded");
+    var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "chroma8: tile decodes");
+    # rebuild the model from the warp block's samples (BLOCK_16X16 = 6, mi (4,4), Mv (0,0)).
+    var ws = load64(dt + AV1TILE_WS);
+    assert_eq(av1_warp_num(ws) > 0, 1, "chroma8: warp block found >= 1 sample");
+    var model = av1_warp_model_new();
+    av1_warp_estimation(ws, 4, 4, 6, 0, 0, model);
+    assert_eq(av1_warp_model_valid(model), 1, "chroma8: estimation valid (det != 0)");
+    av1_setup_shear(model);
+    assert_eq(av1_warp_model_shear_valid(model), 1, "chroma8: shear realizable");
+    # U plane: 8x8 chroma at (8,8) -> nominal nw == 8 -> WARPS. Direct chroma warp reference:
+    var rf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(rf, ref, 1, 8, 8, 8, 8, model), DR_OK, "chroma8: U reference warp");
+    var difU = 0;
+    var yy = 8;
+    while (yy < 16) {
+        var xx = 8;
+        while (xx < 16) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(rf, 1, xx, yy)) { difU = difU + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difU, 0, "chroma8: decoded U == direct chroma warp (nw==8 boundary WARPS)");
+    # and != translation -> chroma really warped (kills >>(sx+1) / `> 8` gate mutations).
+    var tf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 1, 8, 8, 8, 8, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difUt = 0;
+    yy = 8;
+    while (yy < 16) {
+        var xx = 8;
+        while (xx < 16) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(tf, 1, xx, yy)) { difUt = difUt + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difUt > 0, 1, "chroma8: U warped, != translation");
+    return 0;
+}
+# WITNESS (0.7.99): the per-plane useWarp gate FALLBACK below the chroma boundary. An 8x8-luma
+# LOCALWARP block (4:2:0) -> 4x4 chroma -> nominal chroma nw == 4 < 8 -> chroma TRANSLATES while
+# luma (nw == 8) WARPS. Nested SPLIT to an 8x8 at pixel (24,24) whose 8x8 siblings are its warp
+# samples. Kills the OTHER side of the gate: dropping `&& (nw >= 8)` (or `nw >= 4`) WARPS the 4x4
+# chroma -> "decoded U == chroma TRANSLATION" goes red; the luma-warp assert proves the model is
+# genuinely valid (so the chroma fallback is the gate, not a globally-invalid model).
+fn test_inter_tile_localwarp_chroma4() {
+    var oe = alloc(8);
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    var ref = itw_ctx420(32, 32, 8, 8, fh, refs, seq, dpb);
+    var pp = alloc(80);
+    store64(pp + 0, AV1_PARTITION_SPLIT);     # 64
+    store64(pp + 8, AV1_PARTITION_SPLIT);     # 32 TL
+    store64(pp + 16, AV1_PARTITION_NONE);     # 16 (0,0)
+    store64(pp + 24, AV1_PARTITION_NONE);     # 16 (0,4)
+    store64(pp + 32, AV1_PARTITION_NONE);     # 16 (4,0)
+    store64(pp + 40, AV1_PARTITION_SPLIT);    # 16 (4,4) -> split to 8x8
+    store64(pp + 48, AV1_PARTITION_NONE);     # 8 (4,4)
+    store64(pp + 56, AV1_PARTITION_NONE);     # 8 (4,6)
+    store64(pp + 64, AV1_PARTITION_NONE);     # 8 (6,4)
+    store64(pp + 72, AV1_PARTITION_NONE);     # 8 (6,6) -> LOCALWARP
+    # small neighbour MVs (|mv| <= the 16-threshold) so all three of the warp block's
+    # samples (above 8(4,6), left 8(6,4), top-left 8(4,4)) are VALID -> num==3 -> a genuine,
+    # shear-realizable 8x8 affine (a degenerate model would fail setup_shear -> both planes
+    # translate and the luma-warp assert below would go red).
+    var pf = alloc(56);
+    store64(pf + 0, it_blk(16, 8));            # 16(0,0)
+    store64(pf + 8, it_blk(0 - 8, 24));        # 16(0,4)
+    store64(pf + 16, it_blk(8, 0 - 16));       # 16(4,0)
+    store64(pf + 24, it_blk(0, 0));            # 8(4,4) = warp's TOP-LEFT sample
+    store64(pf + 32, it_blk(8, 8));            # 8(4,6) = warp's ABOVE sample
+    store64(pf + 40, it_blk(0 - 8, 8));        # 8(6,4) = warp's LEFT sample
+    store64(pf + 48, it_blk_warp(0, 0));       # 8(6,6) LOCALWARP, Mv (0,0)
+    var ef = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "chroma4: 8x8-warp 4:2:0 tile encoded");
+    var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "chroma4: tile decodes");
+    var ws = load64(dt + AV1TILE_WS);
+    assert_eq(av1_warp_num(ws) > 0, 1, "chroma4: warp block found >= 1 sample");
+    var model = av1_warp_model_new();
+    av1_warp_estimation(ws, 6, 6, 3, 0, 0, model);            # BLOCK_8X8 = 3, mi (6,6)
+    assert_eq(av1_warp_model_valid(model), 1, "chroma4: estimation valid (det != 0)");
+    av1_setup_shear(model);
+    assert_eq(av1_warp_model_shear_valid(model), 1, "chroma4: shear realizable");
+    # LUMA: 8x8 at (24,24), nominal nw == 8 -> WARPS. decoded Y == direct luma warp.
+    var rf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(rf, ref, 0, 24, 24, 8, 8, model), DR_OK, "chroma4: Y reference warp");
+    var difY = 0;
+    var yy = 24;
+    while (yy < 32) {
+        var xx = 24;
+        while (xx < 32) {
+            if (dr_frame_get(df, 0, xx, yy) != dr_frame_get(rf, 0, xx, yy)) { difY = difY + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difY, 0, "chroma4: decoded Y == direct luma warp (nw==8 WARPS)");
+    # CHROMA U: 4x4 at (12,12), nominal nw == 4 < 8 -> TRANSLATES. decoded U == translation MC.
+    var tf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 1, 12, 12, 4, 4, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difU = 0;
+    yy = 12;
+    while (yy < 16) {
+        var xx = 12;
+        while (xx < 16) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(tf, 1, xx, yy)) { difU = difU + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difU, 0, "chroma4: decoded U == translation MC (nw==4 FALLS BACK, not warp)");
+    return 0;
+}
+# WITNESS (0.7.99): the useWarp gate keys off the NOMINAL block, not the edge-CLAMPED w/h. A
+# 16x16-luma LOCALWARP block at pixel (16,16) in a 32x28 frame overhangs the bottom -> visible
+# 12 luma rows -> 6 chroma rows. Nominal chroma nh = 8 (>= 8 -> WARPS the visible strip); a gate
+# on the CLAMPED chroma h (= 6 < 8) would TRANSLATE. Same nested SPLIT + neighbour MVs as
+# chroma8 (identical model); only the frame height changes -> the clamp binds.
+fn test_inter_tile_localwarp_edge_chroma() {
+    var oe = alloc(8);
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    var ref = itw_ctx420(32, 28, 8, 7, fh, refs, seq, dpb);    # 28 tall (mir=7): bottom cut
+    var pp = alloc(48);
+    store64(pp + 0, AV1_PARTITION_SPLIT);     # 64
+    store64(pp + 8, AV1_PARTITION_SPLIT);     # 32 TL
+    store64(pp + 16, AV1_PARTITION_NONE);     # 16 (0,0)
+    store64(pp + 24, AV1_PARTITION_NONE);     # 16 (0,4) = BR's ABOVE (fully in frame)
+    store64(pp + 32, AV1_PARTITION_NONE);     # 16 (4,0) = BR's LEFT (also bottom-cut)
+    store64(pp + 40, AV1_PARTITION_NONE);     # 16 (4,4) -> LOCALWARP (bottom-cut)
+    var pf = alloc(32);
+    store64(pf + 0, it_blk(16, 8));
+    store64(pf + 8, it_blk(0, 16));            # above sample (same MVs as chroma8)
+    store64(pf + 16, it_blk(16, 0));           # left sample
+    store64(pf + 24, it_blk_warp(0, 0));
+    var ef = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 7, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "edge chroma: 32x28 4:2:0 tile encoded");
+    var df = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 7, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "edge chroma: tile decodes");
+    var ws = load64(dt + AV1TILE_WS);
+    var model = av1_warp_model_new();
+    av1_warp_estimation(ws, 4, 4, 6, 0, 0, model);
+    assert_eq(av1_warp_model_valid(model), 1, "edge chroma: estimation valid");
+    av1_setup_shear(model);
+    assert_eq(av1_warp_model_shear_valid(model), 1, "edge chroma: shear realizable");
+    # U plane: nominal 8x8 chroma at (8,8) CLAMPED to 8x6 (chroma plane is 16x14) -> WARPS the
+    # visible strip. Direct reference warps the SAME 8x6 clamped extent (warp_pred_block crops).
+    var rf = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(rf, ref, 1, 8, 8, 8, 6, model), DR_OK, "edge chroma: U reference warp");
+    var difU = 0;
+    var yy = 8;
+    while (yy < 14) {
+        var xx = 8;
+        while (xx < 16) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(rf, 1, xx, yy)) { difU = difU + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difU, 0, "edge chroma: decoded U == direct clamped chroma warp (gate uses NOMINAL nh)");
+    # and != translation of the same clamped strip -> the nominal gate WARPED, not the clamped gate.
+    var tf = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 1, 8, 8, 8, 6, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difUt = 0;
+    yy = 8;
+    while (yy < 14) {
+        var xx = 8;
+        while (xx < 16) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(tf, 1, xx, yy)) { difUt = difUt + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difUt > 0, 1, "edge chroma: U warped (clamped-h gate would translate)");
+    return 0;
+}
+# set the frame's global-motion model for LAST_FRAME (ref slot 1): GmType + gm_params[0..5]
+# (the six are the warp matrix wmmat[0..5] at 1<<16 precision — [0/1]=x/y translation, [2..5]=2x2).
+fn it_fh_set_gm(fh, gtype, w0, w1, w2, w3, w4, w5) {
+    store64(fh + AV1FH_GM_TYPE + ((AV1_LAST_FRAME - 1) * 8), gtype);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 0) * 8), w0);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 1) * 8), w1);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 2) * 8), w2);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 3) * 8), w3);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 4) * 8), w4);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 5) * 8), w5);
+    return 0;
+}
+# a single-ref GLOBALMV block record (ymode=GLOBALMV). Mv[0] is DERIVED from gm_params by both
+# encode + decode (assign_mv → GlobalMvs), so the record's MV0 is ignored (left 0).
+fn it_blk_global(): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIP, 1);
+    store64(b + AV1FB_ISINTER, 1);
+    var ib = b + AV1FB_IB;
+    store64(ib + AV1IB_REF0, AV1_LAST_FRAME);
+    store64(ib + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib + AV1IB_YMODE, AV1_GLOBALMV);
+    store64(ib + AV1IB_MOTIONMODE, AV1_MM_SIMPLE);
+    store64(ib + AV1IB_INTERP + 0, AV1_EIGHTTAP);
+    store64(ib + AV1IB_INTERP + 8, AV1_EIGHTTAP);
+    store64(ib + AV1IB_CT + AV1CT_COMPIDX, 1);
+    return b;
+}
+# GLOBALWARP UNIT (0.7.100): av1_warp_model_from_global copies gm_params[ref][0..5] into the model's
+# wmmat, sets AV1WM_VALID=1, and runs setup_shear. Pins the copy + the valid flag directly.
+fn test_globalwarp_model_build() {
+    var fh = it_fh();
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 111, 222, 67584, 1024, 0 - 1024, 67584);
+    var m = av1_warp_model_new();
+    assert_eq(av1_warp_model_from_global(m, fh, AV1_LAST_FRAME), DR_OK, "gm model: built");
+    assert_eq(av1_warp_model_valid(m), 1, "gm model: VALID forced to 1 (no estimation det)");
+    assert_eq(av1_warp_model_param(m, 0), 111, "gm model: wmmat[0] = gm_param[0]");
+    assert_eq(av1_warp_model_param(m, 1), 222, "gm model: wmmat[1] = gm_param[1]");
+    assert_eq(av1_warp_model_param(m, 2), 67584, "gm model: wmmat[2] = gm_param[2]");
+    assert_eq(av1_warp_model_param(m, 3), 1024, "gm model: wmmat[3] = gm_param[3] (off-diagonal)");
+    assert_eq(av1_warp_model_param(m, 4), 0 - 1024, "gm model: wmmat[4] = gm_param[4] (off-diagonal)");
+    assert_eq(av1_warp_model_param(m, 5), 67584, "gm model: wmmat[5] = gm_param[5]");
+    assert_eq(av1_warp_model_shear_valid(m), 1, "gm model: gentle rotzoom is shear-realizable");
+    return 0;
+}
+# THE GLOBALWARP MILESTONE (0.7.100): a single-ref GLOBALMV block whose reference carries a ROTZOOM
+# global-motion model decodes to GLOBALLY-WARPED pixels (spec 7.11.3.1 useWarp==2). The inter tile
+# decode builds the model straight from gm_params (av1_warp_model_from_global → setup_shear) and warps
+# each plane. Verified vs a DIRECT warp on a model from the same gm_params (complementary oracle: the
+# math is pinned by the 0.7.94/97 refs; this proves the WIRING) AND != the global-MV translation (proves
+# the global warp fired, not the useWarp==0 fallback).
+fn test_inter_tile_globalwarp() {
+    var ref = it_ref_frame();                        # 64x64 gradient (x + 2y)
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    # a gentle ROTZOOM: zoom (wmmat[2]=one+2048) + rotation (wmmat[3]=1024), zero translation. one=65536.
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk_global(), &tlen);
+    assert_eq(tlen > 0, 1, "globalwarp: GLOBALMV rotzoom tile encoded");
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "globalwarp: tile decodes");
+    # direct oracle: build the SAME global model + warp-predict the 64x64 block.
+    var model = av1_warp_model_new();
+    assert_eq(av1_warp_model_from_global(model, fh, AV1_LAST_FRAME), DR_OK, "globalwarp: model built");
+    assert_eq(av1_warp_model_shear_valid(model), 1, "globalwarp: global model shear-realizable");
+    var rf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(rf, ref, 0, 0, 0, 64, 64, model), DR_OK, "globalwarp: direct warp");
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(rf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "globalwarp: decoded == direct global warp (gm_params) (4096 px)");
+    # != translation of the GLOBAL MV (the useWarp==0 fallback) -> the global warp actually fired.
+    var gmv = alloc(16);
+    av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);       # BLOCK_64X64=12, block at (0,0)
+    var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difft = 0;
+    y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(tf, 0, x, y)) { difft = difft + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(difft > 0, 1, "globalwarp: != global-MV translation (warp fired, not the fallback)");
+    return 0;
+}
+# THE GATE CONTROL (0.7.100): the SAME GLOBALMV block with a TRANSLATION global model (GmType ==
+# TRANSLATION, NOT > TRANSLATION) does NOT warp — useWarp stays 0 and the block translates by its
+# global MV. Witnesses the `GmType > TRANSLATION` conjunct of the useWarp==2 gate.
+fn test_inter_tile_globalwarp_translation() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    # TRANSLATION model: identity 2x2 (wmmat[2]=wmmat[5]=one), a translation in wmmat[0/1].
+    it_fh_set_gm(fh, AV1_GM_TRANSLATION, 8 << 13, 16 << 13, 65536, 0, 0, 65536);
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk_global(), &tlen);
+    assert_eq(tlen > 0, 1, "globalwarp-trans: TRANSLATION-GM GLOBALMV tile encoded");
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "globalwarp-trans: tile decodes");
+    # decoded == a plain translation MC of the block's global MV -> NO warp (GmType == TRANSLATION).
+    var gmv = alloc(16);
+    av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
+    var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(tf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "globalwarp-trans: decoded == global-MV translation (GmType==TRANSLATION: NO warp)");
+    return 0;
+}
+# THE ymode GATE CONTROL (0.7.100): a NEWMV block in a frame that HAS a >TRANSLATION global model must
+# still translate by its OWN decoded MV — global warp is `YMode == GLOBALMV`-gated, NOT applied to every
+# inter block. Witnesses the ymode conjunct of the useWarp==2 gate (dropping it warps this NEWMV block).
+fn test_inter_tile_globalwarp_newmv_gated() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);   # same rotzoom as above
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk(16, 8), &tlen);         # a NEWMV block, Mv (16,8)
+    assert_eq(tlen > 0, 1, "globalwarp-newmv: NEWMV tile encoded (rotzoom GM present)");
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "globalwarp-newmv: tile decodes");
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "globalwarp-newmv: NEWMV translates by its own MV (global warp is ymode-gated)");
+    return 0;
+}
+# THE shearValid FALLBACK (0.7.100 review): a GLOBALMV block whose reference has a >TRANSLATION but
+# SHEAR-UNREALIZABLE global model (setup_shear rejects it) must NOT warp — warp_valid keys off
+# AV1WM_SHEARVALID (which setup_shear sets), NOT the always-1 AV1WM_VALID. The block translates by its
+# global MV. Witnesses the `warp_valid = shear_valid` link (the GLOBALWARP analog of the LOCALWARP det==0
+# fallback): mutating it to `= av1_warp_model_valid(wm)` would warp with the leftover strong shear.
+fn test_inter_tile_globalwarp_unrealizable() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    # ROTZOOM (>TRANSLATION) but a STEEP off-diagonal: beta reduces to 32768, 7*32768 >= 65536 -> reject.
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 65536, 32767, 0 - 32767, 65536);
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    # the model IS >TRANSLATION but setup_shear rejects it -> shearValid 0 (VALID stays 1).
+    var m = av1_warp_model_new();
+    av1_warp_model_from_global(m, fh, AV1_LAST_FRAME);
+    assert_eq(av1_warp_model_valid(m), 1, "gw-unreal: VALID forced 1");
+    assert_eq(av1_warp_model_shear_valid(m), 0, "gw-unreal: steep rotzoom is NOT shear-realizable");
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk_global(), &tlen);
+    assert_eq(tlen > 0, 1, "gw-unreal: tile encoded");
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "gw-unreal: tile decodes");
+    # decoded == translation of the global MV -> NO warp (shearValid==0 fell back).
+    var gmv = alloc(16);
+    av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
+    var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(tf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "gw-unreal: decoded == global-MV translation (unrealizable shear -> NO warp)");
+    return 0;
+}
+# THE force_integer_mv GATE (0.7.100 review): a GLOBALMV block with a realizable >TRANSLATION model in a
+# force_integer_mv frame does NOT warp (spec 7.11.3.1 / dav1d gmv_warp_allowed forbid warp under
+# force_integer_mv) — it translates by its integer global MV. Witnesses the `!force_integer_mv` conjunct.
+fn test_inter_tile_globalwarp_force_int() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);   # realizable rotzoom
+    store64(fh + AV1FH_FORCE_INT_MV, 1);                                     # but force_integer_mv on
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk_global(), &tlen);
+    assert_eq(tlen > 0, 1, "gw-forceint: tile encoded");
+    var oe = alloc(8);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "gw-forceint: tile decodes");
+    var gmv = alloc(16);
+    av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
+    var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(tf, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "gw-forceint: decoded == integer global-MV translation (force_integer_mv -> NO warp)");
+    return 0;
+}
+# GLOBALWARP + inter-intra REJECT (0.7.100 review): a GLOBALMV inter-intra block whose >TRANSLATION global
+# model would warp (useWarp==2) is REJECTED (DR_ERR_UNSUPPORTED) rather than silently translation-blended
+# — warping the inter part inside the inter-intra blend is a deferred follow-on. Witnesses the
+# `is_ii && warp_valid` reject (a mutation dropping it would decode the block as a translation-blend).
+fn test_inter_tile_globalwarp_ii_rejected() {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var fh = it_fh();
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);   # would-warp GM
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_INTERINTRA, 1);
+    # a 32x32 GLOBALMV SMOOTH inter-intra block (via SPLIT) as sub-block 0; MV ignored (GLOBALMV).
+    var iiblk = it_blk_ii(0, 0, 0, 0, 0);
+    store64((iiblk + AV1FB_IB) + AV1IB_YMODE, AV1_GLOBALMV);
+    var plain = it_blk(0 - 8, 24);
+    var pp = alloc(5 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);
+    store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);
+    store64(pp + 32, AV1_PARTITION_NONE);
+    var pf = alloc(4 * 8);
+    store64(pf + 0, iiblk);
+    store64(pf + 8, plain);
+    store64(pf + 16, plain);
+    store64(pf + 24, plain);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "gw-ii: tile encoded");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_ERR_UNSUPPORTED,
+    "gw-ii: GLOBALMV inter-intra + would-warp GM is REJECTED (not silently translation-blended)");
+    return 0;
+}
 # distinct x/y filters through the lane (en_dual on, SWITCHABLE): a filt_x/filt_y
 # swap in the MC wiring changes the taps and the oracle catches it.
 fn test_inter_tile_dual_filter() {
@@ -2948,6 +3535,16 @@ fn main() {
     test_inter_tile_two_sb();
     test_inter_tile_localwarp();
     test_inter_tile_localwarp_chroma();
+    test_inter_tile_localwarp_chroma8();
+    test_inter_tile_localwarp_chroma4();
+    test_inter_tile_localwarp_edge_chroma();
+    test_globalwarp_model_build();
+    test_inter_tile_globalwarp();
+    test_inter_tile_globalwarp_translation();
+    test_inter_tile_globalwarp_newmv_gated();
+    test_inter_tile_globalwarp_unrealizable();
+    test_inter_tile_globalwarp_force_int();
+    test_inter_tile_globalwarp_ii_rejected();
     test_inter_tile_dual_filter();
     test_inter_frame_route();
     test_group("the review hardening: chroma, ref selection, clamps, windows");

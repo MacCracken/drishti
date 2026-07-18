@@ -6,6 +6,57 @@
 
 ## Version
 
+**0.7.100** — cut 2026-07-18, not yet tagged (user's git). **GLOBALWARP — the global-motion warp path
+(spec 7.11.3.1 useWarp==2).** A single-ref GLOBALMV block whose reference carries a >TRANSLATION global
+model now decodes to GLOBALLY-WARPED pixels (previously it fell through to a translation MC). Second warp
+mode after LOCALWARP (0.7.98), reusing the whole verified warp pixel path. av1_mv.cyr:
+av1_warp_model_from_global — gm_params[ref][0..5] ARE the warp matrix wmmat[0..5] (1<<16 precision, the
+layout warp_estimation produces), so NO least-squares: copy them, set AV1WM_VALID=1 (a global model has no
+estimation det — realizability rides entirely on AV1WM_SHEARVALID), run setup_shear -> globalValid.
+av1_intertile.cyr: the per-block model build (LOCALWARP-only before) gains an else branch — a
+SIMPLE-motion-mode single-ref (is_comp==0) block with YMode==GLOBALMV, GmType[ref0]>TRANSLATION,
+!force_integer_mv, !is_scaled builds the global model + warp_valid=shearValid. The EXISTING per-plane gate
+(warp_valid && nw>=8 && nh>=8) then warps with the model, else av1_mc_pred_block; block>=8x8 comes from the
+nominal nw>=8 gate. Fallback: Mv[0] IS the global MV (assign_mv/GlobalMvs), so <8x8 / shearValid==0 / scaled
+blocks translate correctly. Reconciled vs dav1d recon_tmpl.c gmv_warp_allowed (GmType>TRANSLATION &&
+!force_integer_mv && shear-valid && !is_scaled; per-block imin(bw4,bh4)>1 && GLOBALMV) — GLOBAL warp does
+NOT need allow_warped_motion (that gates LOCALWARP). Compound GLOBAL_GLOBALMV (each ref warped + blended) is
+a DEFERRED follow-on (the compound path doesn't warp yet). PROOF (tests/av1_intertile.tcyr): a ROTZOOM
+GLOBALMV block decodes == a DIRECT warp_pred_block on a model from the same gm_params (complementary oracle,
+proves WIRING) AND != the global-MV translation; a GmType==TRANSLATION control that translates; a
+NEWMV-with-rotzoom-GM control that still translates by its own MV; a warp_model_from_global KAT. MUTATIONS:
+admit-TRANSLATION reddens the trans control; widen-YMode reddens the NEWMV control; warp_valid=0 reddens the
+positive test; shearValid->VALID reddens the unrealizable control; drop-!force_integer_mv reddens the
+force-int control; drop the inter-intra reject reddens the reject test. THE REVIEW (2 dims, adversarial
+verify): 1 MAJOR — a GLOBALMV INTER-INTRA block whose global model would warp was silently translation-
+blended (the is_ii dispatch precedes the warp gate; dav1d warps the inter part THEN blends). FIXED by
+REJECTING it (is_ii && warp_valid -> DR_ERR_UNSUPPORTED; warp-blend deferred). Plus 4 coverage gaps: the
+shearValid fallback, force_integer_mv, and the KAT's wmmat[3]/[4] are now witnessed; the !is_scaled conjunct
+is UN-WITNESSABLE in the current codebase (both av1_warp_pred_block AND the translation av1_mc_pred_block
+reject a scaled ref identically -> the gate is outcome-neutral until scaled-ref MC lands) so it's kept +
+documented. LESSON: gm_params ARE wmmat (no least-squares); the global model's realizability rides on
+setup_shear's shearValid, NOT the always-1 VALID; a would-warp block that a mode can't warp (inter-intra,
+compound) must REJECT, not silently translate. 38 suites, **28,395** assertions + **1,140** fuzz, all green.
+Next: **OBMC + the temporal
+scan (needs the DPB's deferred saved MVs); compound GLOBAL_GLOBALMV warp; scaled-reference/BILINEAR MC.**
+
+**0.7.99** — cut 2026-07-18, not yet tagged (user's git). **Closed the three deferred 0.7.98 useWarp-gate
+coverage witnesses** (TEST-ONLY; shipped code unchanged, was already spec-correct). The 0.7.98 review flagged
+three gate boundaries no SB-aligned fixture could distinguish; this bite builds a nested-SPLIT harness
+(shared `itw_ctx420` 4:2:0 helper) to place small / edge-cut LOCALWARP blocks and witness each
+(tests/av1_intertile.tcyr): `chroma8` — a 16×16-luma warp block whose chroma nominal `nw==8` **warps** (kills
+F2b `(bw4*4)>>sx` → `>>(sx+1)`); `chroma4` — an 8×8-luma block whose 4×4 chroma **translates** while luma
+warps (kills the loose `nw>=4` side); `edge_chroma` — a 16×16 block bottom-cut in a 32×28 frame (chroma
+clamped 8×6, nominal `nh==8`) that still **warps the visible strip** (kills gating on the CLAMPED `w`/`h`).
+Complementary-oracle (decoded == direct `warp_pred_block`, ≠ translation); neighbour MVs kept within the
+add_sample threshold (16 for ≤16×16) so the models are genuine **num≥2** affines, not force-kept degenerates.
+MUTATION-VERIFIED: `>>(sx+1)` reddens chroma8+chroma4+edge; the clamped-gate reddens edge only; `nw>=4`
+reddens chroma4 only. 38 suites, **28,358** assertions + **1,140** fuzz, all green. LESSON: the warp-sample
+add_sample threshold is `clip3(16,112,max(bw,bh))` — for any ≤16×16 block that clamps to **16**, so a
+synthetic warp fixture needs neighbour MVs with `|Δmv| ≤ 16` (vs the block Mv) to produce VALID (non-degenerate)
+samples; larger MVs are force-kept as a single degenerate sample (valid det≠0 but often shear-unrealizable at
+8×8). Next: **GLOBALWARP (the global-motion warp path, useWarp==2 + gm_params), then OBMC + the temporal scan**.
+
 **0.7.98** — cut 2026-07-18, not yet tagged (user's git). **LOCALWARP DECODES TO PIXELS (the warp milestone).**
 A LOCALWARP inter block now decodes end-to-end to WARPED pixels: the inter tile decode builds the local warp
 model (warp_estimation 0.7.93 → setup_shear 0.7.94) and predicts each plane through av1_warp_pred_block

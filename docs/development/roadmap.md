@@ -323,14 +323,21 @@ Baseline (0.7.0): OBU layer + sequence header.
   pixels). DEFERRED to
   the conformance era: the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary
   symbol's context, un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors,
-  not on the pre-conformance decode lane; likewise the warp `LS_MAT`-clamp. DEFERRED test-coverage witnesses
-  (0.7.98 review, MINOR, code verified-correct): the 8×8-chroma-boundary useWarp gate / the 4×4-chroma
-  translation fallback (need a 16×16-/8×8-luma LOCALWARP block via a SPLIT partition) and the edge-overhang
-  nominal-vs-clamped gate (need a non-multiple-of-block frame). Next
-  **GLOBALWARP** (useWarp==2 — a GLOBALMV block with `GmType>TRANSLATION` warps with `gm_params`; currently
-  such blocks get motion_mode SIMPLE and decode as translation, a known latent gap), OBMC, the temporal scan
-  (needs the DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar the warp filter, dav1d
-  `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory `av1-decode-remaining-tracks`.
+  not on the pre-conformance decode lane; likewise the warp `LS_MAT`-clamp. The three 0.7.98-review test-coverage
+  witnesses (MINOR, code was already verified-correct) are **CLOSED in 0.7.99** via a nested-SPLIT harness: the
+  8×8-chroma-boundary useWarp gate (16×16-luma block, chroma `nw==8` warps), the 4×4-chroma translation fallback
+  (8×8-luma block, chroma `nw==4` translates), and the edge-overhang nominal-vs-clamped gate (16×16 block
+  bottom-cut in a 32×28 frame) — each mutation-verified. **GLOBALWARP 0.7.100** (useWarp==2 — a single-ref
+  GLOBALMV block whose reference carries a `GmType>TRANSLATION` global model warps with `gm_params`: the model
+  is `av1_warp_model_from_global` (gm_params ARE wmmat, so no least-squares) → `setup_shear`, reusing the same
+  per-plane useWarp gate + `av1_warp_pred_block`; gated `!force_integer_mv && !is_scaled` per dav1d
+  `gmv_warp_allowed`; the `Mv[0]==global MV` translation fallback covers useWarp==0; a GLOBALMV **inter-intra**
+  block that would warp is REJECTED, not silently translation-blended — the review caught that). Next
+  **inter-intra + GLOBALWARP warp-blend** (warp the inter part inside `av1_mc_pred_interintra`, currently
+  rejected) and **compound GLOBAL_GLOBALMV warp** (each ref warped + blended — the compound MC path doesn't warp yet), OBMC,
+  the temporal scan (needs the DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar
+  the warp filter, dav1d `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory
+  `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

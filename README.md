@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.98 (AV1 decode: LOCALWARP DECODES TO PIXELS — the warp milestone: a LOCALWARP inter block now decodes end-to-end to WARPED pixels — the inter tile decode builds the local warp model (warp_estimation → setup_shear) and predicts each plane through the warp driver, with the per-plane useWarp gate (≥8 warps, else translation) and the load-bearing det==0→translation fallback; the whole warp arc (samples→model→shear→filter→warped block) is wired; GLOBALWARP is a deferred follow-on; 8/10/12-bit, multi-tile, superres; next: GLOBALWARP (global-motion warp), then OBMC + the temporal scan)
+## Status — 0.7.100 (AV1 decode: BOTH WARP MODES DECODE TO PIXELS — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100): a LOCALWARP inter block decodes to per-block warped pixels (find_warp_samples → warp_estimation → setup_shear → warp driver), and a GLOBALMV block whose reference carries a >TRANSLATION global-motion model decodes to globally-warped pixels (gm_params → setup_shear → warp driver, spec 7.11.3.1 useWarp==2); both flow through the per-plane useWarp gate (≥8 warps, else translation) and the translation fallbacks; 0.7.99 closed the deferred useWarp-gate coverage witnesses; compound GLOBAL_GLOBALMV warp is a deferred follow-on; 8/10/12-bit, multi-tile, superres; next: OBMC, then the temporal scan)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (27,420 suite assertions + 1,140 fuzz
+derived, and adversarially tested (28,395 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

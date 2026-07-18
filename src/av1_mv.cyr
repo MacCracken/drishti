@@ -1615,6 +1615,25 @@ fn av1_setup_shear(model): i64 {
     return DR_OK;
 }
 
+# av1_warp_model_from_global — build a GLOBAL warp model (spec 7.11.3.1 useWarp==2) for the given
+# reference. The frame's gm_params[ref][0..5] ARE the warp matrix wmmat[0..5] (already at 1<<16 warp
+# precision — the same layout av1_warp_estimation produces), so a global model needs NO least-squares:
+# copy them into the model and run setup_shear. AV1WM_SHEARVALID is `globalValid`. AV1WM_VALID is set
+# to 1 (a global model has no estimation determinant — realizability is carried entirely by shearValid;
+# the caller's useWarp==2 gate keys off shearValid, not this flag). Returns setup_shear's status.
+# The caller supplies the >TRANSLATION / !is_scaled / !force_integer_mv gate (7.11.3.1).
+fn av1_warp_model_from_global(model, fh, ref): i64 {
+    if (model == 0) { return DR_ERR_BOUNDS; }
+    memset(model, 0, AV1WM_SIZE);
+    store64(model + AV1WM_VALID, 1);
+    var j = 0;
+    while (j < 6) {
+        store64(model + AV1WM_MAT + (j * 8), av1_fh_gm_param(fh, ref, j));
+        j = j + 1;
+    }
+    return av1_setup_shear(model);
+}
+
 # a module-global reusable Av1WarpModel — built lazily, overwritten per LOCALWARP block by
 # av1_warp_estimation + av1_setup_shear (single-threaded, one block at a time), so the inter
 # tile decode avoids a per-block alloc. Returns 0 on OOM.

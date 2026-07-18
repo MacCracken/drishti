@@ -806,6 +806,37 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             if (ews != DR_OK) { return av1_ierr_latch(tile, ews); }
             warp_valid = av1_warp_model_shear_valid(wm);
         }
+    } else {
+        # GLOBALWARP (useWarp==2, spec 7.11.3.1): a single-ref GLOBALMV block whose reference carries a
+        # >TRANSLATION global-motion model warps with gm_params (a block-independent shear built straight
+        # from the frame header — no find_warp_samples). !force_integer_mv + !is_scaled gate it (matches
+        # dav1d's gmv_warp_allowed). globalValid = setup_shear on the gm_params. The per-plane nw>=8 gate
+        # supplies the block>=8x8 requirement; when useWarp==0 (globalValid==0 / <8x8 / scaled) the block
+        # falls back to av1_mc_pred_block with Mv[0], which for a GLOBALMV block IS the global MV
+        # (assign_mv, GlobalMvs) — the correct translation. Compound GLOBAL_GLOBALMV warp is a
+        # deferred follow-on (roadmap.md — the compound path does not warp yet).
+        var g_ref0 = av1_ib_ref(ib, 0);
+        if ((is_comp == 0) && (av1_ib_ymode(ib) == AV1_GLOBALMV)
+        && (av1_fh_gm_type(fh, g_ref0) > AV1_GM_TRANSLATION)
+        && (av1_fh_force_integer_mv(fh) == 0)
+        && (av1_is_scaled(fh, load64(tile + AV1TILE_REFS), g_ref0) == 0)) {
+            wm = av1_warp_model_scratch();
+            if (wm == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
+            var egw = av1_warp_model_from_global(wm, fh, g_ref0);
+            if (egw != DR_OK) { return av1_ierr_latch(tile, egw); }
+            warp_valid = av1_warp_model_shear_valid(wm);
+        }
+    }
+    # GLOBALWARP + inter-intra (spec 7.11.3.1): a GLOBALMV inter-intra block whose global model would
+    # warp (useWarp==2) must warp the INTER prediction and THEN blend the intra (dav1d recon_tmpl.c
+    # warps the inter part regardless of interintra_type). av1_mc_pred_interintra only translation-MCs
+    # the inter part, so rather than silently mis-decode a valid stream we REJECT here — warping the
+    # inter part inside the interintra MC is a deferred follow-on (roadmap.md). `is_ii && warp_valid` is
+    # exact — a LOCALWARP block is
+    # never inter-intra, so warp_valid here is the GLOBALWARP flag; an IDENTITY/TRANSLATION or
+    # shear-unrealizable global model leaves warp_valid==0 and inter-intra decodes normally.
+    if ((is_ii != 0) && (warp_valid != 0)) {
+        return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
     }
     # Compound blend params (spec 7.11.3.11/14/15): SCALAR (comp_mode=0) = AVERAGE (8/8, bit-
     # identical to the plain average) or DISTANCE (compound_idx==0 -> order-hint weights); DIFFWTD

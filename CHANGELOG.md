@@ -4,6 +4,82 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.100] - 2026-07-18
+
+**GLOBALWARP — the global-motion warp path (spec 7.11.3.1 useWarp==2).** A single-ref `GLOBALMV` inter
+block whose reference carries a `>TRANSLATION` global-motion model now decodes to *globally-warped* pixels
+(previously such blocks fell through to a translation MC). This closes the second of the two warp modes
+(after LOCALWARP 0.7.98), reusing the whole verified warp pixel path.
+
+### Added
+
+- **`av1_warp_model_from_global`** (`av1_mv.cyr`): builds a global warp model for a reference — the frame's
+  `gm_params[ref][0..5]` ARE the warp matrix `wmmat[0..5]` (already at 1<<16 precision, the same layout
+  `av1_warp_estimation` produces), so **no least-squares**: copy them into the model, set `AV1WM_VALID=1`
+  (a global model has no estimation determinant — realizability is carried entirely by `AV1WM_SHEARVALID`),
+  and run `av1_setup_shear`. The result's `shearValid` is `globalValid`.
+- **The GLOBALWARP dispatch** (`av1_intertile.cyr`): the per-block warp-model build (previously LOCALWARP
+  only) gains a branch for a SIMPLE-motion-mode single-ref (`is_comp==0`) block with `YMode==GLOBALMV`,
+  `GmType[ref0] > TRANSLATION`, `!force_integer_mv`, and `!is_scaled` — it builds the global model and sets
+  `warp_valid = shearValid`. The **existing** per-plane dispatch then warps with the model iff
+  `warp_valid && nw>=8 && nh>=8` (the nominal-plane gate supplies the block≥8×8 requirement), else the
+  existing `av1_mc_pred_block` translation. For a GLOBALMV block `Mv[0]` IS the global MV (`assign_mv` →
+  `GlobalMvs`), so the useWarp==0 fallback (block<8×8 / `shearValid==0` / scaled) translates correctly.
+- **Reconciled** against spec 7.11.3.1 + cached dav1d `recon_tmpl.c` (`gmv_warp_allowed[ref]` = `GmType >
+  TRANSLATION && !force_integer_mv && shear-valid && !is_scaled`; the per-block `imin(bw4,bh4)>1 &&
+  inter_mode==GLOBALMV`). GLOBAL warp does NOT require `allow_warped_motion` (that gates LOCALWARP).
+
+- **Inter-intra + GLOBALWARP is REJECTED, not mis-decoded** (`av1_intertile.cyr`): a GLOBALMV inter-intra
+  block whose global model would warp (`is_ii && warp_valid`) is refused with `DR_ERR_UNSUPPORTED` — dav1d
+  warps the inter prediction *then* blends the intra, but `av1_mc_pred_interintra` only translation-blends,
+  so decoding it would silently emit wrong pixels. Warping the inter part inside the inter-intra blend is a
+  deferred follow-on. (Found by the adversarial review as a genuine mis-decode; `is_ii && warp_valid` is
+  exact — a LOCALWARP block is never inter-intra.)
+
+Two follow-ons are **deferred**: compound **`GLOBAL_GLOBALMV`** (each ref warped through its own global
+model, then blended — the compound MC path does not warp yet) and **inter-intra + GLOBALWARP** warp-blend
+(rejected above). The **`!is_scaled` conjunct is currently un-witnessable** — both `av1_warp_pred_block` and
+the translation `av1_mc_pred_block` reject a scaled reference identically (scaled-reference MC is a separate
+deferred track), so the gate is outcome-neutral until that lands; it matches dav1d/spec and is kept.
+
+**Proofs** (`tests/av1_intertile.tcyr`): a ROTZOOM `GLOBALMV` block decodes **== a direct
+`av1_warp_pred_block` on a model from the same gm_params** (complementary-oracle: the warp math is pinned
+by the 0.7.94/97 refs, so this proves the WIRING) and **≠ the global-MV translation** (the warp fired, not
+the fallback); a `GmType==TRANSLATION` control that **translates** (no warp); a `NEWMV`-with-rotzoom-GM
+control that **still translates by its own MV** (global warp is `YMode==GLOBALMV`-gated); a
+`GmType==ROTZOOM`-but-shear-**unrealizable** control that **translates** (the `warp_valid=shearValid`
+fallback — the GLOBALWARP analog of the LOCALWARP `det==0` fallback); a **`force_integer_mv`** control that
+translates; a **GLOBALMV inter-intra** block that is **rejected**; and a KAT for `av1_warp_model_from_global`
+(all six `wmmat` slots). **Mutation-verified** (each reddens exactly its witness): admit-`TRANSLATION` →
+the TRANSLATION control; widen-`YMode` → the NEWMV control; `warp_valid=0` → the positive test; `shearValid
+→ VALID` → the unrealizable control; drop `!force_integer_mv` → the force-int control; drop the inter-intra
+reject → the reject test.
+
+## [0.7.99] - 2026-07-18
+
+**Closed the three deferred 0.7.98 useWarp-gate coverage witnesses** (test-only — the shipped code is
+unchanged and was already spec-correct). The 0.7.98 review flagged that the per-plane useWarp gate
+(`av1_intertile.cyr`, spec 7.11.3.1) had two boundaries and one nominal-vs-clamped choice that no test could
+distinguish; all three needed small (16×16/8×8) or edge-cut LOCALWARP blocks, which the SB-aligned 0.7.98
+fixtures could not place. This bite builds a nested-SPLIT harness for them.
+
+### Added
+
+- **Three nested-SPLIT LOCALWARP witnesses** (`tests/av1_intertile.tcyr`, shared `itw_ctx420` 4:2:0 helper):
+  - `test_inter_tile_localwarp_chroma8` — a 16×16-luma warp block (chroma nominal `nw==8` **exactly**) whose
+    8×8 chroma **warps**; kills the review's F2b survivor `nw = (bw4*4) >> sx` → `>> (sx+1)` (which folds
+    chroma `nw` to 4 → translation).
+  - `test_inter_tile_localwarp_chroma4` — an 8×8-luma warp block (chroma `nw==4 < 8`) whose 4×4 chroma
+    **translates** while luma warps; kills the loose side (`nw >= 4` / drop-the-gate would warp the 4×4).
+  - `test_inter_tile_localwarp_edge_chroma` — a 16×16 warp block bottom-cut in a 32×28 frame (chroma clamped
+    to 8×6, nominal `nh==8`) that still **warps the visible strip**; kills gating on the edge-CLAMPED `w`/`h`
+    instead of the NOMINAL `nw`/`nh`.
+- Each uses the complementary-oracle pattern (decoded plane == a direct `warp_pred_block` on the post-decode
+  samples, ≠ translation MC). Neighbour MVs are kept within the warp-sample threshold (16 for a ≤16×16 block,
+  `av1_mv.cyr` add_sample) so the models are **genuine multi-sample affines** (num≥2), not the force-kept
+  single-sample degenerate case. **Mutation-verified**: `>>(sx+1)` reddens chroma8+chroma4+edge; the
+  clamped-`w`/`h` gate reddens edge only; `nw>=4` reddens chroma4 only.
+
 ## [0.7.98] - 2026-07-18
 
 **LOCALWARP DECODES TO PIXELS — the warp milestone.** A LOCALWARP inter block now decodes end-to-end to
