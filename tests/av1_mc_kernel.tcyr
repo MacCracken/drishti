@@ -56,10 +56,59 @@ fn test_put_8tap() {
     return 0;
 }
 
+# ---- av1_warp_affine_8x8 (7.11.3.5) vs scripts/refs/warp_affine_ref.py ----
+# a deterministic 15x15 padded source grid (matches the ref port's make_grid); the 8x8
+# output block's top-left source sample is grid[3][3] (soff = 3*15 + 3).
+fn warp_grid(bd, salt): i64 {
+    var g = alloc(225 * 8);
+    var r = 0;
+    while (r < 15) {
+        var c = 0;
+        while (c < 15) {
+            var v = 0;
+            if (bd == 8) { v = ((((r * 13) + (c * 7)) + salt) % 251) + 3; }
+            else { v = ((((r * 137) + (c * 91)) + salt) % 4093) + 1; }
+            store64(g + (((r * 15) + c) * 8), v);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return g;
+}
+fn warp_case(bd, salt, a, b, gm, dl, mx, my, cs, p00, p33, p77, tag): i64 {
+    var g = warp_grid(bd, salt);
+    var out = alloc(64 * 8);
+    assert_eq(av1_warp_affine_8x8(out, 0, 8, g, (3 * 15) + 3, 15, a, b, gm, dl, mx, my, bd),
+    DR_OK, tag);
+    assert_eq(mc_checksum(out, 64), cs, tag);
+    assert_eq(load64(out + (0 * 8)), p00, tag);
+    assert_eq(load64(out + (((3 * 8) + 3) * 8)), p33, tag);
+    assert_eq(load64(out + (((7 * 8) + 7) * 8)), p77, tag);
+    return 0;
+}
+fn test_warp_affine_8x8() {
+    # K1: zero shear + zero phase -> offs 64 both passes (filter [0,0,0,127,1,0,0,0]).
+    warp_case(8, 0, 0, 0, 0, 0, 0, 0, 313936, 63, 123, 203, "warp K1 identity (offs=64)");
+    # K2: a shear that varies offs across the block.
+    warp_case(8, 0, 2048, 1024, 1024, 2048, 0, 0, 323569, 64, 126, 216, "warp K2 shear");
+    # K3: negative mx/my -> the offs Round2 goes negative (witnesses the ARITHMETIC shift).
+    warp_case(8, 5, 2048, 1024, 1024, 2048, 300, 0 - 300, 333815, 69, 131, 215,
+    "warp K3 neg phase (arith-shift offs)");
+    # K4: 12-bit -> ib=2, so the rounds are 5 / 9 (7-ib / 7+ib), not 3 / 11.
+    warp_case(12, 9, 1024, 512, 512, 1024, 200, 0 - 150, 3554165, 698, 1393, 2328,
+    "warp K4 12-bit (ib=2)");
+    # K5: large NEGATIVE shear -> tmx down to ~-36540, offs down to 28 (strong arith-shift).
+    warp_case(8, 3, 0 - 3072, 0 - 1024, 0 - 1024, 0 - 3072, 0 - 700, 500, 308118, 66, 122, 197,
+    "warp K5 big neg shear");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("put_8tap motion-compensation kernel (7.11.3.2)");
     test_put_8tap();
+    test_group("warp_affine_8x8 kernel (7.11.3.5)");
+    test_warp_affine_8x8();
     return assert_summary();
 }
 

@@ -6,7 +6,35 @@
 
 ## Version
 
-**0.7.95** — cut 2026-07-17, not yet tagged (user's git). **WARP FILTER TABLE.** The Warped_Filters[193][8]
+**0.7.96** — cut 2026-07-17, not yet tagged (user's git). **BLOCK WARP KERNEL.** The per-8x8 warp
+motion-compensation kernel (spec 7.11.3.5) — a two-pass separable filter applying the warp model's shear
+params (0.7.94) through the Warped_Filters table (0.7.95) to produce warped reference pixels. The pixel stage
+of the warp arc; the model→shear→filter→warp-pixels chain is complete bar the block-level driver. Verified
+STANDALONE like put_8tap (0.7.58), NOT yet wired. av1_mc.cyr: av1_warp_affine_8x8(dst,doff,dstride, src,soff,
+sstride, alpha,beta,gamma,delta, mx,my, bit_depth) — H pass: 15 rows x 8 cols into a signed `mid`, phase
+mx+beta*r stepping +alpha per col, offs=64+av1_round2(tmx,10) (ARITHMETIC — tmx may go negative), the 8-tap
+dot rounded av1_round2(.,7-ib); V pass: 8x8, phase my+delta*r stepping +gamma per col, dot over mid rows
+r..r+7, dr_clip1(av1_round2(.,7+ib)). ib=4 (8/10-bit) / 2 (12-bit). Reuses av1_mc_8tap + av1_warp_filter_row
+(0.7.95) + av1_round2 + dr_clip1 + the put_8tap mid scratch. Reconciled vs spec + the CACHED dav1d
+warp_affine_8x8_c (authoritative) + libaom; oracle scripts/refs/warp_affine_ref.py ported from the dav1d
+kernel. 0.7.96 LESSON / THE TRAP: the warp table is SPEC-LITERAL (rows sum to 128), so the rounds are the FULL
+7±ib — NOT put_8tap's 6±ib (whose subpel table is HALVED to sum 64). Copying put_8tap's shift corrupts every
+warped pixel; this is the single easiest transcription bug and it's why the reconciliation pinned it. THE
+PROOF (tests/av1_mc_kernel.tcyr): 5 KATs vs the ref port — zero-shear identity (offs 64 → filter
+[0,0,0,127,1,0,0,0]), a varying-offs shear, a NEGATIVE-phase case (offs Round2 goes negative → witnesses the
+arithmetic shift), a 12-bit case (ib=2 → 5/9 rounds), a big-negative-shear case (offs down to 28). MUTATIONS,
+11 killed: the 7±ib rounds, the arithmetic-shift offs (a logical shift both reds K4 AND OOB-crashes on the
+negative-tmx K5), the per-row/per-col alpha/beta/gamma/delta step assignment, the signed mid, the -3/+3 tap
+offsets, the offs centre (64), the 12-bit ib. THE REVIEW (2 dims, worktree-isolated, patch-applied, verified):
+fixed-point (vs cached dav1d) + memory-safety CLEAN, no confirmed findings; the one raised concern (unchecked
+offs into the 193-row table) REFUTED — the kernel deliberately trusts the driver's warpValid gate to keep
+offs∈[0,192], exactly as it trusts the emu_edge gather for source coords and as put_8tap does (contract
+correct + documented; enforcing the bound is the driver's job). Next: **the warp DRIVER (7.11.3.5 setup) —
+the mx/my/dx/dy derivation from wmmat, the per-8x8 sub-block loop, the emu_edge gather, and the LOCALWARP
+un-gate — which finally makes warped inter blocks decode to pixels; then OBMC + the temporal scan**. **Prior:
+WARP FILTER TABLE (0.7.95).**
+
+**0.7.95** — **WARP FILTER TABLE.** The Warped_Filters[193][8]
 interpolation table (spec 7.11.3.5) — the signed 8-tap filter, indexed by the 1/64 sub-pixel warp offset
 offs∈[0,192], that the warp block-predict (next bite) applies. Table-only bite (like Subpel_Filters 0.7.57),
 NOT yet consumed. av1_mc.cyr: av1_warp_filter_tbl (lazy 193*8 i64 blob, 193 av1_wfill8 rows) +

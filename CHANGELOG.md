@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.96] - 2026-07-17
+
+**BLOCK WARP KERNEL.** The per-8×8 warp motion-compensation kernel (spec 7.11.3.5) — a two-pass separable
+filter that applies the local warp model's shear params (0.7.94) through the Warped_Filters table (0.7.95) to
+produce warped reference pixels. This is the pixel stage of the warp arc; the model → shear → filter → **warp
+pixels** chain is now complete bar the block-level driver. Verified standalone, like `put_8tap` (0.7.58).
+
+### Added
+
+- **`av1_warp_affine_8x8`** in `av1_mc.cyr`: horizontal pass — 15 rows × 8 cols into a signed `mid` buffer,
+  phase `mx + beta·r` stepping `+alpha` per column, `offs = 64 + Round2(tmx, 10)` (arithmetic), the 8-tap
+  Warped_Filters dot rounded `Round2(·, 7−ib)`; vertical pass — 8×8, phase `my + delta·r` stepping `+gamma`
+  per column, dot over mid rows `r..r+7`, `Clip1(Round2(·, 7+ib))`. `ib` = 4 (8/10-bit) or 2 (12-bit).
+  Reuses `av1_mc_8tap`, `av1_warp_filter_row`, `av1_round2`, `dr_clip1`, and the put_8tap `mid` scratch.
+  **Reconciled** against the spec + the **cached dav1d `warp_affine_8x8_c`** (authoritative) + libaom; the
+  oracle `scripts/refs/warp_affine_ref.py` is ported directly from the dav1d kernel.
+
+The single easiest transcription trap here — and the one the reconciliation pinned — is the round shift:
+the warp table is **spec-literal (rows sum to 128)**, so the rounds are the **full `7±ib`**, NOT put_8tap's
+`6±ib` (whose subpel table is halved to sum 64). Copying put_8tap's shift would corrupt every warped pixel.
+
+**Proofs** (`tests/av1_mc_kernel.tcyr`): 5 KAT cases vs the ref port — zero-shear identity (offs 64 → filter
+`[0,0,0,127,1,0,0,0]`), a varying-offs shear, a **negative-phase** case (the offs `Round2` goes negative,
+witnessing the arithmetic shift), a **12-bit** case (ib=2 → 5/9 rounds), and a large-negative-shear case
+(offs down to 28). **Mutation-verified — 11 mutations killed**: the `7±ib` rounds (the put_8tap-copy trap),
+the arithmetic-shift `offs` (a logical shift both reds and OOB-crashes on the negative-tmx case), the
+per-row/per-col `alpha/beta/gamma/delta` step assignment, the signed `mid`, the `−3`/`+3` tap offsets, the
+offs centre (64), and the 12-bit `ib`.
+
+**The adversarial review (2 dimensions, worktree-isolated, patch-applied, every finding verified):** the
+fixed-point math (vs the cached dav1d kernel) and the memory-safety (read/write ranges, the mid-scratch
+reuse, OOM) are CLEAN — no confirmed findings. The one raised concern (the unchecked `offs` into the 193-row
+table) was REFUTED: the kernel deliberately trusts the driver's `warpValid` gate to keep `offs ∈ [0,192]`,
+exactly as it trusts the emu_edge gather for source coords and as `put_8tap` does — the contract is correct
+and documented; enforcing the bound is the driver's job (next bite).
+
 ## [0.7.95] - 2026-07-17
 
 **WARP FILTER TABLE.** The `Warped_Filters[193][8]` interpolation table (spec 7.11.3.5) — the 8-tap filter,
