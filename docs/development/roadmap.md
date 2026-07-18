@@ -297,14 +297,18 @@ Baseline (0.7.0): OBU layer + sequence header.
   INTRA prediction through a WEDGE mask from the compound codebook 7.11.3.11, built on LUMA at the nominal
   size with `wedge_sign` forced 0 and chroma SUBSAMPLING the luma mask (unlike smooth's per-plane regen);
   reuses the verified codebook + the final-precision blend — **closes the masked-interintra family, every
-  AV1 interintra mode now decodes**). DEFERRED to the conformance era:
-  the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary symbol's context,
-  un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors, not on the
-  pre-conformance decode lane. Next
-  `warp_estimation` (7.11.3.8) turning the
-  samples into a model, OBMC, the temporal scan (needs the
-  DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free, dav1d
-  `mc_tmpl.c` / `decode.c` references in hand). See memory `av1-decode-remaining-tracks`.
+  AV1 interintra mode now decodes**), and **WARP ESTIMATION 0.7.93** (`av1_warp_estimation` 7.11.3.8 +
+  `av1_resolve_divisor` 7.11.3.7 + the lazy `Div_Lut[257]` — the least-squares solve turning the
+  find_warp_samples CandList into a 6-param affine LocalWarpParams + LocalValid; a pure derivation like
+  setup_global_mv, NOT yet wired to pixels — LOCALWARP stays gated until warp MC; the libaom LS_MAT
+  accumulator clamp + the shear-realizability rejection are DEFERRED as un-witnessable here). DEFERRED to
+  the conformance era: the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary
+  symbol's context, un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors,
+  not on the pre-conformance decode lane; likewise the warp LS_MAT-clamp / shear-realizability checks. Next
+  **warp MC** (7.11.3.5 — the `dav1d_mc_warp_filter[193][8]` table + shear setup 7.11.3.6, turning the
+  0.7.93 model into pixels), OBMC, the temporal scan (needs the
+  DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar the warp filter, dav1d
+  `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.
 - **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from

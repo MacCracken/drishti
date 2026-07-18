@@ -22,7 +22,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.92 (AV1 decode: WEDGE INTER-INTRA PREDICTION — the second interintra variant completes the masked-interintra family: a single-ref inter block blends its inter MC with an INTRA prediction (the keyframe intra predictor invoked from the inter path) through a WEDGE mask from the compound codebook (chroma subsamples the luma mask); every interintra mode now decodes; the inter milestone stands: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: OBMC/warp + the temporal scan)
+## Status — 0.7.93 (AV1 decode: WARP ESTIMATION — the least-squares solve (7.11.3.8) that turns the find_warp_samples candidate list into a local warp model (the 6-param affine + valid flag), plus its resolve_divisor + Div_Lut reciprocal primitive; a pure derivation like setup_global_mv, not yet wired to the pixel path — LOCALWARP stays gated until warp-MC; the masked-interintra family and the inter milestone stand: a genuine inter frame decodes end-to-end from raw bytes; 8/10/12-bit, multi-tile, superres; next: warp MC (the warp-filter table) + OBMC + the temporal scan)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (27,420 suite assertions + 1,140 fuzz

@@ -6,7 +6,42 @@
 
 ## Version
 
-**0.7.92** — cut 2026-07-17, not yet tagged (user's git). **WEDGE INTER-INTRA PREDICTION.** The second (and
+**0.7.93** — cut 2026-07-17, not yet tagged (user's git). **WARP ESTIMATION (local warp model).** The
+least-squares solve (spec 7.11.3.8) turning the find_warp_samples CandList into a 6-param affine
+LocalWarpParams[0..5] + LocalValid — the direct consumer of the 0.7.79 warp-sample leaves, and the first
+half of the warp arc. Like setup_global_mv it is a pure DERIVATION (no bitstream symbol → no encoder
+inverse) and NOT yet wired to pixels (LOCALWARP motion stays gated in av1_intertile until the warp-MC bite
+that needs the warp-filter table). av1_mv.cyr adds: av1_div_lut_tbl (the lazy 257-entry Div_Lut[i]=round(2^22/
+(256+i)); anchors [0]=16384=2^14, [256]=8192=2^13, exact — no tie ever occurs) + av1_resolve_divisor (7.11.3.7:
+n=FloorLog2(|D|), f=(n>8)?Round2(e,n-8):e<<(8-n), divShift=n+14, divFactor=±Div_Lut[f], f∈[0,256] guarded);
+the LS macros av1_ls_square/product1/product2 (Tikhonov +1, exact >>2 — arithmetic >>> on the SIGNED product
+numerators); av1_warp_mult_clip (Round2Signed(v*divFactor, divShift) then a diag/nondiag Clip3 window); and
+av1_warp_estimation (accumulate symmetric 2x2 A + Bx/By over samples with the LS_MV_MAX per-sample guard →
+det==0 is the SOLE LocalValid=0 exit → Cramer solve scaled by resolve_divisor → diag clamp near 1<<16 /
+nondiag near 0 → translation wmmat[0..1] anchored at the block center, ±2^23 clamp). CandList is ALREADY
+1/8-pel (add_sample) so NO extra *8. Av1WarpModel record (av1_warp_model_new/_valid/_param). 4-source
+reconciled (spec+libaom+dav1d+focused-divisor → adjudication; scripts/refs/warp_estimation_ref.py the
+spec-literal oracle). DEFERRED (un-witnessable by a self-consistent test → conformance-vector bite,
+roadmap "warp"): the libaom LS_MAT_MIN/MAX accumulator clamp (existence+bounds unverified) and the
+shear-realizability rejection (get_shear_params ~7.11.3.6, a SEPARATE post-process). THE PROOF
+(tests/av1_mv.tcyr): Div_Lut via 9 anchored spot values + a full 257-entry sum/position-weighted-checksum
+digest (defeats the circular per-entry accessor test); resolve_divisor over 2^n±1 boundaries (witnessing
+f=0, f=256, negative D); 13 warp KATs vs the ref port — identity/translation, a clean 4-distinct-param
+affine, the LS_MV_MAX guard (BOTH horizontal and vertical conjuncts), all four clamp bounds (diag
+57345/73727, nondiag ±8191), the divShift<0 rescale branch (det=1 single sample), the ±2^23 translation
+clamp, a single-sample + a small negative-product case, det==0→invalid. MUTATIONS, 16 killed (Div_Lut
+rounding / resolve shift+branch / every LS macro / Cramer products / both clamp bounds / guard / translation
+anchor / invalidation / signed rounding); the lone survivor is a PROVABLY-EQUIVALENT >-vs->= at the n=8
+divisor branch (e<<0 == Round2(e,0) == e). 0.7.93 LESSON: symmetric 4-sample vectors MASKED the
+arithmetic-shift + signed-rounding bugs via an i64-overflow coincidence (two ~4.6e18 logical-shift terms
+summed just past i64-max and wrapped back to the correct value) — a SINGLE-sample and a small 2-sample case
+witness them cleanly. THE REVIEW (3 dims, worktree-isolated, patch-applied, every finding verified): math +
+memory-safety CLEAN; three MINOR test-coverage gaps found + closed (divShift<0 branch, the vertical guard
+conjunct, the translation-clamp bound MAGNITUDE — all with the shipped code confirmed spec-correct; new
+K/CV/TC KATs now fail red under the matching mutation). Next: **warp MC (the warp-filter table) + OBMC + the
+temporal scan**. **Prior: WEDGE INTER-INTRA (0.7.92).**
+
+**0.7.92** — **WEDGE INTER-INTRA PREDICTION.** The second (and
 final) interintra variant: a single-ref inter block with the interintra flag AND wedge_interintra==1 blends
 its inter MC with an INTRA prediction through a WEDGE mask from the compound codebook (0.7.90) rather than a
 smooth mask (0.7.91) — completing the masked-interintra family (every AV1 interintra mode now decodes). Small

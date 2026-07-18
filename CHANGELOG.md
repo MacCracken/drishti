@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.93] - 2026-07-17
+
+**WARP ESTIMATION (local warp model).** The least-squares solve (spec 7.11.3.8) that turns the
+`find_warp_samples` candidate list into a LOCAL warp model — the 6-parameter affine `LocalWarpParams[0..5]`
+plus a `LocalValid` flag — for a LOCALWARP-motion inter block. This is the direct consumer of the warp-sample
+leaves landed at 0.7.79, and the first half of the warp arc. Like `setup_global_mv`, it is a pure
+DERIVATION (no bitstream symbol → no encoder inverse) and is not yet wired to the pixel path; LOCALWARP
+motion stays gated until the warp-MC bite (which needs the warp-filter table). The bite also lands the
+`resolve_divisor` (7.11.3.7) reciprocal primitive + the lazy `Div_Lut[257]` table it needs.
+
+### Added
+
+- **`av1_div_lut_tbl` + `av1_resolve_divisor`** (spec 7.11.3.7) in `av1_mv.cyr`: the 257-entry rounded-
+  reciprocal `Div_Lut[i] = round(2^22 / (256+i))` (lazily generated — anchored on `Div_Lut[0]=16384=2^14`
+  and `Div_Lut[256]=8192=2^13`, exact because no tie ever occurs), and `resolve_divisor(D)` returning
+  `(divShift = FloorLog2(|D|)+14, divFactor = ±Div_Lut[f])` with `f ∈ [0,256]` bounds-guarded.
+- **`av1_warp_estimation`** (spec 7.11.3.8): accumulates the symmetric 2×2 `A` matrix + `Bx`/`By` vectors
+  over the samples (the `LS_SQUARE`/`LS_PRODUCT1`/`LS_PRODUCT2` Tikhonov-regularized macros — arithmetic
+  `>>>` on the signed product numerators), rejects per-sample motion outliers via the `LS_MV_MAX` guard,
+  and — when the determinant is non-zero (the sole `LocalValid=0` exit) — solves the 2×2 by Cramer scaled
+  through `resolve_divisor`, clamping the diagonal params near `1<<16` and the off-diagonal near 0, then
+  derives the translation `wmmat[0..1]` (anchored at the block center, `±2^23`-clamped). The CandList is
+  already 1/8-pel, so no extra scaling is applied. **4-source reconciled** (spec + libaom + dav1d + a
+  focused divisor pass → adjudication); the spec-literal oracle is `scripts/refs/warp_estimation_ref.py`.
+- **`Av1WarpModel`** record (`av1_warp_model_new`/`_valid`/`_param`) carrying the valid flag + `wmmat[0..5]`.
+
+**Deferred** (NOT implemented — un-witnessable by a self-consistent test, so deferred to a conformance-vector
+bite per the project discipline, roadmap "warp"): the libaom `LS_MAT_MIN/MAX` accumulator clamp (existence
++ exact bounds unverified across sources) and the shear-realizability rejection (`get_shear_params`, a
+SEPARATE process ~7.11.3.6 run AFTER estimation).
+
+**Proofs** (`tests/av1_mv.tcyr`): `Div_Lut` pinned by 9 anchored spot values + a full 257-entry
+sum/position-weighted-checksum digest (defeats a circular per-entry accessor test); `resolve_divisor`
+driven over `2^n−1 / 2^n / 2^n+1` boundaries (witnessing `f=0`, `f=256`, and a negative `D`); and 13
+`warp_estimation` KATs vs the ref port — identity/translation, a clean 4-distinct-param affine, the
+`LS_MV_MAX` guard (both the horizontal AND vertical conjuncts), all four clamp bounds (diag 57345/73727,
+non-diag ±8191), the `divShift<0` rescale branch (a `det=1` single sample), the ±2^23 translation clamp,
+a single-sample and a small negative-product case (which cleanly witness the arithmetic shift + the signed
+rounding), and `det==0 → invalid`. **Mutation-verified — 16 mutations killed** across the Div_Lut rounding,
+the resolve_divisor shift/branch, every LS macro, the Cramer products, both clamp bounds, the guard, the
+translation anchor, the invalidation, and the signed rounding; the lone survivor is a provably-equivalent
+`>`-vs-`>=` at the `n=8` divisor branch (`e<<0 == Round2(e,0) == e`). A pitfall the mutation loop caught:
+symmetric 4-sample vectors masked the arithmetic-shift + signed-rounding bugs via an i64-overflow
+coincidence — added a single-sample + a small 2-sample case that witness them cleanly.
+
+**The adversarial review (3 dimensions, worktree-isolated, patch-applied, every finding verified):** the
+fixed-point math + memory-safety CLEAN — no correctness or bounds findings. Three MINOR test-coverage gaps
+found + closed (all with the shipped code confirmed spec-correct): the `divShift<0` branch, the `LS_MV_MAX`
+vertical conjunct, and the translation-clamp bound MAGNITUDE were each un-witnessed by the original KATs;
+new KATs (K/CV/TC) now fail red under the corresponding mutation.
+
 ## [0.7.92] - 2026-07-17
 
 **WEDGE INTER-INTRA PREDICTION.** The second (and final) interintra variant: a single-reference inter block
