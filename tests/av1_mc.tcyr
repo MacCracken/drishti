@@ -84,12 +84,85 @@ fn test_subpel_checksum() {
     return 0;
 }
 
+# ---- Warped_Filters[193][8] (7.11.3.5) — anchored to dav1d via warp_filter_ref.py ----
+fn test_warp_filter_invariants() {
+    # every one of the 193 rows sums to exactly 128 (FILTER_BITS=7). A transpose fails this.
+    var badsum = 0;
+    var i = 0;
+    while (i < 193) {
+        var s = 0;
+        var k = 0;
+        while (k < 8) {
+            s = s + av1_warp_filter(i, k);
+            k = k + 1;
+        }
+        if (s != 128) { badsum = badsum + 1; }
+        i = i + 1;
+    }
+    assert_eq(badsum, 0, "warp filter: every one of 193 rows sums to 128");
+    # reversal symmetry: row[i] == reverse(row[192-i]) for i=1..191 (NOT i=0 — 192 is a dup).
+    var badsym = 0;
+    i = 1;
+    while (i < 192) {
+        var k2 = 0;
+        while (k2 < 8) {
+            if (av1_warp_filter(i, k2) != av1_warp_filter(192 - i, 7 - k2)) { badsym = badsym + 1; }
+            k2 = k2 + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(badsym, 0, "warp filter: reversal symmetry row[i]==reverse(row[192-i]) (i=1..191)");
+    # row 192 duplicates row 191 (guard-tail sentinel, NOT the mirror of row 0).
+    var baddup = 0;
+    var k3 = 0;
+    while (k3 < 8) {
+        if (av1_warp_filter(192, k3) != av1_warp_filter(191, k3)) { baddup = baddup + 1; }
+        k3 = k3 + 1;
+    }
+    assert_eq(baddup, 0, "warp filter: row 192 == row 191 (sentinel dup)");
+    # anchor rows — KNOWN values from scripts/refs/warp_filter_ref.py (independent oracle).
+    assert_eq(av1_warp_filter(0, 2), 127, "warp[0][2]=127 (region A start)");
+    assert_eq(av1_warp_filter(32, 1), 0 - 18, "warp[32][1]=-18");
+    assert_eq(av1_warp_filter(32, 2), 78, "warp[32][2]=78 (region A half-pel)");
+    assert_eq(av1_warp_filter(64, 3), 127, "warp[64][3]=127 (zero-frac — a real filter, not identity)");
+    assert_eq(av1_warp_filter(96, 0), 0 - 2, "warp[96][0]=-2");
+    assert_eq(av1_warp_filter(96, 3), 79, "warp[96][3]=79 (central half-pel, palindromic)");
+    assert_eq(av1_warp_filter(128, 4), 127, "warp[128][4]=127 (region C start)");
+    assert_eq(av1_warp_filter(160, 4), 78, "warp[160][4]=78 (=row 32 shifted right 2)");
+    assert_eq(av1_warp_filter(191, 5), 127, "warp[191][5]=127 (last real row)");
+    # cross-check the accessor formula against the RAW blob (absolute byte offset, not via
+    # the same accessor that could hide a consistent index bug).
+    assert_eq(load64(av1_warp_filter_tbl() + (((96 * 8) + 3) * 8)), 79, "warp raw[96][3]=79 (absolute)");
+    assert_eq(av1_warp_filter_row(96) + (3 * 8), av1_warp_filter_tbl() + (((96 * 8) + 3) * 8),
+    "warp_filter_row aligns with the accessor offset");
+    return 0;
+}
+fn test_warp_filter_checksum() {
+    # position-weighted checksum over all 1544 coeffs (tap order pinned) vs warp_filter_ref.py;
+    # a single wrong coefficient changes it. The ref port asserts the dav1d MD5 that anchors it.
+    var ck = 0;
+    var i = 0;
+    while (i < 193) {
+        var k = 0;
+        while (k < 8) {
+            ck = ck + ((((i * 8) + k) + 1) * av1_warp_filter(i, k));
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(ck, 19083838, "warp filter full position-weighted checksum (vs warp_filter_ref.py)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("sub-pel filter table invariants (7.11.3.2)");
     test_subpel_invariants();
     test_group("sub-pel filter position checksum");
     test_subpel_checksum();
+    test_group("warp filter table (7.11.3.5) — invariants + anchors + digest");
+    test_warp_filter_invariants();
+    test_warp_filter_checksum();
     return assert_summary();
 }
 

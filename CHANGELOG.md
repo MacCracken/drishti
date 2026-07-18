@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.95] - 2026-07-17
+
+**WARP FILTER TABLE.** The `Warped_Filters[193][8]` interpolation table (spec 7.11.3.5) — the 8-tap filter,
+indexed by the 1/64 sub-pixel warp offset, that the warp block-predict (next bite) applies to turn the
+0.7.93/0.7.94 model+shear into pixels. A table-only bite, like the Subpel_Filters landing (0.7.57).
+
+### Added
+
+- **`av1_warp_filter_tbl` / `av1_warp_filter(offs, tap)` / `av1_warp_filter_row(offs)`** in `av1_mc.cyr`: a
+  lazily-built 193×8 blob of the signed 8-tap warp filter, plus the `WARPEDPIXEL_PREC_SHIFTS`(=64) /
+  `WARPEDDIFF_PREC_BITS`(=10) constants the coming offset map needs. dav1d stores this table **spec-literal**
+  (positive centre, every row sums to +128 = `1<<FILTER_BITS`) — UNLIKE its negated resize / halved subpel
+  neighbours in the same file, a convention trap that's called out inline.
+- **The oracle** `scripts/refs/warp_filter_ref.py`: the table transcribed **deterministically** from a
+  re-fetched dav1d `src/tables.c` and **anchored by its MD5** `c764ff07aecee5aba2348072f285059b`.
+
+The 1544 signed values were **machine-generated** from the MD5-verified dav1d source (never hand-typed — the
+`- N` minus-space quirk in dav1d's C silently corrupts ~17 rows under a naive tokenizer, so a deterministic
+parser gated on the digest is the only safe path). A web-enabled multi-source pass first established that the
+table is a **raw constant with no generation formula** (so it must be transcribed, not generated) and
+re-fetched + independently re-parsed the dav1d source to reproduce the exact MD5.
+
+**Proofs** (`tests/av1_mc.tcyr`): every one of the 193 rows sums to 128 (catches a transpose); the reversal
+symmetry `row[i] == reverse(row[192−i])` for i=1..191 with `row[192] == row[191]` (the guard-tail sentinel);
+anchor spot values at pinned `[row][tap]` offsets vs the ref port (incl. a raw-blob absolute-offset read that
+can't hide a consistent accessor bug); and a full position-weighted checksum (19083838) over all 1544 coeffs.
+**Mutation-verified**: a single-coefficient change AND a row-sum-preserving within-row swap both go red.
+
+**The adversarial review (worktree-isolated, patch-applied):** the accessor/storage offsets, the exact alloc
+size (12352 bytes), the OOM handling, the constants for the coming block_warp, the absence of symbol
+shadowing, and the ref-port MD5 anchor all CLEAN — no defects (the reviewer's own accessor mutation confirmed
+the tests are non-circular).
+
 ## [0.7.94] - 2026-07-17
 
 **SETUP SHEAR (warp shear params + realizability).** The process (spec 7.11.3.6) that turns a warp model's

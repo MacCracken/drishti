@@ -305,12 +305,15 @@ Baseline (0.7.0): OBU layer + sequence header.
   7.11.3.6 — the warp model → shear params `alpha/beta/gamma/delta` + a `warpValid` realizability flag;
   reuses the 0.7.93 `resolve_divisor` on `wmmat[2]` (RAW output, not the determinant), reduces to multiples
   of `1<<WARP_PARAM_REDUCE_BITS`, rejects when `4|alpha|+7|beta|` or `4|gamma|+4|delta|` >= `1<<16`; a pure
-  derivation, un-defers the 0.7.93 shear-realizability check). DEFERRED to
+  derivation, un-defers the 0.7.93 shear-realizability check), and **WARP FILTER TABLE 0.7.95**
+  (`av1_warp_filter` — the `Warped_Filters[193][8]` signed 8-tap interpolation table 7.11.3.5, machine-
+  generated from a re-fetched dav1d `src/tables.c` and MD5-anchored; the last table needed before the
+  per-pixel warp; NOT yet consumed). DEFERRED to
   the conformance era: the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary
   symbol's context, un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors,
   not on the pre-conformance decode lane; likewise the warp `LS_MAT`-clamp. Next
-  **warp MC** (7.11.3.5 — the `dav1d_mc_warp_filter[193][8]` table + the block_warp per-pixel process,
-  turning the 0.7.93/0.7.94 model+shear into pixels), OBMC, the temporal scan (needs the
+  **block_warp** (7.11.3.5 — the per-pixel warp process applying the 0.7.93/0.7.94 model+shear through the
+  0.7.95 filter table to produce warped pixels, then un-gating LOCALWARP), OBMC, the temporal scan (needs the
   DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar the warp filter, dav1d
   `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths

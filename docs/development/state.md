@@ -6,7 +6,35 @@
 
 ## Version
 
-**0.7.94** — cut 2026-07-17, not yet tagged (user's git). **SETUP SHEAR (warp shear params + realizability).**
+**0.7.95** — cut 2026-07-17, not yet tagged (user's git). **WARP FILTER TABLE.** The Warped_Filters[193][8]
+interpolation table (spec 7.11.3.5) — the signed 8-tap filter, indexed by the 1/64 sub-pixel warp offset
+offs∈[0,192], that the warp block-predict (next bite) applies. Table-only bite (like Subpel_Filters 0.7.57),
+NOT yet consumed. av1_mc.cyr: av1_warp_filter_tbl (lazy 193*8 i64 blob, 193 av1_wfill8 rows) +
+av1_warp_filter(offs,tap)/_row(offs) accessors + the AV1_WARPEDPIXEL_PREC_SHIFTS(=64)/AV1_WARPEDDIFF_PREC_BITS
+(=10) constants the coming offs map (offs=Round2(sx,10)+64) needs. dav1d stores this SPEC-LITERAL (positive
+centre, each row sums to +128=1<<FILTER_BITS) — UNLIKE its NEGATED resize / HALVED subpel neighbours in the
+same file (a convention trap, flagged inline). THE DATA PATH: a web-enabled multi-source pass established the
+table is a RAW CONSTANT with NO generation formula (all of spec/libaom/dav1d carry it literally), and
+re-fetched dav1d src/tables.c to disk; the 1544 signed values were MACHINE-GENERATED (never hand-typed) from
+that MD5-verified source (MD5 c764ff07aecee5aba2348072f285059b) — dav1d writes some negatives as '- N'
+(minus-space), which a naive tokenizer silently drops (corrupts ~17 rows), so a DETERMINISTIC parser gated on
+the digest is the only safe path. Oracle scripts/refs/warp_filter_ref.py (embeds the table + asserts the MD5).
+THE PROOF (tests/av1_mc.tcyr): every one of 193 rows sums to 128 (catches a transpose); reversal symmetry
+row[i]==reverse(row[192-i]) i=1..191 with row[192]==row[191] (guard-tail sentinel, NOT mirror of row 0);
+anchor spot values at PINNED [row][tap] offsets vs the ref port (incl. a raw-blob absolute-offset read that
+can't hide a consistent accessor bug); a full position-weighted checksum 19083838 over all 1544 coeffs.
+MUTATIONS: a single-coefficient change AND a row-sum-preserving within-row swap both go red. THE REVIEW
+(worktree-isolated, patch-applied): accessor/storage offsets, the exact alloc size (12352 bytes), OOM
+handling, the block_warp constants, no symbol shadowing, the ref-port MD5 anchor — all CLEAN, no defects
+(the reviewer's own accessor mutation confirmed the tests are non-circular). 0.7.95 LESSON: for a big
+constant table with no in-session source and NO formula, the disciplined path is not memory-reconstruction
+(hallucination risk for 1544 values) — it is re-FETCH the reference source, verify a cryptographic digest
+(MD5), then MACHINE-GENERATE both the Cyrius and the ref port from that verified file, gating on the digest +
+structural invariants; a from-memory 8-tuple is never trusted. Next: **block_warp (7.11.3.5) — the per-pixel
+warp using the model+shear+filter, then un-gate LOCALWARP; then OBMC + the temporal scan**. **Prior: SETUP
+SHEAR (0.7.94).**
+
+**0.7.94** — **SETUP SHEAR (warp shear params + realizability).**
 The process (spec 7.11.3.6) turning a warp model's wmmat[2..5] into the four shear params alpha/beta/gamma/
 delta + a warpValid flag — the second warp step, consumed by block_warp (7.11.3.5, later). Reuses the 0.7.93
 resolve_divisor/Div_Lut verbatim (small delta); pure derivation (no bitstream symbol → no encoder inverse),
