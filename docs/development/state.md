@@ -6,6 +6,33 @@
 
 ## Version
 
+**0.7.104** — cut 2026-07-18, not yet tagged (user's git). **THE TEMPORAL SCAN (temporal-MV Bite 3) — the
+first OUTPUT-CHANGING temporal-MV bite.** The last find_mv_stack deferral: when use_ref_frame_mvs is set,
+find_mv_stack now reads the current frame's MotionFieldMvs (built by motion_field_estimation, 0.7.103), folds
+projected temporal MVs into the candidate stack, and derives ZeroMvContext — closing the temporal-MV arc
+(producer 0.7.102 → estimation 0.7.103 → scan 0.7.104). av1_mv.cyr: av1_temporal_scan (7.10.2.5 — step 2/4 by
+dim<64/≥64, bound Min(bw4/bh4,16), + 3 extension samples for a block in [8×8,64×64) gated on check_sb_border
+using MiRow&15/MiCol&15); av1_add_tpl_ref_mv (7.10.2.6 — mvRow/Col|1, is_inside FIRST, y8/x8=>>1, the
+LOAD-BEARING ZeroMvContext state machine: unconditional=1 at origin BEFORE the sentinel, lower_mv_precision
+AFTER the sentinel BEFORE the |cand-gmv|>=16 test, the refine is an ASSIGN that may reset 1→0; single reads
+RefFrame[0], compound reads both planes at the same cell needing BOTH valid; reads an ALREADY-projected MV, NO
+re-projection); av1_tpl_stack_append (dedup/append weight FIXED 2, NO NewMvCount, list-0 dedup single / 4-comp
+compound, cap 8) + a reusable Av1_TplScratch for lower_mv_precision; wired into av1_find_mv_stack between the
+REF_CAT_LEVEL weighting and scan_point(-1,-1), gated on use_ref_frame_mvs. 3-source reconciled (spec 7.10.2.5/6
++ dav1d refmvs.c + libaom mvref_common.c) via a workflow. PROOF scripts/refs/tmvs_scan_ref.py spec-literal
+oracle + ctx-level KATs (origin state machine sentinel-leaves-1 / far-refines-1 / near-RESETS-0; lower inside
+the scan; grid+extension+dedup; temporal dedups a spatial entry; compound both-valid/one-sentinel/distinct-
+list1; check_sb_border isolated from is_inside via a 2-SB frame; is_inside isolated via a sub-tile; the
+use_ref_frame_mvs gate e2e through find_mv_stack). MUTATIONS (12, all red): is_inside, unconditional ZeroMvCtx
+set, single+compound sentinels, lower, the >=16 threshold, the refine reset-to-0, append weight, dedup weight,
+check_sb_border, compound list-1 dedup, the sample step; the mvRow/Col|1 is UN-WITNESSABLE by construction
+((X|1)>>1==X>>1 + even SB-aligned tile bounds). Existing find_mv_stack tests use use_ref_frame_mvs=0 → no
+regression. 38 suites, **28,870** suite + **1,140** fuzz assertions, all green. LESSON: a temporal witness
+cell is silently skipped when is_inside/check_sb_border fails, the cell is sentinel, or it dedup-matches an
+existing entry — the sentinel/dedup analogue of the earlier "projected off-grid" masking; isolate each gate
+(a sub-tile isolates is_inside from check_sb_border and vice versa). Next: **inter-intra + GLOBALWARP
+warp-blend, compound GLOBAL_GLOBALMV warp, then scaled-reference/BILINEAR MC.**
+
 **0.7.103** — cut 2026-07-18, not yet tagged (user's git). **motion_field_estimation (temporal-MV Bite 2).**
 The full projection process (spec 7.9) that builds MotionFieldMvs — the per-8×8 pre-scaled temporal-MV field
 the scan (7.10.2.5/6, Bite 3) will read — landed OUTPUT-NEUTRAL in two de-risked steps. **2a (leaves):** the

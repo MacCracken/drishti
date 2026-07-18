@@ -343,9 +343,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   **Bite 2 / motion_field_estimation 0.7.103** (spec 7.9 — 2a: `Div_Mult[32]` + `av1_get_mv_projection` +
   `av1_get_block_position`/`project` as KAT'd leaves; 2b: `av1_mv_projection` (7.9.2 per-ref) +
   `av1_motion_field_estimation` (7.9.1 useLast/refStamp driver) + the reusable `MotionFieldMvs` scratch + the
-  `av1_tile_set_inter_ctx` frame-start hook behind `use_ref_frame_mvs`; still output-neutral). Next
-  **Bite 3 / the scan** (spec 7.10.2.5/6 — read `MotionFieldMvs` in find_mv_stack, add temporal candidates +
-  `ZeroMvContext`; the output-changing bite). Then **inter-intra + GLOBALWARP warp-blend** +
+  `av1_tile_set_inter_ctx` frame-start hook behind `use_ref_frame_mvs`; still output-neutral), and
+  **Bite 3 / the scan 0.7.104** (spec 7.10.2.5/6 — `av1_temporal_scan` + `av1_add_tpl_ref_mv`: find_mv_stack
+  reads `MotionFieldMvs`, folds projected temporal MVs into the candidate stack + derives `ZeroMvContext`,
+  gated on `use_ref_frame_mvs`; the FIRST output-changing temporal bite — closes the temporal-MV arc). Then
+  **inter-intra + GLOBALWARP warp-blend** +
   **compound GLOBAL_GLOBALMV warp** (warp-into-a-scratch follow-ons), then scaled-reference/BILINEAR MC; all
   table-free bar the warp filter + Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

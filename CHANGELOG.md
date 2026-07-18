@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.104] - 2026-07-18
+
+**The temporal scan (temporal-MV Bite 3)** — the last `find_mv_stack` deferral, and the **first temporal-MV
+bite that changes decode output**. When `use_ref_frame_mvs` is set, `find_mv_stack` now reads the current
+frame's `MotionFieldMvs` (the per-8×8 pre-scaled field built by `motion_field_estimation`, 0.7.103), folds
+the projected temporal MVs into the candidate stack, and derives `ZeroMvContext`. This closes the temporal-MV
+arc (producer 0.7.102 → estimation 0.7.103 → scan 0.7.104). 3-source reconciled (spec 7.10.2.5/6 + dav1d
+`refmvs.c` + libaom `mvref_common.c`).
+
+### Added
+
+- **`av1_temporal_scan`** (`av1_mv.cyr`, spec 7.10.2.5): the sampling grid — step 2 (8-px) for block dims
+  < 64px else 4 (16-px), bounded to 16 4×4-units per dim — plus, for a block strictly inside `[8×8, 64×64)`,
+  three "extension" samples just below the block, each gated on `check_sb_border` (stay within the 64×64 SB,
+  using `MiRow & 15` / `MiCol & 15`).
+- **`av1_add_tpl_ref_mv`** (spec 7.10.2.6): per-sample — `mvRow/mvCol |= 1`, `is_inside`, `y8/x8 = >>1`, then
+  a **load-bearing** `ZeroMvContext` state machine: at the origin it is set to 1 *unconditionally before* the
+  candidate read (so a sentinel origin cell leaves it 1), `lower_mv_precision` runs *after* the sentinel check
+  and *before* the `|cand − GlobalMv| ≥ 16` test, and the refine is an **assignment** (may reset 1→0). Single-
+  ref reads `MotionFieldMvs[RefFrame[0]]`; compound reads both planes at the same cell and requires **both**
+  valid. drishti reads an **already-projected** MV (no re-projection, unlike dav1d's deferred single-field
+  scaling).
+- **`av1_tpl_stack_append`**: the dedup-or-append with weight fixed at **2** (temporal is the lowest tier) and
+  **no** `NewMvCount` bump — dedup on list-0 for single, all four components for compound, capped at
+  `MAX_REF_MV_STACK_SIZE = 8`. Wired into `av1_find_mv_stack` between the REF_CAT_LEVEL weighting and
+  `scan_point(-1,-1)`, gated on `use_ref_frame_mvs` (`ZeroMvContext` stays 0 when it doesn't run).
+
+**Proofs** (`scripts/refs/tmvs_scan_ref.py` spec-literal oracle + ctx-level KATs): the origin state machine
+(sentinel origin leaves `ZeroMvContext=1`; a far candidate refines to 1; a near candidate **resets** to 0);
+`lower_mv_precision` inside the scan; the grid + extension sampling + a dedup that bumps a duplicate's weight;
+a temporal candidate that dedups a pre-seeded spatial entry; compound both-valid append, one-sentinel early
+return, and a distinct-list-1 append; `check_sb_border` isolated from `is_inside` (a 2-SB frame); `is_inside`
+isolated from `check_sb_border` (a sub-tile); and the `use_ref_frame_mvs` gate end-to-end through
+`find_mv_stack`. **Mutation-verified** (12 targets, all red): `is_inside`, the unconditional `ZeroMvContext`
+set, the single + compound sentinel checks, `lower_mv_precision`, the `≥16` refine threshold, the refine
+reset-to-0, the append weight, the dedup weight, `check_sb_border`, the compound list-1 dedup, and the sample
+step. The `mvRow/mvCol |= 1` is provably un-witnessable (`(X|1)>>1 == X>>1` and even SB-aligned tile bounds).
+
 ## [0.7.103] - 2026-07-18
 
 **`motion_field_estimation` (temporal-MV Bite 2)** — the projection process (spec 7.9) that builds
