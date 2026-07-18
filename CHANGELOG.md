@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.94] - 2026-07-17
+
+**SETUP SHEAR (warp shear params + realizability).** The process (spec 7.11.3.6) that turns a warp model's
+`wmmat[2..5]` into the four shear parameters `alpha/beta/gamma/delta` + a `warpValid` realizability flag —
+the second step of the warp arc, consumed by the warp block-predict (7.11.3.5, a later bite). It reuses the
+0.7.93 `resolve_divisor`/`Div_Lut` verbatim, so this is a small delta. Like `warp_estimation` it is a pure
+derivation (no bitstream symbol → no encoder inverse) and is not yet wired to the pixel path. This also
+un-defers the shear-realizability rejection that 0.7.93 flagged as a separate process.
+
+### Added
+
+- **`av1_setup_shear`** (spec 7.11.3.6) in `av1_mv.cyr`: guards `wmmat[2] <= 0` (the `is_affine_valid`
+  precondition, which also protects `resolve_divisor` from `FloorLog2(0)`), calls `resolve_divisor` on
+  **`wmmat[2]`** (the x-scale — NOT the determinant, and using the **raw** divisor output, unlike
+  `warp_estimation`'s `-WARPEDMODEL_PREC_BITS` rescale), derives `alpha0/beta0/gamma0/delta0` (INT16-clamped),
+  reduces each to a multiple of `1 << WARP_PARAM_REDUCE_BITS` (=64), and sets `warpValid = 0` when
+  `4|alpha| + 7|beta| >= 65536` or `4|gamma| + 4|delta| >= 65536`. **3-source reconciled** (spec + libaom +
+  dav1d, unanimous); the spec-literal oracle is `scripts/refs/setup_shear_ref.py`.
+- **`Av1WarpModel`** grows to carry the shear params + a separate `AV1WM_SHEARVALID` (distinct from the
+  estimation `AV1WM_VALID`), with `av1_warp_model_alpha`/`_beta`/`_gamma`/`_delta`/`_shear_valid` accessors.
+
+**Proofs** (`tests/av1_mv.tcyr`): 17 KAT cases vs the ref port — identity (→ all-zero shear, valid), three
+real `warp_estimation` outputs (each yielding four distinct nonzero params), the `wmmat[2] <= 0` guard (zero
+AND negative), the reduce (100 → 128), both INT16 clamp bounds, and BOTH realizability checks pinned from
+BOTH directions at their exact boundaries (each of the 4/7/4/4 coefficients + the `>=` comparator).
+**Mutation-verified — 19 mutations killed** across the divisor input, the raw-shift usage, every param
+formula, the reduce, all four validity coefficients (increase AND decrease), both `>=` comparators, and the
+guard; the lone survivor is a provably-equivalent ±1 in the INT16 clamp bound (the granularity-64 reduce
+absorbs it — the clamp's presence is separately witnessed).
+
+**The adversarial review (2 dimensions, worktree-isolated, patch-applied, every finding verified):** the
+fixed-point math + memory-safety (record growth, scratch reuse, overflow, the guard) CLEAN. One MINOR
+test-coverage gap found + closed (shipped code confirmed spec-correct): the `gamma`/`delta` coefficients were
+un-witnessed for a coefficient *increase* (the sole reject case was symmetric); added gamma/delta boundary
+cases — and, by the same logic, the alpha/beta increase cases — so every coefficient now fails red under
+mutation in both directions.
+
 ## [0.7.93] - 2026-07-17
 
 **WARP ESTIMATION (local warp model).** The least-squares solve (spec 7.11.3.8) that turns the

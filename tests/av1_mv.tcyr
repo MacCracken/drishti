@@ -1310,6 +1310,9 @@ fn main() {
     test_resolve_divisor();
     test_warp_estimation();
     test_warp_est_badargs();
+    test_group("setup_shear (7.11.3.6) — shear params + warpValid");
+    test_setup_shear();
+    test_setup_shear_badargs();
     return assert_summary();
 }
 
@@ -1496,6 +1499,69 @@ fn test_warp_est_badargs() {
     assert_eq(av1_warp_estimation(ws, 8, 8, 6, 0, 0, 0), DR_ERR_BOUNDS, "warp out==0 rejects");
     assert_eq(av1_warp_estimation(ws, 8, 8, 0 - 1, 0, 0, out), DR_ERR_BOUNDS, "warp mi_size<0 rejects");
     assert_eq(av1_warp_estimation(ws, 8, 8, 22, 0, 0, out), DR_ERR_BOUNDS, "warp mi_size>=22 rejects");
+    return 0;
+}
+
+# ---- setup_shear (7.11.3.6) — KATs from scripts/refs/setup_shear_ref.py ----
+fn ss_model(w0, w1, w2, w3, w4, w5): i64 {
+    var m = av1_warp_model_new();
+    store64(m + AV1WM_MAT + (0 * 8), w0);
+    store64(m + AV1WM_MAT + (1 * 8), w1);
+    store64(m + AV1WM_MAT + (2 * 8), w2);
+    store64(m + AV1WM_MAT + (3 * 8), w3);
+    store64(m + AV1WM_MAT + (4 * 8), w4);
+    store64(m + AV1WM_MAT + (5 * 8), w5);
+    return m;
+}
+fn ss_check(m, valid, a, b, g, d, tag): i64 {
+    assert_eq(av1_setup_shear(m), DR_OK, tag);
+    assert_eq(av1_warp_model_shear_valid(m), valid, tag);
+    assert_eq(av1_warp_model_alpha(m), a, tag);
+    assert_eq(av1_warp_model_beta(m), b, tag);
+    assert_eq(av1_warp_model_gamma(m), g, tag);
+    assert_eq(av1_warp_model_delta(m), d, tag);
+    return 0;
+}
+fn test_setup_shear() {
+    # identity model -> all-zero shear, valid.
+    ss_check(ss_model(0, 0, 65536, 0, 0, 65536), 1, 0, 0, 0, 0, "shear identity");
+    # real warp_estimation outputs (0.7.93 F/E/G) -> genuine 4-distinct shear params, valid.
+    ss_check(ss_model(0 - 185328, 0 - 101166, 70077, 211, 0 - 868, 68998),
+    1, 4544, 192, 0 - 832, 3456, "shear est_F (4 distinct params)");
+    ss_check(ss_model(0 - 317031, 0 - 312936, 73727, 0 - 62, 8191, 65369),
+    1, 8192, 0 - 64, 7296, 0 - 192, "shear est_E");
+    ss_check(ss_model(317031, 321126, 57345, 62, 0 - 8191, 65493),
+    1, 0 - 8192, 64, 0 - 9344, 0 - 64, "shear est_G");
+    # fail the 4|alpha|+7|beta| realizability check -> warpValid 0 (params still computed).
+    ss_check(ss_model(0, 0, 73727, 8191, 0, 65536), 0, 8192, 8192, 0, 0, "shear bad_ab reject");
+    # alpha EXACTLY at the boundary (4*16384==65536) -> pins the alpha coeff + the >= compare.
+    ss_check(ss_model(0, 0, 81920, 0, 0, 65536), 0, 16384, 0, 0, 0, "shear alpha boundary (>=)");
+    # beta-dominant boundary (7*9408 over, 6*9408 under) -> pins the beta coefficient (7).
+    ss_check(ss_model(0, 0, 65536, 9408, 0, 65536), 0, 0, 9408, 0, 0, "shear beta coeff (7)");
+    # fail ONLY the 4|gamma|+4|delta| check -> warpValid 0.
+    ss_check(ss_model(0, 0, 65536, 0, 8191, 73727), 0, 0, 0, 8192, 8192, "shear bad_gd reject");
+    # second-check coefficient pins BOTH directions (bad_gd is symmetric -> can't pin either):
+    # gamma at the exact boundary (4*16384==65536) rejects -> pins gamma coeff decrease + >=;
+    # a gamma pass at 13120 (5*13120 would reject) -> pins gamma coeff increase. Same for delta.
+    ss_check(ss_model(0, 0, 65536, 0, 16384, 65536), 0, 0, 0, 16384, 0, "shear gamma boundary (>=)");
+    ss_check(ss_model(0, 0, 65536, 0, 13120, 65536), 1, 0, 0, 13120, 0, "shear gamma coeff (4)");
+    ss_check(ss_model(0, 0, 65536, 0, 0, 81920), 0, 0, 0, 0, 16384, "shear delta boundary (>=)");
+    ss_check(ss_model(0, 0, 65536, 0, 0, 78656), 1, 0, 0, 0, 13120, "shear delta coeff (4)");
+    # first-check coefficient INCREASE pins (the boundary cases above only catch decreases):
+    ss_check(ss_model(0, 0, 78656, 0, 0, 65536), 1, 13120, 0, 0, 0, "shear alpha coeff incr (4)");
+    ss_check(ss_model(0, 0, 65536, 8192, 0, 65536), 1, 0, 8192, 0, 0, "shear beta coeff incr (7)");
+    # precondition guard: wmmat[2] <= 0 -> warpValid 0, params 0, before resolve_divisor.
+    ss_check(ss_model(0, 0, 0, 0, 0, 65536), 0, 0, 0, 0, 0, "shear guard m2==0");
+    ss_check(ss_model(0, 0, 0 - 100, 5, 5, 65536), 0, 0, 0, 0, 0, "shear guard m2<0");
+    # reduce witness: alpha0=100 -> reduced to a multiple of 64 (128), not 100.
+    ss_check(ss_model(0, 0, 65636, 0, 0, 65536), 1, 128, 0, 0, 0, "shear reduce 100->128");
+    # INT16 clamp witnesses (lower -32768 via m2=100; upper 32767 via m2=100000).
+    ss_check(ss_model(0, 0, 100, 0, 0, 65536), 0, 0 - 32768, 0, 0, 0, "shear clamp_lo -32768");
+    ss_check(ss_model(0, 0, 100000, 40000, 0, 65536), 0, 32768, 32768, 0, 0, "shear clamp_hi 32767");
+    return 0;
+}
+fn test_setup_shear_badargs() {
+    assert_eq(av1_setup_shear(0), DR_ERR_BOUNDS, "setup_shear model==0 rejects");
     return 0;
 }
 

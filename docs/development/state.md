@@ -6,7 +6,34 @@
 
 ## Version
 
-**0.7.93** — cut 2026-07-17, not yet tagged (user's git). **WARP ESTIMATION (local warp model).** The
+**0.7.94** — cut 2026-07-17, not yet tagged (user's git). **SETUP SHEAR (warp shear params + realizability).**
+The process (spec 7.11.3.6) turning a warp model's wmmat[2..5] into the four shear params alpha/beta/gamma/
+delta + a warpValid flag — the second warp step, consumed by block_warp (7.11.3.5, later). Reuses the 0.7.93
+resolve_divisor/Div_Lut verbatim (small delta); pure derivation (no bitstream symbol → no encoder inverse),
+NOT wired to pixels yet. Un-defers the shear-realizability rejection 0.7.93 flagged. av1_mv.cyr adds
+av1_setup_shear: guard wmmat[2]<=0 (is_affine_valid — also protects resolve_divisor from FloorLog2(0)) →
+resolve_divisor on wmmat[2] (the x-scale, NOT the determinant; RAW output, UNLIKE warp_estimation's
+-WARPEDMODEL_PREC_BITS rescale — divShift>=14 so no <0 fixup) → alpha0/beta0/gamma0/delta0 (INT16-clamped;
+v=m4*65536, w=m3*m4) → reduce each to a multiple of 1<<WARP_PARAM_REDUCE_BITS(=64) → warpValid=0 if
+4|alpha|+7|beta|>=65536 or 4|gamma|+4|delta|>=65536. Av1WarpModel grew (AV1WM_ALPHA..DELTA + a separate
+AV1WM_SHEARVALID; SIZE 56→96) + accessors. 3-source reconciled (spec+libaom+dav1d, UNANIMOUS;
+scripts/refs/setup_shear_ref.py the oracle, reusing the checksum-pinned resolve_divisor). THE PROOF
+(tests/av1_mv.tcyr): 17 KATs — identity→all-zero+valid, three real warp_estimation outputs (4 distinct
+params each), the wmmat[2]<=0 guard (zero AND negative), the reduce (100→128), both INT16 clamp bounds, and
+BOTH realizability checks pinned from BOTH directions at their exact boundaries (each of the 4/7/4/4 coeffs +
+the >= comparator). MUTATIONS, 19 killed (divisor input / raw-shift / every param formula / reduce / all
+four validity coeffs increase AND decrease / both >= / guard); lone survivor a PROVABLY-EQUIVALENT ±1 in the
+INT16 clamp bound (the granularity-64 reduce absorbs it — clamp PRESENCE separately witnessed by removing it).
+THE REVIEW (2 dims, worktree-isolated, patch-applied, verified): fixed-point + memory-safety CLEAN; one MINOR
+coverage gap found + closed (the gamma/delta coeffs were un-witnessed for an INCREASE — the sole reject case
+bad_gd is symmetric; added gamma/delta boundary cases AND, by the same logic, the alpha/beta increase cases —
+shipped code was spec-correct). 0.7.94 LESSON: a SYMMETRIC boundary case (gamma==delta) pins neither
+coefficient's magnitude; a validity coefficient needs BOTH a reject-at-exact-boundary case (catches decrease)
+AND a pass-just-under-boundary case (catches increase) to be fully mutation-covered. Next: **the warp-filter
+table (dav1d_mc_warp_filter[193][8]) + block_warp (7.11.3.5) + OBMC + the temporal scan**. **Prior: WARP
+ESTIMATION (0.7.93).**
+
+**0.7.93** — **WARP ESTIMATION (local warp model).** The
 least-squares solve (spec 7.11.3.8) turning the find_warp_samples CandList into a 6-param affine
 LocalWarpParams[0..5] + LocalValid — the direct consumer of the 0.7.79 warp-sample leaves, and the first
 half of the warp arc. Like setup_global_mv it is a pure DERIVATION (no bitstream symbol → no encoder
