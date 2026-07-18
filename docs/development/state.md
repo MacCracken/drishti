@@ -6,23 +6,40 @@
 
 ## Version
 
-**0.7.103** — cut 2026-07-18, not yet tagged (user's git). **MV-PROJECTION LEAVES (temporal-MV Bite 2a).**
-The pure projection arithmetic motion_field_estimation (7.9) will use, landed as un-wired OUTPUT-NEUTRAL
-leaves + KATs (the warp_estimation/setup_shear pattern) to de-risk the hardest arithmetic in isolation.
-av1_mv.cyr: Div_Mult[32] (spec 7.9.3, floor(16384/i), formula-generated + KAT-anchored to the 32 spec
-values); av1_get_mv_projection (clippedDenom=Min(31,den), clippedNum=Clip3(-31,31,num), each comp
-Clip3(-16383,16383, Round2Signed(mv*cn*DivMult[cd], 14)) — USES av1_round2_signed NOT plain round2, and no
-int32 overflow trick since the product fits i64); av1_mv_project_pos (7.9.4 project — offset8 negate-shift-
-negate with LOGICAL >> on the positive operand, -1 outside the window); av1_get_block_position (PosY8 maxOff
-0 / PosX8 maxOff 8). PROOF scripts/refs/mv_projection_ref.py + a KAT: Div_Mult all 32, get_mv_projection with
-a HALF-BOUNDARY case pinning Round2Signed vs plain Round2 (-16 vs -15) + num/den clips + the ±16383 clamp,
-project with a NON-64-multiple negative pinning negate-shift-negate vs arithmetic >>> (7 vs 6) + all 4 window
-rejects. MUTATIONS (5): Div_Mult generator, Round2Signed->Round2, num clip, den clamp, negate-shift-negate.
-Output-neutral (leaves not wired). 38 suites, **28,576** suite + **1,140** fuzz assertions, all green.
-LESSON: av1_round2 is ARITHMETIC (>>>) so it AGREES with round2_signed except at half-boundaries — the
-witness needs a ties-away case (mv=1,num=-31,den=2), and the negate-shift-negate needs a non-64-multiple.
-Next: **Bite 2b = the 7.9.1 driver (useLast/refStamp) + 7.9.2 projection + the MotionFieldMvs scratch + the
-frame-start hook (still output-neutral), then Bite 3 = the temporal scan (7.10.2.5/6).**
+**0.7.103** — cut 2026-07-18, not yet tagged (user's git). **motion_field_estimation (temporal-MV Bite 2).**
+The full projection process (spec 7.9) that builds MotionFieldMvs — the per-8×8 pre-scaled temporal-MV field
+the scan (7.10.2.5/6, Bite 3) will read — landed OUTPUT-NEUTRAL in two de-risked steps. **2a (leaves):** the
+pure arithmetic as un-wired KAT'd leaves (the warp_estimation/setup_shear pattern). av1_mv.cyr: Div_Mult[32]
+(spec 7.9.3, floor(16384/i), formula-generated + KAT-anchored to the 32 spec values); av1_get_mv_projection
+(clippedDenom=Min(31,den), clippedNum=Clip3(-31,31,num), each comp Clip3(-16383,16383, Round2Signed(mv*cn*
+DivMult[cd], 14)) — USES av1_round2_signed NOT plain round2, product fits i64 so no int32 overflow trick);
+av1_mv_project_pos (7.9.4 project — offset8 negate-shift-negate with LOGICAL >> on the positive operand, -1
+outside the window); av1_get_block_position (PosY8 maxOff 0 / PosX8 maxOff 8). **2b (driver + projection +
+scratch + hook):** av1_mv_projection (7.9.2 — per-ref, early-rejects on resolution change / KEY / INTRA_ONLY
+/ null saved field; per cell posValid = |refToCur|≤31 && |refOffset|≤31 && refOffset>0; the position-finder
+projection carries *dstSign, the per-dst stored projections do NOT; reads drishti's compact per-8×8 saved
+field at (y8,x8) directly since the producer pre-sampled the odd 2*y8+1 rows); av1_motion_field_estimation
+(7.9.1 driver — init to -32768 sentinel, then LAST(-1) if useLast / BWDREF(+1) / ALTREF2(+1) / ALTREF(+1) /
+LAST2(-1) with the useLast + refStamp bookkeeping; only BWDREF/ALTREF2/ALTREF decrement refStamp, ALTREF +
+LAST2 gated on refStamp≥0); a reusable module-global MotionFieldMvs scratch ([8][h8][w8][2], resized only on
+growth, header-stamped h8/w8); the frame-start hook in av1_tile_set_inter_ctx behind a use_ref_frame_mvs
+gate. THE DIRECTIONAL TRAP (3-source reconciled vs a re-fetched spec 7.9 + dav1d refmvs.c): refToCur =
+dist(OrderHints[src], OrderHint) and the inner refToDst = dist(OrderHint, OrderHints[dst]) use OPPOSITE
+argument order. PROOF scripts/refs/{mv_projection_ref.py, tmvs_est_ref.py} spec-literal oracles + KATs: the
+leaves KAT (half-boundary Round2Signed vs Round2 -16 vs -15, non-64-multiple negate-shift-negate 7 vs 6, all
+window rejects); the estimation KAT (a 2-ref 8×8 scenario, every MotionFieldMvs cell vs the oracle — LAST→
+(0,1), BWDREF→(2,3), ALTREF2 empty-field drives refStamp to -1 so ALTREF+LAST2 skip, their cells stay
+sentinel) + a direct-call gate test (dimension / KEY / INTRA_ONLY / null / refOffset≤0 / |refToCur|>31).
+MUTATIONS (13, all red): Div_Mult generator, Round2Signed->Round2, num clip, den clamp, negate-shift-negate;
+both refStamp≥0 gates, useLast, *dstSign placement, both get_relative_dist arg orders, the >INTRA cell guard,
+the KEY/dimension/null gates, the sentinel value, both posValid distance gates. Output-neutral (nothing reads
+MotionFieldMvs yet — the full suite staying green IS the no-regression proof). 38 suites, **28,810** suite +
+**1,140** fuzz assertions, all green. LESSONS: av1_round2 is ARITHMETIC (>>>) so it AGREES with round2_signed
+except at half-boundaries (the witness needs a ties-away case); a would-contribute witness cell needs a SMALL
+in-window MV or the projected position lands off-grid and get_block_position rejects it, masking a removed
+refStamp/posValid gate (three mutations first SURVIVED for exactly this reason). Next: **Bite 3 = the
+temporal scan (7.10.2.5/6) — read MotionFieldMvs in find_mv_stack, add temporal candidates + ZeroMvContext;
+the output-CHANGING bite (needs a 2-frame fixture with a non-degenerate MotionFieldMvs).**
 
 **0.7.102** — cut 2026-07-18, not yet tagged (user's git). **Temporal-MV PRODUCER (Bite 1 of 3).** The
 first piece of temporal motion-vector prediction (the sole remaining find_mv_stack deferral). At inter-frame

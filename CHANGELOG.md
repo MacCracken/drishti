@@ -6,10 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.7.103] - 2026-07-18
 
-**MV-projection leaves (temporal-MV Bite 2a)** — the pure arithmetic `motion_field_estimation` (spec 7.9)
-will use to scale + project a reference's saved MV onto the current 8×8 grid. Landed as **un-wired,
-output-neutral leaves with KATs** (the warp_estimation/setup_shear pattern) so the hardest arithmetic — the
-signed rounding, the reciprocal scale, and the negate-shift-negate offset trap — is de-risked in isolation.
+**`motion_field_estimation` (temporal-MV Bite 2)** — the projection process (spec 7.9) that builds
+`MotionFieldMvs`, the per-8×8 pre-scaled temporal-MV field the temporal scan (7.10.2.5/6, the next bite)
+will read. Built in two de-risked steps: **2a — the pure projection arithmetic** as un-wired KAT'd leaves
+(the warp_estimation/setup_shear pattern, so the signed rounding + reciprocal scale + negate-shift-negate
+offset trap are proven in isolation), then **2b — the driver + per-ref projection + the reusable scratch +
+the frame-start hook** that wires those leaves into a whole-field build. Still **output-neutral** — nothing
+reads `MotionFieldMvs` until the scan lands, so the full suite staying green is the no-regression proof.
 
 ### Added
 
@@ -25,13 +28,37 @@ signed rounding, the reciprocal scale, and the negate-shift-negate offset trap �
   operand; a plain arithmetic `>>>` on a negative delta mis-projects); returns `-1` outside the valid
   window. **`av1_get_block_position`** (7.9.4) projects `(x8,y8)` into `(PosY8,PosX8)` (`MAX_OFFSET` 0/8).
 
-**Proofs** (`scripts/refs/mv_projection_ref.py` spec-literal oracle + a KAT): `Div_Mult` all 32 (formula
-cross-check + spec anchors); `get_mv_projection` incl. a **half-boundary** case that distinguishes
-`Round2Signed` from plain `Round2` (−16 vs −15), the num/den clips, and the ±16383 clamp; `project` incl. a
-**non-64-multiple** negative case that distinguishes negate-shift-negate from arithmetic `>>>` (7 vs 6) plus
-all four window rejects. **Mutation-verified**: the `Div_Mult` generator, `Round2Signed`→`Round2`, the num
-clip, the den clamp, and the negate-shift-negate offset — each reddens its witness. Output-neutral: nothing
-calls the leaves yet (the 7.9 driver + hook is Bite 2b, the scan Bite 3).
+- **`av1_mv_projection`** (spec 7.9.2 `motion_field_projection`, Bite 2b): projects one reference's saved
+  per-8×8 field onto the current grid, filling `MotionFieldMvs[LAST..ALTREF]`. Early-rejects (returns 0) on a
+  resolution change, a KEY/INTRA_ONLY reference, or a null saved field; per cell it gates on
+  `posValid = |refToCur|≤31 && |refOffset|≤31 && refOffset>0`, projects the MV to a landing position (the
+  position-finder projection carries `*dstSign`), and stores a **per-destination pre-scaled** MV in every
+  plane (the inner per-dst projection does **not** carry `dstSign`). The directional trap — 3-source
+  reconciled against a re-fetched spec 7.9 + dav1d `refmvs.c` — is that `refToCur = dist(OrderHints[src],
+  OrderHint)` and the inner `refToDst = dist(OrderHint, OrderHints[dst])` use **opposite** argument order.
+  drishti's saved field is already per-8×8 (the producer pre-sampled the spec's odd `2*y8+1` rows), so this
+  reads it at `(y8,x8)` directly.
+- **`av1_motion_field_estimation`** (spec 7.9.1 driver, Bite 2b): inits `MotionFieldMvs` to the `-32768`
+  sentinel, then projects `LAST(-1)` (if `useLast`), `BWDREF(+1)`, `ALTREF2(+1)`, `ALTREF(+1)`, `LAST2(-1)`
+  in the spec order with the `useLast`/`refStamp` bookkeeping (only BWDREF/ALTREF2/ALTREF decrement
+  `refStamp`; ALTREF + LAST2 are gated on `refStamp≥0`). Backed by a **reusable module-global scratch**
+  (`[8][h8][w8][2]`, resized only when it grows, header-stamped with the current `h8/w8`). Wired into
+  `av1_tile_set_inter_ctx` behind a `use_ref_frame_mvs` gate (frame-start hook).
+
+**Proofs.** *Leaves* (`scripts/refs/mv_projection_ref.py` + a KAT): `Div_Mult` all 32 (formula cross-check +
+spec anchors); `get_mv_projection` incl. a **half-boundary** case distinguishing `Round2Signed` from plain
+`Round2` (−16 vs −15), the num/den clips, the ±16383 clamp; `project` incl. a **non-64-multiple** negative
+case distinguishing negate-shift-negate from arithmetic `>>>` (7 vs 6) plus all four window rejects.
+*Estimation* (`scripts/refs/tmvs_est_ref.py` spec-literal oracle + a KAT): a 2-reference 8×8-frame scenario
+whose every `MotionFieldMvs` cell is checked against the oracle — LAST projects (`useLast`, `dstSign=-1`) to
+`(0,1)`, BWDREF (`dstSign=+1`) to `(2,3)`, ALTREF2's empty field drives `refStamp` to −1 so ALTREF + LAST2
+are **skipped** (their would-contribute cells must stay sentinel); plus a direct-call gate test for the
+dimension / KEY / INTRA_ONLY / null-field / `refOffset≤0` / `|refToCur|>31` rejections. **Mutation-verified**
+(13 targets, all red): the `Div_Mult` generator + `Round2Signed`→`Round2` + num clip + den clamp +
+negate-shift-negate (leaves); and the two `refStamp≥0` gates, the `useLast` condition, the `*dstSign`
+placement, both `get_relative_dist` argument orders, the `>INTRA` cell guard, the KEY/dimension/null gates,
+the sentinel value, and both `posValid` distance gates (estimation). Output-neutral: nothing reads
+`MotionFieldMvs` yet (the temporal scan is Bite 3).
 
 ## [0.7.102] - 2026-07-18
 

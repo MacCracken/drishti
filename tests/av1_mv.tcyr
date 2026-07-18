@@ -1343,6 +1343,181 @@ fn test_mv_projection_leaves() {
     return 0;
 }
 
+# ---- motion_field_estimation (0.7.103, spec 7.9.1/2) test scaffolding + KATs ------------------------------
+# Build an all-NONE compact per-8x8 saved field (AV1SMF layout: H8, W8, REF[h8*w8], MV[h8*w8*2]).
+fn tmvsest_mkfield(h8, w8): i64 {
+    var f = alloc(16 + (h8 * w8 * 24));
+    store64(f + AV1SMF_H8, h8);
+    store64(f + AV1SMF_W8, w8);
+    var n = h8 * w8;
+    var mvb = f + AV1SMF_REF + (n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(f + AV1SMF_REF + (i * 8), 0 - 1);      # MfRefFrame = NONE
+        store64(mvb + ((i * 2) * 8), 0);
+        store64(mvb + (((i * 2) + 1) * 8), 0);
+        i = i + 1;
+    }
+    return f;
+}
+fn tmvsest_setcell(f, h8, w8, y8, x8, ref, mvr, mvc): i64 {
+    var n = h8 * w8;
+    var cell = (y8 * w8) + x8;
+    store64(f + AV1SMF_REF + (cell * 8), ref);
+    var mvb = f + AV1SMF_REF + (n * 8);
+    store64(mvb + ((cell * 2) * 8), mvr);
+    store64(mvb + (((cell * 2) + 1) * 8), mvc);
+    return 0;
+}
+fn tmvsest_setslot(refs, slot, mi_rows, mi_cols, ft, field): i64 {
+    store64(refs + AV1REF_MI_ROWS + (slot * 8), mi_rows);
+    store64(refs + AV1REF_MI_COLS + (slot * 8), mi_cols);
+    store64(refs + AV1REF_FRAME_TYPE + (slot * 8), ft);
+    av1_ref_set_saved_mf(refs, slot, field);
+    return 0;
+}
+fn tmvsest_setsoh(refs, slot, ref, hint): i64 {
+    store64(refs + AV1REF_SAVED_ORDER_HINTS + (((slot * 8) + ref) * 8), hint);
+    return 0;
+}
+# THE MOTION-FIELD-ESTIMATION KAT (0.7.103) vs scripts/refs/tmvs_est_ref.py. An 8x8 frame (h8=w8=4). LAST
+# projects (useLast, dstSign=-1) -> a cell at (0,1); BWDREF projects (dstSign=+1) -> a cell at (2,3); ALTREF2
+# returns 1 with an empty field, driving refStamp to -1 so ALTREF + LAST2 are SKIPPED (their would-contribute
+# cells MUST be absent). Every cell of every plane is checked against the oracle (sentinel unless one of the
+# two contributing positions), so a stray/missing write or a wrong refStamp gate flips an assertion.
+fn test_motion_field_estimation() {
+    var seq = alloc(AV1_SEQ_SIZE);
+    memset(seq, 0, AV1_SEQ_SIZE);
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_ORDER_HINT, 16);
+    store64(fh + AV1FH_MI_ROWS, 8);
+    store64(fh + AV1FH_MI_COLS, 8);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 12);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST2_FRAME * 8), 8);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST3_FRAME * 8), 10);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_GOLDEN_FRAME * 8), 4);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_BWDREF_FRAME * 8), 20);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF2_FRAME * 8), 24);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), 32);
+    var ii = 0;
+    while (ii < 7) { store64(fh + AV1FH_REF_FRAME_IDX + (ii * 8), ii); ii = ii + 1; }   # ref LAST..ALTREF -> slot 0..6
+    var refs = alloc(AV1REF_SIZE);
+    memset(refs, 0, AV1REF_SIZE);
+    var s = 0;
+    while (s < 8) { store64(refs + AV1REF_MI_ROWS + (s * 8), 8); store64(refs + AV1REF_MI_COLS + (s * 8), 8);
+        store64(refs + AV1REF_FRAME_TYPE + (s * 8), AV1_INTER_FRAME); s = s + 1; }
+    # slot0 = LAST: useLast via SavedOrderHints[0][ALTREF]=99 (!= GOLDEN 4); one cell + a synthetic INTRA(0)
+    # cell at (0,3) to witness the "> INTRA_FRAME" guard (a >= mutant would try to project it).
+    var f0 = tmvsest_mkfield(4, 4);
+    tmvsest_setcell(f0, 4, 4, 1, 1, AV1_LAST_FRAME, 64, 0);
+    tmvsest_setcell(f0, 4, 4, 0, 3, AV1_INTRA_FRAME, 0, 16);   # synthetic ref=0, small in-window MV
+    tmvsest_setslot(refs, 0, 8, 8, AV1_INTER_FRAME, f0);
+    tmvsest_setsoh(refs, 0, AV1_ALTREF_FRAME, 99);
+    tmvsest_setsoh(refs, 0, AV1_LAST_FRAME, 8);            # refOffset = dist(12,8) = 4
+    tmvsest_setsoh(refs, 0, AV1_INTRA_FRAME, 8);           # SavedOrderHints[0][0], read only by a >=INTRA mutant
+    # slot4 = BWDREF: one cell (dstSign=+1). refOffset = dist(20,16) = 4.
+    var f4 = tmvsest_mkfield(4, 4);
+    tmvsest_setcell(f4, 4, 4, 2, 2, AV1_LAST_FRAME, 0, 64);
+    tmvsest_setslot(refs, 4, 8, 8, AV1_INTER_FRAME, f4);
+    tmvsest_setsoh(refs, 4, AV1_LAST_FRAME, 16);
+    # slot5 = ALTREF2: empty field -> returns 1, contributes nothing, drives refStamp to -1.
+    tmvsest_setslot(refs, 5, 8, 8, AV1_INTER_FRAME, tmvsest_mkfield(4, 4));
+    # slot6 = ALTREF: a would-contribute cell (small MV -> lands at (1,0)) that MUST be absent (refStamp<0).
+    var f6 = tmvsest_mkfield(4, 4);
+    tmvsest_setcell(f6, 4, 4, 1, 0, AV1_LAST_FRAME, 16, 0);
+    tmvsest_setslot(refs, 6, 8, 8, AV1_INTER_FRAME, f6);
+    tmvsest_setsoh(refs, 6, AV1_LAST_FRAME, 16);           # refOffset = dist(32,16) = 16
+    # slot1 = LAST2: a would-contribute cell (small MV -> lands at (3,0)) that MUST be absent (refStamp<0).
+    var f1 = tmvsest_mkfield(4, 4);
+    tmvsest_setcell(f1, 4, 4, 3, 0, AV1_LAST_FRAME, 0, 16);
+    tmvsest_setslot(refs, 1, 8, 8, AV1_INTER_FRAME, f1);
+    tmvsest_setsoh(refs, 1, AV1_LAST_FRAME, 0);            # refOffset = dist(8,0) = 8
+
+    var mf = av1_motion_field_estimation(fh, refs, seq);
+    assert(mf != 0, "mfe: built");
+    assert_eq(av1_motionfield_get(mf, AV1_LAST_FRAME, 0, 0, 0), 0 - 32768, "mfe: (0,0) sentinel (ALTREF skipped)");
+    # Per-dst scale rows for the two contributing positions (oracle: [64,128,96,192,-64,-128,-256]).
+    var pr = alloc(8 * 8);   # row proj at pos (0,1), col 0
+    store64(pr + (1 * 8), 64); store64(pr + (2 * 8), 128); store64(pr + (3 * 8), 96); store64(pr + (4 * 8), 192);
+    store64(pr + (5 * 8), 0 - 64); store64(pr + (6 * 8), 0 - 128); store64(pr + (7 * 8), 0 - 256);
+    var sent = 0 - 32768;
+    var dst = AV1_LAST_FRAME;
+    while (dst <= AV1_ALTREF_FRAME) {
+        var y = 0;
+        while (y < 4) {
+            var x = 0;
+            while (x < 4) {
+                # expected row/col: sentinel unless (0,1) [LAST cell] or (2,3) [BWDREF cell].
+                var er = sent; var ec = sent;
+                if ((y == 0) && (x == 1)) { er = load64(pr + (dst * 8)); ec = 0; }
+                if ((y == 2) && (x == 3)) { er = 0; ec = load64(pr + (dst * 8)); }
+                assert_eq(av1_motionfield_get(mf, dst, y, x, 0), er, "mfe: cell row vs oracle");
+                assert_eq(av1_motionfield_get(mf, dst, y, x, 1), ec, "mfe: cell col vs oracle");
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        dst = dst + 1;
+    }
+    return 0;
+}
+# Direct av1_mv_projection gate witnesses (0.7.103): the early return-0 gates + per-cell posValid rejections
+# that the whole-frame KAT can't isolate. Each builds a minimal 2x2-field ref and asserts the return + that
+# MotionFieldMvs stays all-sentinel (nothing written) when a gate rejects.
+fn test_mv_projection_gates() {
+    var seq = alloc(AV1_SEQ_SIZE);
+    memset(seq, 0, AV1_SEQ_SIZE);
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_ORDER_HINT, 16);
+    store64(fh + AV1FH_MI_ROWS, 4);
+    store64(fh + AV1FH_MI_COLS, 4);        # h8 = w8 = 2
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 12);
+    var jj = 0;
+    while (jj < 7) { store64(fh + AV1FH_REF_FRAME_IDX + (jj * 8), jj); jj = jj + 1; }
+    var refs = alloc(AV1REF_SIZE);
+    memset(refs, 0, AV1REF_SIZE);
+    var mf = av1_motionfield_alloc(2, 2);
+    # a valid contributing field (2x2) with one cell — reused across gate variations.
+    var fld = tmvsest_mkfield(2, 2);
+    tmvsest_setcell(fld, 2, 2, 0, 0, AV1_LAST_FRAME, 1, 0);   # tiny MV -> stays at (0,0) when projected, so a
+    #   dropped posValid gate (refOffset<=0 / |refToCur|>31) actually WRITES there and is caught, not lost off-grid
+    tmvsest_setsoh(refs, 0, AV1_LAST_FRAME, 8);            # refOffset = dist(12,8) = 4 > 0
+    # gate 1: dimension mismatch (ref mi_rows != current) -> 0.
+    tmvsest_setslot(refs, 0, 8, 4, AV1_INTER_FRAME, fld);  # mi_rows 8 != 4
+    assert_eq(av1_mv_projection(fh, refs, seq, mf, AV1_LAST_FRAME, 1, 2, 2, 4, 4), 0, "gate: dim mismatch -> 0");
+    # gate 2: KEY frame type -> 0.
+    tmvsest_setslot(refs, 0, 4, 4, AV1_KEY_FRAME, fld);
+    assert_eq(av1_mv_projection(fh, refs, seq, mf, AV1_LAST_FRAME, 1, 2, 2, 4, 4), 0, "gate: KEY type -> 0");
+    # gate 3: INTRA_ONLY frame type -> 0.
+    tmvsest_setslot(refs, 0, 4, 4, AV1_INTRA_ONLY_FRAME, fld);
+    assert_eq(av1_mv_projection(fh, refs, seq, mf, AV1_LAST_FRAME, 1, 2, 2, 4, 4), 0, "gate: INTRA_ONLY -> 0");
+    # gate 4: null saved field -> 0.
+    tmvsest_setslot(refs, 0, 4, 4, AV1_INTER_FRAME, 0);
+    assert_eq(av1_mv_projection(fh, refs, seq, mf, AV1_LAST_FRAME, 1, 2, 2, 4, 4), 0, "gate: null field -> 0");
+    # gate 5: per-cell refOffset <= 0 (saved MV points to the FUTURE) -> returns 1 but writes nothing.
+    av1_motion_field_estimation(fh, refs, seq);            # (re-init mf to sentinel via a throwaway build)
+    var mf5 = av1_motionfield_alloc(2, 2);
+    var kk = 0; while (kk < (8 * 2 * 2 * 2)) { store64(mf5 + AV1MF_FIELD + (kk * 8), 0 - 32768); kk = kk + 1; }
+    tmvsest_setslot(refs, 0, 4, 4, AV1_INTER_FRAME, fld);
+    tmvsest_setsoh(refs, 0, AV1_LAST_FRAME, 20);           # refOffset = dist(12,20) = -8 <= 0 -> reject
+    assert_eq(av1_mv_projection(fh, refs, seq, mf5, AV1_LAST_FRAME, 1, 2, 2, 4, 4), 1, "gate: refOffset<=0 -> 1");
+    assert_eq(av1_motionfield_get(mf5, AV1_LAST_FRAME, 0, 0, 0), 0 - 32768, "gate: refOffset<=0 wrote nothing");
+    # gate 6: |refToCur| > 31 (distant src order hint) -> returns 1 but writes nothing.
+    var mf6 = av1_motionfield_alloc(2, 2);
+    var mm = 0; while (mm < (8 * 2 * 2 * 2)) { store64(mf6 + AV1MF_FIELD + (mm * 8), 0 - 32768); mm = mm + 1; }
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 60);   # dist(60,16)=44 -> |refToCur|=44 > 31
+    tmvsest_setsoh(refs, 0, AV1_LAST_FRAME, 56);                  # refOffset = dist(60,56) = 4 > 0 (fine)
+    assert_eq(av1_mv_projection(fh, refs, seq, mf6, AV1_LAST_FRAME, 1, 2, 2, 4, 4), 1, "gate: |refToCur|>31 returns 1");
+    assert_eq(av1_motionfield_get(mf6, AV1_LAST_FRAME, 0, 0, 0), 0 - 32768, "gate: |refToCur|>31 wrote nothing");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -1385,6 +1560,9 @@ fn main() {
     test_group("temporal-MV producer (0.7.102)");
     test_tmvs_save();
     test_mv_projection_leaves();
+    test_group("motion_field_estimation (7.9.1/2) — driver + projection (0.7.103)");
+    test_motion_field_estimation();
+    test_mv_projection_gates();
     test_scan_compound_global();
     test_group("find_mv_stack driver (7.10.2) + extra_search + context/clamping");
     test_driver_above_left();

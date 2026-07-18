@@ -73,6 +73,14 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
         store64(ic + 48, load64(cctx + 48));     # plan slot (write side; 0 on decode)
         store64(tile + AV1TILE_ICDEF, ic);
     }
+    # Temporal-MV field (spec 7.9): when use_ref_frame_mvs, build MotionFieldMvs from the DPB's saved motion
+    # fields before decoding this tile's blocks. OUTPUT-NEUTRAL in 0.7.103 — the temporal scan (7.10.2.5/6,
+    # roadmap.md) is the first reader; until then this only populates the reusable module-global scratch, so a
+    # per-tile rebuild is harmless (the estimation is a pure fn of fh/refs/seq — identical across a frame's
+    # tiles; hoist to a once-per-frame call when the scan lands). A build failure (OOM) is non-fatal here.
+    if (av1_fh_use_ref_frame_mvs(fh) != 0) {
+        av1_motion_field_estimation(fh, refs, seq);
+    }
     return DR_OK;
 }
 

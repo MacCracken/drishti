@@ -340,13 +340,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   **TEMPORAL-MV arc** (3 bites, the last find_mv_stack deferral): **Bite 1 / producer 0.7.102** (`av1_mv_save_field`
   — save each inter frame's per-8x8 motion field into the DPB it refreshes, spec 7.19/7.20; `AV1REF_SAVED_MF`
   storage + the `av1_frame_dec_finish` hook; output-neutral, KAT vs a spec-literal `tmvs_save_ref.py`), and
-  **Bite 2a / projection leaves 0.7.103** (spec 7.9.3/4 — `Div_Mult[32]` + `av1_get_mv_projection` +
-  `av1_get_block_position`/`project`, the pure arithmetic as un-wired KAT'd leaves; output-neutral). Next
-  **Bite 2b / motion_field_estimation 0.7.104** (spec 7.9.1/2 — the useLast/refStamp driver + the per-ref
-  order-hint-scaled projection onto the current 8x8 grid → `MotionFieldMvs`, wiring the 2a leaves; the
-  frame-start hook; still output-neutral) then **Bite 3 / the scan** (spec 7.10.2.5/6 — read `MotionFieldMvs`
-  in find_mv_stack, add temporal candidates + `ZeroMvContext`; the output-changing bite). Then
-  **inter-intra + GLOBALWARP warp-blend** +
+  **Bite 2 / motion_field_estimation 0.7.103** (spec 7.9 — 2a: `Div_Mult[32]` + `av1_get_mv_projection` +
+  `av1_get_block_position`/`project` as KAT'd leaves; 2b: `av1_mv_projection` (7.9.2 per-ref) +
+  `av1_motion_field_estimation` (7.9.1 useLast/refStamp driver) + the reusable `MotionFieldMvs` scratch + the
+  `av1_tile_set_inter_ctx` frame-start hook behind `use_ref_frame_mvs`; still output-neutral). Next
+  **Bite 3 / the scan** (spec 7.10.2.5/6 — read `MotionFieldMvs` in find_mv_stack, add temporal candidates +
+  `ZeroMvContext`; the output-changing bite). Then **inter-intra + GLOBALWARP warp-blend** +
   **compound GLOBAL_GLOBALMV warp** (warp-into-a-scratch follow-ons), then scaled-reference/BILINEAR MC; all
   table-free bar the warp filter + Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

@@ -691,6 +691,178 @@ fn av1_get_block_position(x8, y8, dstSign, proj_row, proj_col, mi_rows, mi_cols,
     return 1;
 }
 
+# ================================================================
+# MOTION-FIELD ESTIMATION (0.7.103, spec 7.9.1 driver + 7.9.2 per-ref projection) — build MotionFieldMvs, the
+# per-8x8 pre-scaled temporal-MV field the temporal scan (7.10.2.5/6, the next bite) will read. Wires the
+# 7.9.3/4 leaves above. OUTPUT-NEUTRAL: nothing reads MotionFieldMvs yet, so the full suite staying green IS
+# the no-regression proof. 3-source reconciled (spec 7.9 PDF re-fetched + dav1d refmvs.c + libaom).
+# ================================================================
+# MotionFieldMvs scratch — [8 planes][h8][w8][2] i64, plane indexed by the DESTINATION ref frame value
+# (LAST..ALTREF = 1..7; plane 0 is unused so the scan indexes MotionFieldMvs[RefFrame] with no -1 adjust).
+# A reusable module-global (decode is one-frame-at-a-time); re-sized only when h8*w8 grows. The header carries
+# the CURRENT h8/w8 so the element stride is self-describing. Element (dst,y8,x8,comp) sits at
+# AV1MF_FIELD + ((((dst*h8 + y8)*w8 + x8)*2) + comp)*8. Cells with no projected MV hold the -32768 sentinel.
+var Av1_MotionField    = 0;    # pointer to [h8, w8, then 8*h8*w8*2 i64], or 0
+var Av1_MotionFieldCap = 0;    # current cell capacity (h8*w8) — avoid re-alloc on same/smaller frames
+var Av1_MvProjScratch  = 0;    # reusable 48-byte projection scratch (pbuf|dbuf|qbuf), lazily allocated
+enum Av1MotionFieldOff {
+    AV1MF_H8    = 0;
+    AV1MF_W8    = 8;
+    AV1MF_FIELD = 16;          # [8][h8][w8][2] i64 payload
+}
+# Sentinel written to every cell before projection — the spec's "-1 << 15" no-candidate marker; the scan
+# (next bite) treats a cell whose row == this as absent. Kept OUT of the valid MV range (|proj| <= 16383).
+fn av1_motionfield_sentinel(): i64 { return 0 - 32768; }
+# Allocate/resize the scratch for the current h8/w8 and stamp the header. Returns the buffer, or 0 on OOM.
+fn av1_motionfield_alloc(h8, w8): i64 {
+    var need = h8 * w8;
+    if (need <= 0) { return 0; }                        # trust-no-input backstop (0x0 frame)
+    if ((Av1_MotionField == 0) || (need > Av1_MotionFieldCap)) {
+        var t = alloc(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
+        if (t == 0) { return 0; }
+        Av1_MotionField    = t;
+        Av1_MotionFieldCap = need;
+    }
+    store64(Av1_MotionField + AV1MF_H8, h8);
+    store64(Av1_MotionField + AV1MF_W8, w8);
+    return Av1_MotionField;
+}
+# Byte offset of (dst, y8, x8) component 0 inside the scratch (comp 1 is +8). Uses the header h8/w8.
+fn av1_motionfield_slot(mf, dst, y8, x8): i64 {
+    var h8 = load64(mf + AV1MF_H8);
+    var w8 = load64(mf + AV1MF_W8);
+    return AV1MF_FIELD + ((((((dst * h8) + y8) * w8) + x8) * 2) * 8);
+}
+# Read component comp (0=row, 1=col) of MotionFieldMvs[dst][y8][x8] — for the scan (next bite) + the KATs.
+fn av1_motionfield_get(mf, dst, y8, x8, comp): i64 {
+    return load64(mf + av1_motionfield_slot(mf, dst, y8, x8) + (comp * 8));
+}
+# av1_mv_projection (spec 7.9.2 motion_field_projection) — project reference `srcRef`'s saved per-8x8 field
+# onto the current grid, filling MotionFieldMvs[LAST..ALTREF]. dstSign is +1 (forward ref) or -1 (backward).
+# Returns 1 if the projection RAN (dimension/type/storage gates passed), 0 if a gate rejected it — the driver
+# uses that to decrement refStamp. The per-cell posValid gate decides whether a given cell contributes.
+# drishti's saved field is ALREADY per-8x8 (av1_mv_save_field pre-sampled at the spec's odd 2*y8+1 rows), so
+# this reads it at (y8, x8) directly, NOT re-sampling at 2*y8+1.
+# CRITICAL directional detail (spec-confirmed): refToCur = dist(OrderHints[src], OrderHint) — src FIRST; the
+# per-dst refToDst = dist(OrderHint, OrderHints[dst]) — current FIRST (opposite order); refOffset =
+# dist(OrderHints[src], SavedOrderHints[srcIdx][srcRef]) — src FIRST. The position projection carries *dstSign
+# on its numerator; the inner per-dst projection does NOT.
+fn av1_mv_projection(fh, refs, s, mf, srcRef, dstSign, h8, w8, mi_rows, mi_cols): i64 {
+    var srcIdx = av1_fh_ref_frame_idx(fh, srcRef - AV1_LAST_FRAME);
+    if ((srcIdx < 0) || (srcIdx > 7)) { return 0; }
+    # 7.9.2 gates: temporal MV is disabled across a resolution change and against a key / intra-only ref.
+    if (av1_ref_mi_rows(refs, srcIdx) != mi_rows) { return 0; }
+    if (av1_ref_mi_cols(refs, srcIdx) != mi_cols) { return 0; }
+    var ft = av1_ref_frame_type(refs, srcIdx);
+    if ((ft == AV1_KEY_FRAME) || (ft == AV1_INTRA_ONLY_FRAME)) { return 0; }
+    var saved = av1_ref_saved_mf(refs, srcIdx);
+    if (saved == 0) { return 0; }                         # ref stored no motion field (was intra) -> no proj
+    var oh     = av1_fh_order_hint(fh);
+    var src_oh = av1_fh_order_hint_ref(fh, srcRef);
+    var refToCur = av1_get_relative_dist(s, src_oh, oh);   # constant per call; posValid re-checks it per spec
+    var mv_base  = saved + AV1SMF_REF + (h8 * w8 * 8);      # dims match, so saved stride == current stride
+    # Scratch out-buffers: a reusable 48-byte module-global (pbuf|dbuf|qbuf) — no per-call/per-frame alloc.
+    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = alloc(48); }
+    if (Av1_MvProjScratch == 0) { return 0; }
+    var pbuf = Av1_MvProjScratch;         # get_block_position input proj MV (position finder)
+    var dbuf = Av1_MvProjScratch + 16;    # per-dst stored proj MV
+    var qbuf = Av1_MvProjScratch + 32;    # get_block_position output (PosY8, PosX8)
+    var y8 = 0;
+    while (y8 < h8) {
+        var x8 = 0;
+        while (x8 < w8) {
+            var cell = (y8 * w8) + x8;
+            var srcRefCell = load64(saved + AV1SMF_REF + (cell * 8));
+            # srcRefCell is buffer-derived (av1_mv_save_field writes only NONE=-1 or a real ref 1..7), so the
+            # upper bound is defense-in-depth — it keeps the SavedOrderHints[srcIdx][srcRefCell] read inside the
+            # [8] row even under internal corruption, matching the trust-no-input guard discipline.
+            if ((srcRefCell > AV1_INTRA_FRAME) && (srcRefCell <= AV1_ALTREF_FRAME)) {
+                var saved_oh  = av1_ref_saved_order_hint(refs, srcIdx, srcRefCell);
+                var refOffset = av1_get_relative_dist(s, src_oh, saved_oh);
+                # posValid: both distances within +-31 and the saved MV points into the past (refOffset > 0).
+                if ((av1_iabs(refToCur) <= 31) && (av1_iabs(refOffset) <= 31) && (refOffset > 0)) {
+                    var mvr = load64(mv_base + ((cell * 2) * 8));
+                    var mvc = load64(mv_base + (((cell * 2) + 1) * 8));
+                    # First projection scales the MV to the CURRENT frame to find where it lands (num *dstSign).
+                    av1_get_mv_projection(mvr, mvc, refToCur * dstSign, refOffset, pbuf);
+                    var gbp = av1_get_block_position(x8, y8, dstSign, load64(pbuf), load64(pbuf + 8),
+                        mi_rows, mi_cols, qbuf);
+                    if (gbp != 0) {
+                        var posY = load64(qbuf);
+                        var posX = load64(qbuf + 8);
+                        # Store a per-DEST pre-scaled MV into every plane (the spec's pre-scaled layout).
+                        var dst = AV1_LAST_FRAME;
+                        while (dst <= AV1_ALTREF_FRAME) {
+                            var dstDist = av1_get_relative_dist(s, oh, av1_fh_order_hint_ref(fh, dst));
+                            av1_get_mv_projection(mvr, mvc, dstDist, refOffset, dbuf);   # NO *dstSign here
+                            var slot = av1_motionfield_slot(mf, dst, posY, posX);
+                            store64(mf + slot, load64(dbuf));
+                            store64(mf + slot + 8, load64(dbuf + 8));
+                            dst = dst + 1;
+                        }
+                    }
+                }
+            }
+            x8 = x8 + 1;
+        }
+        y8 = y8 + 1;
+    }
+    return 1;
+}
+# av1_motion_field_estimation (spec 7.9.1) — the driver: init MotionFieldMvs to the sentinel, then project a
+# fixed set of references in the spec order with the useLast / refStamp bookkeeping. Returns the built
+# MotionFieldMvs scratch (or 0 on OOM). Callers gate on use_ref_frame_mvs before invoking. Order (spec-
+# confirmed): LAST(-1) if useLast [discarded]; BWDREF(+1); ALTREF2(+1) [both ungated on refStamp]; ALTREF(+1)
+# [refStamp>=0]; LAST2(-1) [refStamp>=0]. Only BWDREF/ALTREF2/ALTREF decrement refStamp on a return of 1.
+fn av1_motion_field_estimation(fh, refs, s): i64 {
+    var mi_rows = av1_fh_mi_rows(fh);
+    var mi_cols = av1_fh_mi_cols(fh);
+    var h8 = mi_rows >> 1;
+    var w8 = mi_cols >> 1;
+    var mf = av1_motionfield_alloc(h8, w8);
+    if (mf == 0) { return 0; }
+    # Init every cell (both comps, all 8 planes) to the -32768 sentinel.
+    var sent = av1_motionfield_sentinel();
+    var n = ((8 * h8) * w8) * 2;
+    var k = 0;
+    while (k < n) {
+        store64(mf + AV1MF_FIELD + (k * 8), sent);
+        k = k + 1;
+    }
+    var oh = av1_fh_order_hint(fh);
+    # useLast: LAST's saved ALTREF order hint differs from the current GOLDEN order hint (spec 7.9.1).
+    var lastIdx = av1_fh_ref_frame_idx(fh, 0);
+    var useLast = 0;
+    if ((lastIdx >= 0) && (lastIdx <= 7)) {
+        var lastAlt  = av1_ref_saved_order_hint(refs, lastIdx, AV1_ALTREF_FRAME);
+        var curGold  = av1_fh_order_hint_ref(fh, AV1_GOLDEN_FRAME);
+        if (lastAlt != curGold) { useLast = 1; }
+    }
+    if (useLast != 0) {
+        av1_mv_projection(fh, refs, s, mf, AV1_LAST_FRAME, 0 - 1, h8, w8, mi_rows, mi_cols);
+    }
+    var refStamp = 1;   # MFMV_STACK_SIZE(3) - 2
+    if (av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, AV1_BWDREF_FRAME), oh) > 0) {
+        if (av1_mv_projection(fh, refs, s, mf, AV1_BWDREF_FRAME, 1, h8, w8, mi_rows, mi_cols) == 1) {
+            refStamp = refStamp - 1;
+        }
+    }
+    if (av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, AV1_ALTREF2_FRAME), oh) > 0) {
+        if (av1_mv_projection(fh, refs, s, mf, AV1_ALTREF2_FRAME, 1, h8, w8, mi_rows, mi_cols) == 1) {
+            refStamp = refStamp - 1;
+        }
+    }
+    if ((av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, AV1_ALTREF_FRAME), oh) > 0) && (refStamp >= 0)) {
+        if (av1_mv_projection(fh, refs, s, mf, AV1_ALTREF_FRAME, 1, h8, w8, mi_rows, mi_cols) == 1) {
+            refStamp = refStamp - 1;
+        }
+    }
+    if (refStamp >= 0) {
+        av1_mv_projection(fh, refs, s, mf, AV1_LAST2_FRAME, 0 - 1, h8, w8, mi_rows, mi_cols);
+    }
+    return mf;
+}
+
 # Av1MvCtx — everything the scans need for one block: the MI grid + frame stride,
 # the tile bounds (for is_inside), the current block (MiRow/MiCol/MiSize), the
 # block's references RefFrame[0..1], the GlobalMvs[0..1] + GmType[RefFrame[0..1]]
