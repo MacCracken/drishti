@@ -1614,3 +1614,13 @@ fn av1_setup_shear(model): i64 {
     store64(model + AV1WM_SHEARVALID, valid);
     return DR_OK;
 }
+
+# a module-global reusable Av1WarpModel — built lazily, overwritten per LOCALWARP block by
+# av1_warp_estimation + av1_setup_shear (single-threaded, one block at a time), so the inter
+# tile decode avoids a per-block alloc. Returns 0 on OOM.
+var Av1_WarpModelScratch = 0;
+fn av1_warp_model_scratch(): i64 {
+    if (Av1_WarpModelScratch != 0) { return Av1_WarpModelScratch; }
+    Av1_WarpModelScratch = av1_warp_model_new();
+    return Av1_WarpModelScratch;
+}

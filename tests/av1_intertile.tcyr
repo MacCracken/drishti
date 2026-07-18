@@ -525,6 +525,246 @@ fn test_inter_tile_two_sb() {
     assert_eq(load64(g4 + AV1MIR_MV0ROW), 0 - 24, "SB4's MI mv row");
     return 0;
 }
+# a LOCALWARP block record (mirrors it_blk but motion_mode = LOCALWARP).
+fn it_blk_warp(mvr, mvc): i64 {
+    var b = it_blk(mvr, mvc);
+    store64((b + AV1FB_IB) + AV1IB_MOTIONMODE, AV1_MM_LOCALWARP);
+    return b;
+}
+# THE WARP MILESTONE: a LOCALWARP inter block decodes to WARPED pixels end-to-end. 4 SBs
+# (128x128): SB1-3 SIMPLE inter (populate the MI grid), SB4 (bottom-right) LOCALWARP — it finds
+# SB2 (above) + SB3 (left) as warp samples, so the decode runs warp_estimation -> setup_shear ->
+# av1_warp_pred_block. Verified against a DIRECT warp call on the post-decode samples (the
+# complementary-oracle pattern: the math is pinned by the 0.7.93/94/97 Python refs; this proves
+# the decode WIRING), plus a != translation check (proves warp actually fired, not the fallback).
+fn test_inter_tile_localwarp() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 128) {
+        var x0 = 0;
+        while (x0 < 128) {
+            dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255);
+            x0 = x0 + 1;
+        }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_FRAME_HEIGHT, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_ROWS, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 32);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, 1);   # allow the @@motion_mode read/write
+    store64(fh + AV1FH_ALLOW_WARPED, 1);             # allow LOCALWARP
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    store64(refs + AV1REF_FRAME_H + 0, 128);
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var ef = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(32);
+    var pf = alloc(32);
+    var k = 0;
+    while (k < 4) {
+        store64(pp + (k * 8), AV1_PARTITION_NONE);
+        k = k + 1;
+    }
+    store64(pf + 0, it_blk(16, 8));
+    store64(pf + 8, it_blk(0 - 8, 24));
+    store64(pf + 16, it_blk(8, 0 - 16));
+    store64(pf + 24, it_blk_warp(0, 0));           # SB4 LOCALWARP, Mv[0] = (0,0)
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "warp: 4-SB tile encoded (LOCALWARP SB4)");
+    var df = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "warp: 4-SB tile decodes (SB4 warps)");
+    # SB4's samples (the reusable tile ws holds the LAST decoded block's CandList) -> build the
+    # model + warp-predict DIRECTLY on a fresh frame: the decode's SB4 must equal it (wiring proof).
+    var ws = load64(dt + AV1TILE_WS);
+    assert_eq(av1_warp_num(ws) > 0, 1, "warp: SB4 found >= 1 warp sample");
+    var model = av1_warp_model_new();
+    av1_warp_estimation(ws, 16, 16, 12, 0, 0, model);   # BLOCK_64X64=12, SB4 at MI (16,16), mv (0,0)
+    assert_eq(av1_warp_model_valid(model), 1, "warp: SB4 estimation valid (det != 0)");
+    av1_setup_shear(model);
+    assert_eq(av1_warp_model_shear_valid(model), 1, "warp: SB4 shear realizable");
+    var rf = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(rf, ref, 0, 64, 64, 64, 64, model), DR_OK, "warp: reference predict");
+    var diffw = 0;
+    var yy = 64;
+    while (yy < 128) {
+        var xx = 64;
+        while (xx < 128) {
+            if (dr_frame_get(df, 0, xx, yy) != dr_frame_get(rf, 0, xx, yy)) { diffw = diffw + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(diffw, 0, "warp: SB4 decoded == the direct warp reference (4096 px)");
+    # and SB4 is NOT a translation MC of its Mv[0]=(0,0) -> warp actually fired, not the fallback.
+    var tf = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 0, 64, 64, 64, 64, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difft = 0;
+    yy = 64;
+    while (yy < 128) {
+        var xx = 64;
+        while (xx < 128) {
+            if (dr_frame_get(df, 0, xx, yy) != dr_frame_get(tf, 0, xx, yy)) { difft = difft + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difft > 0, 1, "warp: SB4 != translation MC (warp actually happened)");
+    # ---- the AV1WM_VALID guard is LOAD-BEARING: det==0 IS reachable. A LOCALWARP block whose
+    # Mv[0] is >= 256 (1/8-pel) from every neighbour -> find_warp_samples force-keeps the sole
+    # large-MV sample (NUM=1, the "no small MV found, return the first large one" case), which
+    # then FAILS warp_estimation's per-axis LS_MV_MAX (256) inlier filter -> all accumulators 0 ->
+    # det==0 -> AV1WM_VALID==0 -> the guard skips setup_shear -> TRANSLATION fallback. Dropping the
+    # guard would warp with the identity default (shearValid on wmmat[2]=65536) = a wrong
+    # zero-motion copy != the block-MV translation.
+    store64(pf + 24, it_blk_warp(0, 300));       # far Mv: |300-24|,|300-(-16)| both >= 256
+    var tlen2 = 0;
+    var ef2 = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var et2 = av1_tile_new(ef2, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(et2);
+    av1_tile_set_inter_ctx(et2, fh, refs, seq, dpb);
+    var tb2 = av1_encode_inter_tile(et2, pp, pf, 1, &tlen2);
+    assert_eq(tlen2 > 0, 1, "warp det==0: far-MV LOCALWARP tile encoded");
+    var df2 = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var dt2 = av1_tile_new(df2, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(dt2);
+    av1_tile_set_inter_ctx(dt2, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt2, tb2, tlen2, 1), DR_OK, "warp det==0: tile decodes");
+    # the estimation IS invalid for these force-kept far samples (the reachability).
+    var m2 = av1_warp_model_new();
+    av1_warp_estimation(load64(dt2 + AV1TILE_WS), 16, 16, 12, 0, 300, m2);
+    assert_eq(av1_warp_model_valid(m2), 0, "warp det==0: estimation invalid (all samples filtered)");
+    # SB4 == translation MC of Mv[0]=(0,300), NOT an identity copy -> the guard held.
+    var tf2 = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tf2, ref, 0, 64, 64, 64, 64, 0, 300, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difft2 = 0;
+    var yy2 = 64;
+    while (yy2 < 128) {
+        var xx2 = 64;
+        while (xx2 < 128) {
+            if (dr_frame_get(df2, 0, xx2, yy2) != dr_frame_get(tf2, 0, xx2, yy2)) { difft2 = difft2 + 1; }
+            xx2 = xx2 + 1;
+        }
+        yy2 = yy2 + 1;
+    }
+    assert_eq(difft2, 0, "warp det==0: SB4 falls back to translation MC (guard held, no identity copy)");
+    return 0;
+}
+# CHROMA warp (4:2:0): the per-plane useWarp gate warps a plane iff its NOMINAL block is >= 8x8.
+# A 64x64-luma LOCALWARP block -> 32x32 chroma (>= 8) -> chroma warps too. Asserts the decoded U
+# plane's SB4 quadrant == a DIRECT chroma warp; witnesses the >>subx/>>suby chroma projection +
+# the per-plane dispatch (a `plane == 0` gate that forced chroma to translation would go red).
+fn test_inter_tile_localwarp_chroma() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(128, 128, 3, 1, 1, 8, 8, oe);
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(ref, p);
+        var ph = dr_frame_plane_height(ref, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) {
+                dr_frame_set(ref, p, xx, yy, ((xx + (2 * yy)) + (p * 13)) & 255);
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_FRAME_HEIGHT, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_ROWS, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 32);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, 1);
+    store64(fh + AV1FH_ALLOW_WARPED, 1);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    store64(refs + AV1REF_FRAME_H + 0, 128);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_NUM_PLANES, 3);
+    store64(seq + AV1_SEQ_SUBX, 1);
+    store64(seq + AV1_SEQ_SUBY, 1);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var ef = dr_frame_new(128, 128, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 32, 32, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(32);
+    var pf = alloc(32);
+    var k = 0;
+    while (k < 4) {
+        store64(pp + (k * 8), AV1_PARTITION_NONE);
+        k = k + 1;
+    }
+    store64(pf + 0, it_blk(16, 8));
+    store64(pf + 8, it_blk(0 - 8, 24));
+    store64(pf + 16, it_blk(8, 0 - 16));
+    store64(pf + 24, it_blk_warp(0, 0));
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "warp chroma: 4:2:0 tile encoded");
+    var df = dr_frame_new(128, 128, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 32, 32, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "warp chroma: 4:2:0 tile decodes");
+    var model = av1_warp_model_new();
+    av1_warp_estimation(load64(dt + AV1TILE_WS), 16, 16, 12, 0, 0, model);
+    assert_eq(av1_warp_model_valid(model), 1, "warp chroma: SB4 estimation valid");
+    av1_setup_shear(model);
+    assert_eq(av1_warp_model_shear_valid(model), 1, "warp chroma: SB4 shear valid");
+    # the U plane (plane 1) SB4 quadrant is 32x32 at chroma (32,32) -> WARPS. Direct reference:
+    var rf = dr_frame_new(128, 128, 3, 1, 1, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(rf, ref, 1, 32, 32, 32, 32, model), DR_OK, "warp chroma: U reference");
+    var difU = 0;
+    var yy = 32;
+    while (yy < 64) {
+        var xx = 32;
+        while (xx < 64) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(rf, 1, xx, yy)) { difU = difU + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difU, 0, "warp chroma: decoded U plane SB4 == direct chroma warp (1024 px)");
+    # and the U plane warped (!= translation MC) -> the chroma dispatch chose warp, not fallback.
+    var tf = dr_frame_new(128, 128, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(tf, ref, 1, 32, 32, 32, 32, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var difUt = 0;
+    yy = 32;
+    while (yy < 64) {
+        var xx = 32;
+        while (xx < 64) {
+            if (dr_frame_get(df, 1, xx, yy) != dr_frame_get(tf, 1, xx, yy)) { difUt = difUt + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(difUt > 0, 1, "warp chroma: U plane warped, != translation");
+    return 0;
+}
 # distinct x/y filters through the lane (en_dual on, SWITCHABLE): a filt_x/filt_y
 # swap in the MC wiring changes the taps and the oracle catches it.
 fn test_inter_tile_dual_filter() {
@@ -2706,6 +2946,8 @@ fn main() {
     test_inter_tile_e2e();
     test_inter_tile_subpel();
     test_inter_tile_two_sb();
+    test_inter_tile_localwarp();
+    test_inter_tile_localwarp_chroma();
     test_inter_tile_dual_filter();
     test_inter_frame_route();
     test_group("the review hardening: chroma, ref selection, clamps, windows");

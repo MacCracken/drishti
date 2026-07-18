@@ -4,6 +4,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.98] - 2026-07-18
+
+**LOCALWARP DECODES TO PIXELS — the warp milestone.** A LOCALWARP inter block now decodes end-to-end to
+*warped* pixels: the inter tile decode builds the local warp model (`warp_estimation` 0.7.93 →
+`setup_shear` 0.7.94) and predicts each plane through `av1_warp_pred_block` (0.7.97). This wires together the
+whole warp arc (samples → model → shear → filter → warped block).
+
+### Added
+
+- **The LOCALWARP wiring** in `av1_intertile.cyr` (spec 7.11.3.1 useWarp): the motion-mode gate now admits
+  SIMPLE + LOCALWARP (OBMC stays out); once per LOCALWARP block the model is built from the tile's
+  find_warp_samples output (`AV1TILE_WS`, filled during mode-info with the same Mv[0]); each plane dispatches
+  `av1_warp_pred_block` iff the model is valid AND the plane's NOMINAL block is ≥8×8, else the existing
+  translation `av1_mc_pred_block` (so a 4×4 chroma block at 4:2:0 translates while luma warps). The encode
+  gate mirrors it. A module-global `Av1_WarpModelScratch` (in `av1_mv.cyr`) avoids per-block allocation.
+- **Reconciled** against spec 7.11.3.1 + the cached dav1d `warp_affine` caller + libaom.
+
+The composite `warpValid = AV1WM_VALID (estimation det≠0) && AV1WM_SHEARVALID`, with **setup_shear gated on
+AV1WM_VALID**. This guard is **load-bearing**: `det==0` IS reachable for a LOCALWARP block whose
+`find_warp_samples` force-kept its sole (large-MV) neighbour via the NUM=1 special case, which then fails
+`warp_estimation`'s per-axis `LS_MV_MAX` inlier filter → all accumulators 0 → `det==0` → `AV1WM_VALID==0`.
+Without the guard, the identity default would pass `setup_shear` (wmmat[2]=65536>0) and warp the block as a
+spurious zero-motion copy instead of the correct block-MV translation. (The adversarial review corrected an
+earlier mistaken "un-witnessable" claim here — the guard is now witnessed.)
+
+GLOBALWARP (useWarp==2, global-motion gm_params) is a **deferred follow-on**: a GLOBALMV block with
+`GmType>TRANSLATION` currently gets motion_mode SIMPLE from read_motion_mode and decodes as translation.
+
+**Proofs** (`tests/av1_intertile.tcyr`): a 4-superblock tile where SB4 (LOCALWARP) finds SB2 (above) + SB3
+(left) as warp samples and decodes to warped pixels **== a direct `warp_estimation`+`setup_shear`+
+`warp_pred_block`** on the post-decode samples (the complementary-oracle pattern — the math is pinned by the
+0.7.93/94/97 Python refs, so this proves the WIRING) and **≠ a translation MC**; a `det==0` case (far-MV
+LOCALWARP block) that falls back to translation (witnessing the load-bearing guard); and a **4:2:0 chroma**
+case whose 32×32 chroma warps == a direct chroma warp ≠ translation. **Mutation-verified**: the gate, the
+per-plane ≥8 dispatch, the warp-vs-translation branch, the estimation MV arg, the setup_shear result, the
+AV1WM_VALID guard, and the chroma dispatch all go red.
+
+**The adversarial review (2 dimensions, worktree-isolated, patch-applied, every finding verified):** one
+MAJOR finding — the det==0 guard was reachable + load-bearing but documented "un-witnessable" — fixed (the
+det==0 regression test above). Two MINOR test-coverage gaps deferred as a tracked follow-on (the shipped code
+is verified-correct — 0.7.97 chroma KATs + the spec reconciliation): witnessing the 8×8-chroma-boundary gate
+(needs a 16×16-luma block) / the 4×4-chroma translation fallback (needs an 8×8-luma block), and the
+edge-overhang nominal-vs-clamped gate — all of which need a SPLIT-partition / non-multiple-frame test harness.
+
 ## [0.7.97] - 2026-07-18
 
 **WARP PREDICTION DRIVER.** The block-level warp motion-compensation driver (spec 7.11.3.5) — per 8×8

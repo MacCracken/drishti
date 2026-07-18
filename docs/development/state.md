@@ -6,7 +6,42 @@
 
 ## Version
 
-**0.7.97** — cut 2026-07-18, not yet tagged (user's git). **WARP PREDICTION DRIVER.** The block-level warp
+**0.7.98** — cut 2026-07-18, not yet tagged (user's git). **LOCALWARP DECODES TO PIXELS (the warp milestone).**
+A LOCALWARP inter block now decodes end-to-end to WARPED pixels: the inter tile decode builds the local warp
+model (warp_estimation 0.7.93 → setup_shear 0.7.94) and predicts each plane through av1_warp_pred_block
+(0.7.97). Wires the whole warp arc (samples→model→shear→filter→warped block). av1_intertile.cyr (spec 7.11.3.1
+useWarp): the motion-mode gate admits SIMPLE + LOCALWARP (OBMC out); once per LOCALWARP block the model is
+built from the tile's find_warp_samples output (AV1TILE_WS, filled during mode-info with the same Mv[0]);
+per plane, dispatch av1_warp_pred_block iff warpValid AND the plane's NOMINAL block >= 8x8, else the existing
+translation av1_mc_pred_block (a 4x4 chroma at 4:2:0 translates while luma warps). Encode gate mirrors.
+Av1_WarpModelScratch (av1_mv.cyr) avoids per-block alloc. warpValid = AV1WM_VALID (estimation det!=0) &&
+AV1WM_SHEARVALID, with setup_shear GATED on AV1WM_VALID. 0.7.98 LESSONS: (a) **THE det==0 GUARD IS
+LOAD-BEARING and REACHABLE** — I mistakenly declared it un-witnessable (det>0 for any sample); the review
+CORRECTED it: find_warp_samples FORCE-KEEPS its sole large-MV neighbour via the NUM=1 "no small MV, return
+the first large one" case (av1_mv.cyr:1351), and that force-kept sample then FAILS warp_estimation's per-axis
+LS_MV_MAX (256) inlier filter → all accumulators 0 → det==0 → AV1WM_VALID==0. So a LOCALWARP block whose Mv[0]
+is >= 256 (1/8-pel) from every neighbour reaches det==0; without the guard the identity default passes
+setup_shear (wmmat[2]=65536>0) → shearValid=1 → a spurious zero-motion COPY instead of the block-MV
+translation. GENERAL: NumSamples (find_warp_samples output) != estimation inliers — the force-keep path admits
+a sample that estimation's own LS_MV_MAX then discards. Do NOT declare a guard un-witnessable without BUILDING
+the witness ("a test you have not seen fail is not evidence" applies to un-witnessability claims too). (b) the
+useWarp >=8 gate uses the NOMINAL subsampled dims (bw4*4)>>sx, NOT the edge-clamped w/h; dispatch on the
+clamped w/h (warp_pred_block crops). (c) GLOBALWARP (useWarp==2, gm_params) is a DEFERRED follow-on — a
+GLOBALMV block with GmType>TRANSLATION currently gets motion_mode SIMPLE and decodes as translation. THE PROOF
+(tests/av1_intertile.tcyr): a 4-SB tile where SB4 (LOCALWARP) finds SB2 (above)+SB3 (left) as samples and
+decodes == a DIRECT warp_estimation+setup_shear+warp_pred_block on the post-decode samples (complementary
+oracle: math pinned by the 0.7.93/94/97 Python refs; this proves WIRING) AND != translation MC; a det==0 case
+(far-MV block → translation, witnessing the guard); a 4:2:0 chroma case (32x32 chroma warps == direct chroma
+warp != translation). MUTATIONS: the gate, the >=8 dispatch, the warp-vs-translation branch, the estimation MV
+arg, the setup_shear result, the AV1WM_VALID guard, and the chroma dispatch all go red. THE REVIEW (2 dims,
+worktree-isolated, verified): 1 MAJOR (the det==0 guard reachability + the wrong "un-witnessable" doc) — FIXED
+(the det==0 regression test); 2 MINOR test-coverage gaps DEFERRED (code verified-correct via 0.7.97 chroma
+KATs + reconciliation): the 8x8-chroma-boundary gate / 4x4-chroma fallback (need a 16x16- / 8x8-luma block)
+and the edge-overhang nominal-vs-clamped gate (need a non-multiple-frame block) — both need a SPLIT-partition
+test harness (roadmap.md). Next: **GLOBALWARP (the global-motion warp path, useWarp==2 + gm_params), then OBMC
++ the temporal scan**. **Prior: WARP PREDICTION DRIVER (0.7.97).**
+
+**0.7.97** — **WARP PREDICTION DRIVER.** The block-level warp
 motion compensation (spec 7.11.3.5) — per 8x8 sub-block it projects the block centre through the warp model
 to the integer source position + sub-pixel phase seeds, gathers the padded reference, calls the 0.7.96 kernel,
 and writes back cropped. Handles luma + subsampled chroma. This assembles the whole warp pixel path

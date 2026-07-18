@@ -316,13 +316,20 @@ Baseline (0.7.0): OBU layer + sequence header.
   per 8x8 sub-block projects the block centre through the wmmat to the source position + the sub-pixel phase
   seeds (`mx=(sx4−4α−7β)&~0x3f`), gathers the 15x15 padded reference via `emu_edge`, runs the 0.7.96 kernel,
   writes back cropped; luma + subsampled chroma; verified standalone against the cached dav1d `warp_affine`
-  driver; the whole warp pixel path is now assembled). DEFERRED to
+  driver; the whole warp pixel path is now assembled), and **LOCALWARP DECODES TO PIXELS 0.7.98** (the warp
+  milestone — the inter tile decode builds the local warp model (`warp_estimation`→`setup_shear`) and predicts
+  each plane through `av1_warp_pred_block`, with the per-plane useWarp gate (nominal ≥8 warps, else translation)
+  and the load-bearing `det==0`→translation fallback; a LOCALWARP inter block decodes end-to-end to warped
+  pixels). DEFERRED to
   the conformance era: the `fwd_eq_bck` compound_idx CDF-context term (5.11.29) — it shifts one binary
   symbol's context, un-witnessable by a self-consistent round-trip, so it lands with external jnt vectors,
-  not on the pre-conformance decode lane; likewise the warp `LS_MAT`-clamp. Next
-  **un-gate LOCALWARP** (wire `warp_estimation`→`setup_shear`→`av1_warp_pred_block` into the inter tile decode
-  so warped inter blocks decode to pixels end-to-end), OBMC, the temporal scan (needs the
-  DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar the warp filter, dav1d
+  not on the pre-conformance decode lane; likewise the warp `LS_MAT`-clamp. DEFERRED test-coverage witnesses
+  (0.7.98 review, MINOR, code verified-correct): the 8×8-chroma-boundary useWarp gate / the 4×4-chroma
+  translation fallback (need a 16×16-/8×8-luma LOCALWARP block via a SPLIT partition) and the edge-overhang
+  nominal-vs-clamped gate (need a non-multiple-of-block frame). Next
+  **GLOBALWARP** (useWarp==2 — a GLOBALMV block with `GmType>TRANSLATION` warps with `gm_params`; currently
+  such blocks get motion_mode SIMPLE and decode as translation, a known latent gap), OBMC, the temporal scan
+  (needs the DPB's deferred saved MVs), and scaled-reference/BILINEAR MC; all table-free bar the warp filter, dav1d
   `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand). See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.

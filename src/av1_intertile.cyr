@@ -747,7 +747,9 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         }
         is_ii = 1;
     }
-    if (av1_ib_motion_mode(ib) != AV1_MM_SIMPLE) {
+    # motion mode: SIMPLE + LOCALWARP (0.7.98) are in scope; OBMC stays out (roadmap.md).
+    var mm = av1_ib_motion_mode(ib);
+    if ((mm != AV1_MM_SIMPLE) && (mm != AV1_MM_LOCALWARP)) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
     }
     # read_block_tx_size's var-tx branch (5.11.16): fill InterTxSizes for luma by
@@ -787,6 +789,24 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     var mv1_col = av1_mv_col(mv1);
     var filt_y = av1_ib_interp(ib, 0);
     var filt_x = av1_ib_interp(ib, 1);
+    # LOCALWARP: build the local warp model ONCE per block (spec 7.11.3.5/6/8) from the tile's
+    # find_warp_samples output (AV1TILE_WS, filled during inter_frame_mode_info using this same
+    # Mv[0]). warpValid = estimation det != 0 AND the shear is realizable. CRITICAL: setup_shear
+    # runs only when the estimation is VALID — on the identity default (det == 0) it would spuriously
+    # report shearValid for a zero-translation warp, warping an invalid block with wrong pixels.
+    var warp_valid = 0;
+    var wm = 0;
+    if (mm == AV1_MM_LOCALWARP) {
+        wm = av1_warp_model_scratch();
+        if (wm == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
+        var ewe = av1_warp_estimation(load64(tile + AV1TILE_WS), r, c, sub_size, mv_row, mv_col, wm);
+        if (ewe != DR_OK) { return av1_ierr_latch(tile, ewe); }
+        if (av1_warp_model_valid(wm) != 0) {
+            var ews = av1_setup_shear(wm);
+            if (ews != DR_OK) { return av1_ierr_latch(tile, ews); }
+            warp_valid = av1_warp_model_shear_valid(wm);
+        }
+    }
     # Compound blend params (spec 7.11.3.11/14/15): SCALAR (comp_mode=0) = AVERAGE (8/8, bit-
     # identical to the plain average) or DISTANCE (compound_idx==0 -> order-hint weights); DIFFWTD
     # (comp_mode=1) = per-pixel difference mask (mask_type); WEDGE (comp_mode=2) = a codebook mask
@@ -848,8 +868,18 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                         sub_size, load64(st + 8), load64(st + 0),
                         load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
                     } else {
-                        em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
-                        mv_row, mv_col, filt_x, filt_y);
+                        # useWarp (spec 7.11.3.1): warp this plane iff the model is valid AND the
+                        # plane's NOMINAL (subsampled, pre-edge-clamp) block is >= 8x8 — so a 4x4
+                        # chroma (from an 8x8-luma warp block at 4:2:0) falls back to translation.
+                        # Dispatch on the edge-CLAMPED w/h (warp_pred_block crops partial tiles).
+                        var nw = (bw4 * 4) >> sx;
+                        var nh = (bh4 * 4) >> sy;
+                        if ((warp_valid != 0) && (nw >= 8) && (nh >= 8)) {
+                            em = av1_warp_pred_block(frame, refframe, plane, x, y, w, h, wm);
+                        } else {
+                            em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
+                            mv_row, mv_col, filt_x, filt_y);
+                        }
                     }
                 }
                 if (em != DR_OK) { return av1_ierr_latch(tile, em); }
@@ -925,7 +955,8 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
             e_ii_reject = 1;
         }
     }
-    if ((e_ii_reject != 0) || (av1_ib_motion_mode(eib) != AV1_MM_SIMPLE)) {
+    var emm = av1_ib_motion_mode(eib);
+    if ((e_ii_reject != 0) || ((emm != AV1_MM_SIMPLE) && (emm != AV1_MM_LOCALWARP))) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
     }
     # VAR-TX (0.7.86): a non-skip TX_MODE_SELECT inter block > 4x4 non-lossless writes
