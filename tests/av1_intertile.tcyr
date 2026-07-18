@@ -207,6 +207,29 @@ fn test_inter_frame_route() {
     assert_eq(load64(oe2), DR_ERR_UNSUPPORTED, "no DPB -> UNSUPPORTED, never garbage");
     return 0;
 }
+# THE PRODUCER SAVE HOOK (0.7.102): a frame-level inter decode (through av1_frame_dec_finish) saves this
+# frame's per-8x8 motion field into every DPB slot it refreshes, aliasing ONE buffer. A fresh refs has
+# null saved-MF slots (pre-decode); after the decode all 8 slots (refresh_frame_flags 255) alias one
+# non-null buffer. Nothing reads the field yet (0.7.102 producer) — this pins that the save FIRES + aliases.
+fn test_tmvs_save_hook() {
+    var ref = it_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    var seq = it_seq();
+    assert_eq(av1_ref_saved_mf(refs, 0), 0, "tmvs hook: fresh refs slot is null (pre-decode)");
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk(16, 8), &tlen);
+    var oe = alloc(8);
+    var out = av1_decode_frame_ref(seq, fh, dpb, refs, tb, tlen, oe);
+    assert_eq(load64(oe), DR_OK, "tmvs hook: inter frame decodes");
+    assert_eq(out != 0, 1, "tmvs hook: frame returned");
+    assert_eq(av1_ref_saved_mf(refs, 0) != 0, 1, "tmvs hook: the save FIRED (slot 0 non-null)");
+    assert_eq(av1_ref_saved_mf(refs, 5), av1_ref_saved_mf(refs, 0),
+    "tmvs hook: all refreshed slots ALIAS one buffer");
+    return 0;
+}
 
 # ================================================================
 # The BYTE-STREAM E2E: a real (non-still) sequence header + a KEY frame + an INTER
@@ -3864,6 +3887,7 @@ fn main() {
     test_obmc_scan_intra();
     test_inter_tile_dual_filter();
     test_inter_frame_route();
+    test_tmvs_save_hook();
     test_group("the review hardening: chroma, ref selection, clamps, windows");
     test_inter_tile_chroma_e2e();
     test_inter_chroma_span_gated();

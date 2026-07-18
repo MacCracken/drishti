@@ -237,7 +237,8 @@ enum Av1RefOff {
     AV1REF_ORDER_HINT         = 832;    # [8]
     AV1REF_SAVED_ORDER_HINTS  = 896;    # [8][8]  -> 1408
     AV1REF_SAVED_GM           = 1408;   # [8][7][6] -> 4096
-    AV1REF_SIZE               = 4096;
+    AV1REF_SAVED_MF           = 4096;    # [8] i64 pointers to each slot's saved motion field (0.7.102) -> 4160
+    AV1REF_SIZE               = 4160;
 }
 
 # ================================================================
@@ -347,6 +348,10 @@ fn av1_ref_order_hint(r, i): i64 { return load64(r + AV1REF_ORDER_HINT + (i * 8)
 fn av1_ref_saved_order_hint(r, i, refFrame): i64 {
     return load64(r + AV1REF_SAVED_ORDER_HINTS + ((i * 8 + refFrame) * 8));
 }
+# saved motion field (0.7.102): the per-slot pointer to slot i's compact per-8x8 field (av1_mv_save_field
+# output; 0 for an intra/never-refreshed slot), read by a FUTURE frame's motion_field_estimation.
+fn av1_ref_saved_mf(r, i): i64 { return load64(r + AV1REF_SAVED_MF + (i * 8)); }
+fn av1_ref_set_saved_mf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_MF + (i * 8), ptr); return 0; }
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }

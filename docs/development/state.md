@@ -6,6 +6,27 @@
 
 ## Version
 
+**0.7.102** — cut 2026-07-18, not yet tagged (user's git). **Temporal-MV PRODUCER (Bite 1 of 3).** The
+first piece of temporal motion-vector prediction (the sole remaining find_mv_stack deferral). At inter-frame
+decode end, the per-8x8 motion field is saved into the DPB slots the frame refreshes, so a FUTURE frame can
+read it as temporal candidates (spec 7.19 storage + 7.20 save). OUTPUT-NEUTRAL — nothing reads it yet (the
+projection/motion_field_estimation is 0.7.103, the scan 0.7.104), so every existing test staying green IS
+the proof it changed no decode behavior. av1_mv.cyr: av1_mv_save_field — per 8x8 cell (y8,x8) samples the MI
+grid at (2*y8+1, 2*x8+1); list0 THEN list1 NO-break (list1 OVERWRITES list0 when it also qualifies); keep
+{ref,mv} iff ref>INTRA && get_relative_dist<0 (display-past) && |mv|<=4095 (REFMVS_LIMIT); else NONE. Compact
+self-indexed field (AV1SMF_H8/W8/REF + variable MV). av1_frame.cyr: AV1REF_SAVED_MF per-slot storage
+(AV1REF_SIZE 4096->4160) + av1_ref_saved_mf/set. av1_decode.cyr: the save hook in av1_frame_dec_finish (alloc
+one buffer, reduce tile0's MI grid, alias into every refreshed slot; intra frames leave null). Reconciled vs
+spec + a FETCHED dav1d refmvs.c (save_tmvs) + libaom (3-source understand workflow); drishti follows the
+SPEC's per-ref pre-scaled MotionFieldMvs layout (0.7.103), NOT dav1d's single-field deferred scaling (a
+documented future memory optimization). PROOF: scripts/refs/tmvs_save_ref.py spec-literal oracle + a 2x4-field
+KAT with ASYMMETRIC witnesses (list1-overwrites-list0, list0-survives, future->NONE, intra->NONE, REFMVS
+4095-kept/4096-rejected each component, 8x8 ODD-cell sampling vs an even decoy) asserted cell-by-cell + a
+frame-level save-hook aliasing test. MUTATIONS (6): list preference, dist<0 direction, REFMVS boundary,
+2*y8+1 sampling, hook-fires, buffer-aliasing. 38 suites, **28,516** suite + **1,140** fuzz assertions, all
+green. Next: **Bite 2 = motion_field_estimation (7.9 — Div_Mult table + get_mv_projection + the projection
+onto the 8x8 grid, order-hint scaled), still output-neutral; then Bite 3 = the temporal scan (7.10.2.5/6).**
+
 **0.7.101** — cut 2026-07-18, not yet tagged (user's git). **OBMC — overlapped block motion compensation
 (spec 7.11.3.9/10).** The SECOND inter motion mode after LOCALWARP: an OBMC block decodes to overlap-blended
 pixels (its own MC smoothed at the top/left edges with the above-row + left-col neighbours). The mode-info

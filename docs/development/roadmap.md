@@ -336,11 +336,16 @@ Baseline (0.7.0): OBU layer + sequence header.
   **OBMC 0.7.101** (overlapped block MC, spec 7.11.3.9/10 — the SECOND motion mode: an OBMC block's own MC
   is smoothed at the top/left edges with the above-row + left-col neighbours via a raised-cosine `Obmc_Mask`;
   `av1_obmc_predict` two-pass scan + `av1_obmc_overlap` blend, gated per the spec asymmetry (above pass has a
-  residual-size gate, left pass none); verified pixel-exact vs a spec-literal `obmc_ref.py`). Next
-  **the temporal MV scan** (spec 7.10.2.5/6 — un-defers the temporal MV candidates in find_mv_stack; needs
-  the DPB's saved motion fields, 7.9), then **inter-intra + GLOBALWARP warp-blend** + **compound
-  GLOBAL_GLOBALMV warp** (both warp-into-a-scratch follow-ons), then scaled-reference/BILINEAR MC; all
-  table-free bar the warp filter + Obmc_Mask, dav1d `mc_tmpl.c` / `decode.c` / `warpmv.c` references in hand).
+  residual-size gate, left pass none); verified pixel-exact vs a spec-literal `obmc_ref.py`), and the
+  **TEMPORAL-MV arc** (3 bites, the last find_mv_stack deferral): **Bite 1 / producer 0.7.102** (`av1_mv_save_field`
+  — save each inter frame's per-8x8 motion field into the DPB it refreshes, spec 7.19/7.20; `AV1REF_SAVED_MF`
+  storage + the `av1_frame_dec_finish` hook; output-neutral, KAT vs a spec-literal `tmvs_save_ref.py`). Next
+  **Bite 2 / motion_field_estimation 0.7.103** (spec 7.9 — the `Div_Mult` table + `get_mv_projection` + the
+  order-hint-scaled projection onto the current 8x8 grid → `MotionFieldMvs`; still output-neutral) then
+  **Bite 3 / the scan 0.7.104** (spec 7.10.2.5/6 — read `MotionFieldMvs` in find_mv_stack, add temporal
+  candidates + `ZeroMvContext`; the output-changing bite). Then **inter-intra + GLOBALWARP warp-blend** +
+  **compound GLOBAL_GLOBALMV warp** (warp-into-a-scratch follow-ons), then scaled-reference/BILINEAR MC; all
+  table-free bar the warp filter + Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.

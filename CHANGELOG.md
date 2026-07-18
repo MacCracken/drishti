@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.102] - 2026-07-18
+
+**Temporal-MV producer (Bite 1 of 3)** — the first piece of temporal motion-vector prediction (the last
+`find_mv_stack` deferral). At the end of decoding an inter frame, its per-8×8 motion field is now saved into
+the DPB slots it refreshes, so a **future** frame can read it as temporal candidates (spec 7.19 MV storage
++ 7.20 save). This bite is **output-neutral**: nothing reads the saved field yet (the projection +
+`motion_field_estimation` is 0.7.103, the scan is 0.7.104), so every existing test staying green **is** the
+proof it changed no decode behavior.
+
+### Added
+
+- **`av1_mv_save_field`** (`av1_mv.cyr`) — the pure reducer (spec 7.19/7.20). Per 8×8 cell `(y8,x8)` it
+  samples the MI grid at `(2*y8+1, 2*x8+1)` (the bottom-right 4×4 — only odd row/col are read). For list 0
+  **then** list 1 with **no break** (a qualifying list-1 OVERWRITES list-0), a reference qualifies iff it
+  is a real inter ref, its order-hint distance is `< 0` (strictly display-past), and both MV components are
+  within ±4095 (`REFMVS_LIMIT`); else the cell stores NONE + zero MV. Compact self-indexed field
+  (`AV1SMF_H8/W8/REF` + a variable `MV` offset, all i64).
+- **`AV1REF_SAVED_MF`** per-slot storage on `Av1RefState` (`av1_frame.cyr`, `AV1REF_SIZE` 4096→4160) +
+  `av1_ref_saved_mf` / `av1_ref_set_saved_mf`, co-located with the `SavedOrderHints`/`RefMiCols` the future
+  projection reads.
+- **The frame-end save hook** in `av1_frame_dec_finish` (`av1_decode.cyr`): allocs one compact buffer,
+  reduces the tile-0 MI grid, and aliases the buffer into every refreshed slot (`refresh_frame_flags`);
+  intra/key frames leave the slots null.
+- **Reconciled** against spec 7.19/7.20 + a fetched dav1d `refmvs.c` (`save_tmvs`) + libaom via a 3-source
+  understand workflow. drishti follows the spec's per-ref pre-scaled `MotionFieldMvs` layout (in 0.7.103),
+  not dav1d's single-field deferred scaling — a documented future memory optimization.
+
+**Proofs** (`scripts/refs/tmvs_save_ref.py` spec-literal oracle + `tests/`): a KAT over a 2×4 field with
+**asymmetric** witnesses — list-1-overwrites-list-0, list-0-survives (list-1 future), future-ref→NONE,
+intra→NONE, `REFMVS_LIMIT` 4095-kept / 4096-rejected (each MV component), and the 8×8 sampling reading the
+ODD cell not an even decoy — asserted cell-by-cell against the ref. A frame-level save-hook test (the field
+is saved + aliased across refreshed slots). **Mutation-verified**: the list preference, the `dist<0`
+direction, the `REFMVS_LIMIT` boundary, the `2*y8+1` sampling, the hook firing, and the buffer aliasing.
+
 ## [0.7.101] - 2026-07-18
 
 **OBMC — overlapped block motion compensation (spec 7.11.3.9 / 7.11.3.10).** The second inter motion mode

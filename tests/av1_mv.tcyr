@@ -1237,6 +1237,59 @@ fn test_overlappable_granularity() {
     "ODD MiCol=5, inter only at col 9: the 8x8 step-2 probe must NOT reach it");
     return 0;
 }
+# THE TEMPORAL-MV PRODUCER KAT (0.7.102): av1_mv_save_field vs the spec-literal scripts/refs/tmvs_save_ref.py.
+# A 2x4 8x8-cell field (fmi 8x4) with ASYMMETRIC witnesses — a symmetric grid would witness nothing (the
+# OBMC secretly-identity lesson): list1-OVERWRITES-list0, list0-survives (list1 future), future-ref -> NONE,
+# intra -> NONE, REFMVS_LIMIT 4095-kept / 4096-rejected (each MV component independently), and the 8x8
+# sampling reading the ODD MI cell (2*y8+1, 2*x8+1), NOT the even decoy at (2,6). OrderHint=8; LAST/LAST2/
+# GOLDEN display-PAST (hint<8), BWDREF display-FUTURE (hint>8).
+fn test_tmvs_save() {
+    var seq = alloc(AV1_SEQ_SIZE);
+    memset(seq, 0, AV1_SEQ_SIZE);
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_ORDER_HINT, 8);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 4);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST2_FRAME * 8), 5);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_GOLDEN_FRAME * 8), 6);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_BWDREF_FRAME * 8), 12);
+    var g = av1_mv_grid_new(8, 4);
+    #                 grid  fc  r  c  av in sz ym  ref0              ref1              mv0r  mv0c    mv1r mv1c
+    av1_mv_grid_set(g, 8, 1, 1, 1, 1, 3, 0, AV1_LAST_FRAME, AV1_GOLDEN_FRAME, 10, 20, 30, 40);      # both past -> list1
+    av1_mv_grid_set(g, 8, 1, 3, 1, 1, 3, 0, AV1_LAST_FRAME, AV1_BWDREF_FRAME, 50, 60, 70, 80);   # list1 future->list0
+    av1_mv_grid_set(g, 8, 1, 5, 1, 1, 3, 0, AV1_BWDREF_FRAME, AV1_REF_NONE, 1, 2, 0, 0);            # future -> NONE
+    av1_mv_grid_set(g, 8, 1, 7, 1, 0, 3, 0, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0);             # intra -> NONE
+    av1_mv_grid_set(g, 8, 3, 1, 1, 1, 3, 0, AV1_LAST_FRAME, AV1_REF_NONE, 4095, 0 - 4095, 0, 0);    # |mv|=4095 kept
+    av1_mv_grid_set(g, 8, 3, 3, 1, 1, 3, 0, AV1_LAST_FRAME, AV1_REF_NONE, 4096, 0, 0, 0);           # row 4096 reject
+    av1_mv_grid_set(g, 8, 3, 5, 1, 1, 3, 0, AV1_LAST_FRAME, AV1_REF_NONE, 0, 4096, 0, 0);           # col 4096 reject
+    av1_mv_grid_set(g, 8, 3, 7, 1, 1, 3, 0, AV1_LAST2_FRAME, AV1_REF_NONE, 7, 8, 0, 0);             # ODD cell (read)
+    av1_mv_grid_set(g, 8, 2, 6, 1, 1, 3, 0, AV1_LAST_FRAME, AV1_REF_NONE, 999, 999, 0, 0);   # even decoy (ignored)
+    var out = alloc(16 + (2 * 4 * 24));
+    assert_eq(av1_mv_save_field(g, 8, 4, seq, fh, out), DR_OK, "tmvs: save_field DR_OK");
+    assert_eq(load64(out + AV1SMF_H8), 2, "tmvs: h8 = MiRows>>1");
+    assert_eq(load64(out + AV1SMF_W8), 4, "tmvs: w8 = MiCols>>1");
+    # expected field from tmvs_save_ref.py: (MfRefFrame, MfMvRow, MfMvCol) per cell idx 0..7.
+    var er = alloc(8 * 8);
+    store64(er + 0, 4); store64(er + 8, 1); store64(er + 16, 0 - 1); store64(er + 24, 0 - 1);
+    store64(er + 32, 1); store64(er + 40, 0 - 1); store64(er + 48, 0 - 1); store64(er + 56, 2);
+    var evr = alloc(8 * 8);
+    store64(evr + 0, 30); store64(evr + 8, 50); store64(evr + 16, 0); store64(evr + 24, 0);
+    store64(evr + 32, 4095); store64(evr + 40, 0); store64(evr + 48, 0); store64(evr + 56, 7);
+    var evc = alloc(8 * 8);
+    store64(evc + 0, 40); store64(evc + 8, 60); store64(evc + 16, 0); store64(evc + 24, 0);
+    store64(evc + 32, 0 - 4095); store64(evc + 40, 0); store64(evc + 48, 0); store64(evc + 56, 8);
+    var mvb = out + AV1SMF_REF + (2 * 4 * 8);
+    var i = 0;
+    while (i < 8) {
+        assert_eq(load64(out + AV1SMF_REF + (i * 8)), load64(er + (i * 8)), "tmvs: MfRefFrame cell");
+        assert_eq(load64(mvb + ((i * 2) * 8)), load64(evr + (i * 8)), "tmvs: MfMv row");
+        assert_eq(load64(mvb + (((i * 2) + 1) * 8)), load64(evc + (i * 8)), "tmvs: MfMv col");
+        i = i + 1;
+    }
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -1277,6 +1330,8 @@ fn main() {
     test_scan_row_usestep16();
     test_scan_row_odd_parity();
     test_scan_col_odd_parity();
+    test_group("temporal-MV producer (0.7.102)");
+    test_tmvs_save();
     test_scan_compound_global();
     test_group("find_mv_stack driver (7.10.2) + extra_search + context/clamping");
     test_driver_above_left();

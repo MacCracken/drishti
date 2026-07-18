@@ -433,6 +433,30 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
     var ferr = 0;
     var result = av1_apply_loop_filters(tile0, fh, seq, load64(fdc + AV1FDEC_LR_PARAMS), &ferr);
     if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
+    # TEMPORAL-MV PRODUCER (0.7.102, spec 7.19/7.20): save this inter frame's per-8x8 motion field into the
+    # DPB slots it refreshes, so a FUTURE frame's motion_field_estimation (7.9) can read it. Output-neutral
+    # — nothing reads AV1REF_SAVED_MF yet (the estimation + scan are 0.7.103/104). Intra/key frames leave
+    # the slots null (no MVs to save). One arena buffer is aliased into every refreshed slot (never freed;
+    # no later frame mutates it — the reducer allocs a fresh buffer per frame). The MI grid lives on tile0
+    # (the loop filters do not mutate it, so this after-filter placement is fine).
+    var refs = load64(fdc + AV1FDEC_REFS);
+    if ((refs != 0) && (av1_fh_frame_is_intra(fh) == 0)) {
+        var grid = load64(tile0 + AV1TILE_MVGRID);
+        if (grid != 0) {
+            var fmi_cols = av1_fh_mi_cols(fh);
+            var fmi_rows = av1_fh_mi_rows(fh);
+            var buf = alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
+            if (buf != 0) {
+                av1_mv_save_field(grid, fmi_cols, fmi_rows, seq, fh, buf);
+                var rff = av1_fh_refresh_frame_flags(fh);
+                var i = 0;
+                while (i < 8) {
+                    if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
+                    i = i + 1;
+                }
+            }
+        }
+    }
     return result;
 }
 
