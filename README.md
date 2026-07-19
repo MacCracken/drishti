@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.106 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc COMPLETE + INTER-INTRA & COMPOUND-GLOBAL WARP — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels (per-block warp / global-motion warp / overlap-blend); temporal MV prediction is fully wired (0.7.102 saves each inter frame's per-8×8 motion field into the DPB, 0.7.103 builds motion_field_estimation, 0.7.104 the temporal scan folds projected temporal MVs into the candidate stack + derives ZeroMvContext); 0.7.105 warps the inter part of a GLOBALWARP inter-intra block then blends the intra, and 0.7.106 warps each reference of a compound GLOBAL_GLOBALMV block at intermediate precision then combines (a latent-mis-decode fix, spec 7.11.3.5); 8/10/12-bit, multi-tile, superres; next: scaled-reference MC)
+## Status — 0.7.107 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc COMPLETE + INTER-INTRA & COMPOUND-GLOBAL WARP — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels (per-block warp / global-motion warp / overlap-blend); temporal MV prediction is fully wired (0.7.102 saves each inter frame's per-8×8 motion field into the DPB, 0.7.103 builds motion_field_estimation, 0.7.104 the temporal scan folds projected temporal MVs into the candidate stack + derives ZeroMvContext); 0.7.105 warps the inter part of a GLOBALWARP inter-intra block then blends the intra, and 0.7.106 warps each reference of a compound GLOBAL_GLOBALMV block at intermediate precision then combines (a latent-mis-decode fix, spec 7.11.3.5); 0.7.107 factors the Subpel_Filters set selection and the reference-geometry gate into leaves — output-neutral groundwork for the LAST inter track; 8/10/12-bit, multi-tile, superres; next: BILINEAR then scaled-reference MC)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (28,890 suite assertions + 1,140 fuzz
+derived, and adversarially tested (28,905 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

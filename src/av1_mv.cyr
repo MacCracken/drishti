@@ -786,7 +786,7 @@ fn av1_mv_projection(fh, refs, s, mf, srcRef, dstSign, h8, w8, mi_rows, mi_cols)
                     # First projection scales the MV to the CURRENT frame to find where it lands (num *dstSign).
                     av1_get_mv_projection(mvr, mvc, refToCur * dstSign, refOffset, pbuf);
                     var gbp = av1_get_block_position(x8, y8, dstSign, load64(pbuf), load64(pbuf + 8),
-                        mi_rows, mi_cols, qbuf);
+                    mi_rows, mi_cols, qbuf);
                     if (gbp != 0) {
                         var posY = load64(qbuf);
                         var posX = load64(qbuf + 8);
@@ -1543,9 +1543,9 @@ fn av1_add_tpl_ref_mv(ctx, mf, delta_row, delta_col, is_compound): i64 {
         if (at_origin == 1) {
             var z2 = 0;
             if ((av1_iabs(mr0 - load64(ctx + AV1MVC_GMV0_ROW)) >= 16)
-             || (av1_iabs(mc0 - load64(ctx + AV1MVC_GMV0_COL)) >= 16)
-             || (av1_iabs(mr1 - load64(ctx + AV1MVC_GMV1_ROW)) >= 16)
-             || (av1_iabs(mc1 - load64(ctx + AV1MVC_GMV1_COL)) >= 16)) { z2 = 1; }
+            || (av1_iabs(mc0 - load64(ctx + AV1MVC_GMV0_COL)) >= 16)
+            || (av1_iabs(mr1 - load64(ctx + AV1MVC_GMV1_ROW)) >= 16)
+            || (av1_iabs(mc1 - load64(ctx + AV1MVC_GMV1_COL)) >= 16)) { z2 = 1; }
             store64(ctx + AV1MVC_ZEROCTX, z2);
         }
         av1_tpl_stack_append(ctx, mr0, mc0, mr1, mc1, 1);

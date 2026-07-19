@@ -6,6 +6,51 @@
 
 ## Version
 
+**0.7.107** — cut 2026-07-19, not yet tagged (user's git). **FILTER-SET + REFERENCE-GEOMETRY LEAVES — an
+OUTPUT-NEUTRAL refactor opening the LAST inter track (scaled-reference / BILINEAR MC).** Preceded by a
+multi-source understand workflow (spec 7.11.3.3/7.11.3.4 + Subpel set map re-fetched from AOMediaCodec/av1-spec,
+dav1d mc_tmpl.c/tables.c, libaom convolve.c/scale.c/decodeframe.c — all md5-pinned in scratchpad/srcs/) whose
+adjudicated derivation was checked by four adversarial lenses; three confirmed, the memory-safety lens REFUTED
+the draft plan (see B3's carried-forward guards below). av1_mc.cyr: `av1_mc_filter_set(filt, dim)` — the
+7.11.3.4 set selection lifted out of put_8tap, TOTAL by construction (a leading `& 3` keeps every input inside
+0..AV1_SUBPEL_SETS-1; av1_mc_subpel_row bounds-checks nothing and the blob is exactly 6*15*8 i64) — which also
+CLOSES a latent OOB: the horizontal set was masked (`filter_type & 3`) but the vertical was a bare
+`filter_type >> 2`, unbounded above (unreachable today, the caller range-guards filt to 0..2). And
+`av1_mc_ref_compat` (bit-depth + subsampling — a PERMANENT reject on every path) / `av1_mc_ref_unscaled`
+(exact LUMA dims + the plane's own), split along the seam where the callers diverge: B4 lets the TRANSLATION
+path accept a dim mismatch while WARP must keep rejecting it (spec 7.11.3.1 step 7 for GLOBALWARP; the
+read_motion_mode syntax gate for LOCALWARP — two DISTINCT mechanisms, per the spec-fidelity lens). PROOF: the
+existing suite passing BYTE-IDENTICALLY (38 suites / 28,890 / 1,140 unchanged, only av1_mc.cyr touched) IS the
+neutrality proof; then `test_filter_set_selection` pins the leaf directly on the two cases no kernel fixture
+reaches — dim==2 (REACHABLE: predW = Block_Width[MiSize] >> subX, so a BLOCK_4X4 luma block's 4:2:0 chroma is
+2 samples wide) and a hostile filt x dim sweep asserting the result never leaves the table. MUTATIONS (10, all
+red): the `& 3` mask, `dim<=4`->`dim<4`, `dim<=4`->`dim<=2`, `3+(f&1)`->`3+(f&3)`, narrow base 3->4, the two
+axis swaps (dims w<->h, filter halves h<->v), both luma conjuncts INDEPENDENTLY, and the bit-depth conjunct.
+THE FIXTURE TRAP THIS BITE FOUND AND CLOSED: luma 24x18 vs 23x17 differs in BOTH dims, so the chroma-collision
+reject fired even with one luma conjunct deleted — a symmetric fixture witnessing the PAIR but neither half
+(the 0.7.76 ref_count_ctx lesson exactly). All four of 24x18/23x18/24x17/23x17 collide to 12x9 chroma at
+4:2:0, so width-only and height-only references now pin each conjunct alone (both mutations confirmed SURVIVING
+before the fixtures were added). Doc defects fixed (all three verified against the fetched spec): Subpel_Filters
+cited to 7.11.3.4 (7.11.3.2 is the ROUNDING-VARIABLES process); the dav1d convention described as HALVED
+coefficients with correspondingly reduced shifts — bit-identical to spec since Round2(2s,n)==Round2(s,n-1) for
+the arithmetic-shift av1_round2 and every spec tap is even — INDEPENDENTLY of the extra intermediate_bits its
+2-pass kernel carries (a kernel property, not a table property); set 5 named BILINEAR (spec set 3), a genuine
+2-tap kernel, not "scaled-bilinear", with the set-order map (drishti->spec 3->4, 4->5, 5->3) written out; and
+the stale warp-table MD5 pin re-recorded (c764ff07 as fetched 2026-07-18 vs fbf72ee5 on master 2026-07-19 —
+byte-identical rows, stale provenance not data divergence). 38 suites, **28,905** suite + **1,140** fuzz
+assertions, all green. **INCIDENT — I REPORTED "gates green" WHEN fmt-check WAS RED.** `make fmt-check` was
+failing on the COMMITTED 0.7.106 tree (av1_mc.cyr + av1_mv.cyr); my session-start check piped `make lint` to
+`tail`, which discards the exit code and showed only a passing tail. Separately my first mutation harness
+scored `grep -oE "^[0-9]+ failed"`, which NEVER matches (the failed count is mid-line, not line-start), so
+three mutations were scored SURVIVED that were in fact RED — caught only by running a deliberately blatant
+mutation as a harness sanity check. LESSONS: (a) NEVER pipe a gate through `tail`/`head` — use the EXIT CODE;
+(b) a mutation harness must itself be sanity-checked against a known-red mutation BEFORE any survivor is
+believed, because a broken scorer reports universal survival, which reads exactly like thorough-but-clean;
+(c) [[av1-arc-end-audit]] applies — do not report green while a gate is red. fmt-check is now green for the
+first time in the arc. Next: **B1 = BILINEAR (un-gate filt==3; the table already exists at set 5, so it is
+selection + reject-lift only), then B2 scaling-geometry leaves, B3 the scaled convolve kernel, B4 the wiring,
+B5 the is_scaled gate witnesses.**
+
 **0.7.106** — cut 2026-07-18, not yet tagged (user's git). **COMPOUND GLOBAL_GLOBALMV WARP — a latent-mis-
 decode FIX.** A compound (2-ref) GLOBAL_GLOBALMV block whose refs carry >TRANSLATION global models was
 previously translation-MC'd SILENTLY (warp_valid gated on is_comp==0); now each ref WARPS at INTERMEDIATE

@@ -180,6 +180,19 @@ fn test_mc_pred_rejects() {
     mcd_fill(odd);
     assert_eq(av1_mc_pred_block(d, odd, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "scaled ref luma plane");
     assert_eq(av1_mc_pred_block(d, odd, 1, 2, 2, 4, 4, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "scaled ref chroma collision");
+    # ...and each luma AXIS independently. 24x18 vs 23x17 differs in BOTH dimensions, so it is
+    # rejected even if only one of the two luma conjuncts survives — a symmetric fixture that
+    # witnesses the pair but neither half (the 0.7.76 ref_count_ctx lesson). All four of
+    # 24x18 / 23x18 / 24x17 / 23x17 collide to 12x9 chroma at 4:2:0, so a width-only and a
+    # height-only reference pin each conjunct on its own.
+    var odd_w = dr_frame_new(23, 18, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(odd_w);
+    assert_eq(av1_mc_pred_block(d, odd_w, 1, 2, 2, 4, 4, 0, 0, 0, 0), DR_ERR_UNSUPPORTED,
+    "chroma collision width-only");
+    var odd_h = dr_frame_new(24, 17, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(odd_h);
+    assert_eq(av1_mc_pred_block(d, odd_h, 1, 2, 2, 4, 4, 0, 0, 0, 0), DR_ERR_UNSUPPORTED,
+    "chroma collision height-only");
     # hostile geometry.
     assert_eq(av1_mc_pred_block(0, ref, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BOUNDS, "null dst");
     assert_eq(av1_mc_pred_block(d, 0, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BOUNDS, "null ref");

@@ -1,5 +1,6 @@
 # tests/av1_mc.tcyr — AV1 inter prediction, sub-pel interpolation filter table
-# (dav1d_mc_subpel_filters, spec 7.11.3.2): 6 sets x 15 phases x 8 taps.
+# (dav1d_mc_subpel_filters, spec 7.11.3.4): 6 sets x 15 phases x 8 taps, plus the
+# set-SELECTION leaf av1_mc_filter_set.
 include "src/main.cyr"
 
 # ================================================================
@@ -42,6 +43,47 @@ fn test_subpel_invariants() {
     assert_eq(av1_subpel_filter(1, 0, 2), 14, "SMOOTH phase 0 tap 2 = 14");
     assert_eq(av1_subpel_filter(5, 7, 3), 32, "bilin half-pel tap 3 = 32");
     assert_eq(av1_subpel_filter(0, 0, 3), 63, "REGULAR phase 0 tap 3 = 63");
+    return 0;
+}
+
+# ================================================================
+# av1_mc_filter_set — the Subpel_Filters SET selection (spec 7.11.3.4). Exercised indirectly
+# by every put_8tap KAT; pinned directly here for the two cases no kernel fixture reaches:
+# dim == 2, and hostile out-of-range input.
+# ================================================================
+fn test_filter_set_selection() {
+    # wide/tall blocks take the 8-tap set matching the filter, unchanged.
+    assert_eq(av1_mc_filter_set(0, 8), 0, "REGULAR dim 8 -> set 0");
+    assert_eq(av1_mc_filter_set(1, 8), 1, "SMOOTH dim 8 -> set 1");
+    assert_eq(av1_mc_filter_set(2, 8), 2, "SHARP dim 8 -> set 2");
+    assert_eq(av1_mc_filter_set(0, 128), 0, "REGULAR dim 128 -> set 0");
+    # dim 5 is the first width ABOVE the narrow threshold — pins the <= boundary from above.
+    assert_eq(av1_mc_filter_set(0, 5), 0, "REGULAR dim 5 -> set 0 (just above threshold)");
+    # dim <= 4 takes the narrow 4-tap variant: REGULAR and SHARP share set 3, SMOOTH set 4.
+    assert_eq(av1_mc_filter_set(0, 4), 3, "REGULAR dim 4 -> set 3 (narrow)");
+    assert_eq(av1_mc_filter_set(1, 4), 4, "SMOOTH dim 4 -> set 4 (narrow)");
+    assert_eq(av1_mc_filter_set(2, 4), 3, "SHARP dim 4 -> set 3 (narrow, shares REGULAR)");
+    # dim 2 is REACHABLE: predW = Block_Width[MiSize] >> subX (6.10.22), so a BLOCK_4X4 luma
+    # block's 4:2:0 chroma plane is 2 samples wide. No kernel KAT covers it.
+    assert_eq(av1_mc_filter_set(0, 2), 3, "REGULAR dim 2 -> set 3 (4:2:0 chroma of BLOCK_4X4)");
+    assert_eq(av1_mc_filter_set(1, 2), 4, "SMOOTH dim 2 -> set 4");
+    assert_eq(av1_mc_filter_set(2, 2), 3, "SHARP dim 2 -> set 3");
+    assert_eq(av1_mc_filter_set(0, 1), 3, "REGULAR dim 1 -> set 3");
+    # TOTALITY. av1_mc_subpel_row does no bounds check and the blob is exactly 6*15*8 i64, so
+    # an out-of-range set index reads off the end. The leading `& 3` must keep EVERY input --
+    # including negative and wide-of-range -- inside 0..AV1_SUBPEL_SETS-1.
+    var bad = 0;
+    var filt = 0 - 8;
+    while (filt < 16) {
+        var dim = 1;
+        while (dim < 131) {
+            var s = av1_mc_filter_set(filt, dim);
+            if ((s < 0) || (s >= AV1_SUBPEL_SETS)) { bad = bad + 1; }
+            dim = dim + 1;
+        }
+        filt = filt + 1;
+    }
+    assert_eq(bad, 0, "filter set stays in range over hostile filt x dim sweep");
     return 0;
 }
 
@@ -156,8 +198,10 @@ fn test_warp_filter_checksum() {
 
 fn main() {
     alloc_init();
-    test_group("sub-pel filter table invariants (7.11.3.2)");
+    test_group("sub-pel filter table invariants (7.11.3.4)");
     test_subpel_invariants();
+    test_group("sub-pel filter SET selection (7.11.3.4)");
+    test_filter_set_selection();
     test_group("sub-pel filter position checksum");
     test_subpel_checksum();
     test_group("warp filter table (7.11.3.5) — invariants + anchors + digest");

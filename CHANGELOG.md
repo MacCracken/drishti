@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.107] - 2026-07-19
+
+**Filter-set + reference-geometry leaves** — an **output-neutral** refactor opening the last inter-prediction
+track (scaled-reference / BILINEAR MC). The whole existing suite passes byte-identically; the proof of this
+bite *is* that neutrality, plus five new mutation-verified unit assertions on the extracted leaves.
+
+Groundwork, not behaviour: the `Subpel_Filters` set selection and the scaled/mismatched-reference predicate
+were each written twice inline, and the coming bites need to change them in opposite directions — BILINEAR
+adds a set-selection branch, while scaled-reference MC must let the *translation* path accept a dimension
+mismatch that the *warp* path must keep rejecting (spec 7.11.3.1 step 7). Extracting them first means those
+changes land in one place each and the two gates cannot drift apart.
+
+### Added
+
+- **`av1_mc_filter_set(filt, dim)`** (`av1_mc.cyr`) — the spec 7.11.3.4 `Subpel_Filters` SET selection, lifted
+  out of `av1_mc_put_8tap`. A block ≤ 4 samples wide/tall takes the narrow 4-tap variant of its filter
+  (REGULAR and SHARP both → set 3, SMOOTH → set 4). **Total by construction**: the leading `& 3` keeps every
+  input, however hostile, inside `0..AV1_SUBPEL_SETS-1`. That masking is load-bearing — `av1_mc_subpel_row`
+  does no bounds check and the blob is exactly `6*15*8` i64, so an out-of-range set index reads off the end.
+- **`av1_mc_ref_compat(ref, dst)`** / **`av1_mc_ref_unscaled(ref, dst, plane)`** (`av1_mc.cyr`) — the
+  reference-frame gate, split along the seam where the two callers will diverge. `_compat` (bit depth +
+  subsampling) is a permanent hard reject on every path: the sample grids are not comparable and no amount of
+  scaling reconciles them. `_unscaled` (exact **luma** frame dims, plus the plane's own) is merely a
+  limitation for the translation path but permanent for warp.
+- **`test_filter_set_selection`** (`tests/av1_mc.tcyr`) — pins the leaf directly, covering the two cases no
+  kernel fixture reaches: `dim == 2` (reachable — `predW = Block_Width[MiSize] >> subX`, so a `BLOCK_4X4`
+  luma block's 4:2:0 chroma plane is 2 samples wide) and a hostile `filt × dim` sweep asserting the result
+  never leaves the table. Mutation-verified 5 ways: dropping the `& 3` mask, the `dim <= 4` boundary in both
+  directions, the `3 + (f & 1)` variant selector, and the narrow-set base.
+- **Per-axis chroma-collision rejects** (`tests/av1_mc_driver.tcyr`) — luma `24×18` vs `23×17` differs in
+  **both** dimensions, so it was rejected even if only one of the two luma conjuncts survived: a symmetric
+  fixture witnessing the pair but neither half (the 0.7.76 `ref_count_ctx` lesson). All four of
+  `24×18 / 23×18 / 24×17 / 23×17` collide to `12×9` chroma at 4:2:0, so a width-only and a height-only
+  reference now pin each conjunct on its own. Both were confirmed to survive before the fixtures were added.
+
+### Fixed
+
+- **Latent OOB in the vertical filter-set selection** (`av1_mc.cyr`) — `av1_mc_put_8tap`'s horizontal set was
+  masked (`filter_type & 3`) but the vertical one was a bare `filter_type >> 2`, unbounded above. Unreachable
+  today (the caller range-guards the filter to `0..2`), but the asymmetry is closed by routing both axes
+  through the total leaf.
+- **Documentation defects** in `av1_mc.cyr`'s header, all three verified against the fetched sources: the
+  `Subpel_Filters` table is cited to **7.11.3.4** (7.11.3.2 is the *rounding variables* process); the dav1d
+  convention is described correctly as **halved coefficients with correspondingly reduced shifts** — which is
+  bit-identical to the spec, since `Round2(2s, n) == Round2(s, n-1)` for the arithmetic-shift `av1_round2` and
+  every spec tap is even — **independently** of the extra `intermediate_bits` its 2-pass kernel carries, which
+  is a property of the kernel and not the table; and set 5 is named **BILINEAR (spec set 3)**, a genuine 2-tap
+  linear kernel, not "scaled-bilinear". The set-order map (drishti/dav1d → spec: `3→4`, `4→5`, `5→3`) is now
+  written out.
+- **Stale provenance pin** (`av1_mc.cyr`) — the warp table cites dav1d `src/tables.c` MD5
+  `c764ff07…`; a 2026-07-19 re-fetch of `master` gives `fbf72ee5…`. The warp and subpel rows are byte-identical
+  between them, so this was stale provenance rather than a data divergence, and is now recorded as such.
+- **`make fmt-check` restored to green** — it was **red on the committed tree** at 0.7.106 (`av1_mc.cyr` and
+  `av1_mv.cyr`), which a `tail`-piped gate check had masked. `av1_mc.cyr`'s drift was a mis-indented comment
+  continuation, now restructured; `av1_mv.cyr`'s was four continuation lines, formatted by `cyrius fmt`
+  (whitespace only, no behaviour change).
+
 ## [0.7.106] - 2026-07-18
 
 **Compound GLOBAL_GLOBALMV warp** — the last warp follow-on, and a **latent-mis-decode fix**: a compound
