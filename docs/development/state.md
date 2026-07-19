@@ -6,6 +6,36 @@
 
 ## Version
 
+**0.7.105** — cut 2026-07-18, not yet tagged (user's git). **INTER-INTRA WARP-BLEND.** Un-defers the
+`is_ii && warp_valid` reject (installed by 0.7.100's review): a GLOBALMV inter-intra block whose ref carries a
+>TRANSLATION global model (useWarp==2 / GLOBALWARP) now WARPS the inter part per plane + blends the intra
+instead of returning DR_ERR_UNSUPPORTED. 3-source confirmed (spec 7.11.3.1 + dav1d recon_tmpl.c + libaom
+reconinter.c): the useWarp derivation has NO inter-intra exception — the inter part warps exactly as a plain
+warp block (same per-plane >=8x8 gate: luma warps, 4x4 chroma at 4:2:0 falls back to translation), and since
+inter-intra is isCompound==0 (InterPostRound==0) the inter samples are final-precision either way, so the
+Round2(mask*intra + (64-mask)*inter, 6) blend is byte-identical. Inter-intra is never LOCALWARP
+(read_motion_mode forces SIMPLE) so only GLOBALWARP is reachable. av1_mc.cyr: av1_warp_pred_gen (the former
+av1_warp_pred_block body + (out_buf, out_stride); the per-8x8 kernel writes Av1_McTmp, the write-back targets
+the frame or a block-relative buffer — so the inter-intra path warps into Av1_McOut for the blend;
+av1_warp_pred_block is now a thin frame-write wrapper, all 9 callers unchanged); av1_mc_pred_interintra_w (the
+former av1_mc_pred_interintra body + (wm, use_warp): warp the inter into Av1_McOut when the plane warps else
+av1_mc_pred_core; intra + mask + blend UNCHANGED; av1_mc_pred_interintra is the translation-form wrapper).
+av1_intertile.cyr av1_decode_block_inter: the is_ii && warp_valid reject REMOVED; the plane loop computes
+use_warp = warp_valid && nominal-plane>=8x8 once and passes it to both the plain-inter and inter-intra paths.
+The encoder uses a GIVEN residual (av1_fb_resid) and does NOT predict, so this decode-only change needs no
+encoder mirror. PROOF: the 0.7.100 gw-ii e2e test now asserts the block DECODES (was rejected) + its 32x32
+skip block == a direct warp-blend reference (av1_warp_model_from_global + av1_mc_pred_interintra_w use_warp=1);
++ a direct complementary-oracle test ii_warp_orch_case (av1_mc_pred_interintra_w(use_warp=1) pixel-exact vs
+Round2(mask*intra + (64-mask)*WARPED, 6), the warped inter from the VERIFIED av1_warp_pred_block) at the origin
+AND a non-origin (8,8) block (witnesses the block-relative write-back offset) + a warp!=translation
+differential. MUTATIONS (5, all red): the use_warp branch, the dispatch per-plane gate, the -x and -y
+write-back offsets, the McTmp/McOut kernel target (also breaks the plain-warp path). 38 suites, **28,881**
+suite + **1,140** fuzz assertions, all green. LESSON: parameterizing a shared warp fn (write-back target +
+kernel scratch McOut->McTmp) let the inter-intra path reuse the verified warp kernel with ONE thin wrapper +
+zero call-site churn; the complementary-oracle pattern (warp inter via the verified av1_warp_pred_block, then
+recompute the blend) validates the new path without a fresh ref port. Next: compound GLOBAL_GLOBALMV warp,
+then scaled-reference/BILINEAR MC.
+
 **0.7.104** — cut 2026-07-18, not yet tagged (user's git). **THE TEMPORAL SCAN (temporal-MV Bite 3) — the
 first OUTPUT-CHANGING temporal-MV bite.** The last find_mv_stack deferral: when use_ref_frame_mvs is set,
 find_mv_stack now reads the current frame's MotionFieldMvs (built by motion_field_estimation, 0.7.103), folds

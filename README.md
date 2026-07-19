@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.104 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc COMPLETE — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels (per-block warp / global-motion warp / overlap-blend); temporal MV prediction is now fully wired: 0.7.102 saves each inter frame's per-8×8 motion field into the DPB (spec 7.19/7.20), 0.7.103 builds motion_field_estimation (spec 7.9), and 0.7.104 adds the temporal scan (spec 7.10.2.5/6 — find_mv_stack reads MotionFieldMvs, folds projected temporal MVs into the candidate stack + derives ZeroMvContext, the first output-changing temporal bite); 8/10/12-bit, multi-tile, superres; next: inter-intra / GLOBALWARP warp-blend, compound GLOBAL_GLOBALMV warp, then scaled-reference MC)
+## Status — 0.7.105 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc COMPLETE + INTER-INTRA WARP-BLEND — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels (per-block warp / global-motion warp / overlap-blend); temporal MV prediction is fully wired (0.7.102 saves each inter frame's per-8×8 motion field into the DPB, 0.7.103 builds motion_field_estimation, 0.7.104 the temporal scan folds projected temporal MVs into the candidate stack + derives ZeroMvContext); 0.7.105 warps the inter part of a GLOBALWARP inter-intra block then blends the intra (spec 7.11.3.1 — un-defers the 0.7.100 reject); 8/10/12-bit, multi-tile, superres; next: compound GLOBAL_GLOBALMV warp, then scaled-reference MC)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (28,870 suite assertions + 1,140 fuzz
+derived, and adversarially tested (28,881 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -63,8 +63,8 @@ producer→consumer loop, and **ALL the neighbour CDF contexts** (0.7.75–0.7.7
 context the inter reads had taken as a caller input — only frame-level state (AvailU/AvailL, the
 order-hint distances) is still supplied by the caller, exactly as the spec has it. The **inter tile decode**
 (0.7.84+), the three inter **motion modes** (LOCALWARP / GLOBALWARP / OBMC), and the **temporal-MV arc**
-(producer 0.7.102 → estimation 0.7.103 → scan 0.7.104) are all in; what remains is compound-global /
-inter-intra **warp-blend** and **scaled-reference** MC before inter frames decode end-to-end.
+(producer 0.7.102 → estimation 0.7.103 → scan 0.7.104), and **inter-intra warp-blend** (0.7.105) are all in;
+what remains is **compound-global** warp and **scaled-reference** MC before inter frames decode end-to-end.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive

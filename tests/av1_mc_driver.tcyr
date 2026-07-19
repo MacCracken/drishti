@@ -1018,6 +1018,41 @@ fn ii_orch_chroma(r0, ii_mode, tag): i64 {
     assert_eq(diff, 0, tag);
     return 0;
 }
+# WARP inter-intra (0.7.105): av1_mc_pred_interintra_w(use_warp=1) must WARP the inter part (into Av1_McOut)
+# then blend the intra — unlike the translation form which MCs it. Independent oracle: warp the inter part
+# DIRECTLY via the verified av1_warp_pred_block into wf, intra-predict into tf, and recompute the blend with
+# the WARPED inter. Catches a use_warp branch that ignores the model, or a wrong warp target/stride into McOut.
+# fdim-sized frames; the 32x32 block is at (bx, by) so a NON-origin case (8,8) witnesses the warp write-back's
+# block-relative (irow-y)/(jcol-x) offset into McOut (an origin block masks it since -x/-y == 0).
+fn ii_warp_orch_case(r0, fdim, wm, ii_mode, bx, by, hl, hu, tag): i64 {
+    var oe = alloc(8);
+    var imode = ii_mode;
+    if (ii_mode == 3) { imode = 9; }
+    var tf = dr_frame_new(fdim, fdim, 1, 0, 0, 8, 8, oe);
+    av1_intra_predict(tf, 0, bx, by, hl, hu, 0, 0, imode, 0, 0, 0, 0, 0, 5, 5, 8, 8);
+    var wf = dr_frame_new(fdim, fdim, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(wf, r0, 0, bx, by, 32, 32, wm), DR_OK, tag);
+    var df = dr_frame_new(fdim, fdim, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_mc_pred_interintra_w(df, r0, 0, bx, by, 32, 32, 0, 0, 0, 0, ii_mode, 0, 0,
+    AV1_BLOCK_32X32, hl, hu, 8, 8, wm, 1), DR_OK, tag);
+    av1_ii_smooth_mask_build(32, 32, 32, 32, ii_mode);
+    var diff = 0;
+    var i = 0;
+    while (i < 32) {
+        var j = 0;
+        while (j < 32) {
+            var m = load64(Av1_McMask + (((i * 32) + j) * 8));
+            var intra = dr_frame_get(tf, 0, bx + j, by + i);
+            var inter = dr_frame_get(wf, 0, bx + j, by + i);       # the WARPED inter (not translation)
+            var exp = av1_round2((m * intra) + ((64 - m) * inter), 6);
+            if (dr_frame_get(df, 0, bx + j, by + i) != exp) { diff = diff + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, tag);
+    return 0;
+}
 
 fn test_mc_interintra() {
     var oe = alloc(8);
@@ -1032,6 +1067,35 @@ fn test_mc_interintra() {
     ii_orch_case(r0, 1, "interintra V: independent blend oracle (1024 px)");
     ii_orch_case(r0, 2, "interintra H: independent blend oracle (1024 px)");
     ii_orch_case(r0, 3, "interintra SMOOTH: independent blend oracle (1024 px)");
+    # WARP inter-intra (0.7.105): warp the inter part then blend, vs the verified av1_warp_pred_block oracle.
+    var wm = warp_model();
+    ii_warp_orch_case(r0, 32, wm, 0, 0, 0, 0, 0, "warp interintra DC (origin): Round2(m*intra+(64-m)*WARPED,6)");
+    ii_warp_orch_case(r0, 32, wm, 3, 0, 0, 0, 0, "warp interintra SMOOTH (origin): warped-inter blend oracle");
+    # a NON-origin block (8,8) in a 48x48 frame witnesses the warp write-back's block-relative McOut offset.
+    var r0b = dr_frame_new(48, 48, 1, 0, 0, 8, 8, oe);
+    var yb = 0;
+    while (yb < 48) {
+        var xb = 0;
+        while (xb < 48) { dr_frame_set(r0b, 0, xb, yb, ((xb * 5) + (yb * 3)) & 255); xb = xb + 1; }
+        yb = yb + 1;
+    }
+    ii_warp_orch_case(r0b, 48, wm, 0, 8, 8, 1, 1, "warp interintra DC (8,8): block-relative McOut write-back");
+    # warp inter-intra (use_warp=1) must DIFFER from translation inter-intra (use_warp=0) — warp applied.
+    var dfw = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_interintra_w(dfw, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, AV1_BLOCK_32X32, 0, 0, 8, 8, wm, 1);
+    var dft = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_interintra_w(dft, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, AV1_BLOCK_32X32, 0, 0, 8, 8, wm, 0);
+    var ndw = 0;
+    var yw = 0;
+    while (yw < 32) {
+        var xw = 0;
+        while (xw < 32) {
+            if (dr_frame_get(dfw, 0, xw, yw) != dr_frame_get(dft, 0, xw, yw)) { ndw = ndw + 1; }
+            xw = xw + 1;
+        }
+        yw = yw + 1;
+    }
+    assert_eq(ndw > 0, 1, "warp interintra != translation interintra (warp actually applied)");
     # interintra must DIFFER from pure-inter (mask/intra actually applied).
     var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 1, 0, 0, AV1_BLOCK_32X32, 0, 0, 8, 8);

@@ -346,10 +346,12 @@ Baseline (0.7.0): OBU layer + sequence header.
   `av1_tile_set_inter_ctx` frame-start hook behind `use_ref_frame_mvs`; still output-neutral), and
   **Bite 3 / the scan 0.7.104** (spec 7.10.2.5/6 — `av1_temporal_scan` + `av1_add_tpl_ref_mv`: find_mv_stack
   reads `MotionFieldMvs`, folds projected temporal MVs into the candidate stack + derives `ZeroMvContext`,
-  gated on `use_ref_frame_mvs`; the FIRST output-changing temporal bite — closes the temporal-MV arc). Then
-  **inter-intra + GLOBALWARP warp-blend** +
-  **compound GLOBAL_GLOBALMV warp** (warp-into-a-scratch follow-ons), then scaled-reference/BILINEAR MC; all
-  table-free bar the warp filter + Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
+  gated on `use_ref_frame_mvs`; the FIRST output-changing temporal bite — closes the temporal-MV arc), and
+  **inter-intra warp-blend 0.7.105** (spec 7.11.3.1 — a GLOBALWARP inter-intra block warps the inter part per
+  plane into `Av1_McOut` then runs the unchanged mask blend; un-defers the 0.7.100 `is_ii && warp_valid`
+  reject; `av1_warp_pred_gen` + `av1_mc_pred_interintra_w`). Then **compound GLOBAL_GLOBALMV warp**
+  (warp-into-a-scratch follow-on), then scaled-reference/BILINEAR MC; all table-free bar the warp filter +
+  Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
   (unblocked 0.7.46), fuzz hardening.

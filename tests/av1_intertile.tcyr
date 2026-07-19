@@ -1329,11 +1329,12 @@ fn test_inter_tile_globalwarp_force_int() {
     assert_eq(diff, 0, "gw-forceint: decoded == integer global-MV translation (force_integer_mv -> NO warp)");
     return 0;
 }
-# GLOBALWARP + inter-intra REJECT (0.7.100 review): a GLOBALMV inter-intra block whose >TRANSLATION global
-# model would warp (useWarp==2) is REJECTED (DR_ERR_UNSUPPORTED) rather than silently translation-blended
-# — warping the inter part inside the inter-intra blend is a deferred follow-on. Witnesses the
-# `is_ii && warp_valid` reject (a mutation dropping it would decode the block as a translation-blend).
-fn test_inter_tile_globalwarp_ii_rejected() {
+# GLOBALWARP + inter-intra WARP-BLEND (0.7.105): a GLOBALMV inter-intra block whose >TRANSLATION global model
+# warps (useWarp==2) now WARPS the inter part per plane and blends the intra — no longer rejected. The block
+# is SKIP, so its decoded pixels ARE the warp-blend prediction; the decode's 32x32 block must equal a direct
+# warp-blend reference (global model -> av1_mc_pred_interintra_w with use_warp=1). A dispatch mutation forcing
+# translation (use_warp=0 for the is_ii branch) would make df a translation-blend != this reference.
+fn test_inter_tile_globalwarp_ii_warpblend() {
     var oe = alloc(8);
     var r0 = it_ref_frame();
     var fh = it_fh();
@@ -1371,8 +1372,27 @@ fn test_inter_tile_globalwarp_ii_rejected() {
     var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
     av1_tile_grids_new(dt);
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
-    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_ERR_UNSUPPORTED,
-    "gw-ii: GLOBALMV inter-intra + would-warp GM is REJECTED (not silently translation-blended)");
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
+    "gw-ii: GLOBALMV inter-intra + would-warp GM now decodes (warp-blend, 0.7.105)");
+    # direct warp-blend reference: the global warp model + av1_mc_pred_interintra_w(use_warp=1) on a fresh
+    # frame. The block is SKIP + at (0,0) with no neighbours, so the decode's 32x32 luma == this reference.
+    var wm = av1_warp_model_new();
+    av1_warp_model_from_global(wm, fh, AV1_LAST_FRAME);
+    av1_setup_shear(wm);
+    var rf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_interintra_w(rf, r0, 0, 0, 0, 32, 32, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP, 0, 0, 0,
+    AV1_BLOCK_32X32, 0, 0, load64(dt + AV1TILE_FMI_COLS), load64(dt + AV1TILE_FMI_ROWS), wm, 1);
+    var diffw = 0;
+    var yy = 0;
+    while (yy < 32) {
+        var xx = 0;
+        while (xx < 32) {
+            if (dr_frame_get(df, 0, xx, yy) != dr_frame_get(rf, 0, xx, yy)) { diffw = diffw + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(diffw, 0, "gw-ii: decoded block == direct warp-blend reference (1024 px)");
     return 0;
 }
 # an OBMC block record (mirrors it_blk but motion_mode = OBMC).
@@ -3879,7 +3899,7 @@ fn main() {
     test_inter_tile_globalwarp_newmv_gated();
     test_inter_tile_globalwarp_unrealizable();
     test_inter_tile_globalwarp_force_int();
-    test_inter_tile_globalwarp_ii_rejected();
+    test_inter_tile_globalwarp_ii_warpblend();
     test_obmc_mask();
     test_obmc_e2e();
     test_obmc_chroma_gate();

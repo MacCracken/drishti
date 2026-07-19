@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.105] - 2026-07-18
+
+**Inter-intra warp-blend** — un-defers the `is_ii && warp_valid` reject that 0.7.100's review installed. A
+GLOBALMV inter-intra block whose reference carries a `> TRANSLATION` global-motion model (useWarp==2 /
+GLOBALWARP) now **warps the inter part** per plane and blends the intra, instead of bailing with
+`DR_ERR_UNSUPPORTED`. 3-source confirmed (spec 7.11.3.1 + dav1d `recon_tmpl.c` + libaom `reconinter.c`): the
+`useWarp` derivation has no inter-intra exception, so the inter part warps exactly as a plain warp block
+(same per-plane `≥8×8` gate — luma warps, a 4×4 chroma at 4:2:0 falls back to translation), and — because
+inter-intra is `isCompound==0` so `InterPostRound==0` — the inter samples arrive at final precision either
+way, leaving the `Round2(mask*intra + (64-mask)*inter, 6)` blend byte-identical. Inter-intra is never
+LOCALWARP (read_motion_mode forces SIMPLE), so only the GLOBALWARP path is reachable.
+
+### Changed
+
+- **`av1_warp_pred_gen`** (`av1_mc.cyr`) — `av1_warp_pred_block`'s body, parameterized with `(out_buf,
+  out_stride)`: the per-8×8 kernel now writes to `Av1_McTmp` (free on the single-ref / plain-warp paths), and
+  the cropped write-back targets the frame (`out_buf==0`) or a block-relative buffer, so the inter-intra path
+  can warp the inter part straight into `Av1_McOut` for the blend. `av1_warp_pred_block` is now a thin
+  frame-write wrapper (all existing callers unchanged).
+- **`av1_mc_pred_interintra_w`** (`av1_mc.cyr`) — `av1_mc_pred_interintra` plus `(wm, use_warp)`: the inter
+  part is warped into `Av1_McOut` when the plane warps, else translation-MC'd; intra + mask + blend unchanged.
+  `av1_mc_pred_interintra` is a translation-form wrapper.
+- **`av1_decode_block_inter`** (`av1_intertile.cyr`) — the `is_ii && warp_valid` reject is removed; the plane
+  loop computes `use_warp = warp_valid && nominal-plane≥8×8` once and passes it to both the plain-inter and
+  inter-intra paths.
+
+**Proofs**: the 0.7.100 GLOBALWARP-inter-intra e2e test now asserts the block **decodes** (was: rejected) and
+its 32×32 skip block equals a direct warp-blend reference; plus a direct complementary-oracle test
+(`ii_warp_orch_case`) checking `av1_mc_pred_interintra_w(use_warp=1)` pixel-exactly against
+`Round2(mask*intra + (64-mask)*WARPED, 6)` — with the warped inter from the verified `av1_warp_pred_block` —
+at the origin AND at a non-origin `(8,8)` block (witnessing the write-back's block-relative offset), plus a
+warp-≠-translation differential. **Mutation-verified**: the `use_warp` branch, the dispatch's per-plane gate,
+the `-x`/`-y` write-back offset, and the `McTmp`/`McOut` kernel target — each reddens a witness.
+
 ## [0.7.104] - 2026-07-18
 
 **The temporal scan (temporal-MV Bite 3)** — the last `find_mv_stack` deferral, and the **first temporal-MV

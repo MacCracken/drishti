@@ -946,17 +946,14 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             warp_valid = av1_warp_model_shear_valid(wm);
         }
     }
-    # GLOBALWARP + inter-intra (spec 7.11.3.1): a GLOBALMV inter-intra block whose global model would
-    # warp (useWarp==2) must warp the INTER prediction and THEN blend the intra (dav1d recon_tmpl.c
-    # warps the inter part regardless of interintra_type). av1_mc_pred_interintra only translation-MCs
-    # the inter part, so rather than silently mis-decode a valid stream we REJECT here — warping the
-    # inter part inside the interintra MC is a deferred follow-on (roadmap.md). `is_ii && warp_valid` is
-    # exact — a LOCALWARP block is
-    # never inter-intra, so warp_valid here is the GLOBALWARP flag; an IDENTITY/TRANSLATION or
-    # shear-unrealizable global model leaves warp_valid==0 and inter-intra decodes normally.
-    if ((is_ii != 0) && (warp_valid != 0)) {
-        return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
-    }
+    # GLOBALWARP + inter-intra (spec 7.11.3.1, 0.7.105): a GLOBALMV inter-intra block whose global model
+    # warps (useWarp==2) warps the INTER prediction per plane and THEN blends the intra — the useWarp
+    # derivation has NO inter-intra exception (3-source confirmed vs dav1d recon_tmpl.c + libaom; the inter
+    # part arrives at final precision either way since isCompound==0 -> InterPostRound==0, so the mask blend
+    # is unchanged). The per-plane warp decision (warp_valid AND the nominal plane >= 8x8) is passed into
+    # av1_mc_pred_interintra_w below. A LOCALWARP block is never inter-intra (read_motion_mode forces SIMPLE),
+    # so warp_valid here is the GLOBALWARP flag; an IDENTITY/TRANSLATION or shear-unrealizable model leaves
+    # warp_valid==0 and inter-intra decodes with translation MC.
     # Compound blend params (spec 7.11.3.11/14/15): SCALAR (comp_mode=0) = AVERAGE (8/8, bit-
     # identical to the plain average) or DISTANCE (compound_idx==0 -> order-hint weights); DIFFWTD
     # (comp_mode=1) = per-pixel difference mask (mask_type); WEDGE (comp_mode=2) = a codebook mask
@@ -1000,11 +997,19 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             var y = (r * 4) >> sy;
             var w = (bw4 * 4) >> sx;
             var h = (bh4 * 4) >> sy;
+            var nw = w;               # NOMINAL (subsampled, pre-edge-clamp) plane dims — the warp >=8x8 gate
+            var nh = h;
             var pw = dr_frame_plane_width(frame, plane);
             var ph = dr_frame_plane_height(frame, plane);
             if ((x + w) > pw) { w = pw - x; }
             if ((y + h) > ph) { h = ph - y; }
             if ((w > 0) && (h > 0)) {
+                # useWarp per plane (spec 7.11.3.1): warp iff the model is valid AND the plane's NOMINAL block
+                # is >= 8x8 — a 4x4 chroma (8x8-luma at 4:2:0) falls back to translation. The SAME gate drives
+                # the plain-inter warp AND the inter-intra warp (the useWarp derivation has no is_ii exception).
+                # Dispatch on the edge-CLAMPED w/h (warp_pred_block/interintra crop partial tiles).
+                var use_warp = 0;
+                if ((warp_valid != 0) && (nw >= 8) && (nh >= 8)) { use_warp = 1; }
                 var em = DR_OK;
                 if (is_comp != 0) {
                     em = av1_mc_pred_compound(frame, refframe, ref1frame, plane, x, y, w, h,
@@ -1012,19 +1017,13 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                     sub_size, cwidx, cwsign);
                 } else {
                     if (is_ii != 0) {
-                        em = av1_mc_pred_interintra(frame, refframe, plane, x, y, w, h,
+                        em = av1_mc_pred_interintra_w(frame, refframe, plane, x, y, w, h,
                         mv_row, mv_col, filt_x, filt_y, av1_interintra_mode(av1_ib_ii(ib)),
                         av1_interintra_wedge(av1_ib_ii(ib)), av1_interintra_wedge_idx(av1_ib_ii(ib)),
                         sub_size, load64(st + 8), load64(st + 0),
-                        load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
+                        load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS), wm, use_warp);
                     } else {
-                        # useWarp (spec 7.11.3.1): warp this plane iff the model is valid AND the
-                        # plane's NOMINAL (subsampled, pre-edge-clamp) block is >= 8x8 — so a 4x4
-                        # chroma (from an 8x8-luma warp block at 4:2:0) falls back to translation.
-                        # Dispatch on the edge-CLAMPED w/h (warp_pred_block crops partial tiles).
-                        var nw = (bw4 * 4) >> sx;
-                        var nh = (bh4 * 4) >> sy;
-                        if ((warp_valid != 0) && (nw >= 8) && (nh >= 8)) {
+                        if (use_warp != 0) {
                             em = av1_warp_pred_block(frame, refframe, plane, x, y, w, h, wm);
                         } else {
                             em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
