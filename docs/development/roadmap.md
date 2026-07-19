@@ -205,7 +205,9 @@ Baseline (0.7.0): OBU layer + sequence header.
   decode 0.7.49, tile-relative coeff-context + intra-reference rebases 0.7.50,
   multi-tile-**group** frames 0.7.51); **superres COMPLETE** (7.16 — 0.7.52–0.7.56, a
   use_superres keyframe decodes end-to-end, reference-confirmed against dav1d). **INTER
-  underway** (the last of the four tracks, and the biggest — 7.11.3: the Subpel_Filters
+  nearly complete** (the last of the four tracks, and the biggest — every warp form, the
+  temporal-MV arc, compound and inter-intra are in; only scaled-reference/BILINEAR MC
+  remains — 7.11.3: the Subpel_Filters
   table 0.7.57, the `put_8tap` 8-tap MC kernel 0.7.58 (reference-confirmed vs dav1d
   `put_8tap_c`), the `emu_edge` frame-boundary block fetch 0.7.59 (reference-confirmed vs
   dav1d `emu_edge_c`), and the **MC driver** `av1_mc_pred_block` 0.7.60 (spec 7.11.3.1

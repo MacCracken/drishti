@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 28 × `src/av1_*.cyr` — keyframes decode to pixels; inter underway |
+| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — keyframes decode to pixels; inter nearly complete (only scaled-ref MC left) |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -50,8 +50,8 @@ frame-header + tile-group OBUs) **and** the combined FRAME OBU (type 6 — the c
 real-stream form; it byte-splits off the tile group per spec 5.10). A complete
 keyframe bitstream decodes **from raw bytes all the way to pixels** — both forms
 verified end-to-end, at 8/10/12-bit, single- and multi-tile, with or without
-superres. **Inter prediction** — the last decode track — is **underway**, and most of
-it is now in: the leaf motion-compensation kernels (`av1_mc.cyr`: **Subpel_Filters**
+superres. **Inter prediction** — the last decode track — is **nearly complete** (only
+scaled-reference / BILINEAR MC remains): the leaf motion-compensation kernels (`av1_mc.cyr`: **Subpel_Filters**
 0.7.57, **`put_8tap`** 0.7.58, **`emu_edge`** 0.7.59, each reference-confirmed against
 dav1d) plus the **MC driver** (0.7.60), the **reference-frame buffer/DPB** + multi-frame
 decode (`av1_dpb.cyr` 0.7.61), the complete **MV-prediction** arc (`av1_mv.cyr`
@@ -110,8 +110,9 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   **in-loop filter layer** (deblocking 7.14 / CDEF 7.15 / loop restoration 7.17,
   chained in `av1_apply_loop_filters`) + **superres** upscaling (spec 7.16) +
   **multi-tile** frames (frame-addressed MI grids + tile-group accumulation) +
-  **8/10/12-bit** + the inter-prediction leaf kernels (Subpel_Filters + `put_8tap`
-  + `emu_edge`, spec 7.11.3.2, reference-confirmed against dav1d)
+  **8/10/12-bit** + **inter prediction** nearly complete (the MC kernels + driver, the DPB,
+  the full MV-prediction + temporal-MV arc, all compound + inter-intra prediction, and all
+  four warp forms + OBMC — only scaled-reference / BILINEAR MC remains)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,
@@ -122,11 +123,11 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
 
 A profile-0 AV1 **keyframe** decodes end-to-end to pixels — single- or
 multi-tile, with or without superres, at 8/10/12-bit — through the full
-in-loop filter chain. The remaining AV1 work toward 100% is the rest of **inter
-prediction** (the inter tile decode + the temporal scan + compound/OBMC/warp +
-scaled-reference MC — the MC driver, DPB, MV prediction, the full inter mode-info read
-layer, and the MI-grid population are in), **film-grain synthesis**, conformance, and
-the encode lane. The road to 1.0
+in-loop filter chain. The remaining AV1 work toward 100% is **scaled-reference /
+BILINEAR MC** (the last inter-prediction track — the inter tile decode, the temporal-MV
+arc, all compound + inter-intra prediction, all four warp forms + OBMC, the MC driver,
+DPB, MV prediction, the full inter mode-info read layer, and the MI-grid population are
+all in), **film-grain synthesis**, conformance, and the encode lane. The road to 1.0
 is **one minor arc per codec** —
 **0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
 **0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
