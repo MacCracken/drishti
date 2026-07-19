@@ -3408,7 +3408,7 @@ fn test_ir_compound() {
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "compound tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0);
+    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     y = 0;
     while (y < 64) {
@@ -3420,6 +3420,101 @@ fn test_ir_compound() {
         y = y + 1;
     }
     assert_eq(diff, 0, "compound AVERAGE block: decode == av1_mc_pred_compound oracle (4096)");
+    return 0;
+}
+# COMPOUND GLOBAL_GLOBALMV WARP (0.7.106): a compound block whose BOTH refs carry >TRANSLATION global models
+# now WARPS each ref (was silently translation-MC'd). Both refs are GLOBAL_GLOBALMV + skip, so the decoded
+# 64x64 == a direct compound warp-warp reference (each ref's global model + av1_mc_pred_compound use_warp=1);
+# and it DIFFERS from a translation-compound reference (proving the dispatch built both models + warped both).
+fn test_ir_compound_global_warp() {
+    var oe = alloc(8);
+    var r0 = it_ref_frame();
+    var r1 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(r1, 0, x, y, ((3 * x) + y) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    # a would-warp ROTZOOM global model for BOTH refs: LAST via it_fh_set_gm, ALTREF set manually.
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);
+    # ALTREF gets a DISTINCT (milder) rotzoom so its model != LAST's — this witnesses that the ref1 model is
+    # built from ref1 (a mutation building it from ref0 would warp ref1 with the wrong model).
+    store64(fh + AV1FH_GM_TYPE + ((AV1_ALTREF_FRAME - 1) * 8), AV1_GM_ROTZOOM);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 0) * 8), 0);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 1) * 8), 0);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 2) * 8), 66560);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 3) * 8), 512);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 4) * 8), 0 - 512);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 5) * 8), 66560);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var seq = it_seq();
+    var blk = it_blk_comp(0, 0, 0, 0);      # GLOBAL_GLOBALMV -> MVs derived from GM (record MVs ignored)
+    store64((blk + AV1FB_IB) + AV1IB_YMODE, AV1_GLOBAL_GLOBALMV);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "gg-warp: tile encoded");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "gg-warp: compound tile decodes");
+    # reference: build each ref's global model + warp-warp AVERAGE compound.
+    var wm0 = av1_warp_model_new();
+    av1_warp_model_from_global(wm0, fh, AV1_LAST_FRAME);
+    av1_setup_shear(wm0);
+    var wm1 = av1_warp_model_new();
+    av1_warp_model_from_global(wm1, fh, AV1_ALTREF_FRAME);
+    av1_setup_shear(wm1);
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 0, 0, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP,
+    8, 8, 0, 0, 0, 0, 0, wm0, wm1, 1, 1);
+    var diffw = 0;
+    y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(xf, 0, x, y)) { diffw = diffw + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diffw, 0, "gg-warp: decode == compound warp-warp reference (4096 px)");
+    # DIFFERS from a translation-compound reference -> the dispatch actually warped both refs.
+    var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_compound(tf, r0, r1, 0, 0, 0, 64, 64, 0, 0, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP,
+    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    var difft = 0;
+    y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(tf, 0, x, y)) { difft = difft + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(difft > 0, 1, "gg-warp: decode != translation-compound (warp actually applied)");
     return 0;
 }
 
@@ -3600,10 +3695,10 @@ fn test_ir_compound_distance() {
     assert_eq(fwd, 13, "round-trip Fwd = 13 (dist0=2, dist1=10)");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    fwd, 16 - fwd, 0, 0, 0, 0, 0);
+    fwd, 16 - fwd, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0);
+    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -3674,10 +3769,10 @@ fn it_diffwtd_roundtrip(mask_type, tag): i64 {
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "diffwtd tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 1, mask_type, 0, 0, 0);
+    8, 8, 1, mask_type, 0, 0, 0, 0, 0, 0, 0);
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0);
+    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -3708,7 +3803,7 @@ fn test_ir_compound_diffwtd() {
 # decode threaded comp_mode=2 + wedge_idx/sign + sub_size, and built the codebook mask).
 fn iw_oracle(dstf, r0, r1, rx, ry, wedge_idx, wedge_sign): i64 {
     av1_mc_pred_compound(dstf, r0, r1, 0, rx, ry, 32, 32, 16, 8, 0 - 8, 24, AV1_EIGHTTAP,
-    AV1_EIGHTTAP, 8, 8, 2, 0, AV1_BLOCK_32X32, wedge_idx, wedge_sign);
+    AV1_EIGHTTAP, 8, 8, 2, 0, AV1_BLOCK_32X32, wedge_idx, wedge_sign, 0, 0, 0, 0);
     return 0;
 }
 fn it_wedge_roundtrip(wedge_idx, wedge_sign, tag): i64 {
@@ -3774,7 +3869,7 @@ fn it_wedge_roundtrip(wedge_idx, wedge_sign, tag): i64 {
     # AVERAGE oracle (comp_mode=0) for the differs-witness.
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0);
+    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -3928,6 +4023,7 @@ fn main() {
     test_ir_zero();
     test_ir_vartx();
     test_ir_compound();
+    test_ir_compound_global_warp();
     test_ir_compound_missing_ref();
     test_dist_tables();
     test_ir_dist_weights();

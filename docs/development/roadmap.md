@@ -349,8 +349,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   gated on `use_ref_frame_mvs`; the FIRST output-changing temporal bite — closes the temporal-MV arc), and
   **inter-intra warp-blend 0.7.105** (spec 7.11.3.1 — a GLOBALWARP inter-intra block warps the inter part per
   plane into `Av1_McOut` then runs the unchanged mask blend; un-defers the 0.7.100 `is_ii && warp_valid`
-  reject; `av1_warp_pred_gen` + `av1_mc_pred_interintra_w`). Then **compound GLOBAL_GLOBALMV warp**
-  (warp-into-a-scratch follow-on), then scaled-reference/BILINEAR MC; all table-free bar the warp filter +
+  reject; `av1_warp_pred_gen` + `av1_mc_pred_interintra_w`), and **compound GLOBAL_GLOBALMV warp 0.7.106**
+  (spec 7.11.3.5 isCompound — each ref warps at INTERMEDIATE precision into `Av1_McTmp`/`Av1_McOut` then the
+  existing combine; a latent-mis-decode fix that lifts the `is_comp==0` restriction; `av1_warp_affine_8x8` +
+  `compound` flag + a dedicated `Av1_McWarp8` kernel scratch). Then scaled-reference/BILINEAR MC — the LAST
+  inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.
 - **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths

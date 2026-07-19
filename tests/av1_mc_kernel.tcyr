@@ -78,7 +78,7 @@ fn warp_grid(bd, salt): i64 {
 fn warp_case(bd, salt, a, b, gm, dl, mx, my, cs, p00, p33, p77, tag): i64 {
     var g = warp_grid(bd, salt);
     var out = alloc(64 * 8);
-    assert_eq(av1_warp_affine_8x8(out, 0, 8, g, (3 * 15) + 3, 15, a, b, gm, dl, mx, my, bd),
+    assert_eq(av1_warp_affine_8x8(out, 0, 8, g, (3 * 15) + 3, 15, a, b, gm, dl, mx, my, bd, 0),
     DR_OK, tag);
     assert_eq(mc_checksum(out, 64), cs, tag);
     assert_eq(load64(out + (0 * 8)), p00, tag);

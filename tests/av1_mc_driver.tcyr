@@ -217,7 +217,7 @@ fn test_mc_compound_avg() {
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     # ref0 MV (row 16=+2px, col 8=+1px); ref1 MV (row -8=-1px, col 24=+3px). Filter 0.
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     DR_OK, "compound-average decodes");
     var diff = 0;
     y = 0;
@@ -252,7 +252,7 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
     var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     av1_mc_pred_block(s, ref, 0, 0, 0, 32, 32, mvr, mvc, 0, 0);
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(d, ref, ref, 0, 0, 0, 32, 32, mvr, mvc, mvr, mvc, 0, 0, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var big = 0;
     var y = 0;
     while (y < 32) {
@@ -268,6 +268,65 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
     assert_eq(big, 0, tag);
     return 0;
 }
+# COMPOUND WARP (0.7.106): a GLOBAL_GLOBALMV compound block warps each ref at INTERMEDIATE precision (spec
+# 7.11.3.5 isCompound=1: vertical Round2(vs,7), NO Clip1), then combines. Anchored to the ALREADY-VERIFIED
+# single-ref warp: AVERAGE-of-self (both refs = R, both warp) must equal av1_warp_pred_block(R) within +-1
+# (only the split-round timing differs) — a wrong compound-warp vertical shift (7+ib, or Clip1 left in)
+# misscales the intermediate and blows the diff far past 1. Plus a warp-vs-translation differential and a
+# MIXED (ref0 warps, ref1 translation-MCs) witness of per-ref independence.
+fn test_mc_compound_warp() {
+    var r = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    warp_fill(r, 0, 0);
+    var wm = warp_model();
+    var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_warp_pred_block(s, r, 0, 0, 0, 32, 32, wm);   # the VERIFIED single-ref final warp
+    var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_compound(d, r, r, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, wm, wm, 1, 1),
+    DR_OK, "compound warp: AVERAGE-of-self DR_OK");
+    var big = 0;
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            var dd = dr_frame_get(d, 0, x, y) - dr_frame_get(s, 0, x, y);
+            if (dd < 0) { dd = 0 - dd; }
+            if (dd > 1) { big = big + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(big, 0, "compound warp: AVERAGE-of-self warp-warp == single-ref warp (+-1, 1024 px)");
+    # B: warp-warp DIFFERS from translation-translation (the warp is actually applied).
+    var dt = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_mc_pred_compound(dt, r, r, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, wm, wm, 0, 0);
+    var nd = 0;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) { if (dr_frame_get(d, 0, x, y) != dr_frame_get(dt, 0, x, y)) { nd = nd + 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(nd > 0, 1, "compound warp != compound translation (warp actually applied)");
+    # C: MIXED (ref0 warps, ref1 translation-MCs) differs from BOTH both-warp and both-translation -> the two
+    # references are handled INDEPENDENTLY (spec 7.11.3.1 step 14 per-refList useWarp).
+    var dm = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_mc_pred_compound(dm, r, r, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, wm, wm, 1, 0);
+    var nmw = 0;
+    var nmt = 0;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            if (dr_frame_get(dm, 0, x, y) != dr_frame_get(d, 0, x, y)) { nmw = nmw + 1; }
+            if (dr_frame_get(dm, 0, x, y) != dr_frame_get(dt, 0, x, y)) { nmt = nmt + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(nmw > 0, 1, "mixed (warp0, trans1) != both-warp (ref0 warps independently)");
+    assert_eq(nmt > 0, 1, "mixed (warp0, trans1) != both-translation (ref1 translates independently)");
+    return 0;
+}
 
 # COMPOUND DISTANCE (jnt, 0.7.88): with INTEGER MVs + explicit weights the combine collapses
 # to (ref0[s0]*Fwd + ref1[s1]*Bck + 8) >> 4 (prep = pixel<<ib; combine >>(ib+4), the 2^ib
@@ -275,7 +334,8 @@ fn mcd_compound_self(ref, mvr, mvc, tag): i64 {
 # oracle above — the ONLY change is the weighting. Independent (scripts/refs/dist_wtd_ref.py).
 fn mcd_dist_oracle(r0, r1, fwd, bck, tag): i64 {
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck, 0, 0, 0, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck,
+    0, 0, 0, 0, 0, 0, 0, 0, 0),
     DR_OK, tag);
     var diff = 0;
     var y = 0;
@@ -320,8 +380,8 @@ fn test_mc_compound_dist() {
     # DISTANCE (13/3) must actually DIFFER from AVERAGE (8/8) — else the mode is untested.
     var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     var dd = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0);
-    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(dd, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 13, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var ndiff = 0;
     y = 0;
     while (y < 32) {
@@ -356,7 +416,8 @@ fn mcd_diffwtd_case(bd, mask_type, tag): i64 {
         y = y + 1;
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, bd, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type,
+    0, 0, 0, 0, 0, 0, 0),
     DR_OK, tag);
     var ib = 4;
     if (bd == 12) { ib = 2; }
@@ -412,9 +473,11 @@ fn mcd_diffwtd_chroma_case(bd, mask_type, tag): i64 {
         p = p + 1;
     }
     var d = dr_frame_new(32, 32, 3, 1, 1, bd, 8, Mcd_Err);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type,
+    0, 0, 0, 0, 0, 0, 0),
     DR_OK, tag);
-    assert_eq(av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0),
+    assert_eq(av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type,
+    0, 0, 0, 0, 0, 0, 0),
     DR_OK, tag);
     var ib = 4;
     if (bd == 12) { ib = 2; }
@@ -474,8 +537,8 @@ fn test_mc_diffwtd() {
     }
     var dw = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     var da = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
-    av1_mc_pred_compound(dw, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
-    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(dw, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(da, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var nd = 0;
     yy = 0;
     while (yy < 32) {
@@ -499,7 +562,7 @@ fn diffwtd_kat_luma(p0, p1, bd, mask_type, exp_out, tag): i64 {
     dr_frame_fill(r0, 0, p0);
     dr_frame_fill(r1, 0, p1);
     var d = dr_frame_new(4, 4, 1, 0, 0, bd, 8, Mcd_Err);
-    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0);
+    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(dr_frame_get(d, 0, 1, 1), exp_out, tag);
     return 0;
 }
@@ -522,8 +585,8 @@ fn test_diffwtd_kat() {
     dr_frame_set(r0, 0, 1, 1, 255); dr_frame_set(r1, 0, 1, 1, 0);    # -> m=53
     dr_frame_set(r0, 1, 0, 0, 150); dr_frame_set(r1, 1, 0, 0, 90);   # chroma preds
     var d = dr_frame_new(4, 4, 3, 1, 1, 8, 8, oe);
-    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
-    av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
+    av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+    av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(dr_frame_get(d, 1, 0, 0), 134, "KAT chroma 4:2:0 masks[48,48,38,53]->m47, 150/90 -> 134");
     return 0;
 }
@@ -1383,6 +1446,8 @@ fn main() {
     test_mc_pred_rejects();
     test_group("compound-average MC (7.11.3.1 isCompound)");
     test_mc_compound_avg();
+    test_group("compound WARP (7.11.3.5 isCompound — GLOBAL_GLOBALMV, 0.7.106)");
+    test_mc_compound_warp();
     test_group("compound-distance MC (7.11.3.15 jnt weights)");
     test_mc_compound_dist();
     test_group("compound-diffwtd MC (7.11.3.12 diff mask + blend)");

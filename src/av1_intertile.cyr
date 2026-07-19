@@ -915,6 +915,10 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     # report shearValid for a zero-translation warp, warping an invalid block with wrong pixels.
     var warp_valid = 0;
     var wm = 0;
+    var wm0 = 0;             # compound GLOBAL_GLOBALMV (0.7.106): ref0's + ref1's global warp models +
+    var wm1 = 0;             # their per-ref shear validity; each ref warps independently (mixed reachable)
+    var warp_valid0 = 0;
+    var warp_valid1 = 0;
     if (mm == AV1_MM_LOCALWARP) {
         wm = av1_warp_model_scratch();
         if (wm == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
@@ -932,18 +936,42 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         # dav1d's gmv_warp_allowed). globalValid = setup_shear on the gm_params. The per-plane nw>=8 gate
         # supplies the block>=8x8 requirement; when useWarp==0 (globalValid==0 / <8x8 / scaled) the block
         # falls back to av1_mc_pred_block with Mv[0], which for a GLOBALMV block IS the global MV
-        # (assign_mv, GlobalMvs) — the correct translation. Compound GLOBAL_GLOBALMV warp is a
-        # deferred follow-on (roadmap.md — the compound path does not warp yet).
-        var g_ref0 = av1_ib_ref(ib, 0);
-        if ((is_comp == 0) && (av1_ib_ymode(ib) == AV1_GLOBALMV)
-        && (av1_fh_gm_type(fh, g_ref0) > AV1_GM_TRANSLATION)
-        && (av1_fh_force_integer_mv(fh) == 0)
-        && (av1_is_scaled(fh, load64(tile + AV1TILE_REFS), g_ref0) == 0)) {
-            wm = av1_warp_model_scratch();
-            if (wm == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
-            var egw = av1_warp_model_from_global(wm, fh, g_ref0);
-            if (egw != DR_OK) { return av1_ierr_latch(tile, egw); }
-            warp_valid = av1_warp_model_shear_valid(wm);
+        # (assign_mv, GlobalMvs) — the correct translation. For COMPOUND GLOBAL_GLOBALMV (0.7.106) each ref's
+        # global model is built INDEPENDENTLY (into scratch / scratch2) so one ref can warp while the other
+        # translation-MCs (spec 7.11.3.1 step 14 repeats the useWarp derivation per refList).
+        var refs2 = load64(tile + AV1TILE_REFS);
+        var fint = av1_fh_force_integer_mv(fh);
+        var ymode = av1_ib_ymode(ib);
+        if ((is_comp == 0) && (ymode == AV1_GLOBALMV)) {
+            var g_ref0 = av1_ib_ref(ib, 0);
+            if ((av1_fh_gm_type(fh, g_ref0) > AV1_GM_TRANSLATION) && (fint == 0)
+            && (av1_is_scaled(fh, refs2, g_ref0) == 0)) {
+                wm = av1_warp_model_scratch();
+                if (wm == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
+                var egw = av1_warp_model_from_global(wm, fh, g_ref0);
+                if (egw != DR_OK) { return av1_ierr_latch(tile, egw); }
+                warp_valid = av1_warp_model_shear_valid(wm);
+            }
+        }
+        if ((is_comp != 0) && (ymode == AV1_GLOBAL_GLOBALMV)) {
+            var cr0 = av1_ib_ref(ib, 0);
+            if ((av1_fh_gm_type(fh, cr0) > AV1_GM_TRANSLATION) && (fint == 0)
+            && (av1_is_scaled(fh, refs2, cr0) == 0)) {
+                wm0 = av1_warp_model_scratch();
+                if (wm0 == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
+                var e0 = av1_warp_model_from_global(wm0, fh, cr0);
+                if (e0 != DR_OK) { return av1_ierr_latch(tile, e0); }
+                warp_valid0 = av1_warp_model_shear_valid(wm0);
+            }
+            var cr1 = av1_ib_ref(ib, 1);
+            if ((av1_fh_gm_type(fh, cr1) > AV1_GM_TRANSLATION) && (fint == 0)
+            && (av1_is_scaled(fh, refs2, cr1) == 0)) {
+                wm1 = av1_warp_model_scratch2();
+                if (wm1 == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
+                var e1 = av1_warp_model_from_global(wm1, fh, cr1);
+                if (e1 != DR_OK) { return av1_ierr_latch(tile, e1); }
+                warp_valid1 = av1_warp_model_shear_valid(wm1);
+            }
         }
     }
     # GLOBALWARP + inter-intra (spec 7.11.3.1, 0.7.105): a GLOBALMV inter-intra block whose global model
@@ -1008,13 +1036,19 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                 # is >= 8x8 — a 4x4 chroma (8x8-luma at 4:2:0) falls back to translation. The SAME gate drives
                 # the plain-inter warp AND the inter-intra warp (the useWarp derivation has no is_ii exception).
                 # Dispatch on the edge-CLAMPED w/h (warp_pred_block/interintra crop partial tiles).
+                var big = 0;
+                if ((nw >= 8) && (nh >= 8)) { big = 1; }   # the per-plane block>=8x8 warp gate
                 var use_warp = 0;
-                if ((warp_valid != 0) && (nw >= 8) && (nh >= 8)) { use_warp = 1; }
+                if ((warp_valid != 0) && (big != 0)) { use_warp = 1; }
+                var use_warp0 = 0;
+                if ((warp_valid0 != 0) && (big != 0)) { use_warp0 = 1; }
+                var use_warp1 = 0;
+                if ((warp_valid1 != 0) && (big != 0)) { use_warp1 = 1; }
                 var em = DR_OK;
                 if (is_comp != 0) {
                     em = av1_mc_pred_compound(frame, refframe, ref1frame, plane, x, y, w, h,
                     mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
-                    sub_size, cwidx, cwsign);
+                    sub_size, cwidx, cwsign, wm0, wm1, use_warp0, use_warp1);
                 } else {
                     if (is_ii != 0) {
                         em = av1_mc_pred_interintra_w(frame, refframe, plane, x, y, w, h,

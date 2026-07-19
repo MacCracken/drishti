@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.106] - 2026-07-18
+
+**Compound GLOBAL_GLOBALMV warp** — the last warp follow-on, and a **latent-mis-decode fix**: a compound
+(two-reference) `GLOBAL_GLOBALMV` block whose references carry `> TRANSLATION` global-motion models was
+previously translation-MC'd **silently** (`warp_valid` was gated on `is_comp == 0`). Now each reference warps
+at **intermediate precision** and the existing combine (AVERAGE / DISTANCE / DIFFWTD / WEDGE) runs unchanged.
+3-source confirmed (spec 7.11.3.5 + dav1d `mc_tmpl.c` `warp_affine_8x8t_c` + libaom `av1_warp_affine_c`): the
+compound warp vertical is `Round2(sum, 7)` with **no Clip1** (vs single-ref `Clip1(Round2(sum, 7+ib))`),
+horizontal unchanged — landing at the same `bit_depth+ib` intermediate as compound `put_8tap`, so the combine
+is producer-agnostic. Gating is **per-reference** (mixed — one ref warps while the other translation-MCs — is
+reachable); only `GLOBAL_GLOBALMV` reaches it (LOCALWARP is single-ref only).
+
+### Changed
+
+- **`av1_warp_affine_8x8`** (`av1_mc.cyr`) gained a `compound` flag selecting the intermediate vs final
+  vertical round. **`av1_warp_pred_gen`** gained a `compound` param and now writes its per-8×8 kernel output
+  to a **dedicated `Av1_McWarp8` scratch** (was `Av1_McTmp`), decoupled from `McTmp`/`McOut` so the compound
+  path can write-back into **both** intermediate buffers without a self-copy. `av1_warp_pred_block` and the
+  inter-intra warp pass `compound=0` (unchanged).
+- **`av1_mc_pred_compound`** gained `(wm0, wm1, use_warp0, use_warp1)`: each reference warps into its
+  intermediate buffer (`av1_warp_pred_gen(compound=1)`) when it warps, else translation-MC; the two warps are
+  independent (`av1_warp_pred_gen` touches neither `McTmp` nor `McOut` internally). A second reusable
+  warp-model scratch (`av1_warp_model_scratch2`) holds ref1's model — a compound block needs both live at once.
+- **`av1_decode_block_inter`** (`av1_intertile.cyr`) — the GLOBALWARP model-build gained a compound branch
+  building `wm0`/`wm1` per reference; the plane loop passes the per-ref `use_warp0/1` (each `= warp_valid_r &&
+  nominal-plane≥8×8`) into `av1_mc_pred_compound`. The `is_comp == 0` restriction is lifted.
+
+**Proofs**: a direct complementary-oracle test (`test_mc_compound_warp`) anchored to the **already-verified**
+single-ref warp — `compound(AVERAGE, R, R, warp, warp)` must equal `av1_warp_pred_block(R)` within ±1 (only the
+split-round timing differs; a wrong intermediate shift blows the diff far past 1) — plus warp-≠-translation and
+a **mixed** (ref0 warps, ref1 translates) per-reference-independence witness; and an e2e
+(`test_ir_compound_global_warp`) where a compound GLOBAL_GLOBALMV block with two distinct warp models decodes
+== a compound warp-warp reference and ≠ a translation-compound reference. **Mutation-verified** (8 targets, all
+red): the compound vertical round + no-Clip1, both `av1_mc_pred_compound` per-ref branches, the dispatch's
+`use_warp0/1` gates, the compound model-build gate, and the ref1-model source.
+
 ## [0.7.105] - 2026-07-18
 
 **Inter-intra warp-blend** — un-defers the `is_ii && warp_valid` reject that 0.7.100's review installed. A
