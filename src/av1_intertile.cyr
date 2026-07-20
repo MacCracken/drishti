@@ -62,6 +62,15 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
     if ((ctx == 0) || (nb == 0) || (ws == 0) || (mvs == 0)) { return DR_ERR_OOM; }
     av1_mvctx_set_stack(ctx, mvs);
     store64(tile + AV1TILE_MVCTX, ctx);
+    # RefFrameSignBias[8] — derived once per frame from the header's OrderHints (spec 7.20).
+    # Both lanes compute it here so the MV candidate dedup (which negates cross-bias MVs) agrees.
+    var sbias = load64(tile + AV1TILE_SIGNBIAS);
+    if (sbias == 0) {
+        sbias = alloc(AV1_NUM_REF_FRAMES * 8);
+        if (sbias == 0) { return DR_ERR_OOM; }
+        store64(tile + AV1TILE_SIGNBIAS, sbias);
+    }
+    av1_frame_sign_bias(seq, fh, sbias);
     store64(tile + AV1TILE_NB, nb);
     store64(tile + AV1TILE_WS, ws);
     # the 5.11.15 driver's cdef record: bundle the tile's CDEF read context + the
@@ -117,6 +126,7 @@ fn av1_inter_block_setup(tile, r, c, sub_size, out): i64 {
     load64(tile + AV1TILE_COL_START), load64(tile + AV1TILE_COL_END));
     av1_mvctx_set_block(ctx, r, c, sub_size);
     av1_mvctx_set_precision(ctx, av1_fh_allow_high_precision_mv(fh), av1_fh_force_integer_mv(fh));
+    av1_mvctx_set_signbias(ctx, load64(tile + AV1TILE_SIGNBIAS));   # 7.20 RefFrameSignBias
     store64(out + 0, avail_u);
     store64(out + 8, avail_l);
     store64(out + 16, above_skip);

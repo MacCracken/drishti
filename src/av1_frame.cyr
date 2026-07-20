@@ -296,6 +296,31 @@ fn av1_ref_dist(s, fh, ref): i64 {
     return av1_clip3(0, 31, av1_max(d, 0 - d));
 }
 
+# RefFrameSignBias[ref] (spec 7.20 / the setup after the frame header): fills out[8] with the
+# per-reference sign bias. A reference frame whose order hint is AFTER the current frame's is a
+# BACKWARD reference (bias 1); one before or equal is forward (bias 0). Unlike av1_ref_dist this
+# uses the SIGNED get_relative_dist ( > 0 ), NOT its Abs. INTRA_FRAME (0) and NONE are forward,
+# and everything is forward when enable_order_hint is off (get_relative_dist returns 0).
+#
+# Consumed by the MV candidate dedup (7.10.2.12): a compound block combining MVs from two refs
+# with DIFFERENT sign biases negates one, so a decoder that never derives this mishandles every
+# compound / backward-reference block. Until 0.7.x this was never wired (av1_mvctx_set_signbias
+# had no callers), which was safe only because no decoded frame had a backward reference.
+fn av1_frame_sign_bias(s, fh, out): i64 {
+    var ref = 0;
+    while (ref < AV1_NUM_REF_FRAMES) {
+        store64(out + (ref * 8), 0);
+        ref = ref + 1;
+    }
+    ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) {
+        var d = av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, ref), av1_fh_order_hint(fh));
+        if (d > 0) { store64(out + (ref * 8), 1); }
+        ref = ref + 1;
+    }
+    return DR_OK;
+}
+
 # Segmentation feature tables (5.9.14): Segmentation_Feature_Bits /
 # _Signed / _Max, indexed by feature j in [0, SEG_LVL_MAX).
 fn av1_seg_feature_bits(j): i64 {

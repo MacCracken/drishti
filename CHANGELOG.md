@@ -4,6 +4,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **`RefFrameSignBias` is now derived and wired** (Phase C — the first real correctness gap, not
+  parse coverage). Per spec 7.20, `RefFrameSignBias[ref] = get_relative_dist(OrderHints[ref], OrderHint)
+  > 0` — a reference whose order hint is *after* the current frame is a backward reference (bias 1). This
+  was **never computed**: `av1_mvctx_set_signbias` had zero callers, so the compound MV-candidate dedup
+  (which negates an MV combined across two refs of *differing* bias, 7.10.2.12) always saw all-forward.
+  Safe only while no decoded frame had a backward reference. New `av1_frame_sign_bias` (`av1_frame.cyr`,
+  the **signed** dist `> 0`, not `av1_ref_dist`'s `Abs`); derived once per frame into a new
+  `AV1TILE_SIGNBIAS` buffer in `av1_tile_set_inter_ctx` (both lanes) and attached to the per-block MV
+  context in `av1_inter_block_setup`. Tests: `test_sign_bias_derivation` (backward→1, same-hint→0,
+  order-hint-off→0) and `test_sign_bias_wiring` (it reaches the MV context); both teeth-verified
+  (flipping the `> 0` direction and removing the per-block set each redden). The consumer negation was
+  already tested (`test_driver_signbias_append`). This fixes the derivation; it does **not** by itself
+  make a compound inter frame decode end-to-end — that still needs `reference_select` + backward refs in
+  the DPB + compound-mode reads through the stream (a later bite).
 - **Realistic order-hint inter header decodes** (Phase C part 2). The degenerate inter path
   (`enable_order_hint = 0`, `error_resilient = 1`) gated off `order_hint`, explicit
   `primary_ref_frame`, `frame_refs_short_signaling` and `get_relative_dist`. New OH-enabled builders

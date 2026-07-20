@@ -587,6 +587,34 @@ fn its_enc_inter_content(dpb, refs, seq, out_len): i64 {
 # Phase C part 2 — the REALISTIC order-hint header parses correctly (isolate the bit-packing
 # before wiring it into a full decode). Parse the OH seq + a KEY OH fh + an INTER OH fh through
 # the REAL parser and assert the order-hint fields that the degenerate path never exercised.
+# WIRING: the derived RefFrameSignBias reaches the per-block MV context (0.7.x). Without this
+# (av1_mvctx_set_signbias had no callers) the compound MV dedup always saw all-forward bias.
+fn test_sign_bias_wiring() {
+    var oe = alloc(8);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    var fh = it_fh();
+    store64(fh + AV1FH_ORDER_HINT, 9);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), 12);   # backward ref
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 5);      # forward ref
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    assert_eq(av1_tile_set_inter_ctx(et, fh, it_refs(), seq, av1_dpb_new()), DR_OK, "wiring: tile ctx set");
+    # the tile-level buffer is filled from the frame's OrderHints.
+    var sb = load64(et + AV1TILE_SIGNBIAS);
+    assert_eq(load64(sb + (AV1_ALTREF_FRAME * 8)), 1, "wiring: tile SIGNBIAS carries the backward ref");
+    assert_eq(load64(sb + (AV1_LAST_FRAME * 8)), 0, "wiring: tile SIGNBIAS forward ref is 0");
+    # and the per-block setup attaches it to the MV context the mode-info reads consume.
+    var st = alloc(40);
+    assert_eq(av1_inter_block_setup(et, 0, 0, 12, st), DR_OK, "wiring: block setup");
+    var ctx = load64(et + AV1TILE_MVCTX);
+    assert_eq(av1_mvctx_signbias(ctx, AV1_ALTREF_FRAME), 1, "wiring: MV context sees the backward bias");
+    assert_eq(av1_mvctx_signbias(ctx, AV1_LAST_FRAME), 0, "wiring: MV context sees the forward ref as 0");
+    return 0;
+}
+
 fn test_inter_oh_header_parseback() {
     var slen = 0;
     var sb = its_build_seq_oh(&slen);
@@ -5092,6 +5120,7 @@ fn main() {
     test_inter_cdef_plan_refused();
     test_group("the byte-stream layer: real headers drive the inter lane");
     test_inter_header_parseback();
+    test_sign_bias_wiring();
     test_inter_oh_header_parseback();
     test_inter_stream_motion_oh();
     test_inter_stream_content();

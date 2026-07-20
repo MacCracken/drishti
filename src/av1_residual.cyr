@@ -124,7 +124,8 @@ enum Av1TileOff {
     AV1TILE_IERR      = 536;  # STICKY inter-lane error (the partition walk discards
     #                           block returns; the tile driver reads this after the loop)
     AV1TILE_TXTYPES   = 544;  # per-4x4 luma TxTypes grid (var-tx chroma co-location; shared)
-    AV1TILE_SIZE      = 552;
+    AV1TILE_SIGNBIAS  = 552;  # RefFrameSignBias[8] buffer (derived per frame from OrderHints)
+    AV1TILE_SIZE      = 560;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.

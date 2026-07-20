@@ -674,6 +674,35 @@ fn test_av1_fh_truncation() {
     return 0;
 }
 
+# RefFrameSignBias derivation (spec 7.20). A backward reference (order hint AFTER the current
+# frame) gets bias 1; a forward one gets 0; everything is 0 when enable_order_hint is off. This
+# was NEVER derived before 0.7.x — av1_mvctx_set_signbias had no callers, safe only while no
+# decoded frame had a backward reference.
+fn test_sign_bias_derivation() {
+    var seq = alloc(AV1_SEQ_SIZE);
+    memset(seq, 0, AV1_SEQ_SIZE);
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_ORDER_HINT, 9);                                # current frame
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 5);        # LAST: past -> forward
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), 12);     # ALTREF: future -> backward
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_GOLDEN_FRAME * 8), 9);      # GOLDEN: same -> forward (not > 0)
+    var sb = alloc(AV1_NUM_REF_FRAMES * 8);
+    av1_frame_sign_bias(seq, fh, sb);
+    assert_eq(load64(sb + (AV1_INTRA_FRAME * 8)), 0, "signbias: INTRA_FRAME forward (0)");
+    assert_eq(load64(sb + (AV1_LAST_FRAME * 8)), 0, "signbias: LAST (hint 5 < 9) forward (0)");
+    assert_eq(load64(sb + (AV1_ALTREF_FRAME * 8)), 1, "signbias: ALTREF (hint 12 > 9) BACKWARD (1)");
+    assert_eq(load64(sb + (AV1_GOLDEN_FRAME * 8)), 0, "signbias: GOLDEN (hint 9 == 9) forward (0, not > 0)");
+    # order-hint OFF -> all forward, even the backward ref (get_relative_dist returns 0).
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 0);
+    av1_frame_sign_bias(seq, fh, sb);
+    assert_eq(load64(sb + (AV1_ALTREF_FRAME * 8)), 0,
+    "signbias: order-hint off -> ALTREF forward (get_relative_dist 0)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("av1 frame header — intra / still-picture");
@@ -686,6 +715,7 @@ fn main() {
     test_group("av1 frame header — full path");
     test_av1_fh_full_key();
     test_group("av1 frame header — reference state machine");
+    test_sign_bias_derivation();
     test_av1_fh_inter_refstate();
     test_av1_fh_show_existing();
     test_group("av1 frame header — global motion / arithmetic shift");
