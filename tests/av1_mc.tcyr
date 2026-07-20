@@ -63,7 +63,7 @@ fn test_filter_set_selection() {
     assert_eq(av1_mc_filter_set(0, 4), 3, "REGULAR dim 4 -> set 3 (narrow)");
     assert_eq(av1_mc_filter_set(1, 4), 4, "SMOOTH dim 4 -> set 4 (narrow)");
     assert_eq(av1_mc_filter_set(2, 4), 3, "SHARP dim 4 -> set 3 (narrow, shares REGULAR)");
-    # dim 2 is REACHABLE: predW = Block_Width[MiSize] >> subX (6.10.22), so a BLOCK_4X4 luma
+    # dim 2 is REACHABLE: predW = Block_Width[MiSize] >> subX (compute_prediction), so a BLOCK_4X4 luma
     # block's 4:2:0 chroma plane is 2 samples wide. No kernel KAT covers it.
     assert_eq(av1_mc_filter_set(0, 2), 3, "REGULAR dim 2 -> set 3 (4:2:0 chroma of BLOCK_4X4)");
     assert_eq(av1_mc_filter_set(1, 2), 4, "SMOOTH dim 2 -> set 4");

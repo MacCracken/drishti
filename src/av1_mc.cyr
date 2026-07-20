@@ -410,7 +410,8 @@ fn av1_mc_8tap(src, base, stride, f): i64 {
 
 # Subpel_Filters SET selection (spec 7.11.3.4). `filt` is ONE axis's interpolation filter
 # (EIGHTTAP 0 / EIGHTTAP_SMOOTH 1 / EIGHTTAP_SHARP 2), `dim` that axis's PLANE-LOCAL block
-# extent — predW = Block_Width[MiSize] >> subX (6.10.22), so `dim` can be as small as 2 (a
+# extent — predW = Block_Width[MiSize] >> subX (the compute_prediction process,
+# 5.11.5 / 5.11.33), so `dim` can be as small as 2 (a
 # BLOCK_4X4 luma block's 4:2:0 chroma), not merely 4. A block <= 4 samples wide/tall uses the
 # narrow 4-tap variant of its filter: REGULAR and SHARP both map to set 3, SMOOTH to set 4
 # (drishti indices — see the set-order note in the module header).

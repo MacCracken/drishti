@@ -368,9 +368,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   unscaled fast-path selector, a non-conformant ratio is `DR_ERR_BAD_HEADER`, and anything else takes the
   scaled convolve; warp deliberately keeps rejecting a scaled reference). This closes the last
   **MC-geometry** track; two inter gaps remain, each cleanly rejected on geometry before any symbol is
-  read — **sub-8x8 chroma units spanning sibling blocks** (the spec's `compute_prediction` uses the
-  siblings' MVs from the MI grid) and **inter-intra overhanging the frame edge** (`av1_intra_predict`
-  writes the nominal extent unclamped). Formerly the LAST
+  read. **Sub-8x8 chroma units spanning sibling blocks landed 0.7.112-0.7.113** (`compute_prediction`
+  storage-loop hoist + the spec plane loop, then the live emission loop: each 2x2 chroma quadrant borrows
+  its own sibling's MV / reference / interp filters from the MI grid, with the `someUseIntra` collapse).
+  One gap remains: **inter-intra overhanging the frame edge** (`av1_intra_predict` writes the nominal
+  extent unclamped). Formerly the LAST
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

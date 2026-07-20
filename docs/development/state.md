@@ -6,6 +6,42 @@
 
 ## Version
 
+**0.7.113** — cut 2026-07-20, not yet tagged (user's git). **SUB-8x8 CHROMA SIBLING-MV PREDICTION (spec
+5.11.5 compute_prediction) — the sibling-span gate is LIFTED on both lanes.** At 4:2:0 four BLOCK_4X4 luma
+blocks share ONE 4x4 chroma unit, and the spec does NOT predict it with a single MV: it emits FOUR 2x2
+quadrants, each borrowing the MV of the sibling whose luma quarter it covers, read from the MI grid at
+(candRow+r, candCol+c). Only the bottom-right sibling (odd MiRow AND odd MiCol) carries the chroma, so it
+performs all four. Affects ORDINARY content (4x4/4x8/8x4 at 4:2:0 are common) and was previously rejected
+outright rather than guessed. av1_intertile.cyr: the 0.7.112 emission loop is now LIVE — when the plane's
+residual extent exceeds one prediction (only when a luma dim is 4 AND that axis is subsampled) each quadrant
+reads its own sibling's cell for ref / MV / interp filters. Everything the block-level machinery adds is
+spec-impossible at these sizes (inter-intra needs MiSize>=BLOCK_8X8 per 5.11.28; warp needs a nominal plane
+block >=8x8 which a 2x2 quadrant never is), and a COMPOUND sibling has no single MV to lend so it is rejected
+rather than silently borrowing list 0. New av1_inter_some_use_intra transcribes the someUseIntra scan (which
+collapses the borrow to one whole-extent prediction when any covered cell is intra), CLIPPED to the grid —
+blocks legitimately overhang the frame-sized MI grid and av1_mv_grid_cell is unchecked pointer arithmetic, so
+an unclipped scan is an OOB read at the frame edge. PROOF: a 32x32 4:2:0 tile whose nested plan reaches four
+BLOCK_4X4 leaves at MI (6..7,6..7) with FOUR DISTINCT MVs, each with a distinct dx+2*dy, against a NON-LINEAR
+reference — itw_ctx420's x+2y ramp shifts by exactly dx+2*dy so two MVs sharing that sum give identical
+pixels and the fixture would witness NOTHING (the 0.7.101 OBMC trap); the test also asserts the quadrants are
+pairwise distinct so a later edit cannot make them alias. A second fixture gives each sibling a DUAL FILTER
+pair with a sub-pel MV, since at 2x2 both w<=4 and h<=4 and the narrow remap collapses EIGHTTAP with SHARP —
+only mixing EIGHTTAP against EIGHTTAP_SMOOTH makes the borrowed dir0/dir1 pair observable. MUTATIONS: 14 run,
+**13 red** (both baseX/baseY forms, both candRow/candCol maskings, the wrong-sibling swap, forcing the
+single-prediction path, borrowing list 1, the swapped filter pair, and all four someUseIntra leaf properties).
+**TWO RESULTS WORTH RECORDING:** (a) reverting the 0.7.112 storage hoist NOW TURNS THIS RED (12 of 16 chroma
+pixels), retroactively supplying the witness that bite could not have — the carrier's own unwritten cell reads
+as INTRA_FRAME, someUseIntra fires and the prediction collapses; (b) the DRIVER's someUseIntra call SURVIVES
+DELETION and is REPORTED AS UNWITNESSED — drishti's inter tile decode has no is_inter==0 path so no sibling
+can be intra in a well-formed stream. Transcribed anyway (the spec has it; a future intra-in-inter bite makes
+it live; and it is what turns a missing hoist into a collapsed prediction rather than a borrow of garbage) and
+pinned by a DIRECT LEAF TEST rather than a claimed stream witness. ALSO FIXED: a citation I FABRICATED in
+0.7.107 — av1_mc.cyr cited "6.10.22" for predW = Block_Width[MiSize] >> subX; no source supports that number,
+I invented it while paraphrasing a verifier's file:line reference. Now names compute_prediction. 38 suites,
+**29,418** suite + **1,140** fuzz assertions, all six gates green. Next: **the inter-intra frame-edge
+overhang** (av1_intra_predict writes the NOMINAL extent unclamped) — the last tracked AV1 decode gap; then
+conformance vectors + the encode lane.
+
 **0.7.112** — cut 2026-07-19, not yet tagged (user's git). **compute_prediction GROUNDWORK — OUTPUT-NEUTRAL.**
 Two prerequisites for the sub-8x8 chroma sibling-MV bite, landed together because NEITHER is independently
 verifiable. Preceded by a multi-source understand workflow (spec 5.11.33 compute_prediction + 5.11.38

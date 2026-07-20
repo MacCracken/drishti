@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.113] - 2026-07-20
+
+**SUB-8×8 CHROMA SIBLING-MV PREDICTION** (spec 5.11.5 `compute_prediction`) — the sibling-span gate is
+lifted on both lanes. At 4:2:0 four `BLOCK_4X4` luma blocks share one 4×4 chroma unit, and the spec does
+not predict that unit with a single motion vector: it emits **four 2×2 quadrants, each borrowing the MV
+of the sibling whose luma quarter it covers**, read back out of the MI grid at `(candRow + r, candCol + c)`.
+Only the bottom-right sibling (odd `MiRow` *and* odd `MiCol`) carries the chroma, so it performs all four.
+This affects ordinary content — 4×4/4×8/8×4 partitions at 4:2:0 are common — and was previously rejected
+outright rather than guessed at.
+
+### Changed
+
+- **The emission loop is live** (`av1_intertile.cyr`). When the plane's residual extent exceeds one
+  prediction — which happens only when a luma dimension is 4 and that axis is subsampled — each quadrant
+  reads its own sibling's cell for the reference, motion vector and interpolation filters. Everything the
+  block-level machinery would add is spec-impossible at these sizes: inter-intra needs
+  `MiSize >= BLOCK_8X8` (5.11.28), and warp needs a nominal plane block ≥ 8×8, which a 2×2 quadrant can
+  never be. A compound sibling has no single MV to lend and is rejected rather than silently borrowing
+  list 0.
+- **`av1_inter_some_use_intra`** transcribes the spec's `someUseIntra` scan, which collapses the borrow
+  back to one whole-extent prediction when any covered cell carries an intra reference. **Clipped to the
+  grid**, because blocks legitimately overhang the frame-sized MI grid and `av1_mv_grid_cell` is unchecked
+  pointer arithmetic — an unclipped scan is an out-of-bounds read at the frame edge.
+
+### Fixed
+
+- **A citation I fabricated in 0.7.107.** `av1_mc.cyr` cited "6.10.22" for `predW = Block_Width[MiSize] >>
+  subX`; no source supports that number — I invented it while paraphrasing a verifier's file:line
+  reference. It now names the `compute_prediction` process instead.
+
+### Verification
+
+The witness is a 32×32 4:2:0 tile whose nested partition plan reaches four `BLOCK_4X4` leaves at MI
+(6..7, 6..7) carrying **four distinct motion vectors**, each chosen with a distinct `dx + 2*dy` and
+predicted against a **non-linear** reference — `itw_ctx420`'s `x + 2y` ramp shifts by exactly `dx + 2*dy`,
+so two different MVs sharing that sum produce identical pixels and the fixture would witness nothing (the
+trap OBMC hit at 0.7.101). The test also asserts the four quadrants are pairwise distinct, so a later edit
+cannot quietly make them alias. A second fixture gives each sibling a **dual filter pair** with a sub-pel
+MV, since at 2×2 both `w <= 4` and `h <= 4` and the narrow-block remap collapses EIGHTTAP with SHARP —
+only mixing EIGHTTAP against EIGHTTAP_SMOOTH makes the borrowed `dir0`/`dir1` pair observable.
+
+**14 mutations, 13 red**: both `baseX`/`baseY` forms, both `candRow`/`candCol` maskings, the wrong-sibling
+swap, forcing the single-prediction path, borrowing list 1, the swapped filter pair, and all four
+`someUseIntra` leaf properties (both scan-range shifts, the grid clip, the intra comparison).
+
+Two results worth recording. First, **reverting the 0.7.112 storage hoist now turns this red** — 12 of 16
+chroma pixels — which retroactively supplies the witness that bite could not have. Second, the driver's
+`someUseIntra` call **survives deletion and is reported as unwitnessed**: drishti's inter tile decode has
+no `is_inter == 0` path, so no sibling can carry an intra reference in a well-formed stream. It is
+transcribed anyway (the spec has it, a future intra-in-inter bite makes it live, and it is what turns a
+missing hoist into a collapsed prediction rather than a borrow of garbage) and pinned by a direct leaf
+test rather than a claimed stream witness.
+
+38 suites, **29,418** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.112] - 2026-07-19
 
 **compute_prediction groundwork — OUTPUT-NEUTRAL.** Two prerequisites for the sub-8×8 chroma

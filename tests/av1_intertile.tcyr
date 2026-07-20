@@ -2103,83 +2103,314 @@ fn test_inter_tile_chroma_e2e() {
 # its own bite, roadmap.md) is REJECTED on both lanes, never silent garbage. The
 # decode payload is LEAF-BUILT: partition VERT at 8x8 + block (0,0)'s symbols;
 # block (0,1) has chroma (odd MiCol) and must gate BEFORE reading any symbol.
-fn test_inter_chroma_span_gated() {
+# ================================================================
+# SUB-8x8 CHROMA SIBLING-MV PREDICTION (0.7.113) — spec 5.11.5 compute_prediction.
+#
+# At 4:2:0 four BLOCK_4X4 luma blocks share ONE 4x4 chroma unit. The spec does not predict
+# that unit with a single motion vector: it emits FOUR 2x2 quadrants, each borrowing the MV
+# of the sibling whose luma quarter it covers, read back out of the MI grid at
+# (candRow + r, candCol + c). Only the bottom-right sibling (odd MiRow AND odd MiCol) carries
+# the chroma, so it is the one that performs all four.
+#
+# A NON-LINEAR reference is mandatory here. itw_ctx420 fills with x + 2y, and a translation
+# of a linear ramp shifts by dx + 2*dy — so two different motion vectors sharing that sum
+# produce IDENTICAL pixels and the fixture silently witnesses nothing (the trap OBMC hit at
+# 0.7.101). The MVs below are additionally chosen with distinct dx + 2*dy, and the test
+# asserts the four quadrants differ pairwise so a future edit cannot make them alias.
+# ================================================================
+fn itw_ref420_hc(w, h, mic, mir, fh, refs, seq, dpb): i64 {
     var oe = alloc(8);
-    var fh = it_fh();
-    store64(fh + AV1FH_FRAME_WIDTH, 8);
-    store64(fh + AV1FH_FRAME_HEIGHT, 8);
-    store64(fh + AV1FH_UPSCALED_WIDTH, 8);
-    store64(fh + AV1FH_MI_COLS, 2);
-    store64(fh + AV1FH_MI_ROWS, 2);
-    store64(fh + AV1FH_MI_COL_STARTS + 8, 2);
-    store64(fh + AV1FH_MI_ROW_STARTS + 8, 2);
-    var refs = it_refs();
-    store64(refs + AV1REF_UPSCALED_W + 0, 8);
-    store64(refs + AV1REF_FRAME_W + 0, 8);
-    store64(refs + AV1REF_FRAME_H + 0, 8);
-    var seq = it_seq();
+    var ref = dr_frame_new(w, h, 3, 1, 1, 8, 8, oe);
+    var p = 0;
+    while (p < 3) {
+        var pw = dr_frame_plane_width(ref, p);
+        var ph = dr_frame_plane_height(ref, p);
+        var yy = 0;
+        while (yy < ph) {
+            var xx = 0;
+            while (xx < pw) {
+                dr_frame_set(ref, p, xx, yy,
+                ((((xx * 37) + (yy * 53)) + (((xx * yy) % 7) * 29)) + (p * 11)) & 255);
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    store64(fh + AV1FH_FRAME_WIDTH, w);
+    store64(fh + AV1FH_FRAME_HEIGHT, h);
+    store64(fh + AV1FH_UPSCALED_WIDTH, w);
+    store64(fh + AV1FH_MI_COLS, mic);
+    store64(fh + AV1FH_MI_ROWS, mir);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, mic);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, mir);
+    store64(refs + AV1REF_UPSCALED_W + 0, w);
+    store64(refs + AV1REF_FRAME_W + 0, w);
+    store64(refs + AV1REF_FRAME_H + 0, h);
     store64(seq + AV1_SEQ_NUM_PLANES, 3);
     store64(seq + AV1_SEQ_SUBX, 1);
     store64(seq + AV1_SEQ_SUBY, 1);
-    var ref = dr_frame_new(8, 8, 3, 1, 1, 8, 8, oe);
-    var dpb = av1_dpb_new();
     av1_dpb_store(dpb, fh, ref);
-    # the leaf writers, mirroring the decoder's fresh-tile ctxs at (0,0).
-    var g = av1_mv_grid_new(2, 2);
-    var nb = av1_nbctx_new();
-    av1_nbctx_setup(nb, g, 2, 0, 0, 0, 0);
-    var ctxi = av1_mvctx_new();
-    av1_mvctx_set_grid(ctxi, g, 2, 2);
-    av1_mvctx_set_tile(ctxi, 0, 2, 0, 2);
-    av1_mvctx_set_block(ctxi, 0, 0, 1);              # BLOCK_4X8 = 1
-    av1_mvctx_set_precision(ctxi, 1, 0);
-    av1_mvctx_set_stack(ctxi, av1_mv_stack_new());
-    av1_mvctx_set_refs(ctxi, 1, AV1_REF_NONE);
-    av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
-    av1_find_mv_stack(ctxi, 0);
-    var ncc = av1_ncdf_new();
-    var ccr = av1_refcdf_new();
-    var cim = av1_imcdf_new();
-    var scr = alloc(AV1CCTX_SIZE);
-    var enc = av1_sym_enc_init(64, 1);
-    var ct = av1_tile_new(dr_frame_new(8, 8, 3, 1, 1, 8, 8, alloc(8)), 2, 2, 40, 1, 0, 3);
-    av1_tile_grids_new(ct);
-    # 64x64/32x32/16x16 are forced SPLIT (the 2x2-mi frame): NO symbols until 8x8.
-    av1_write_partition(enc, ncc, av1_partition_ctx(ct, 0, 0, 3, 0, 0),
-    av1_mi_width_log2(3), AV1_PARTITION_VERT);
-    av1_write_skip(enc, ncc, av1_skip_ctx(0, 0, 0, 0), 1);           # block (0,0): skip
-    av1_write_is_inter_sym(enc, ccr, av1_is_inter_ctx(nb), 1);
-    av1_single_ref_ctxs(nb, scr);
-    av1_write_single_ref(enc, ccr, scr, AV1_LAST_FRAME);
-    av1_write_inter_mode(enc, cim, ctxi, AV1_NEARESTMV);             # empty stack: mv (0,0)
-    var olen = 0;
-    var ob = av1_sym_enc_finish(enc, &olen);
-    var df = dr_frame_new(8, 8, 3, 1, 1, 8, 8, oe);
-    var dt = av1_tile_new(df, 2, 2, 40, 1, 0, 3);
+    return ref;
+}
+
+# The borrowed INTERPOLATION FILTERS. The MV witness above uses integer motion vectors, where
+# every filter is an identity — so swapping the borrowed dir0/dir1 pair survives it. Here each
+# sibling carries a DUAL filter pair (enable_dual_filter + SWITCHABLE) and a SUB-PEL motion
+# vector on both axes, which is the only configuration in which the pair is observable.
+#
+# The filter classes must differ, not merely the values: every sub-8x8 chroma quadrant is
+# 2x2, so BOTH w <= 4 and h <= 4 and the spec's narrow-block remap collapses EIGHTTAP and
+# EIGHTTAP_SHARP onto the same 4-tap set. Only {EIGHTTAP, SHARP} / {SMOOTH} / {BILINEAR} are
+# distinguishable, so the pairs below mix EIGHTTAP with EIGHTTAP_SMOOTH.
+# someUseIntra (spec 5.11.5) at LEAF level. The driver's use of it has NO stream witness and
+# this test does not pretend otherwise: drishti's inter tile decode has no is_inter == 0 path,
+# so no sibling can carry an INTRA reference in a well-formed stream, and deleting the
+# driver's call leaves the whole suite green. It is nonetheless transcribed (the spec has it,
+# and a future intra-in-inter bite makes it live) and its ONE reachable effect today is the
+# one D9 exposed: without the 0.7.112 storage hoist, a block's own unwritten cell reads as
+# INTRA_FRAME and this scan is what turns that into a collapsed prediction rather than a
+# borrow of garbage. So the leaf is pinned directly.
+fn test_some_use_intra_leaf() {
+    var g = av1_mv_grid_new(8, 8);
+    # a 2x2 luma footprint at (6,6) — the sub-8x8 chroma carrier's scan range — all INTER.
+    var rr = 6;
+    while (rr < 8) {
+        var cc = 6;
+        while (cc < 8) {
+            av1_mv_grid_set(g, 8, rr, cc, 1, 1, 0, AV1_NEWMV, AV1_LAST_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
+            cc = cc + 1;
+        }
+        rr = rr + 1;
+    }
+    assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 1, 1), 0, "someUseIntra: all inter -> 0");
+    # each of the four cells in turn makes it fire — no cell is skipped by the scan.
+    var k = 0;
+    while (k < 4) {
+        var tr = 6 + (k >>> 1);
+        var tc = 6 + (k & 1);
+        av1_mv_grid_set(g, 8, tr, tc, 1, 1, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
+        assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 1, 1), 1,
+        "someUseIntra: an intra sibling fires");
+        av1_mv_grid_set(g, 8, tr, tc, 1, 1, 0, AV1_NEWMV, AV1_LAST_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
+        k = k + 1;
+    }
+    # the scan RANGE is (n4h << subY) x (n4w << subX): with no subsampling it is 1x1, so an
+    # intra cell at (6,7) is OUTSIDE it and must NOT fire. This pins the shift — dropping it
+    # would widen the scan and make luma see its neighbours.
+    av1_mv_grid_set(g, 8, 6, 7, 1, 1, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
+    assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 0, 0), 0,
+    "someUseIntra: subsampling 0 scans 1x1 — the neighbour is out of range");
+    assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 1, 0), 1,
+    "someUseIntra: subX 1 widens the scan to include it");
+    av1_mv_grid_set(g, 8, 6, 7, 1, 1, 0, AV1_NEWMV, AV1_LAST_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
+    # CLIPPING: a scan that would run off the grid must stop, not read past it. Cells at
+    # row/col 8 do not exist in an 8x8 grid; an unclipped scan reads them as whatever follows
+    # the allocation. Asking for a 4x4 scan from (6,6) covers (6..9, 6..9).
+    assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 4, 4, 0, 0), 0,
+    "someUseIntra: an overhanging scan is clipped, not read out of bounds");
+    return 0;
+}
+
+fn itw_blk_filt(mvr, mvc, dir0, dir1): i64 {
+    var b = it_blk(mvr, mvc);
+    store64((b + AV1FB_IB) + AV1IB_INTERP + 0, dir0);   # dir 0 = vertical = filt_y
+    store64((b + AV1FB_IB) + AV1IB_INTERP + 8, dir1);   # dir 1 = horizontal = filt_x
+    return b;
+}
+
+fn test_inter_chroma_sibling_filters() {
+    var oe = alloc(8);
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_DUAL_FILTER, 1);
+    store64(fh + AV1FH_INTERP_FILTER, AV1_INTERP_SWITCHABLE);
+    var dpb = av1_dpb_new();
+    var ref = itw_ref420_hc(32, 32, 8, 8, fh, refs, seq, dpb);
+    # sub-pel on BOTH axes in CHROMA: the chroma phase is mv & 15, so the motion vectors must
+    # not be multiples of 16 or the filters go unexercised.
+    var m0r = 4;      var m0c = 8;
+    var m1r = 8;      var m1c = 4;
+    var m2r = 0 - 4;  var m2c = 0 - 8;
+    var m3r = 12;     var m3c = 4;
+    var f0d0 = 1;     var f0d1 = 0;    # SMOOTH vertical, EIGHTTAP horizontal
+    var f1d0 = 0;     var f1d1 = 1;    # the mirror — this pair is what a dir0/dir1 swap moves
+    var f2d0 = 1;     var f2d1 = 1;
+    var f3d0 = 0;     var f3d1 = 0;
+    var pp = alloc(10 * 8);
+    store64(pp + (0 * 8), AV1_PARTITION_SPLIT);
+    store64(pp + (1 * 8), AV1_PARTITION_SPLIT);
+    store64(pp + (2 * 8), AV1_PARTITION_NONE);
+    store64(pp + (3 * 8), AV1_PARTITION_NONE);
+    store64(pp + (4 * 8), AV1_PARTITION_NONE);
+    store64(pp + (5 * 8), AV1_PARTITION_SPLIT);
+    store64(pp + (6 * 8), AV1_PARTITION_NONE);
+    store64(pp + (7 * 8), AV1_PARTITION_NONE);
+    store64(pp + (8 * 8), AV1_PARTITION_NONE);
+    store64(pp + (9 * 8), AV1_PARTITION_SPLIT);
+    var pf = alloc(10 * 8);
+    store64(pf + (0 * 8), it_blk(8, 8));
+    store64(pf + (1 * 8), it_blk(8, 8));
+    store64(pf + (2 * 8), it_blk(8, 8));
+    store64(pf + (3 * 8), it_blk(8, 8));
+    store64(pf + (4 * 8), it_blk(8, 8));
+    store64(pf + (5 * 8), it_blk(8, 8));
+    store64(pf + (6 * 8), itw_blk_filt(m0r, m0c, f0d0, f0d1));
+    store64(pf + (7 * 8), itw_blk_filt(m1r, m1c, f1d0, f1d1));
+    store64(pf + (8 * 8), itw_blk_filt(m2r, m2c, f2d0, f2d1));
+    store64(pf + (9 * 8), itw_blk_filt(m3r, m3c, f3d0, f3d1));
+    var ef = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    assert_eq(av1_tile_set_inter_ctx(et, fh, refs, seq, dpb), DR_OK, "sub8 filt: enc ctx");
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "sub8 filt: tile encoded");
+    var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 3);
     av1_tile_grids_new(dt);
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
-    assert_eq(av1_decode_inter_tile(dt, ob, olen, 1), DR_ERR_UNSUPPORTED,
-    "a sibling-span chroma block is REJECTED by decode (geometry gate)");
-    # and the WRITE side refuses the same plan (two 4x8 blocks, 4:2:0).
-    var ef = dr_frame_new(8, 8, 3, 1, 1, 8, 8, oe);
-    var et = av1_tile_new(ef, 2, 2, 40, 1, 0, 3);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "sub8 filt: tile decodes");
+    # each 2x2 chroma quadrant uses its sibling's MV AND its sibling's filter pair, with
+    # filt_x = dir1 and filt_y = dir0.
+    var cf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(cf, ref, 1, 12, 12, 2, 2, m0r, m0c, f0d1, f0d0);
+    av1_mc_pred_block(cf, ref, 1, 14, 12, 2, 2, m1r, m1c, f1d1, f1d0);
+    av1_mc_pred_block(cf, ref, 1, 12, 14, 2, 2, m2r, m2c, f2d1, f2d0);
+    av1_mc_pred_block(cf, ref, 1, 14, 14, 2, 2, m3r, m3c, f3d1, f3d0);
+    var cd = 0;
+    var cy = 12;
+    while (cy < 16) {
+        var cx = 12;
+        while (cx < 16) {
+            if (dr_frame_get(df, 1, cx, cy) != dr_frame_get(cf, 1, cx, cy)) { cd = cd + 1; }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    assert_eq(cd, 0, "sub8 filt: each quadrant borrows its sibling's dir0/dir1 filter pair");
+    # the fixture is only live if swapping the pair actually moves pixels — prove it here
+    # rather than trusting the mutation to be meaningful.
+    var sw = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(sw, ref, 1, 12, 12, 2, 2, m0r, m0c, f0d0, f0d1);
+    var moved = 0;
+    var sy2 = 12;
+    while (sy2 < 14) {
+        var sx2 = 12;
+        while (sx2 < 14) {
+            if (dr_frame_get(sw, 1, sx2, sy2) != dr_frame_get(cf, 1, sx2, sy2)) { moved = moved + 1; }
+            sx2 = sx2 + 1;
+        }
+        sy2 = sy2 + 1;
+    }
+    assert_eq(moved > 0, 1, "sub8 filt: a dir0/dir1 swap DOES move pixels (fixture is live)");
+    return 0;
+}
+
+fn test_inter_chroma_sibling_mvs() {
+    var oe = alloc(8);
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    var ref = itw_ref420_hc(32, 32, 8, 8, fh, refs, seq, dpb);
+    # four DISTINCT MVs, each with a distinct dx + 2*dy so they cannot alias even on a ramp.
+    var m0r = 0;      var m0c = 16;     # sibling (6,6) -> chroma quadrant (12,12)
+    var m1r = 16;     var m1c = 0;      # sibling (6,7) -> chroma quadrant (14,12)
+    var m2r = 0 - 16; var m2c = 0 - 16; # sibling (7,6) -> chroma quadrant (12,14)
+    var m3r = 32;     var m3c = 16;     # sibling (7,7) -> chroma quadrant (14,14)
+    # the walker consumes one plan entry per >=8x8 recursion level, so the full nested chain
+    # down to the four 4x4 leaves at MI (6..7, 6..7) must be spelled out.
+    var pp = alloc(10 * 8);
+    store64(pp + (0 * 8), AV1_PARTITION_SPLIT);   # 64 SB (forced: frame is 32x32)
+    store64(pp + (1 * 8), AV1_PARTITION_SPLIT);   # 32 TL — the only in-frame quadrant
+    store64(pp + (2 * 8), AV1_PARTITION_NONE);    # 16 @ (0,0)
+    store64(pp + (3 * 8), AV1_PARTITION_NONE);    # 16 @ (0,4)
+    store64(pp + (4 * 8), AV1_PARTITION_NONE);    # 16 @ (4,0)
+    store64(pp + (5 * 8), AV1_PARTITION_SPLIT);   # 16 @ (4,4)
+    store64(pp + (6 * 8), AV1_PARTITION_NONE);    # 8 @ (4,4)
+    store64(pp + (7 * 8), AV1_PARTITION_NONE);    # 8 @ (4,6)
+    store64(pp + (8 * 8), AV1_PARTITION_NONE);    # 8 @ (6,4)
+    store64(pp + (9 * 8), AV1_PARTITION_SPLIT);   # 8 @ (6,6) -> the four 4x4 leaves
+    var pf = alloc(10 * 8);
+    store64(pf + (0 * 8), it_blk(8, 8));          # filler 16x16 blocks
+    store64(pf + (1 * 8), it_blk(8, 8));
+    store64(pf + (2 * 8), it_blk(8, 8));
+    store64(pf + (3 * 8), it_blk(8, 8));          # filler 8x8 blocks
+    store64(pf + (4 * 8), it_blk(8, 8));
+    store64(pf + (5 * 8), it_blk(8, 8));
+    store64(pf + (6 * 8), it_blk(m0r, m0c));      # the four 4x4 leaves, in walk order
+    store64(pf + (7 * 8), it_blk(m1r, m1c));
+    store64(pf + (8 * 8), it_blk(m2r, m2c));
+    store64(pf + (9 * 8), it_blk(m3r, m3c));
+    var ef = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 3);
     av1_tile_grids_new(et);
-    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
-    # the encode plan spells out EVERY consumed entry, including the forced-split
-    # levels (the walker consumes one entry per >=8x8 recursion): 64/32/16 SPLIT,
-    # then VERT at 8x8.
-    var pp = alloc(32);
-    store64(pp + 0, AV1_PARTITION_SPLIT);
-    store64(pp + 8, AV1_PARTITION_SPLIT);
-    store64(pp + 16, AV1_PARTITION_SPLIT);
-    store64(pp + 24, AV1_PARTITION_VERT);
-    var pf = alloc(16);
-    store64(pf + 0, it_blk(0, 0));
-    store64(pf + 8, it_blk(0, 0));
-    var elen = 0;
-    assert_eq(av1_encode_inter_tile(et, pp, pf, 1, &elen), 0,
-    "a sibling-span chroma plan is REFUSED by encode");
-    assert_eq(elen, 0, "the refused encode emits no bytes");
+    assert_eq(av1_tile_set_inter_ctx(et, fh, refs, seq, dpb), DR_OK, "sub8 chroma: enc ctx");
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "sub8 chroma: tile encoded (the encode gate is lifted)");
+    var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
+    "sub8 chroma: tile decodes (was DR_ERR_UNSUPPORTED)");
+    # LUMA: each 4x4 leaf predicted with its OWN motion vector.
+    var lf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(lf, ref, 0, 24, 24, 4, 4, m0r, m0c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(lf, ref, 0, 28, 24, 4, 4, m1r, m1c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(lf, ref, 0, 24, 28, 4, 4, m2r, m2c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_mc_pred_block(lf, ref, 0, 28, 28, 4, 4, m3r, m3c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var ld = 0;
+    var y = 24;
+    while (y < 32) {
+        var x = 24;
+        while (x < 32) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(lf, 0, x, y)) { ld = ld + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(ld, 0, "sub8 chroma: each 4x4 LUMA leaf uses its own MV (64 px)");
+    # CHROMA: the 4x4 unit at (12,12) is FOUR 2x2 quadrants, each borrowing its sibling's MV.
+    # This is the assertion the whole bite exists for — and the only one that can redden if
+    # the 0.7.112 storage-loop hoist is reverted, since luma never reads the MI grid.
+    var p1 = 1;
+    while (p1 < 3) {
+        var cf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
+        av1_mc_pred_block(cf, ref, p1, 12, 12, 2, 2, m0r, m0c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        av1_mc_pred_block(cf, ref, p1, 14, 12, 2, 2, m1r, m1c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        av1_mc_pred_block(cf, ref, p1, 12, 14, 2, 2, m2r, m2c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        av1_mc_pred_block(cf, ref, p1, 14, 14, 2, 2, m3r, m3c, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        var cd = 0;
+        var cy = 12;
+        while (cy < 16) {
+            var cx = 12;
+            while (cx < 16) {
+                if (dr_frame_get(df, p1, cx, cy) != dr_frame_get(cf, p1, cx, cy)) { cd = cd + 1; }
+                cx = cx + 1;
+            }
+            cy = cy + 1;
+        }
+        assert_eq(cd, 0, "sub8 chroma: each 2x2 quadrant borrows ITS sibling's MV (16 px)");
+        # the four quadrants must differ PAIRWISE — otherwise the borrow is untested and a
+        # wrong-sibling mutation would pass. Compare each quadrant's top-left sample.
+        var q0 = dr_frame_get(cf, p1, 12, 12);
+        var q1 = dr_frame_get(cf, p1, 14, 12);
+        var q2 = dr_frame_get(cf, p1, 12, 14);
+        var q3 = dr_frame_get(cf, p1, 14, 14);
+        var same = 0;
+        if (q0 == q1) { same = same + 1; }
+        if (q0 == q2) { same = same + 1; }
+        if (q0 == q3) { same = same + 1; }
+        if (q1 == q2) { same = same + 1; }
+        if (q1 == q3) { same = same + 1; }
+        if (q2 == q3) { same = same + 1; }
+        assert_eq(same, 0, "sub8 chroma: the four quadrants are pairwise DISTINCT (fixture is live)");
+        p1 = p1 + 1;
+    }
     return 0;
 }
 # REFERENCE-FRAME SELECTION: GOLDEN maps to DPB slot 3 (the gradient); slot 0
@@ -4322,7 +4553,9 @@ fn main() {
     test_tmvs_save_hook();
     test_group("the review hardening: chroma, ref selection, clamps, windows");
     test_inter_tile_chroma_e2e();
-    test_inter_chroma_span_gated();
+    test_inter_chroma_sibling_mvs();
+    test_inter_chroma_sibling_filters();
+    test_some_use_intra_leaf();
     test_inter_ref_selection();
     test_inter_edge_clamp();
     test_inter_lossless_tx4x4();
