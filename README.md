@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.118 (AV1: a complete profile-0 KEYFRAME decoder and a complete set of inter-prediction PRIMITIVES — every motion mode, compound and masked form, the temporal-MV arc, every interpolation filter, every reference geometry. An inter FRAME does not decode yet: segmentation, delta-q, delta-lf and an intra block inside an inter frame each cleanly reject. No external conformance vector has been run, and the AV1 "encoder" is a plan-driven bitstream writer, not an encoder. 8/10/12-bit, multi-tile, superres. See docs/development/roadmap.md for the itemised remaining work)
+## Status — 0.7.119 (AV1: a complete profile-0 KEYFRAME decoder; as of 0.7.119 a MINIMAL inter frame also decodes end-to-end with WITNESSED motion (single-ref, forward-only, degenerate/no-order-hint header) — the first time the inter primitives run from real bytes and move pixels. A realistic order-hint header, compound/backward refs, cross-frame CDF inheritance and the intra-block fork are still unimplemented / rejected, so a real .ivf does not decode past its first non-key frame. The "encoder" is a plan-driven bitstream writer. No external conformance vector has been run. See docs/development/roadmap.md "HONEST STATUS" for the phased, checkable remainder — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,494 suite assertions + 1,140 fuzz
+derived, and adversarially tested (29,508 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -50,22 +50,23 @@ frame-header + tile-group OBUs) **and** the combined FRAME OBU (type 6 — the c
 real-stream form; it byte-splits off the tile group per spec 5.10). A complete
 keyframe bitstream decodes **from raw bytes all the way to pixels** — both forms
 verified end-to-end, at 8/10/12-bit, single- and multi-tile, with or without
-superres. **Inter prediction** — the last decode track — has every PRIMITIVE in place (only
-scaled-reference / BILINEAR MC remains): the leaf motion-compensation kernels (`av1_mc.cyr`: **Subpel_Filters**
+superres. **Inter prediction — every PRIMITIVE is in** (this section previously claimed "only
+scaled-reference / BILINEAR MC remains"; both landed at 0.7.108/0.7.110, and the real remaining work is
+not a primitive — see below): the leaf motion-compensation kernels (`av1_mc.cyr`: **Subpel_Filters**
 0.7.57, **`put_8tap`** 0.7.58, **`emu_edge`** 0.7.59, each reference-confirmed against
 dav1d) plus the **MC driver** (0.7.60), the **reference-frame buffer/DPB** + multi-frame
-decode (`av1_dpb.cyr` 0.7.61), the complete **MV-prediction** arc (`av1_mv.cyr`
-0.7.62–0.7.65: `find_mv_stack` — candidate stack, spatial scans, driver, entropy
-contexts), the **complete inter mode-info bitstream-read layer** (`av1_intermode.cyr`
-0.7.66–0.7.73: MV decode, mode/reference/compound reads, interp filter, motion mode,
-inter-intra, compound type), the **MI-grid population** (0.7.74) that closes the
-producer→consumer loop, and **ALL the neighbour CDF contexts** (0.7.75–0.7.77), which un-defer every
-context the inter reads had taken as a caller input — only frame-level state (AvailU/AvailL, the
-order-hint distances) is still supplied by the caller, exactly as the spec has it. The **inter tile decode**
-(0.7.84+), the three inter **motion modes** (LOCALWARP / GLOBALWARP / OBMC), and the **temporal-MV arc**
-(producer 0.7.102 → estimation 0.7.103 → scan 0.7.104), **inter-intra warp-blend** (0.7.105), and
-**compound-global warp** (0.7.106) are all in; what remains is **scaled-reference** MC before inter frames
-decode end-to-end.
+decode (`av1_dpb.cyr` 0.7.61), the complete **MV-prediction** arc (`av1_mv.cyr` 0.7.62–0.7.65),
+the **complete inter mode-info bitstream-read layer** (`av1_intermode.cyr` 0.7.66–0.7.73), the
+**MI-grid population** (0.7.74), **ALL the neighbour CDF contexts** (0.7.75–0.7.77), the **inter tile
+decode** (0.7.84+), the three **motion modes** (LOCALWARP / GLOBALWARP / OBMC), the **temporal-MV arc**
+(0.7.102–0.7.104), **inter-intra warp-blend** (0.7.105), **compound-global warp** (0.7.106), **BILINEAR**
+(0.7.108) and **scaled-reference MC** (0.7.110). **As of 0.7.119 a MINIMAL inter frame decodes end-to-end
+with witnessed motion** (single-ref, forward-only, degenerate/no-order-hint header) — the first time these
+primitives ran from real bytes and moved pixels. What actually remains before a real `.ivf` decodes: the
+**realistic order-hint header**, **compound / backward references** (needs `RefFrameSignBias`, never
+derived), **cross-frame CDF inheritance**, the **intra-block fork** inside an inter frame, **segmentation**
+and **delta-q/lf** — none of which is a "primitive." The honest, phased, checkable breakdown is in
+[`docs/development/roadmap.md`](docs/development/roadmap.md) under **HONEST STATUS**.
 The frame header, the entropy substrate, the shared YUV frame buffer, the
 inverse transforms, the full intra-prediction layer, the dequantizer,
 the reconstruct glue, the **coefficient reading loop** (with adaptive
@@ -123,12 +124,16 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
 
 A profile-0 AV1 **keyframe** decodes end-to-end to pixels — single- or
 multi-tile, with or without superres, at 8/10/12-bit — through the full
-in-loop filter chain. The remaining AV1 work toward 100% is **scaled-reference /
-BILINEAR MC** (the last inter-prediction track — the inter tile decode, the temporal-MV
-arc, all compound + inter-intra prediction, all four warp forms + OBMC, the MC driver,
-DPB, MV prediction, the full inter mode-info read layer, and the MI-grid population are
-all in), **film-grain synthesis**, conformance, and the encode lane. The road to 1.0
-is **one minor arc per codec** —
+in-loop filter chain. That is where the decoder actually is: a complete
+**keyframe** decoder. The inter-prediction machinery (MC, all four warp
+forms, OBMC, compound, temporal MVs, scaled references, BILINEAR) is built
+as **primitives** but **no real inter frame decodes yet** — a non-key frame
+rejects at cross-frame CDF inheritance and the intra-block fork. Conformance
+vectors and a real encoder have **not been started** (what ships as "encode"
+is a plan-driven bitstream writer, not an encoder). The honest, phased,
+checkable breakdown — and why no "% done" is printed — is in
+[`docs/development/roadmap.md`](docs/development/roadmap.md) under
+**HONEST STATUS**. The road to 1.0 is **one minor arc per codec** —
 **0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
 **0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
 **freeze/documentation** arc (0.12.x) before the 1.0.0 close-out.

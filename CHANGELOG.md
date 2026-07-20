@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.119] - 2026-07-20
+
+**First MOTION-WITNESSING inter frame decode from real bytes** (Phase C, part 1). An inter frame's
+pixels demonstrably MOVED through `av1_decode_stream` for the first time — the ~60 releases of inter
+primitives (MC, warp, OBMC, compound, temporal MVs, scaled refs) finally ran end-to-end over a real
+reference and produced motion.
+
+### What was actually missing (correcting the earlier framing)
+
+A degenerate inter frame already decoded E2E (`test_inter_stream_e2e`), but over a **flat-128**
+reference — the intra encode lane is skip-only, so MC of any motion vector yields 128 and the test's
+`== 128` check survives skipping motion compensation entirely. **No decode had ever witnessed motion.**
+That, not "an inter frame decodes at all", was the real gap.
+
+### The two coupled tests (one release)
+
+- **C1a** (`test_inter_stream_content`): a NON-FLAT reference from a stream for the first time, via a
+  non-skip inter residual — the only content-producing encode path. Proves the residual survives the full
+  `av1_decode_stream` route (parse fh from bytes → thread dpb/refs → `av1_decode_inter_tile` → residual →
+  pixels), which was only ever record-tested on hand-built tiles. `TX_MODE_LARGEST` + a DC **and** AC
+  coefficient (a DC-only residual is flat and witnesses nothing). Teeth-verified: zeroing the residual
+  makes the frame flat.
+- **C1b** (`test_inter_stream_motion`): KEY(flat) → INTER(content) → INTER(pure MC of the content by a
+  small integer MV). The decoded motion frame **equals an independent MC of the content reference** and
+  **differs from the unshifted content**. Teeth-verified: dropping the decode-side MV reddens both
+  assertions (2624 px diverge). The content reference is snapshotted via the 2-frame prefix before the
+  DPB refresh overwrites it.
+
+### What this does NOT do — stated plainly
+
+- The header is still the **degenerate** one (`error_resilient_mode = 1`, `enable_order_hint = 0`). The
+  realistic order-hint parse path — explicit `primary_ref_frame` f(3), `order_hint`, `get_relative_dist`,
+  `RefFrameSignBias` — is the **next bite**, not this one.
+- The oracle calls the same `av1_mc_pred_block` the decoder does, so this pins the **wiring** (fh parse →
+  ref resolution → MC with the coded MV), NOT the MC math freshly (same scope as `test_inter_tile_e2e`).
+- **Single-ref, forward-only, SIMPLE motion only.** Compound and backward references are out —
+  `RefFrameSignBias` is never derived (`av1_mvctx_set_signbias` has zero callers). Cross-frame CDF
+  inheritance (`primary_ref_frame != NONE`), the intra-block fork, segmentation and delta-q/lf all still
+  cleanly reject. A real `.ivf` from an encoder does not decode past its first non-key frame.
+
+38 suites, **29,508** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.118] - 2026-07-20
 
 **The AV1 decode path is now fuzzed.** The 0.7.116 audit found the only fuzz harness contained

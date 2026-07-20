@@ -328,7 +328,7 @@ fn its_build_key_fh(out_len): i64 {
 }
 # the INTER frame header: error_resilient 1 (primary_ref/use_ref_mvs/warp gated
 # off), refresh 255, every ref_frame_idx = 0, fixed EIGHTTAP, base_q 40.
-fn its_build_inter_fh(out_len): i64 {
+fn its_build_inter_fh(tx_sel, out_len): i64 {
     var bw = dr_bw_init(16);
     dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
     dr_bw_put_bits(bw, 1, 2);        # frame_type = INTER                    f(2)
@@ -366,7 +366,7 @@ fn its_build_inter_fh(out_len): i64 {
     dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
     dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
     dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
-    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1                    f(1)
+    dr_bw_put_bit(bw, tx_sel);       # tx_mode_select (0 = TX_MODE_LARGEST)  f(1)
     dr_bw_put_bit(bw, 0);            # reference_select = 0                  f(1)
     #                                  skip_mode: not allowed -> no bit
     #                                  allow_warped_motion: err_res -> no bit
@@ -410,7 +410,7 @@ fn test_inter_header_parseback() {
     assert_eq(av1_seq_num_planes(seq), 1, "seq: mono");
     assert_eq(av1_seq_enable_order_hint(seq), 0, "seq: order hints off");
     var flen = 0;
-    var fb = its_build_inter_fh(&flen);
+    var fb = its_build_inter_fh(1, &flen);
     var refs = av1_ref_state_new();
     var fe = alloc(8);
     var fh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, fb, flen, fe);
@@ -433,6 +433,186 @@ fn test_inter_header_parseback() {
 }
 # THE STREAM MILESTONE LAYER: TD + SEQ + KEY(fh+tile) + INTER(fh+tile) through
 # av1_decode_stream — real parsed headers drive the inter tile lane.
+# ================================================================
+# PHASE C1 — a MOTION-WITNESSING inter frame decodes end-to-end (0.7.119).
+#
+# test_inter_stream_e2e (below) already decodes an inter frame through av1_decode_stream,
+# but over a FLAT-128 reference (the intra encode lane is skip-only), so MC of any MV yields
+# 128 and its `== 128` pixel check survives skipping motion compensation entirely. No decode
+# has ever WITNESSED motion.
+#
+# C1a: produce a NON-FLAT reference from a stream for the first time — a non-skip INTER
+# residual (the only content-producing encode path). Proves the residual survives the FULL
+# av1_decode_stream route (parse fh from bytes -> thread dpb/refs -> av1_decode_inter_tile ->
+# residual -> pixels), which was only ever record-tested on hand-built tiles.
+#
+# TX_MODE_LARGEST (tx_sel=0) deliberately, to avoid var-tx (which would need a txfm_split
+# plan). A single 64x64 TX with a DC + one AC coefficient inverse-transforms to a NON-FLAT
+# pattern; a DC-only residual would be flat (constant), witnessing nothing — the same
+# uniform-tx trap the sub-8x8 work hit.
+fn its_enc_inter_content(dpb, refs, seq, out_len): i64 {
+    var fh = it_fh();
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_LARGEST);   # match the parsed header (tx_sel=0)
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 320);              # DC
+    store64(coeff + (1 * 8), 0 - 160);    # first AC (scan[1]) -> spatial variation
+    var resid = ir_resid1(AV1_DCT_DCT, 2, coeff);
+    var blk = ir_blk(0, 0, resid);        # ref=LAST, MV=0, SKIP=0, the residual
+    return it_enc_tile(dpb, refs, seq, fh, blk, out_len);
+}
+
+fn test_inter_stream_content() {
+    var slen = 0;
+    var sb = its_build_seq(&slen);
+    var kflen = 0;
+    var kfb = its_build_key_fh(&kflen);
+    var ktlen = 0;
+    var ktb = its_enc_key_tile(&ktlen);
+    # the content inter tile: encoded against a fresh flat-key DPB (the encoder uses the GIVEN
+    # residual and does not predict, so the encode-side reference content is irrelevant to the
+    # coded bytes — only the MV, mode and residual are coded).
+    var dpb0 = av1_dpb_new();
+    var fh0 = it_fh();
+    av1_dpb_store(dpb0, fh0, it_ref_frame());
+    var itlen = 0;
+    var itb = its_enc_inter_content(dpb0, it_refs(), it_seq(), &itlen);
+    assert_eq(itlen > 0, 1, "content inter tile encoded (non-skip residual)");
+    var iflen = 0;
+    var ifb = its_build_inter_fh(0, &iflen);   # tx_sel=0 -> TX_MODE_LARGEST
+    var bw = dr_bw_init(512);
+    its_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    its_wrap(bw, AV1_OBU_SEQUENCE_HEADER, sb, slen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, kfb, kflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ktb, ktlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, ifb, iflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, itb, itlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var out = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "C1a: key + non-skip INTER decode from bytes");
+    assert_eq(load64(oc), 2, "C1a: two frames decoded");
+    # THE POINT: the decoded inter frame is NON-FLAT (residual survived the stream route).
+    # A flat frame here would mean the residual was dropped somewhere in the decode_stream
+    # path — exactly the untested gap this bite closes.
+    var nonflat = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(out, 0, x, y) != 128) { nonflat = nonflat + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(nonflat > 0, 1, "C1a: the inter frame carries a NON-FLAT residual (content, not 128)");
+    return 0;
+}
+
+# snapshot a plane-0 W x H frame's pixels into a fresh DrFrame (the DPB overwrites slots on
+# the next frame's refresh, so the content reference must be copied out before Frame 2 lands).
+fn its_snapshot(src, w, h): i64 {
+    var oe = alloc(8);
+    var dst = dr_frame_new(w, h, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) { dr_frame_set(dst, 0, x, y, dr_frame_get(src, 0, x, y)); x = x + 1; }
+        y = y + 1;
+    }
+    return dst;
+}
+# append TD + SEQ + KEY(flat) + INTER(content residual) to a writer — the shared prefix that
+# puts a NON-FLAT reference into DPB slot 0.
+fn its_append_content_prefix(bw): i64 {
+    var slen = 0;
+    var sb = its_build_seq(&slen);
+    var kflen = 0;
+    var kfb = its_build_key_fh(&kflen);
+    var ktlen = 0;
+    var ktb = its_enc_key_tile(&ktlen);
+    var dpb0 = av1_dpb_new();
+    var fh0 = it_fh();
+    av1_dpb_store(dpb0, fh0, it_ref_frame());
+    var ctlen = 0;
+    var ctb = its_enc_inter_content(dpb0, it_refs(), it_seq(), &ctlen);
+    var iflen = 0;
+    var ifb = its_build_inter_fh(0, &iflen);
+    its_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    its_wrap(bw, AV1_OBU_SEQUENCE_HEADER, sb, slen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, kfb, kflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ktb, ktlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, ifb, iflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ctb, ctlen);
+    return 0;
+}
+
+# C1b — THE MILESTONE: a stream-decoded inter frame whose pixels DEMONSTRABLY MOVED.
+# Frame 0 KEY (flat) -> Frame 1 INTER (content residual, slot 0) -> Frame 2 INTER (pure MC of
+# slot 0 by a small INTEGER MV, skip). The decoded Frame 2 must equal an independent MC of the
+# snapshotted content AND must DIFFER from that content (motion actually shifted pixels).
+#
+# HONESTY ENVELOPE: this pins the WIRING (fh parse from bytes -> dpb/refs threading -> the
+# reference resolves to the content frame -> MC runs with the coded MV). It does NOT freshly
+# validate av1_mc_pred_block's MATH — the oracle calls the same kernel (the same scope as
+# test_inter_tile_e2e). Single-ref, forward-only, SIMPLE motion; compound / backward refs are
+# out (RefFrameSignBias is never derived — av1_mvctx_set_signbias has no callers).
+fn test_inter_stream_motion() {
+    var mvr = 8;      # +1 luma pixel down (8 eighth-pel)
+    var mvc = 8;      # +1 luma pixel right
+    # (1) snapshot the content reference: decode the KEY + content prefix, copy its pixels.
+    var pbw = dr_bw_init(512);
+    its_append_content_prefix(pbw);
+    var pn = dr_bw_flush(pbw);
+    var pdpb = av1_dpb_new();
+    var poc = alloc(8);
+    var poe = alloc(8);
+    var content = av1_decode_stream(pdpb, dr_bw_buf(pbw), pn, poc, poe);
+    assert_eq(load64(poe), DR_OK, "milestone: content prefix decodes");
+    var snap = its_snapshot(content, 64, 64);
+    # (2) build the full stream: prefix + a motion INTER frame (skip, integer MV, ref=LAST).
+    var dpbe = av1_dpb_new();
+    var fhe = it_fh();
+    av1_dpb_store(dpbe, fhe, it_ref_frame());
+    var mtlen = 0;
+    var mtb = it_enc_tile(dpbe, it_refs(), it_seq(), fhe, it_blk(mvr, mvc), &mtlen);
+    var mflen = 0;
+    var mfb = its_build_inter_fh(0, &mflen);
+    var bw = dr_bw_init(768);
+    its_append_content_prefix(bw);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, mfb, mflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, mtb, mtlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var moved = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "MILESTONE: key + content + MOTION inter frame decodes from bytes");
+    assert_eq(load64(oc), 3, "milestone: three frames decoded");
+    # (3) the oracle: MC the snapshotted content by the same MV.
+    var oe2 = alloc(8);
+    var orc = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
+    assert_eq(av1_mc_pred_block(orc, snap, 0, 0, 0, 64, 64, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP),
+    DR_OK, "milestone: oracle MC predicts");
+    var diff_oracle = 0;
+    var diff_copy = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(moved, 0, x, y) != dr_frame_get(orc, 0, x, y)) { diff_oracle = diff_oracle + 1; }
+            if (dr_frame_get(moved, 0, x, y) != dr_frame_get(snap, 0, x, y)) { diff_copy = diff_copy + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff_oracle, 0, "MILESTONE: decoded motion frame == independent MC of the content ref");
+    assert_eq(diff_copy > 0, 1, "MILESTONE: motion actually MOVED pixels (differs from the unshifted content)");
+    return 0;
+}
+
 fn test_inter_stream_e2e() {
     var slen = 0;
     var sb = its_build_seq(&slen);
@@ -451,7 +631,7 @@ fn test_inter_stream_e2e() {
     var itb = it_enc_tile(dpb0, it_refs(), it_seq(), fh0, it_blk(16, 8), &itlen);
     assert_eq(itlen > 0, 1, "inter tile encoded");
     var iflen = 0;
-    var ifb = its_build_inter_fh(&iflen);
+    var ifb = its_build_inter_fh(1, &iflen);
     var bw = dr_bw_init(512);
     its_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
     its_wrap(bw, AV1_OBU_SEQUENCE_HEADER, sb, slen);
@@ -4671,6 +4851,8 @@ fn main() {
     test_inter_cdef_plan_refused();
     test_group("the byte-stream layer: real headers drive the inter lane");
     test_inter_header_parseback();
+    test_inter_stream_content();
+    test_inter_stream_motion();
     test_inter_stream_e2e();
     test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
     test_ir_inter1();

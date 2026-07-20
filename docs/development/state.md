@@ -6,6 +6,31 @@
 
 ## Version
 
+**0.7.119** — cut 2026-07-20, not yet tagged (user's git). **FIRST MOTION-WITNESSING INTER FRAME DECODE
+FROM REAL BYTES** (Phase C part 1). Preceded by a scoping workflow that CORRECTED my own premise: a
+degenerate inter frame ALREADY decoded E2E (test_inter_stream_e2e) — but over a FLAT-128 reference (intra
+encode lane is skip-only), so MC of any MV yields 128 and the `==128` check survives skipping MC entirely.
+NO decode had ever witnessed motion; that was the real gap, not "an inter frame decodes at all." So my
+earlier "no inter frame has ever decoded" was too strong — corrected in the docs. TWO coupled tests, one
+release: **C1a** (test_inter_stream_content) — a NON-FLAT reference from a stream via a non-skip inter
+residual (the only content-producing encode path), proving the residual survives the full av1_decode_stream
+route (only ever record-tested on hand-built tiles). TX_MODE_LARGEST + DC AND AC (DC-only is flat). Teeth:
+zeroing the residual -> flat. **C1b** (test_inter_stream_motion) — KEY(flat) -> INTER(content) -> INTER(pure
+MC of content by a small integer MV); decoded motion frame == independent MC of the content ref AND differs
+from the unshifted content. Teeth: dropping the decode-side MV reddens both (2624 px diverge). Content
+snapshotted via the 2-frame prefix before the DPB refresh overwrites it. **NOT DONE, stated plainly:** the
+header is still the DEGENERATE one (error_resilient=1, enable_order_hint=0) — the realistic order-hint parse
+path (explicit primary_ref_frame f(3), order_hint, get_relative_dist, RefFrameSignBias) is the NEXT bite.
+The oracle shares av1_mc_pred_block, so this pins WIRING not MC math (same scope as test_inter_tile_e2e).
+Single-ref forward-only SIMPLE only; compound/backward refs OUT (RefFrameSignBias never derived —
+av1_mvctx_set_signbias has 0 callers); CDF inheritance / intra fork / segmentation / delta still reject. A
+real .ivf does NOT decode past its first non-key frame. LESSON: the scoping workflow caught that my own
+"no inter frame decodes" was imprecise — a degenerate one did; what was missing was a motion-WITNESSING
+decode. Verify claims against a running test, not memory of the arc. 38 suites, **29,508** suite + **1,140**
+fuzz, all six gates green. Next (Phase C part 2): the realistic order-hint-enabled header — seq
+enable_order_hint=1 + per-frame order_hint + explicit primary_ref_frame=7, exercising get_relative_dist and
+the order-hint machinery on a decoded frame for the first time. [[av1-arc-cannot-close-yet]]
+
 **0.7.118** — cut 2026-07-20, not yet tagged (user's git). **THE AV1 DECODE PATH IS NOW FUZZED**
 (roadmap item 12). The 0.7.116 audit found the only fuzz harness (tests/drishti.fcyr) contained ZERO
 codec symbols — IVF + generic bit readers only, so "fuzz from day one" was true only of the container.

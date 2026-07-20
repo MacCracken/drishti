@@ -91,7 +91,51 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 ---
 
-## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e)
+## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e) — see HONEST STATUS (no completion % — every one ever given here was wrong)
+
+> ### HONEST STATUS as of 0.7.118 — read this before believing any "nearly done"
+>
+> **There is no honest single completion number, and this doc will not print one.**
+> The metric used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**
+> — i.e. it went UP as work got done, because it was lowballed the whole time. The
+> low point literally wrote the entire remaining inter effort as "inter ~1 — just
+> scaled-ref MC", when no inter FRAME had ever decoded at all. Any "% done" or
+> "N patches left" in this arc's history (including a "~40%" a prior revision of THIS
+> block briefly carried) was a guess, always optimistic, and is the mechanism by which
+> "nearly done" persisted for ~60 releases. What follows is only what is CHECKABLE
+> against code — decodes / rejects / unhandled — so completeness is judged from facts,
+> not from a number. Ground truth:
+>
+> **DECODE — what actually works:** profile-0 **KEYFRAME** decode to pixels (intra
+> prediction, transforms, reconstruction, dequant, CDEF, deblock, loop restoration,
+> superres), 8/10/12-bit, multi-tile. That is a real, complete, conformance-shaped
+> keyframe decoder.
+>
+> **DECODE — the thing the bite-prose hides:** **NO real AV1 inter FRAME has ever
+> decoded.** The entire inter-prediction arc (0.7.57–0.7.117, ~60 releases: MC, all
+> four warp forms, OBMC, compound, masked, temporal MVs, scaled references, BILINEAR)
+> built PRIMITIVES that have only ever run on synthetic hand-built tile contexts. The
+> one inter-frame test in the real decode-through-bytes path (`av1_decode.tcyr`)
+> asserts the frame is **rejected**. A real `.ivf` from libaom/rav1e/SVT-AV1 does not
+> decode past its first non-key frame — it rejects at cross-frame CDF inheritance, and
+> would then reject at the intra-block fork, segmentation, delta-q, delta-lf. The
+> primitives are Lego; the house has never been built or lived in.
+>
+> **ENCODE — the thing "encode round-trip-clean" hides:** there is **no encoder**.
+> What exists (`av1_encode_*`, 58 write inverses) is a **bitstream writer** that
+> replays a caller-supplied partition plan + residual. It has no forward transform, no
+> quantiser, no mode decision / RDO, no motion search, no rate control, and cannot
+> even emit its own sequence or frame headers (the tests hand-build every header bit).
+> It cannot produce a file any external decoder could open. A real encoder is
+> **arc-sized**, comparable to the whole decode arc.
+>
+> **CONFORMANCE:** zero external vectors have ever been run. Every test decodes bytes
+> drishti itself wrote — which cannot catch a bug shared by the encode and decode
+> lanes (`docs/guides/verification.md`).
+>
+> The properly-phased, honestly-sized remaining work is at the END of this section
+> ("### The honest remaining work"), not in the optimistic bite-prose that follows.
+> See [[av1-arc-cannot-close-yet]].
 
 Baseline (0.7.0): OBU layer + sequence header.
 
@@ -380,61 +424,95 @@ Baseline (0.7.0): OBU layer + sequence header.
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.
-- **conformance + 10/12-bit** — libaom/Argon vector runs, 10/12-bit paths
-  (unblocked 0.7.46), fuzz hardening.
-- **ENCODE lane** — intra keyframe encoder (rav1e lineage) growing from
-  the `av1_obu_write_header` seed; gate = own-decoder round-trip, then
-  cross-decoder (dav1d/libaom).
-- **AV1 100%** = decode conformance-clean + encode round-trip-clean →
-  close 0.7.x. **NOT MET as of 0.7.116** — the arc audit found neither half
-  satisfied. Itemised remaining work, roughly ordered by value:
 
-  1. **Conformance-vector harness + first runs** (libaom/Argon subset, per-vector
-     MD5 vs reference YUV, a `make conformance` gate, CI wiring). LARGE and
-     open-ended — the fallout cannot be sized until vectors actually run, and the
-     gaps below guarantee most vectors reject or desync on arrival. **This gates
-     any close claim.** Today every AV1 test decodes bytes drishti itself wrote.
-  2. **Cross-frame CDF inheritance** (7.20/7.21 save/load keyed on
-     `ref_frame_idx[primary_ref_frame]` + `context_update_tile_id`, CDF slots in
-     the DPB). MODULE-SIZED. Cleanly rejected since 0.7.116; until it lands, no
-     non-key frame from a real encoder decodes.
-  3. **`intra_block_mode_info`** — the intra fork inside an inter frame
-     (5.11.15/5.11.17). MODULE-SIZED. Without it no real-world inter frame decodes.
-  4. **Segmentation** — segment-id read on both paths, feature data, per-segment
-     `LosslessArray`/qindex plumbing. MODULE-SIZED.
-  5. **Per-SB delta-q / delta-lf** (5.11.18/5.11.19) on both paths. SMALL-MEDIUM.
-  6. **Loop-filter ref/mode deltas** — the deblocker hardcodes `is_intra = 1` /
-     `ref = INTRA_FRAME` for every block of every frame; thread per-MI RefFrame and
-     mode out of the MV grid, and load deltas from the primary ref instead of the
-     unconditional `setup_past_independence` reset. MEDIUM, wrong pixels today.
-  7. **Block-level lossless** from `CodedLossless`/`LosslessArray[segment_id]`
-     rather than `base_q == 0`. SMALL, but an entropy desync when it bites.
-  8. **Film-grain synthesis** (7.18.3) — parsed and discarded today. ONE MODULE.
-  9. **Palette** (5.11.46) and **intra block copy** (5.11.6). TWO MODULES.
-     Cleanly rejected since 0.7.116.
-  10. **128×128 superblocks** (5.5.1) — invasive (SB loop, partition tree, residual
-      chunking, CDEF grid all assume 64×64). Correctly rejected today.
-  11. **Scalability** — operating-point selection + 6.2.1 `drop_obu`, or a clean
-      reject of `operating_points_cnt_minus_1 > 0`. SMALL for the reject.
-  12. **Fuzz the decode path.** ✅ DONE 0.7.118 — `tests/av1_decode.fcyr` mutates
-      OBU streams into `av1_decode_obus` / `av1_decode_stream` / the OBU iterator
-      (+6,270 fuzz assertions); canary-verified. The deep decode path proved
-      structurally safe (size-matched CDFs bound every symbol). A coverage-guided
-      fuzzer over a real corpus remains a later, larger want.
-  13. **OOM fault injection** — `lib/alloc.cyr` has `test_allocator_fail_after`, but
-      `src/` calls the global `alloc()` directly, so none of the ~140 `DR_ERR_OOM`
-      branches is mutation-covered anywhere in the repo. SMALL-MEDIUM.
-  14. **A real AV1 encoder** — forward transform, quantiser, mode decision/RDO,
-      motion search, rate control, sequence/frame-header and OBU writers, IVF
-      muxing. **ARC-SIZED**, comparable to the decode arc. What exists today is a
-      plan-driven bitstream writer and should be named as one.
-  15. **End-to-end 4:2:2 / 4:4:4 / monochrome decode tests** — the code is
-      subsampling-generic and the parsing is right, but this is untested code
-      rather than verified code. SMALL-MEDIUM.
-  16. **Test-fixture hardening** — de-alias the compound-warp fixture (same frame
-      and model for both refs, so a `use_warp0`/`use_warp1` swap survives the entire
-      suite); replace the linear-ramp `it_ref_frame` (27 call sites) with a
-      non-linear fill. SMALL each, high value.
+### The honest remaining work
+
+**AV1 100% = decode conformance-clean + encode round-trip-clean.** NOT MET, and not
+close (see the HONEST STATUS block at the top of this section). Grouped into phases,
+each item sized in rough **bites** (one bite ≈ one release; wide uncertainty, and
+conformance will surface more). Sizes: S ≈ 1–2, M ≈ 3–6, L ≈ 6–12, MODULE ≈ 5–10,
+ARC ≈ 40+.
+
+**Phase C — make a real inter FRAME decode (the gating hole).** Until this lands the
+decoder is keyframe-only and the ~60 releases of inter primitives are unexercised by
+any real stream.
+  - C1. **Cross-frame CDF inheritance** (7.20/7.21; save/load keyed on
+    `ref_frame_idx[primary_ref_frame]` + `context_update_tile_id`; CDF slots in the
+    DPB). **MODULE.** Gates every non-key frame. Rejected since 0.7.116.
+  - C2. **`intra_block_mode_info`** — the intra-block fork inside an inter frame
+    (5.11.15/5.11.17). **MODULE.** Gates every real inter frame. Rejected today.
+  - C3. **Real inter-frame integration** through `av1_decode_stream`: a genuine
+    multi-frame GOP (KEY then INTER referencing it), DPB reference management,
+    order-hint plumbing, `show_existing_frame` / switch frames. **M–L.** PARTLY
+    DONE 0.7.119 — the first MOTION-WITNESSING inter decode (KEY→content→motion,
+    verified vs an MC oracle) landed with the DEGENERATE header. STILL TODO: the
+    realistic order-hint-enabled header (explicit primary_ref_frame, per-frame
+    order_hint, get_relative_dist on a decoded frame), compound / backward refs
+    (needs RefFrameSignBias derivation — `av1_mvctx_set_signbias` has no callers),
+    and multi-frame GOPs beyond 3 frames.
+
+**Phase D — full decode feature coverage (what real `.ivf`s use).**
+  - D1. **Segmentation** — segment-id read (intra + inter), feature data, per-segment
+    qindex / `LosslessArray`. **MODULE.** Silent desync on the intra path today.
+  - D2. **Per-SB delta-q / delta-lf** (5.11.18/5.11.19), both paths. **S–M.** Silent
+    desync on keyframes today (rejected at frame level since 0.7.116).
+  - D3. **Loop-filter ref/mode deltas** — the deblocker hardcodes `is_intra = 1` /
+    `ref = INTRA_FRAME` for every block of every frame; thread per-MI RefFrame + mode
+    out of the MV grid, and load deltas from the primary ref instead of the blanket
+    `setup_past_independence` reset. **M.** WRONG PIXELS today, not a reject.
+  - D4. **Block-level lossless** from `CodedLossless` / `LosslessArray[segment_id]`
+    not `base_q == 0`. **S.** Entropy desync when it bites.
+  - D5. **Film-grain synthesis** (7.18.3) — parsed and discarded today. **MODULE.**
+  - D6. **Palette** (5.11.46). **MODULE.** Rejected since 0.7.116.
+  - D7. **Intra block copy** (5.11.6). **MODULE.** Rejected since 0.7.116.
+  - D8. **128×128 superblocks** (5.5.1) — invasive: the SB loop, partition tree
+    (bsl 5), residual chunking and CDEF grid all assume 64×64. **MODULE (invasive).**
+    Rejected today.
+  - D9. **Scalability** — operating-point select + 6.2.1 `drop_obu` by temporal/
+    spatial id. **S** for a clean reject, **M** for real support. Rejected since 0.7.116.
+  - D10. **Large-scale-tile / `OBU_TILE_LIST`** — **S** (a named reject + scope line).
+  - D11. **4:2:2 / 4:4:4 / monochrome END-TO-END decode tests** — the code is
+    subsampling-generic and parses right, but is untested at those subsamplings.
+    **S–M.** Untested code, not verified code.
+
+**Phase E — conformance (the gate on any close claim).**
+  - E1. **Conformance-vector harness** — acquire a libaom/Argon subset, per-vector
+    MD5 vs reference YUV, a `make conformance` gate, CI wiring. **L, open-ended.**
+  - E2. **Fix what the vectors expose.** **UNKNOWN, likely large** — Phases C/D
+    guarantee most vectors reject or desync until they land, so E2 is where the real
+    long tail lives.
+
+**Phase F — a real AV1 encoder (for "encode round-trip-clean").** What exists is a
+plan-replay bitstream writer, not an encoder. **ARC-SIZED**, comparable to the whole
+decode arc. Forward transform + quantiser (**M**); sequence/frame-header + OBU + IVF
+writers so it can emit a standalone stream (**M**); motion estimation / search
+(**L**); mode decision / RDO (**L+**); rate control (**M–L**); then round-trip and
+cross-decoder gates. **Realistically 40+ bites on its own.**
+
+**Phase G — robustness follow-ups (any time).**
+  - G1. **OOM fault injection** — route `src` allocations through an injectable
+    allocator, then mutation-cover at least one of the ~140 `DR_ERR_OOM` branches per
+    module (none is covered today). **S–M.**
+  - G2. **Coverage-guided decode fuzzing over a real corpus** (the 0.7.118 harness is
+    seed-mutation only). **M.**
+  - G3. **Remaining test-fixture hardening** (the `it_ref_frame` linear-ramp sweep,
+    etc.). **S, per-test.**
+
+**On the total:** the per-item S/M/L sizes above are honest engineering guesses; the
+SUM is not a number to trust — every aggregate estimate this arc has ever printed was
+3–5× too low. What is certain and checkable: two of the five phases (E conformance, F
+encoder) have not been STARTED, and Phase F is an arc in its own right. If a range is
+needed for planning, treat "dozens of releases per phase, encoder+conformance
+dominating" as the shape — and expect it to grow, not shrink, as conformance vectors
+run. We are at 0.7.118; Phases A/B done, C–G not started.
+
+**Re-scoping is the maintainer's call.** Options, if 90–130 is not the intended shape:
+(a) keep the charter as-is; (b) split — declare 0.7.x = *decode* conformance-clean and
+move the encoder to its own later minor line (this is the honest large fault line);
+(c) narrow to profile-0/1 and defer film-grain / palette / intrabc / 128×128 / scalability
+to a later pass; (d) define "close" as *keyframe*-conformance-clean + the encoder as a
+separate charter. Until a decision is made, Phase C is the highest-value next work —
+it is what turns "inter primitives exist" into "an inter frame decodes."
 
 ## 0.8.x — H.264/AVC → 100% (decode + encode; replaces openh264)
 
