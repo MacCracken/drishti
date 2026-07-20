@@ -1261,6 +1261,140 @@ fn test_inter_tile_two_sb() {
     assert_eq(load64(g4 + AV1MIR_MV0ROW), 0 - 24, "SB4's MI mv row");
     return 0;
 }
+
+# ---- Phase C: the SIGN-BIAS MV-NEGATION witness through a real decode (0.7.x) ----
+# it_blk with a chosen reference (NEWMV). A NEWMV block encodes diff = mv - predictor, so it
+# DECODES to exactly this planted mv regardless of its predictor / sign bias — a fixed MV to plant.
+fn its_blk_newmv_ref(ref, mvr, mvc): i64 {
+    var b = it_blk(mvr, mvc);
+    store64((b + AV1FB_IB) + AV1IB_REF0, ref);
+    return b;
+}
+# a NEARESTMV block with a chosen reference. NEARESTMV writes NO mv (encoder emits nothing) — so
+# it DECODES to its predictor = RefStackMv[0]. That predictor is exactly what the sign-bias
+# negation controls, which makes this block the witness for it.
+fn its_blk_nearest_ref(ref): i64 {
+    var b = it_blk(0, 0);
+    store64((b + AV1FB_IB) + AV1IB_REF0, ref);
+    store64((b + AV1FB_IB) + AV1IB_YMODE, AV1_NEARESTMV);
+    return b;
+}
+# Build + encode + decode a 128x128 four-SB inter tile whose ALTREF order hint is `altref_hint`
+# (the ONLY knob). Layout: SB1/SB2/SB3 = NEWMV ref ALTREF, MV (20,40) (they decode to (20,40)
+# exactly); SB4 (bottom-right) = NEARESTMV ref LAST. SB4's neighbours (SB2 above, SB3 left) are all
+# ref ALTREF != LAST, so SB4 finds ZERO full-match candidates -> extra_search (7.10.2.11) fires and
+# examines them as partial matches: each is sign-adjusted per RefFrameSignBias (7.10.2.12) before
+# being appended. With LAST forward (hint 2 < OrderHint 4) and ALTREF `altref_hint`, the bias
+# differs iff ALTREF is backward -> SB4's NEARESTMV predictor is +/- (20,40). Returns the decode
+# tile (read SB4's MI cell + reconstructed pixels from it). The gradient ref is in BOTH slots
+# (LAST=slot 0, ALTREF=slot 6) so SB4's LAST MC has real content.
+fn its_signbias_tile(altref_hint): i64 {
+    var oe = alloc(8);
+    var ref = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var y0 = 0;
+    while (y0 < 128) {
+        var x0 = 0;
+        while (x0 < 128) {
+            dr_frame_set(ref, 0, x0, y0, (x0 + (2 * y0)) & 255);
+            x0 = x0 + 1;
+        }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_FRAME_HEIGHT, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_MI_ROWS, 32);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 32);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, 32);
+    store64(fh + AV1FH_ORDER_HINT, 4);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 2);         # LAST forward (2 < 4)
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), altref_hint);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);                    # ALTREF -> slot 6
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    store64(refs + AV1REF_FRAME_H + 0, 128);
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 128);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 128);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 128);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);                        # slot 0 (LAST)
+    av1_dpb_store(dpb, fh, ref);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);                       # slot 6 (ALTREF)
+    av1_dpb_store(dpb, fh, ref);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var ef = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(32);
+    var pf = alloc(32);
+    var k = 0;
+    while (k < 4) { store64(pp + (k * 8), AV1_PARTITION_NONE); k = k + 1; }
+    store64(pf + 0, its_blk_newmv_ref(AV1_ALTREF_FRAME, 20, 40));      # SB1
+    store64(pf + 8, its_blk_newmv_ref(AV1_ALTREF_FRAME, 20, 40));      # SB2 (above SB4)
+    store64(pf + 16, its_blk_newmv_ref(AV1_ALTREF_FRAME, 20, 40));     # SB3 (left SB4)
+    store64(pf + 24, its_blk_nearest_ref(AV1_LAST_FRAME));             # SB4 (the witness)
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "sign-bias witness tile encoded");
+    var df = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "sign-bias witness tile decodes");
+    return dt;
+}
+# THE SIGN-BIAS MV-NEGATION WITNESS (0.7.x): the FULL chain — OrderHints -> av1_frame_sign_bias ->
+# tile ctx -> find_mv_stack extra_search -> the 7.10.2.12 negation -> SB4's NEARESTMV predictor ->
+# the DECODED block's MV and pixels. Cross-bias flips the neighbour MV's sign; the ONLY input that
+# changes between the two decodes is ALTREF's order hint. (D9 in av1_mv.tcyr pins the negation at
+# the find_mv_stack unit level with a hand-set bias; this proves it survives a real derive+decode.)
+fn test_inter_tile_signbias_negation() {
+    # cross-bias: ALTREF backward (hint 8 > 4), LAST forward -> the ALTREF neighbour MV (20,40) is
+    # NEGATED into SB4's predictor.
+    var dtx = its_signbias_tile(8);
+    var g4x = av1_mv_grid_cell(load64(dtx + AV1TILE_MVGRID), 32, 20, 20);
+    assert_eq(load64(g4x + AV1MIR_MV0ROW), 0 - 20, "SB4 NEARESTMV row = -20 (cross-bias: neighbour MV NEGATED)");
+    assert_eq(load64(g4x + AV1MIR_MV0COL), 0 - 40, "SB4 NEARESTMV col = -40 (negated)");
+    # ...and the negation reaches PIXELS: SB4's 64x64 == an independent MC of LAST by the negated MV.
+    var oe = alloc(8);
+    var gref = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var gy = 0;
+    while (gy < 128) {
+        var gx = 0;
+        while (gx < 128) {
+            dr_frame_set(gref, 0, gx, gy, (gx + (2 * gy)) & 255);
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    }
+    var orc = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(orc, gref, 0, 64, 64, 64, 64, 0 - 20, 0 - 40, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var dfx = load64(dtx + AV1TILE_FRAME);
+    var diff = 0;
+    var y = 64;
+    while (y < 128) {
+        var x = 64;
+        while (x < 128) {
+            if (dr_frame_get(dfx, 0, x, y) != dr_frame_get(orc, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff, 0, "SB4 pixels == MC(LAST, negated MV -20,-40): the negation reaches reconstruction");
+    # same-bias: ALTREF ALSO forward (hint 2 == LAST) -> bias matches -> NO negation.
+    var dts = its_signbias_tile(2);
+    var g4s = av1_mv_grid_cell(load64(dts + AV1TILE_MVGRID), 32, 20, 20);
+    assert_eq(load64(g4s + AV1MIR_MV0ROW), 20, "SB4 NEARESTMV row = +20 (same-bias: NOT negated)");
+    assert_eq(load64(g4s + AV1MIR_MV0COL), 40, "SB4 NEARESTMV col = +40 (not negated)");
+    return 0;
+}
 # a LOCALWARP block record (mirrors it_blk but motion_mode = LOCALWARP).
 fn it_blk_warp(mvr, mvc): i64 {
     var b = it_blk(mvr, mvc);
@@ -5343,6 +5477,7 @@ fn main() {
     test_inter_tile_e2e();
     test_inter_tile_subpel();
     test_inter_tile_two_sb();
+    test_inter_tile_signbias_negation();
     test_inter_tile_localwarp();
     test_inter_tile_localwarp_chroma();
     test_inter_tile_localwarp_chroma8();

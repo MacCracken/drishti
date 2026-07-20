@@ -452,9 +452,12 @@ any real stream.
     **COMPOUND / backward-ref frame decoding through `av1_decode_stream`** (0.7.120,
     `test_inter_stream_compound_oh` — a 4-frame GOP with a real backward ref in the
     DPB, AVERAGE-blended, verified vs an independent compound oracle and vs either
-    single ref). STILL TODO: witnessing the sign-bias MV **negation** itself (needs a
-    cross-bias inter neighbour; an isolated block is bias-invariant), and multi-frame
-    GOPs beyond 4 frames / `show_existing_frame` / switch frames.
+    single ref); and the **sign-bias MV negation witnessed through a real decode**
+    (`test_inter_tile_signbias_negation` — a 4-SB tile where a NEARESTMV block's
+    predictor is the negated MV of a cross-bias ALTREF neighbour; decoded MI-grid MV +
+    reconstructed pixels flip with ALTREF's order hint, mutation-verified necessary and
+    sufficient). STILL TODO: multi-frame GOPs beyond 4 frames / `show_existing_frame` /
+    switch frames.
 
 **Phase D — full decode feature coverage (what real `.ivf`s use).**
   - D1. **Segmentation** — segment-id read (intra + inter), feature data, per-segment

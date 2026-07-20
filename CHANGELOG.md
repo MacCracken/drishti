@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **The sign-bias MV negation is now witnessed through a real decode** (Phase C — closes the gap
+  0.7.120 left open). `RefFrameSignBias` negates a cross-bias neighbour's MV in the extra-candidate
+  fill (7.10.2.12); D9 (`av1_mv.tcyr`) pinned that at the `find_mv_stack` unit level with a *hand-set*
+  bias, but nothing proved it survived a real `OrderHints → av1_frame_sign_bias → ctx → decode` chain.
+  New `test_inter_tile_signbias_negation`: a 4-SB inter tile where SB1–3 are `NEWMV` ref ALTREF MV
+  (20,40) (a `NEWMV` block encodes `diff = mv − predictor`, so it decodes to exactly that MV, bias-
+  independent) and SB4 is `NEARESTMV` ref LAST (decodes to its *predictor*). SB4 finds zero full-match
+  candidates (all neighbours are cross-ref), so `extra_search` fires and sign-adjusts them. Cross-bias
+  (ALTREF backward, `OrderHints[ALTREF]=8 > OrderHint 4`): SB4's decoded MI-grid MV is (−20,−40) **and**
+  its reconstructed 64×64 equals an independent `av1_mc_pred_block(LAST, −20,−40)` oracle — the negation
+  reaches pixels. Same-bias (`OrderHints[ALTREF]=2`, forward like LAST): (+20,+40), not negated. The
+  only input that differs between the two decodes is ALTREF's order hint. Teeth (verified in suite
+  **isolation** — see below): removing the negation reddens exactly the cross-bias assertions (the
+  negation is necessary and reaches pixels); forcing it always-on reddens exactly the same-bias ones.
+  Harness note: `make test` aborts on the first failing suite, so a mutation that also breaks an earlier
+  suite silently skips the target — mutation-verify with `cyrius test tests/<file>.tcyr` in isolation.
+
 ## [0.7.120] - 2026-07-20
 
 - **Compound / backward-ref inter frame decodes through the stream** (Phase C milestone — the
