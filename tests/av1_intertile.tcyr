@@ -1015,14 +1015,14 @@ fn test_inter_tile_localwarp_edge_chroma() {
     store64(pf + 16, it_blk(16, 0));           # left sample
     store64(pf + 24, it_blk_warp(0, 0));
     var ef = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
-    var et = av1_tile_new(ef, 8, 7, 40, 1, 0, 3);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 3);
     av1_tile_grids_new(et);
     av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
     var tlen = 0;
     var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
     assert_eq(tlen > 0, 1, "edge chroma: 32x28 4:2:0 tile encoded");
     var df = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
-    var dt = av1_tile_new(df, 8, 7, 40, 1, 0, 3);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 3);
     av1_tile_grids_new(dt);
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "edge chroma: tile decodes");
@@ -4453,6 +4453,92 @@ fn it_blk_ii(mvr, mvc, ii_mode, is_wedge, wedge_idx): i64 {
     store64(ii + AV1II_WEDGEIDX, wedge_idx);
     return b;
 }
+# EDGE-CUT INTER-INTRA (0.7.115) — the last tracked AV1 decode gap.
+#
+# A 32x28 4:2:0 frame: MiRows = 2*((28+7)>>3) = 8, so the MI grid is 32 rows against a visible
+# 28 and a BLOCK_16X16 at pixel (16,16) overhangs the bottom by 4 luma rows. That block used to
+# be REJECTED on both lanes because av1_intra_predict wrote its nominal extent straight into
+# the frame. The intra half is now staged into Av1_McIntra, so only the blended region is
+# committed and the block decodes.
+#
+# Two assertions carry the bite: the visible region must actually be BLENDED (differ from a
+# plain-inter prediction), and the overhang band must be left UNTOUCHED — the same pixels a
+# plain inter block leaves alone. The second is what pins the staging: predicting the intra
+# half into the frame would deposit a raw, unblended intra prediction there.
+fn it_ii_edge(ii_mode, is_wedge, wedge_idx, tag): i64 {
+    var oe = alloc(8);
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    # mir = 8, not 7: MiRows for a 28-tall frame is 8 (5.9.9). The shipped LOCALWARP edge test
+    # passes 7, which is a fixture-local fiction; this one is spec-faithful.
+    var ref = itw_ctx420(32, 28, 8, 7, fh, refs, seq, dpb);
+    store64(seq + AV1_SEQ_ENABLE_INTERINTRA, 1);
+    var pp = alloc(48);
+    store64(pp + 0, AV1_PARTITION_SPLIT);     # 64 SB (forced: frame is smaller)
+    store64(pp + 8, AV1_PARTITION_SPLIT);     # 32 TL
+    store64(pp + 16, AV1_PARTITION_NONE);     # 16 @ (0,0)
+    store64(pp + 24, AV1_PARTITION_NONE);     # 16 @ (0,4)
+    store64(pp + 32, AV1_PARTITION_NONE);     # 16 @ (4,0)
+    store64(pp + 40, AV1_PARTITION_NONE);     # 16 @ (4,4) -> the INTER-INTRA block, bottom-cut
+    var pf = alloc(32);
+    store64(pf + 0, it_blk(16, 8));
+    store64(pf + 8, it_blk(0, 16));
+    store64(pf + 16, it_blk(16, 0));
+    store64(pf + 24, it_blk_ii(0, 0, ii_mode, is_wedge, wedge_idx));
+    var ef = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 7, 40, 1, 0, 3);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(load64(et + AV1TILE_IERR), DR_OK, tag);
+    assert_eq(tlen > 0, 1, tag);
+    var df = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 7, 40, 1, 0, 3);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, tag);
+    # (1) the VISIBLE part of the block is blended, i.e. differs from a plain-inter MC.
+    var pf2 = dr_frame_new(32, 28, 3, 1, 1, 8, 8, oe);
+    av1_mc_pred_block(pf2, ref, 0, 16, 16, 16, 12, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var differs = 0;
+    var y = 16;
+    while (y < 28) {
+        var x = 16;
+        while (x < 32) {
+            if (dr_frame_get(df, 0, x, y) != dr_frame_get(pf2, 0, x, y)) { differs = differs + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(differs > 0, 1, tag);
+    # (2) the OVERHANG band is untouched. The decode frame starts memset to 0 and nothing
+    # should have written rows 28..31 of the block's columns — those samples exist only in the
+    # padding. Reading them is what makes this assertion possible at all.
+    var wrote = 0;
+    var oy = 28;
+    while (oy < 32) {
+        var ox = 16;
+        while (ox < 32) {
+            if (dr_frame_get(df, 0, ox, oy) != 0) { wrote = wrote + 1; }
+            ox = ox + 1;
+        }
+        oy = oy + 1;
+    }
+    assert_eq(wrote, 0, tag);
+    return 0;
+}
+
+fn test_inter_intra_edge_overhang() {
+    it_ii_edge(3, 0, 0, "ii edge SMOOTH II_SMOOTH_PRED: decodes, blends, leaves the overhang alone");
+    it_ii_edge(0, 0, 0, "ii edge SMOOTH II_DC_PRED");
+    it_ii_edge(0, 1, 0, "ii edge WEDGE idx0");
+    it_ii_edge(1, 1, 8, "ii edge WEDGE idx8 II_V_PRED");
+    return 0;
+}
+
 fn test_ir_interintra() {
     it_interintra_roundtrip(0, 0, 0, "interintra SMOOTH DC");
     it_interintra_roundtrip(1, 0, 0, "interintra SMOOTH V");
@@ -4582,6 +4668,7 @@ fn main() {
     test_ir_compound_distance();
     test_ir_compound_diffwtd();
     test_ir_compound_wedge();
+    test_inter_intra_edge_overhang();
     test_ir_interintra();
     test_ir_vartx_edge_clamp();
     test_ir_vartx_32();

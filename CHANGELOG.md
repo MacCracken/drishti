@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.115] - 2026-07-20
+
+**Inter-intra blocks may overhang the frame edge — the last tracked AV1 decode gap closes.** Both the
+decode reject and its encoder mirror are gone.
+
+### Changed
+
+- **The intra half is STAGED, not committed** (`av1_intra.cyr`, `av1_mc.cyr`). `av1_intra_predict` keeps
+  its exact signature as a wrapper — Cyrius does not hard-fail a wrong argument count, so changing it
+  would have silently broken a dozen call sites — and delegates to a new `av1_intra_predict_gen` taking
+  `(out_buf, out_stride)`, the same split `av1_warp_pred_gen` / `av1_warp_pred_block` already use. Only
+  the writeback branches; the reference edges are still read from the frame. The inter-intra path
+  predicts into a new `Av1_McIntra` scratch at the nominal stride and the blend reads values from there.
+- **Both overhang gates removed**, along with the stale module-header note describing them.
+
+### Why staging rather than relying on the 0.7.114 padding
+
+The padding makes the nominal intra write *safe*, but writing it to the frame would leave a raw,
+unblended intra prediction in the overhang band — different from what every other inter block leaves
+there, since the plain inter path clamps. Staging keeps an edge-cut inter-intra block touching exactly
+the pixels a plain inter block touches, so this bite changes no behaviour outside the blocks it enables.
+
+### Verification
+
+A 32×28 4:2:0 fixture (MI grid 32 rows against a visible 28) with a `BLOCK_16X16` inter-intra block at
+pixel (16,16), overhanging the bottom by 4 luma rows, across four mode/wedge combinations. Two
+assertions carry it: the visible region must actually be **blended** (differ from a plain-inter MC), and
+the overhang band must be left **untouched**. Reverting the staging writes exactly 64 samples into that
+band (16 columns × 4 rows) and turns it red; re-inserting either the decode gate or the encoder mirror
+turns it red.
+
+### Known gap, now tracked rather than latent
+
+The plain inter path **clamps** predictions to the visible plane, so for a frame whose dimensions are not
+a multiple of 8 the band `[FrameWidth, MiCols*4)` is never written by inter prediction. The spec, dav1d
+and libaom all predict over the **nominal** extent into padded storage — and that band *is* read back:
+`av1_cdef_get_at` gates availability on `cand_r < mi_rows` rather than the plane dimensions, and
+`av1_deblock` iterates the full MI grid. So an edge-cut **inter** frame can differ from a conformant
+decoder in visible pixels via CDEF taps. Intra keyframes do not have this problem, because
+`av1_intra_predict` writes the nominal extent. Fixing it needs `av1_mc_pred_block`'s bounds guard to
+bound against the allocated extent rather than the visible plane. Recorded in the roadmap; this release
+does not change it either way.
+
+38 suites, **29,462** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.114] - 2026-07-20
 
 **SECURITY — heap buffer overflow in the AV1 intra decode path.** A conformant keyframe whose height

@@ -6,6 +6,40 @@
 
 ## Version
 
+**0.7.115** — cut 2026-07-20, not yet tagged (user's git). **INTER-INTRA BLOCKS MAY OVERHANG THE FRAME
+EDGE — THE LAST TRACKED AV1 DECODE GAP CLOSES.** Both the decode reject and its encoder mirror are gone.
+av1_intra.cyr: av1_intra_predict keeps its EXACT signature as a wrapper (Cyrius does not hard-fail a wrong
+ARG COUNT, so changing it would have silently broken a dozen call sites) and delegates to a new
+av1_intra_predict_gen taking (out_buf, out_stride) — the same split av1_warp_pred_gen/av1_warp_pred_block
+already use; only the writeback branches, the reference edges still come from the frame. av1_mc.cyr: a new
+Av1_McIntra scratch; av1_mc_pred_interintra_w predicts the intra half into it at the NOMINAL stride and the
+blend reads values from there. **WHY STAGING RATHER THAN RELYING ON 0.7.114's PADDING:** the padding makes
+the nominal intra write SAFE, but writing it to the frame would leave a RAW, UNBLENDED intra prediction in
+the overhang band — different from what every other inter block leaves there, since the plain inter path
+clamps. Staging keeps an edge-cut inter-intra block touching exactly the pixels a plain inter block touches,
+so this bite changes no behaviour outside the blocks it enables. PROOF: a 32x28 4:2:0 fixture (MI grid 32
+rows vs a visible 28) with a BLOCK_16X16 inter-intra block at pixel (16,16) overhanging by 4 luma rows,
+across four mode/wedge combinations. TWO assertions carry it — the visible region must actually be BLENDED
+(differ from a plain-inter MC) and the overhang band must be left UNTOUCHED. MUTATIONS (3, all red):
+reverting the staging writes exactly 64 samples into that band (16 cols x 4 rows, matching the review's
+independent measurement); re-inserting the decode gate; re-inserting the encoder mirror.
+**A FIXTURE MISTAKE WORTH RECORDING:** the first attempt failed with DR_ERR_BOUNDS at encode and I chased
+the edge cut, then the MI-row count, before finding the real cause — the fixture never set
+AV1_SEQ_ENABLE_INTERINTRA. Isolating with a no-edge-cut control (which also failed) is what ruled the edge
+out in one step; guessing at the geometry twice cost more than that control would have. ALSO: an unscoped
+`sed -i` while debugging rewrote a shared tile-construction line in FIVE other tests — `sed -i` over a test
+file applies to every match, and the pattern was not unique. Use a python replace scoped to the function's
+byte range, and always re-run the whole suite after a debugging edit. **KNOWN GAP, NOW TRACKED RATHER THAN
+LATENT:** the plain inter path CLAMPS predictions to the visible plane, so for a frame whose dims are not a
+multiple of 8 the band [FrameWidth, MiCols*4) is never written by inter prediction. Spec/dav1d/libaom all
+predict over the NOMINAL extent into padded storage, and that band IS read back — av1_cdef_get_at gates
+availability on cand_r < mi_rows rather than the plane dims, and av1_deblock iterates the full MI grid — so
+an edge-cut INTER frame can differ from a conformant decoder in visible pixels via CDEF taps. Intra
+keyframes do NOT have this problem (av1_intra_predict writes the nominal extent). Fixing it needs
+av1_mc_pred_block's bounds guard to bound against the ALLOCATED extent rather than the visible plane, which
+likely means storing alloc_w/alloc_h on DrFrame. 38 suites, **29,462** suite + **1,140** fuzz assertions,
+all six gates green. Next: **the stale overhang band above**, then conformance vectors + the encode lane.
+
 **0.7.114** — cut 2026-07-20, not yet tagged (user's git). **SECURITY: HEAP BUFFER OVERFLOW IN THE AV1
 INTRA DECODE PATH.** A conformant keyframe whose dimensions are not a multiple of the superblock size
 could make the decoder write PAST THE END of a plane allocation and still return DR_OK. Measured: a 64x40

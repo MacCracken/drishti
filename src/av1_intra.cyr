@@ -683,10 +683,33 @@ fn av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred)
 # on the luma plane.
 # Returns DR_OK, DR_ERR_UNSUPPORTED (chroma-from-luma; roadmap.md 0.7.x),
 # DR_ERR_OOM, DR_ERR_BOUNDS.
+# av1_intra_predict — predict into the FRAME (the original contract; every existing caller
+# keeps its exact argument list, which matters because Cyrius does not hard-fail a wrong ARG
+# COUNT). Delegates to av1_intra_predict_gen with a null scratch.
 fn av1_intra_predict(frame, plane, x, y, have_left, have_above,
 have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
 filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
 mi_cols, mi_rows): i64 {
+    return av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
+    have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
+    filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
+    mi_cols, mi_rows, 0, 0);
+}
+
+# av1_intra_predict_gen — as above, but the prediction may be written to a caller-supplied
+# BUFFER instead of the frame (out_buf != 0, row stride out_stride, block-relative origin).
+# The reference edges are still read from `frame`; only the writeback moves. This is the same
+# split av1_warp_pred_gen / av1_warp_pred_block use.
+#
+# WHY: the inter-intra path needs the intra half as VALUES to blend, not as pixels already
+# committed to the frame. Predicting into the frame writes the block's NOMINAL extent, so for
+# an edge-cut block the overhang band would keep a raw, unblended intra prediction — different
+# from what every other inter block leaves there. Staging it keeps the frame untouched outside
+# the region actually blended.
+fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
+have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
+filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
+mi_cols, mi_rows, out_buf, out_stride): i64 {
     if ((log2w < 2) || (log2w > 6) || (log2h < 2) || (log2h > 6)) {
         return DR_ERR_BOUNDS;
     }
@@ -793,7 +816,12 @@ mi_cols, mi_rows): i64 {
     while (i < h) {
         var j = 0;
         while (j < w) {
-            dr_frame_set(frame, plane, x + j, y + i, load64(pred + (((i * w) + j) * 8)));
+            var pv = load64(pred + (((i * w) + j) * 8));
+            if (out_buf == 0) {
+                dr_frame_set(frame, plane, x + j, y + i, pv);
+            } else {
+                store64(out_buf + (((i * out_stride) + j) * 8), pv);
+            }
             j = j + 1;
         }
         i = i + 1;

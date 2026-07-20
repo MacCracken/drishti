@@ -371,8 +371,13 @@ Baseline (0.7.0): OBU layer + sequence header.
   read. **Sub-8x8 chroma units spanning sibling blocks landed 0.7.112-0.7.113** (`compute_prediction`
   storage-loop hoist + the spec plane loop, then the live emission loop: each 2x2 chroma quadrant borrows
   its own sibling's MV / reference / interp filters from the MI grid, with the `someUseIntra` collapse).
-  One gap remains: **inter-intra overhanging the frame edge** (`av1_intra_predict` writes the nominal
-  extent unclamped). Formerly the LAST
+  **Inter-intra overhanging the frame edge landed 0.7.115** (the intra half is staged into `Av1_McIntra`
+  via `av1_intra_predict_gen` and only the blended region is committed), on top of the **0.7.114 security
+  fix** (the intra path wrote past the plane allocation on any frame whose dimensions were not a multiple
+  of the superblock size — MI-aligned allocation + a 32-sample border). One known gap remains, tracked
+  rather than latent: **inter prediction clamps to the visible plane**, so the band
+  `[FrameWidth, MiCols*4)` is left stale, while the spec, dav1d and libaom all predict over the nominal
+  extent into padded storage — and deblocking and CDEF read that band back into visible output. Formerly the LAST
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

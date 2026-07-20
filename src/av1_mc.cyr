@@ -860,6 +860,10 @@ var Av1_McMaskW = 0;    # luma mask build width  — chroma subsamples over the 
 var Av1_McMaskH = 0;    # luma mask build height
 # Dedicated per-8x8 warp KERNEL output (64 i64), kept SEPARATE from McTmp/McOut so that
 # av1_warp_pred_gen can write back into them (inter-intra -> McOut; compound -> BOTH).
+# Staging buffer for the inter-intra INTRA half. Sized like the other block scratches; the
+# spec caps inter-intra at BLOCK_32X32 (5.11.28) so 32x32 would do, but uniformity is cheaper
+# than a special case.
+var Av1_McIntra = 0;
 var Av1_McWarp8 = 0;
 
 # Persistent mid-pass scratch for av1_mc_put_8tap's 2-pass (H+V) path. Lazily built once,
@@ -879,9 +883,10 @@ fn av1_mc_drv_scratch(): i64 {
     Av1_McOut = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);
     Av1_McTmp = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);   # 2nd compound intermediate
     Av1_McMask = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # DIFFWTD luma mask
+    Av1_McIntra = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # inter-intra intra half
     Av1_McWarp8 = alloc(8 * 8 * 8);                           # per-8x8 warp kernel output
     if ((Av1_McRect == 0) || (Av1_McGather == 0) || (Av1_McOut == 0) || (Av1_McTmp == 0)
-    || (Av1_McMask == 0) || (Av1_McWarp8 == 0)) {
+    || (Av1_McMask == 0) || (Av1_McWarp8 == 0) || (Av1_McIntra == 0)) {
         Av1_McOut = 0;
         return DR_ERR_OOM;
     }
@@ -1723,8 +1728,14 @@ ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, us
     }
     var log2w = (av1_mi_width_log2(sub_size) + 2) - sx;
     var log2h = (av1_mi_height_log2(sub_size) + 2) - sy;
-    e = av1_intra_predict(dst, plane, x, y, have_l, have_u, 0, 0, imode, 0, 0, 0, 0, 0,
-    log2w, log2h, mi_cols, mi_rows);
+    # The intra half is STAGED, not committed. av1_intra_predict writes a block's NOMINAL
+    # extent, which for an edge-cut block runs past the visible plane; writing it to the frame
+    # would leave a raw, unblended intra prediction in the overhang band, unlike what every
+    # other inter block leaves there. Staging at the nominal stride also keeps the mask
+    # indexing (which is nominal, per 7.11.3.11/14) and the blend loop independent.
+    var nomw = 1 << log2w;
+    e = av1_intra_predict_gen(dst, plane, x, y, have_l, have_u, 0, 0, imode, 0, 0, 0, 0, 0,
+    log2w, log2h, mi_cols, mi_rows, Av1_McIntra, nomw);
     if (e != DR_OK) { return e; }
     # mask: WEDGE interintra (wedge_sign forced 0) builds the codebook mask on LUMA (plane 0) at
     # the NOMINAL block size and chroma SUBSAMPLES it (av1_diffwtd_mask_at, exactly like compound
@@ -1748,7 +1759,7 @@ ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, us
             } else {
                 m = load64(Av1_McMask + (((r * w) + c) * 8));
             }
-            var intra = dr_frame_get(dst, plane, x + c, y + r);
+            var intra = load64(Av1_McIntra + (((r * nomw) + c) * 8));
             var inter = load64(Av1_McOut + (((r * w) + c) * 8));
             dr_frame_set(dst, plane, x + c, y + r,
             av1_round2((m * intra) + ((64 - m) * inter), 6));
