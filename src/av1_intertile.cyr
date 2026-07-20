@@ -133,7 +133,20 @@ fn av1_inter_block_setup(tile, r, c, sub_size, out): i64 {
 # Skips / InterTxSizes; uv unused for inter). LoopfilterTxSizes gets what the
 # (absent) skip-block residual walk would have written: the per-plane tx dims
 # across the plane-MI footprint.
-fn av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx): i64 {
+# STORAGE LOOP 1 of the spec's decode_block (5.11.5), which runs BEFORE compute_prediction —
+# see 06.bitstream.syntax.md, where the YModes / RefFrames / CompGroupIdxs / CompoundIdxs /
+# InterpFilters / Mvs writes sit above the compute_prediction() call and storage loop 2 below
+# residual(). drishti used to defer BOTH loops to the end of the block, which was equivalent
+# only while nothing read the grid mid-block.
+#
+# IT IS NOT EQUIVALENT ANY MORE, and the reason is easy to miss: compute_prediction's
+# someUseIntra scan reads RefFrames at (candRow + r, candCol + c), and at LUMA
+# (subX = subY = 0) candRow/candCol ARE the block's own MiRow/MiCol. The MV grid is
+# zero-initialised and AV1_INTRA_FRAME == 0, so a block that has not yet written its own cell
+# reads itself as intra — someUseIntra fires spuriously, the geometry collapses and the MV
+# reads (0,0). Hoisting this write is therefore a precondition of transcribing
+# compute_prediction at all, for luma as much as for the sub-8x8 chroma case that motivated it.
+fn av1_inter_store_mode(tile, r, c, sub_size, fb): i64 {
     var ib = av1_fb_ib(fb);
     var grid = load64(tile + AV1TILE_MVGRID);
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
@@ -145,6 +158,16 @@ fn av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx
     av1_ib_ref(ib, 0), av1_ib_ref(ib, 1), 1, av1_mv_row(mv0), av1_mv_col(mv0),
     av1_mv_row(mv1), av1_mv_col(mv1), 0, load64(ct + AV1CT_GROUPIDX),
     load64(ct + AV1CT_COMPIDX), av1_ib_interp(ib, 0), av1_ib_interp(ib, 1));
+    return DR_OK;
+}
+
+fn av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx): i64 {
+    var ib = av1_fb_ib(fb);
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
+    var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);
+    # storage loop 1 already ran (av1_inter_store_mode, before compute_prediction); this is
+    # storage loop 2 (IsInters / MiSizes / the avail marker) plus drishti's tile grids.
     av1_mi_store_final(grid, fmi_cols, fmi_rows, r, c, sub_size, 1);
     var bw4 = av1_num_4x4_w(sub_size);
     var bh4 = av1_num_4x4_h(sub_size);
@@ -1023,6 +1046,10 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             }
         }
     }
+    # SPEC STORAGE LOOP 1, hoisted to where 5.11.5 puts it: strictly BEFORE the prediction
+    # below. compute_prediction reads RefFrames/Mvs back out of this grid, including at the
+    # block's OWN cell, so writing it afterwards would let the block see itself as intra.
+    av1_inter_store_mode(tile, r, c, sub_size, fb);
     var num_planes = dr_frame_num_planes(frame);
     var plane = 0;
     while (plane < num_planes) {
@@ -1032,59 +1059,94 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             var sx = 0;
             var sy = 0;
             if (plane > 0) { sx = subx; sy = suby; }
-            var x = (c * 4) >> sx;
-            var y = (r * 4) >> sy;
-            var w = (bw4 * 4) >> sx;
-            var h = (bh4 * 4) >> sy;
-            var nw = w;               # NOMINAL (subsampled, pre-edge-clamp) plane dims — the warp >=8x8 gate
-            var nh = h;
+            # ---- spec 5.11.5 compute_prediction, per plane ----
+            # planeSz is the SUBSAMPLED residual size; the emission extent is num4x4*4 while
+            # each emitted prediction is predW x predH = Block_Width/Height[MiSize] >> sub.
+            # Those two differ ONLY when a luma dimension is 4 and that axis is subsampled —
+            # exactly the sibling-span cases still gated below — so for every block that
+            # currently decodes the y/x loop runs EXACTLY ONCE and this is a restatement, not
+            # a behaviour change. When the gate lifts, the loop becomes the sub-8x8 chroma
+            # machinery: one prediction per quadrant, each borrowing a sibling's MV.
+            var plane_sz = av1_get_plane_residual_size(sub_size, plane, subx, suby);
+            # BLOCK_INVALID (-1): an aspect ratio the subsampling cannot represent. Unreachable
+            # for a legal stream (4:4:0 / 4:1:1 are not AV1 formats) but the table really does
+            # contain the sentinel, and av1_num_4x4_w would index it OOB.
+            if (plane_sz < 0) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }
+            var n4w = av1_num_4x4_w(plane_sz);
+            var n4h = av1_num_4x4_h(plane_sz);
+            var base_x = (c >> sx) * 4;
+            var base_y = (r >> sy) * 4;
+            var pred_w = av1_block_width(sub_size) >> sx;
+            var pred_h = av1_block_height(sub_size) >> sy;
             var pw = dr_frame_plane_width(frame, plane);
             var ph = dr_frame_plane_height(frame, plane);
-            if ((x + w) > pw) { w = pw - x; }
-            if ((y + h) > ph) { h = ph - y; }
-            if ((w > 0) && (h > 0)) {
-                # useWarp per plane (spec 7.11.3.1): warp iff the model is valid AND the plane's NOMINAL block
-                # is >= 8x8 — a 4x4 chroma (8x8-luma at 4:2:0) falls back to translation. The SAME gate drives
-                # the plain-inter warp AND the inter-intra warp (the useWarp derivation has no is_ii exception).
-                # Dispatch on the edge-CLAMPED w/h (warp_pred_block/interintra crop partial tiles).
-                var big = 0;
-                if ((nw >= 8) && (nh >= 8)) { big = 1; }   # the per-plane block>=8x8 warp gate
-                var use_warp = 0;
-                if ((warp_valid != 0) && (big != 0)) { use_warp = 1; }
-                var use_warp0 = 0;
-                if ((warp_valid0 != 0) && (big != 0)) { use_warp0 = 1; }
-                var use_warp1 = 0;
-                if ((warp_valid1 != 0) && (big != 0)) { use_warp1 = 1; }
-                var em = DR_OK;
-                if (is_comp != 0) {
-                    em = av1_mc_pred_compound(frame, refframe, ref1frame, plane, x, y, w, h,
-                    mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
-                    sub_size, cwidx, cwsign, wm0, wm1, use_warp0, use_warp1);
-                } else {
-                    if (is_ii != 0) {
-                        em = av1_mc_pred_interintra_w(frame, refframe, plane, x, y, w, h,
-                        mv_row, mv_col, filt_x, filt_y, av1_interintra_mode(av1_ib_ii(ib)),
-                        av1_interintra_wedge(av1_ib_ii(ib)), av1_interintra_wedge_idx(av1_ib_ii(ib)),
-                        sub_size, load64(st + 8), load64(st + 0),
-                        load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS), wm, use_warp);
-                    } else {
-                        if (use_warp != 0) {
-                            em = av1_warp_pred_block(frame, refframe, plane, x, y, w, h, wm);
+            var predicted = 0;
+            var yy = 0;
+            while (yy < (n4h * 4)) {
+                var xx = 0;
+                while (xx < (n4w * 4)) {
+                    var x = base_x + xx;
+                    var y = base_y + yy;
+                    var w = pred_w;
+                    var h = pred_h;
+                    var nw = w;       # NOMINAL (subsampled, pre-edge-clamp) dims — the warp >=8x8 gate
+                    var nh = h;
+                    if ((x + w) > pw) { w = pw - x; }
+                    if ((y + h) > ph) { h = ph - y; }
+                    if ((w > 0) && (h > 0)) {
+                        predicted = 1;
+                        # useWarp per plane (spec 7.11.3.1): warp iff the model is valid AND the plane's NOMINAL block
+                        # is >= 8x8 — a 4x4 chroma (8x8-luma at 4:2:0) falls back to translation. The SAME gate drives
+                        # the plain-inter warp AND the inter-intra warp (the useWarp derivation has no is_ii exception).
+                        # Dispatch on the edge-CLAMPED w/h (warp_pred_block/interintra crop partial tiles).
+                        var big = 0;
+                        if ((nw >= 8) && (nh >= 8)) { big = 1; }   # the per-plane block>=8x8 warp gate
+                        var use_warp = 0;
+                        if ((warp_valid != 0) && (big != 0)) { use_warp = 1; }
+                        var use_warp0 = 0;
+                        if ((warp_valid0 != 0) && (big != 0)) { use_warp0 = 1; }
+                        var use_warp1 = 0;
+                        if ((warp_valid1 != 0) && (big != 0)) { use_warp1 = 1; }
+                        var em = DR_OK;
+                        if (is_comp != 0) {
+                            em = av1_mc_pred_compound(frame, refframe, ref1frame, plane, x, y, w, h,
+                            mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
+                            sub_size, cwidx, cwsign, wm0, wm1, use_warp0, use_warp1);
                         } else {
-                            em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
-                            mv_row, mv_col, filt_x, filt_y);
+                            if (is_ii != 0) {
+                                em = av1_mc_pred_interintra_w(frame, refframe, plane, x, y, w, h,
+                                mv_row, mv_col, filt_x, filt_y, av1_interintra_mode(av1_ib_ii(ib)),
+                                av1_interintra_wedge(av1_ib_ii(ib)), av1_interintra_wedge_idx(av1_ib_ii(ib)),
+                                sub_size, load64(st + 8), load64(st + 0),
+                                load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS), wm, use_warp);
+                            } else {
+                                if (use_warp != 0) {
+                                    em = av1_warp_pred_block(frame, refframe, plane, x, y, w, h, wm);
+                                } else {
+                                    em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
+                                    mv_row, mv_col, filt_x, filt_y);
+                                }
+                            }
                         }
+                        if (em != DR_OK) { return av1_ierr_latch(tile, em); }
                     }
+                    xx = xx + pred_w;
                 }
-                if (em != DR_OK) { return av1_ierr_latch(tile, em); }
-                # OBMC (7.11.3.9): blend the above/left inter neighbours onto the block's own prediction,
-                # in place. An OBMC block is always single-ref, non-inter-intra, non-warp — read_motion_mode
-                # forces SIMPLE for compound / ref1==INTRA / a would-global-warp GLOBALMV block
-                # (av1_intermode.cyr:2116-2120) — so it took the plain translation MC just above.
-                if (mm == AV1_MM_OBMC) {
-                    var eob = av1_obmc_predict(tile, frame, plane, r, c, sub_size, sx, sy);
-                    if (eob != DR_OK) { return av1_ierr_latch(tile, eob); }
-                }
+                yy = yy + pred_h;
+            }
+            # OBMC (7.11.3.9): blend the above/left inter neighbours onto the block's own
+            # prediction, in place. An OBMC block is always single-ref, non-inter-intra,
+            # non-warp — read_motion_mode forces SIMPLE for compound / ref1==INTRA / a
+            # would-global-warp GLOBALMV block (av1_intermode.cyr) — so it took the plain
+            # translation MC above.
+            #
+            # DELIBERATELY OUTSIDE the emission loop: OBMC blends over the whole plane block
+            # ONCE. While the loop is degenerate that is byte-identical to blending inside it,
+            # but once the sub-8x8 quadrants become live, running it per quadrant would blend
+            # the neighbours in up to four times.
+            if ((predicted != 0) && (mm == AV1_MM_OBMC)) {
+                var eob = av1_obmc_predict(tile, frame, plane, r, c, sub_size, sx, sy);
+                if (eob != DR_OK) { return av1_ierr_latch(tile, eob); }
             }
         }
         plane = plane + 1;
@@ -1192,6 +1254,11 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         }
     }
     av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma);
+    # Mirror the decode lane's split so the two cannot drift: storage loop 1 here, loop 2 at
+    # the end. Ordering is unobservable on this lane — the encoder is handed a residual and
+    # never predicts, so nothing between here and the end reads the MI grid — but keeping the
+    # two lanes structurally identical is what stops a future reader assuming they differ.
+    av1_inter_store_mode(tile, r, c, sub_size, fb);
     if (av1_fb_skip(fb) == 0) {
         var er = av1_residual_inter_encode(tile, r, c, sub_size, has_chroma, tx_size, fb, is_vartx);
         if (er != DR_OK) { return av1_ierr_latch(tile, er); }

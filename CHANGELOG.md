@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.112] - 2026-07-19
+
+**compute_prediction groundwork — OUTPUT-NEUTRAL.** Two prerequisites for the sub-8×8 chroma
+sibling-MV bite, landed together because neither is independently verifiable. The whole existing suite
+passes byte-identically (29,400 assertions unchanged).
+
+### Changed
+
+- **Storage loop 1 hoisted above prediction** (`av1_intertile.cyr`). The spec's `decode_block` (5.11.5)
+  writes `YModes` / `RefFrames` / `Mvs` / `InterpFilters` **before** `compute_prediction()` and the rest
+  after `residual()`; drishti deferred both to the end of the block, which was equivalent only while
+  nothing read the grid mid-block. `av1_inter_store_mode` is now split out and called before the plane
+  loop on both lanes. **This is required for luma, not just for the sub-8×8 chroma case that motivated
+  it**: `compute_prediction`'s `someUseIntra` scan reads `RefFrames` at `(candRow + r, candCol + c)`, and
+  at luma `candRow`/`candCol` *are* the block's own `MiRow`/`MiCol`. The grid is zero-initialised and
+  `AV1_INTRA_FRAME == 0`, so a block that hasn't written its own cell reads itself as intra — the
+  geometry would collapse and the MV read `(0,0)`.
+- **The per-plane loop restated in spec terms** — `planeSz` / `num4x4W` / `num4x4H` / `baseX` / `baseY` /
+  `predW` / `predH` with the spec's y/x emission loop present but **degenerate** (exactly one iteration
+  for every block that currently decodes). `predW × predH` differs from the `num4x4 × 4` extent only when
+  a luma dimension is 4 and that axis is subsampled — precisely the sibling-span cases still gated — so
+  this is a restatement, not a behaviour change. OBMC moved **outside** the emission loop: byte-identical
+  while degenerate, but running it per quadrant would blend the neighbours in up to four times.
+- **A `BLOCK_INVALID` conformance guard.** `Subsampled_Size` genuinely contains a `-1` sentinel for
+  aspect ratios the subsampling cannot represent; `av1_num_4x4_w` would index the table out of bounds.
+  Unreachable for a legal stream (4:4:0 / 4:1:1 are not AV1 formats), now a clean `DR_ERR_BOUNDS`.
+
+### Verification — stated precisely, because most of it is not mutation-coverable yet
+
+The hoist has **no available mutation witness**, and I confirmed that by building it: reverting it leaves
+the entire suite green. Nothing reads the grid mid-block *today*, which is exactly why the hoist is
+output-neutral — it only becomes falsifiable once the sub-8×8 path makes the grid load-bearing. It is not
+reported as mutation-verified.
+
+For the loop restatement, 2 of 7 mutations go red — the ones that break **coverage** (stepping by a
+constant instead of `predW`/`predH`, which overlaps and overruns the block). The other five survive, and
+the reason is structural rather than a coverage gap: **while every sub-prediction shares one motion
+vector, the loop's partitioning is unobservable**, because splitting a translation MC into exactly-tiling
+sub-blocks with the same MV reproduces the same pixels. Swapping `n4w`/`n4h` in the bounds, or taking
+`predH` from the wrong axis, still tile exactly and so still survive. Two further mutations are proven
+tautologies under the current gate (`(c >> sx) * 4` vs `(c * 4) >> sx` coincide whenever `bw4 >= 2`, hence
+an even `MiCol`) and one is vacuous (`Block_Width[planeSz]` and `Block_Width[MiSize] >> subX` differ on
+exactly the six gated sizes). All of these become witnessable in the next bite, where the quadrants carry
+**different** MVs. The evidence for this bite is the byte-identical suite plus the two coverage mutations.
+
+38 suites, **29,400** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.111] - 2026-07-19
 
 **Witnesses for the `is_scaled` gates that 0.7.110 made load-bearing.** Tests only — no shipped-code

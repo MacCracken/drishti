@@ -6,6 +6,45 @@
 
 ## Version
 
+**0.7.112** — cut 2026-07-19, not yet tagged (user's git). **compute_prediction GROUNDWORK — OUTPUT-NEUTRAL.**
+Two prerequisites for the sub-8x8 chroma sibling-MV bite, landed together because NEITHER is independently
+verifiable. Preceded by a multi-source understand workflow (spec 5.11.33 compute_prediction + 5.11.38
+get_plane_residual_size, dav1d recon_tmpl.c, libaom reconinter_template.inc) with three adversarial lenses;
+the ordering lens REFUTED the draft plan's mutation list as unsound, and the fixture lens CONFIRMED the
+central fixture EMPIRICALLY by building it in an isolated git worktree and running it.
+**(a) STORAGE LOOP 1 HOISTED above prediction** (av1_inter_store_mode split out of av1_inter_store_block,
+called before the plane loop on both lanes). The spec's decode_block writes YModes/RefFrames/Mvs/InterpFilters
+BEFORE compute_prediction() and the rest after residual(); drishti deferred BOTH to block end, equivalent only
+while nothing read the grid mid-block. **REQUIRED FOR LUMA, not just the sub-8x8 chroma case that motivated
+it:** compute_prediction's someUseIntra scan reads RefFrames at (candRow+r, candCol+c) and at LUMA
+candRow/candCol ARE the block's own MiRow/MiCol; the grid is zero-initialised and AV1_INTRA_FRAME==0, so a
+block that has not written its own cell reads ITSELF as intra -> geometry collapses, MV reads (0,0).
+**(b) THE PLANE LOOP RESTATED IN SPEC TERMS** — planeSz/num4x4W/H/baseX/baseY/predW/predH with the spec's y/x
+emission loop present but DEGENERATE (exactly one iteration for every currently-decodable block; predW x predH
+differs from the num4x4*4 extent only when a luma dim is 4 AND that axis is subsampled — precisely the gated
+sibling-span cases). OBMC moved OUTSIDE the emission loop (byte-identical while degenerate; per-quadrant it
+would blend neighbours in up to 4x). Plus a BLOCK_INVALID guard: Subsampled_Size really does carry a -1
+sentinel and av1_num_4x4_w would index OOB — unreachable for a legal stream, now a clean DR_ERR_BOUNDS.
+**VERIFICATION, STATED PRECISELY BECAUSE MOST OF IT IS NOT MUTATION-COVERABLE YET:** the hoist has NO
+available mutation witness and I CONFIRMED THAT BY BUILDING IT — reverting it leaves the whole suite green,
+because nothing reads the grid mid-block today, which is exactly why it is output-neutral. NOT reported as
+mutation-verified. For the loop restatement 2 of 7 mutations redden — the ones breaking COVERAGE (stepping by
+a constant instead of predW/predH overlaps and overruns). The other five survive for a STRUCTURAL reason, not
+a coverage gap: **while every sub-prediction shares ONE MV, the loop's PARTITIONING is unobservable**, because
+splitting a translation MC into exactly-tiling sub-blocks with the same MV reproduces identical pixels — so
+swapping n4w/n4h in the bounds, or taking predH from the wrong axis, still tile exactly and still survive.
+Two more are proven tautologies under the gate ((c>>sx)*4 == (c*4)>>sx whenever bw4>=2, hence even MiCol) and
+one is vacuous (Block_Width[planeSz] vs Block_Width[MiSize]>>subX differ on exactly the six gated sizes). ALL
+become witnessable in the NEXT bite, where the quadrants carry DIFFERENT MVs. Evidence here = the
+byte-identical suite (29,400 unchanged, ~1000 inter assertions incl. e2e pixel comparisons) + the two coverage
+mutations. LESSON: an output-neutral restatement of a loop is only witnessed in its COVERAGE, never its
+PARTITIONING, until the per-part inputs actually differ — do not claim otherwise. 38 suites, **29,400** suite
++ **1,140** fuzz assertions, all six gates green. Next: **lift the sibling-span gate and make the emission
+loop live — per-quadrant chroma prediction borrowing each sibling's MV from the MI grid.** The fixture is
+already proven constructible (four BLOCK_4X4 at MI (6..7,6..7) with four distinct MVs round-trip and each
+luma quadrant is bit-exact vs its own-MV oracle); note that a GREEN LUMA witness is NOT evidence for the
+hoist — luma reads the block's own ib and never touches the grid, so only a CHROMA comparison can redden it.
+
 **0.7.111** — cut 2026-07-19, not yet tagged (user's git). **WITNESSES FOR THE is_scaled GATES THAT 0.7.110
 MADE LOAD-BEARING.** Tests only, no shipped-code change. Until scaled references decoded these gates were
 OUTCOME-NEUTRAL (a scaled ref was rejected by the MC layer whatever the warp gate decided), and **all three
