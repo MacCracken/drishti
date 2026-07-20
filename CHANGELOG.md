@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.109] - 2026-07-19
+
+**The SCALED convolve kernel** (spec 7.11.3.4 with a non-unit step) — motion compensation from a
+reference whose dimensions differ from the current frame's. **Output-neutral**: the kernel is verified
+standalone and is not yet called from `av1_mc_pred_core`, so the whole existing suite passing unchanged
+is the no-regression proof. Wiring it is the next (and last) bite of the inter arc.
+
+### Added
+
+- **`av1_mc_put_8tap_scaled`** (`av1_mc.cyr`) — the two-pass stepping convolve. It is a separate kernel
+  rather than a `put_8tap` flag because a non-unit step changes the sub-pel **phase from sample to
+  sample**, so the filter row must be re-selected inside both loops. That also means the source window
+  is no longer a fixed rectangle — at the 2× bound a 128-wide block reads 262 source samples — so the
+  `emu_edge` gather serving the unscaled path (`AV1_MC_MAX_GATHER` = 135) **cannot** be reused. The
+  kernel therefore clamps **per tap** straight out of the `DrFrame`, exactly as the spec writes it, and
+  needs no gather buffer at all. Its rounding family (`6-ib` / `6+ib` / `6`) mirrors `put_8tap` so the
+  two agree bit-for-bit at step 1024.
+- **`av1_mc_8tap_clipped`** — one 8-tap dot product with each tap's column clamped to `[0, lastX]`. The
+  clip is **inside** the tap loop; hoisting it reads past the plane edge for any window straddling it.
+- **`Av1_McScaledMid`** + `av1_mc_scaled_mid_scratch` — a 262×128 i64 intermediate, deliberately kept
+  out of `av1_mc_drv_scratch` (whose OOM check is one disjunction, so a partial failure there would
+  return `DR_OK` with the pointer still 0 and turn every store into a wild write to address 0).
+- **`scripts/refs/scaled_mc_ref.py`** — the spec-convention oracle, importing the geometry from
+  `scaled_geom_ref` and the table from `bilinear_mc_ref` so each is transcribed exactly once.
+
+### Verification
+
+**K1, the identity differential, is the strongest test in this track and needs no golden at all**: at
+scale `1 << REF_SCALE_SHIFT` the geometry yields step 1024 and `startX = (pos16 << 6) + 32`, so the
+scaled kernel must reproduce the already-trusted `av1_mc_pred_block` bit-for-bit. It is not a tautology
+— `put_8tap` selects one filter row per block and takes **fused** rounding shortcuts on its 1D branches,
+while the scaled kernel always materialises the intermediate and re-derives the phase per sample, so
+the 15 cases deliberately include H-only, V-only and integer positions to exercise all three fused
+branches. It also crosses the gather boundary (`emu_edge` padding vs per-tap `Clip3`) via
+overhang cases. Plus 15 genuinely-scaled KATs (2× down/up, `h=128` at step 2048 hitting
+`intermediateHeight = 262` exactly, asymmetric non-square scales, both clamp directions, 4:2:0 chroma,
+10/12-bit, SHARP/mixed/BILINEAR, the `w<=4` remap, compound, and a 16×-smaller reference) and a
+hostile-input table.
+
+**22 mutations, 21 red.** Including both spec asymmetries that are easy to get wrong — the horizontal
+pass uses the **full** `startY` while the vertical uses only `startY & 1023`, and the `-3` tap offset
+belongs to the horizontal source column only — plus every shift, both phase-0 identities, the hoisted
+clip, and the filter-set axis selection. **Removing the `w`/`h` cap segfaults (rc 139)**, concretely
+demonstrating why an `intermediateHeight`-only reject is insufficient: `(h-1) * stepY` is an i64
+multiply, and `h-1 == 2^54` with `stepY == 1024` wraps the product to exactly 0, yielding
+`intermediateHeight == 8` — which passes any check on the height alone while the vertical loop runs
+2^54 iterations off the end of the buffer. A test pins that wrap directly.
+
+**One mutation survived, and is recorded rather than glossed:** deleting the scratch's `DR_ERR_OOM`
+null-check leaves every test green. `alloc` never fails under test and drishti has no allocator
+fault-injection harness, so **no `DR_ERR_OOM` branch anywhere in the repo is mutation-covered**. This
+is a real, repo-wide coverage gap, not a proof; it is noted at the allocator.
+
+38 suites, **29,324** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.108] - 2026-07-19
 
 **BILINEAR motion compensation + the 7.11.3.3 scaling geometry.** Two halves of the last

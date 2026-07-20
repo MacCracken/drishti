@@ -6,6 +6,41 @@
 
 ## Version
 
+**0.7.109** — cut 2026-07-19, not yet tagged (user's git). **THE SCALED CONVOLVE KERNEL (spec 7.11.3.4 with a
+non-unit step) — OUTPUT-NEUTRAL, not yet wired.** The largest and riskiest bite of the track; only the wiring
+(B4) and the is_scaled gate witnesses (B5) remain before inter frames decode end-to-end. av1_mc.cyr:
+av1_mc_put_8tap_scaled — a SEPARATE kernel, not a put_8tap flag, because a non-unit step changes the sub-pel
+PHASE from sample to sample so the filter row must be re-selected inside both loops; that also means the source
+window is no longer a fixed rectangle (at the 2x bound a 128-wide block reads 262 source samples), so the
+emu_edge gather serving the unscaled path (AV1_MC_MAX_GATHER=135) CANNOT be reused — the kernel clamps PER TAP
+straight out of the DrFrame (av1_mc_8tap_clipped, clip INSIDE the tap loop) and needs no gather buffer at all.
+Rounding family 6-ib / 6+ib / 6 mirrors put_8tap so the two agree bit-for-bit at step 1024. Phase 0 is inline
+in both passes because drishti's table DROPS the spec's phase-0 identity row (index p is the spec's p+1): the
+identity makes the H dot px<<ib and the V dot av1_round2(m, ib), sampling the CENTRE tap (t==3). New
+Av1_McScaledMid (262*128 i64) with a DEDICATED lazy allocator — kept out of av1_mc_drv_scratch whose OOM check
+is one disjunction (a partial failure there returns DR_OK with the pointer still 0 -> a wild write to address
+0). PROOF: **K1, the identity differential, needs NO golden** — at scale 1<<14 the geometry gives step 1024 and
+startX=(pos16<<6)+32, so the scaled kernel must reproduce the already-trusted av1_mc_pred_block bit-for-bit.
+NOT a tautology: put_8tap picks one filter row per block and takes FUSED rounding shortcuts on its 1D branches
+while the scaled kernel always materialises the intermediate and re-derives the phase per sample, so the 15
+cases deliberately include H-only / V-only / integer to exercise all three fused branches, plus overhang cases
+that cross the gather boundary (emu_edge padding vs per-tap Clip3). Then 15 genuinely-scaled KATs from
+scripts/refs/scaled_mc_ref.py (spec convention) + a hostile-input table. MUTATIONS: 22 run, **21 red**. Both
+spec asymmetries are pinned — the H pass uses the FULL startY while the V pass uses only (startY & 1023), and
+the -3 tap offset belongs to the H source column ONLY — plus every shift, both phase-0 identities, the hoisted
+clip, and the filter-set axis selection. **Removing the w/h cap SEGFAULTS (rc 139)**, concretely proving the
+memory-safety lens right that an intermediateHeight-only reject is insufficient: (h-1)*stepY is an i64 multiply
+and h-1==2^54 with stepY==1024 wraps the product to exactly 0 -> intermediateHeight 8 passes any height-only
+check while the V loop runs 2^54 iterations off the end. A test pins that wrap directly.
+**THE ONE SURVIVOR, recorded not glossed:** deleting the scratch's DR_ERR_OOM null-check leaves every test
+green — alloc never fails under test and drishti has NO allocator fault-injection harness, so NO DR_ERR_OOM
+branch anywhere in the repo is mutation-covered. A real repo-wide coverage gap; noted at the allocator, and a
+candidate for the 0.11.x audit arc. 38 suites, **29,324** suite + **1,140** fuzz assertions, all six gates
+green. Next: **B4 = wire the scaled path into av1_mc_pred_core (bit-depth/subsampling stay HARD rejects, exact
+dims become the unscaled fast-path selector, any dim difference runs av1_mc_scale_valid then the scaled kernel;
+warp KEEPS rejecting a scaled ref) — the OUTPUT-CHANGING bite that closes the inter arc; then B5 the gate
+witnesses.**
+
 **0.7.108** — cut 2026-07-19, not yet tagged (user's git). **BILINEAR MC (output-CHANGING, lifts an explicit
 reject) + the 7.11.3.3 SCALING GEOMETRY (output-neutral leaves).** Two halves of the last inter track; only
 scaled-reference MC now remains. **BILINEAR:** av1_mc_filter_set gained `f == 3 -> set 5` and

@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.108 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc COMPLETE + INTER-INTRA & COMPOUND-GLOBAL WARP — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels; temporal MV prediction is fully wired (0.7.102 saves each inter frame's per-8×8 motion field into the DPB, 0.7.103 builds motion_field_estimation, 0.7.104 the temporal scan folds projected temporal MVs into the candidate stack); 0.7.105 warps the inter part of a GLOBALWARP inter-intra block, 0.7.106 warps each reference of a compound GLOBAL_GLOBALMV block (a latent-mis-decode fix), 0.7.107 factors the filter-set and reference-geometry gates into leaves, and 0.7.108 lands the BILINEAR interpolation filter + the 7.11.3.3 scaling geometry; 8/10/12-bit, multi-tile, superres; next: scaled-reference MC — the LAST inter track)
+## Status — 0.7.109 (AV1 decode: THREE INTER MOTION MODES + the TEMPORAL-MV arc COMPLETE + INTER-INTRA & COMPOUND-GLOBAL WARP — LOCALWARP (0.7.98) + GLOBALWARP (0.7.100) + OBMC (0.7.101) all decode to pixels; temporal MV prediction is fully wired (0.7.102-0.7.104); 0.7.105 warps the inter part of a GLOBALWARP inter-intra block, 0.7.106 warps each reference of a compound GLOBAL_GLOBALMV block (a latent-mis-decode fix), 0.7.107 factors the filter-set and reference-geometry gates into leaves, 0.7.108 lands the BILINEAR filter + the 7.11.3.3 scaling geometry, and 0.7.109 the SCALED convolve kernel (verified standalone against the unscaled path bit-for-bit); 8/10/12-bit, multi-tile, superres; next: WIRE the scaled path — the last bite of the inter arc)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,129 suite assertions + 1,140 fuzz
+derived, and adversarially tested (29,324 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

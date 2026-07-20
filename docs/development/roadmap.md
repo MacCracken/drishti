@@ -361,7 +361,9 @@ Baseline (0.7.0): OBU layer + sequence header.
   scaling geometry 0.7.108** (`av1_mc_filter_set` admits filter 3 -> the already-present bilinear set 5, the
   `av1_mc_pred_core` reject lifted; plus `av1_mc_scale_valid`/`_scaled_step`/`_scaled_start`/`_scaled_last`/
   `_scaled_mid_h` as unwired KAT'd leaves, and `av1_scale_factor` shared with `av1_is_scaled`).
-  Then scaled-reference MC — the LAST
+  Then the **scaled convolve kernel 0.7.109** (`av1_mc_put_8tap_scaled` — the two-pass stepping convolve
+  with per-tap `Clip3` reads and its own 262x128 intermediate; verified standalone, bit-identical to the
+  unscaled path at step 1024). Then WIRING it — the LAST
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

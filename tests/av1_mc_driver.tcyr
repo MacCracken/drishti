@@ -84,6 +84,196 @@ fn mcd_case(name, fw, fh, planes, subx, suby, bd, plane, x, y, w, h, mvr, mvc, f
     return 0;
 }
 
+# ================================================================
+# The SCALED convolve av1_mc_put_8tap_scaled (spec 7.11.3.4 with a non-unit step), 0.7.109.
+# ================================================================
+var Mcs_Out = 0;
+fn mcs_out(): i64 {
+    if (Mcs_Out == 0) { Mcs_Out = alloc((128 * 128) * 8); }
+    return Mcs_Out;
+}
+# position-weighted checksum of a w x h i64 block, row stride w — matches the ref port's.
+fn mcs_cs(buf, w, h): i64 {
+    var cs = 0;
+    var i = 0;
+    while (i < (w * h)) { cs = cs + (load64(buf + (i * 8)) * (i + 1)); i = i + 1; }
+    return cs;
+}
+
+# K1 — THE IDENTITY DIFFERENTIAL, and the single strongest test in this track: it needs NO
+# golden at all. At scale == 1 << REF_SCALE_SHIFT the 7.11.3.3 geometry gives stepX/stepY of
+# exactly 1024 and startX/startY of (pos16 << 6) + 32, so the scaled kernel must reproduce
+# the ALREADY-TRUSTED unscaled path (av1_mc_pred_block -> put_8tap) BIT-FOR-BIT.
+#
+# It is a genuine cross-check of two independent implementations, not a tautology: put_8tap
+# selects one filter row per block and takes FUSED rounding shortcuts for its 1D branches
+# (H-only rounds (hs + irnd) >>> 6, V-only rounds by 6 not 6+ib, integer copies outright),
+# while the scaled kernel always materialises the intermediate and re-derives the phase per
+# sample. The case table therefore MUST include mx!=0/my==0, mx==0/my!=0 and mx==my==0 or
+# those three fused branches go unexercised. It also crosses the gather boundary: the
+# unscaled path clamps via emu_edge into a padded buffer, the scaled one clamps per tap
+# straight out of the DrFrame, so the edge-overhang rows check those agree too.
+fn mcs_ident(name, fw, fh, planes, subx, suby, bd, plane, x, y, w, h, mvr, mvc, fx, fy) {
+    var ref = mcd_pair(fw, fh, planes, subx, suby, bd, 0);
+    var d = Mcd_Dst;
+    assert_eq(av1_mc_pred_block(d, ref, plane, x, y, w, h, mvr, mvc, fx, fy), DR_OK, name);
+    var sx = 0;
+    var sy = 0;
+    if (plane > 0) {
+        sx = subx;
+        sy = suby;
+    }
+    var unit = 1 << AV1_REF_SCALE_SHIFT;
+    var startx = av1_mc_scaled_start(x, mvc, sx, unit);
+    var starty = av1_mc_scaled_start(y, mvr, sy, unit);
+    var step = av1_mc_scaled_step(unit);
+    assert_eq(step, 1024, name);
+    var o = mcs_out();
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, w, ref, plane, startx, starty, step, step,
+    w, h, fx, fy, bd, 0), DR_OK, name);
+    var bad = 0;
+    var r = 0;
+    while (r < h) {
+        var c = 0;
+        while (c < w) {
+            if (load64(o + (((r * w) + c) * 8)) != dr_frame_get(d, plane, x + c, y + r)) {
+                bad = bad + 1;
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(bad, 0, name);
+    return 0;
+}
+
+fn test_mc_scaled_identity() {
+    #          name                fw  fh  pl sx sy  bd  p   x   y   w   h    mvr   mvc  fx fy
+    # the four put_8tap branches: H+V, H-only, V-only, integer. The three 1D ones are what
+    # exercise its FUSED rounding against the scaled kernel's always-two-pass form.
+    mcs_ident("k1 hv", 24, 18, 3, 1, 1, 8, 0, 10, 8, 8, 8, 0 - 13, 21, 0, 0);
+    mcs_ident("k1 h-only", 24, 18, 3, 1, 1, 8, 0, 8, 5, 8, 8, 0, 3, 0, 0);
+    mcs_ident("k1 v-only", 24, 18, 3, 1, 1, 8, 0, 6, 4, 8, 8, 5, 0, 0, 0);
+    mcs_ident("k1 integer", 24, 18, 3, 1, 1, 8, 0, 4, 3, 8, 8, 0, 0, 0, 0);
+    # edge overhang, both directions: emu_edge padding vs per-tap Clip3 must agree.
+    mcs_ident("k1 tl-overhang", 24, 18, 3, 1, 1, 8, 0, 0, 0, 8, 8, 0 - 9, 0 - 7, 0, 0);
+    mcs_ident("k1 br-overhang", 24, 18, 3, 1, 1, 8, 0, 16, 10, 8, 8, 60, 50, 0, 0);
+    mcs_ident("k1 wholly-out", 24, 18, 3, 1, 1, 8, 0, 8, 8, 8, 8, 0, 512, 0, 0);
+    # subsampled chroma (sub enters origX), the narrow 4-tap remap, mixed + BILINEAR filters.
+    mcs_ident("k1 chroma", 24, 18, 3, 1, 1, 8, 1, 3, 2, 4, 4, 7, 0 - 5, 0, 1);
+    mcs_ident("k1 w4-sharp", 24, 18, 3, 1, 1, 8, 0, 5, 5, 4, 8, 0, 9, 2, 2);
+    mcs_ident("k1 mixed-filt", 24, 18, 3, 1, 1, 8, 0, 6, 6, 8, 8, 11, 19, 1, 2);
+    mcs_ident("k1 bilinear", 24, 18, 3, 1, 1, 8, 0, 6, 6, 8, 8, 11, 19, 3, 3);
+    # 10- and 12-bit (12-bit moves ib to 2, so every round shifts).
+    mcs_ident("k1 10-bit", 16, 12, 1, 0, 0, 10, 0, 4, 4, 8, 8, 0 - 3, 5, 0, 0);
+    mcs_ident("k1 12-bit", 16, 12, 1, 0, 0, 12, 0, 4, 4, 8, 8, 0 - 3, 5, 0, 0);
+    # a 16x16 block, and a 4x4 (both dims narrow).
+    mcs_ident("k1 big-16x16", 48, 32, 3, 1, 1, 8, 0, 12, 9, 16, 16, 0 - 27, 43, 0, 1);
+    mcs_ident("k1 4x4", 24, 18, 3, 1, 1, 8, 0, 5, 5, 4, 4, 7, 9, 0, 0);
+    return 0;
+}
+
+# Genuinely-scaled known answers, from scripts/refs/scaled_mc_ref.py (spec convention:
+# 16 phases, rows summing to 128, spec InterRound0/InterRound1 — so agreement with drishti's
+# halved dav1d convention is a cross-convention result).
+fn mcs_mc(name, rw, rh, dw, dh, planes, subx, suby, bd, plane, x, y, w, h, mvr, mvc,
+fx, fy, comp, cs, first, last) {
+    var oe = alloc(8);
+    var ref = dr_frame_new(rw, rh, planes, subx, suby, bd, 0, oe);
+    assert_eq(load64(oe), DR_OK, name);
+    mcd_fill(ref);
+    var sx = 0;
+    var sy = 0;
+    if (plane > 0) {
+        sx = subx;
+        sy = suby;
+    }
+    # the scale factors are LUMA-derived and apply to every plane; subsampling enters only
+    # through origX and through lastX/lastY (which the kernel takes from the ref itself).
+    var xs = av1_scale_factor(rw, dw);
+    var ys = av1_scale_factor(rh, dh);
+    assert_eq(av1_mc_scale_valid(rw, rh, dw, dh), 1, name);
+    var o = mcs_out();
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, w, ref, plane,
+    av1_mc_scaled_start(x, mvc, sx, xs), av1_mc_scaled_start(y, mvr, sy, ys),
+    av1_mc_scaled_step(xs), av1_mc_scaled_step(ys), w, h, fx, fy, bd, comp), DR_OK, name);
+    assert_eq(mcs_cs(o, w, h), cs, name);
+    assert_eq(load64(o + 0), first, name);
+    assert_eq(load64(o + ((((h - 1) * w) + (w - 1)) * 8)), last, name);
+    return 0;
+}
+
+fn test_mc_scaled_known_answers() {
+    mcs_mc("s01 2x-down luma", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 0, 177987, 178, 103);
+    mcs_mc("s02 2x-up luma", 64, 64, 32, 32, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 0, 261315, 218, 112);
+    mcs_mc("s03 2x-up h128 maxmid", 64, 64, 32, 32, 1, 0, 0, 8, 0, 0, 0, 8, 128, 0, 0, 0, 0, 0,
+    63933595, 21, 182);
+    mcs_mc("s04 asymmetric", 40, 24, 20, 18, 1, 0, 0, 8, 0, 4, 3, 8, 8, 11, 19, 0, 0, 0, 277054, 167, 213);
+    mcs_mc("s05 neg clamp", 48, 48, 32, 32, 1, 0, 0, 8, 0, 0, 0, 8, 8, 0 - 40, 0 - 40, 0, 0, 0,
+    105746, 0, 186);
+    mcs_mc("s06 far clamp", 48, 48, 32, 32, 1, 0, 0, 8, 0, 24, 24, 8, 8, 200, 200, 0, 0, 0, 526240, 253, 253);
+    mcs_mc("s07 chroma 420", 40, 24, 20, 18, 3, 1, 1, 8, 1, 2, 2, 4, 4, 7, 0 - 5, 0, 0, 0, 16183, 236, 193);
+    mcs_mc("s08 10-bit", 32, 32, 16, 16, 1, 0, 0, 10, 0, 4, 4, 8, 8, 0 - 3, 5, 0, 0, 0, 1590450, 427, 92);
+    mcs_mc("s09 12-bit", 32, 32, 16, 16, 1, 0, 0, 12, 0, 4, 4, 8, 8, 0 - 3, 5, 0, 0, 0, 1757948, 427, 1089);
+    mcs_mc("s10 sharp", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 2, 2, 0, 176515, 184, 107);
+    mcs_mc("s11 mixed filters", 40, 24, 20, 18, 1, 0, 0, 8, 0, 4, 3, 8, 8, 11, 19, 1, 2, 0, 266936, 175, 207);
+    mcs_mc("s12 bilinear scaled", 40, 24, 20, 18, 1, 0, 0, 8, 0, 4, 3, 8, 8, 11, 19, 3, 3, 0,
+    275724, 168, 202);
+    mcs_mc("s13 w4 remap", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 4, 8, 5, 0 - 3, 0, 0, 0, 48737, 178, 37);
+    mcs_mc("s14 compound", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 1, 2858049, 2850, 1654);
+    mcs_mc("s15 16x-smaller", 4, 4, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 0, 18439, 0, 17);
+    return 0;
+}
+
+# Hostile input. The scaled kernel takes w/h/step as RAW parameters, three frames below
+# av1_mc_pred_core's own caps, so it must bound them itself.
+fn test_mc_scaled_rejects() {
+    var oe = alloc(8);
+    var ref = dr_frame_new(32, 32, 1, 0, 0, 8, 0, oe);
+    mcd_fill(ref);
+    var o = mcs_out();
+    assert_eq(av1_mc_put_8tap_scaled(0, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: null out");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, 0, 0, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: null ref");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 1, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: plane out of range");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0 - 1, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: negative plane");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 0, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: zero width");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 129, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: oversize height");
+    # THE WRAPPING MULTIPLY. (h - 1) * stepy is an i64 multiply: h - 1 == 2^54 with
+    # stepy == 1024 wraps the product to exactly 0, so av1_mc_scaled_mid_h returns 8 and an
+    # intermediateHeight-only check would PASS — after which the vertical loop runs 2^54
+    # iterations off the end of the buffer. Only bounding h itself catches it.
+    assert_eq(av1_mc_scaled_mid_h((1 << 54) + 1, 1024), 8, "wrapped (h-1)*step gives midH 8");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, (1 << 54) + 1,
+    0, 0, 8, 0), DR_ERR_BOUNDS, "scaled: wrapping h rejected by the h cap");
+    # step bounds: 0 would make every output sample the same, and > 2048 is beyond the
+    # conformance ratio and would overrun the intermediate.
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 0, 1024, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: zero stepX");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 4096, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: stepY beyond the conformance cap");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 0 - 1024, 8, 8, 0, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: negative stepY");
+    # filter index: 4 would read past the 6-set blob via av1_mc_subpel_row.
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 8, 4, 0, 8, 0),
+    DR_ERR_BOUNDS, "scaled: filter fx out of range");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 8, 0, 0 - 1, 8, 0),
+    DR_ERR_BOUNDS, "scaled: filter fy negative");
+    # a hostile START is SAFE by construction, not by a check: every reference read is
+    # av1_clip3'd to the plane, and the vertical index depends only on (starty & 1023),
+    # which is non-negative because Cyrius & is bitwise two's-complement.
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0 - 999999, 0 - 999999, 1024, 1024,
+    8, 8, 0, 0, 8, 0), DR_OK, "scaled: hostile negative start is clamped, not rejected");
+    assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 999999, 999999, 1024, 1024,
+    8, 8, 0, 0, 8, 0), DR_OK, "scaled: hostile positive start is clamped");
+    return 0;
+}
+
 fn test_mc_pos16() {
     # the 7.11.3.3 unscaled split needs floor semantics on negative positions:
     # x=0, mv=-1, sub=0 -> pos16 = -2 -> integer -1, phase 14 (NOT truncation's 0/-2).
@@ -1489,6 +1679,11 @@ fn main() {
     test_mc_pred_chroma_full();
     test_group("MC driver BILINEAR filter (7.11.3.4 set 3 -> drishti set 5)");
     test_mc_pred_bilinear();
+    test_group("SCALED convolve (7.11.3.4 non-unit step) — identity differential");
+    test_mc_scaled_identity();
+    test_group("SCALED convolve known answers + hostile input");
+    test_mc_scaled_known_answers();
+    test_mc_scaled_rejects();
     test_group("MC driver write confinement + border independence");
     test_mc_pred_confinement();
     test_mc_pred_border_independent();

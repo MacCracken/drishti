@@ -538,6 +538,160 @@ fn av1_mc_put_8tap(dst, doff, dstride, src, soff, sstride, w, h, mx, my, filter_
     return DR_OK;
 }
 
+# ================================================================
+# The SCALED convolve (spec 7.11.3.4 with a non-unit step) — motion compensation from a
+# reference whose dimensions differ from the current frame's. Verified STANDALONE like
+# put_8tap and the warp kernel; NOT yet wired into av1_mc_pred_core (roadmap.md).
+#
+# WHY IT IS A SEPARATE KERNEL AND NOT A put_8tap FLAG: when the step is not 1024, the
+# sub-pel PHASE changes from output sample to output sample, so the filter row must be
+# re-selected inside both loops rather than chosen once per block. That also means the
+# source window is no longer a fixed (w+7) x (h+7) rectangle — at the 2x-upscale bound a
+# 128-wide block reads 262 source samples — so the emu_edge gather that serves the unscaled
+# path (Av1_McRect / Av1_McGather, sized AV1_MC_MAX_GATHER = 135) CANNOT be reused. This
+# kernel therefore clamps PER TAP with av1_clip3 straight out of the DrFrame, exactly as
+# the spec writes it, and needs no gather buffer at all.
+# ================================================================
+
+# Largest intermediate array the scaled H pass can produce:
+#   ((AV1_MC_MAX_BLK - 1) * AV1_MC_MAX_STEP + 1023) >> 10) + 8  ==  ((127 * 2048 + 1023) >> 10) + 8
+# The vertical pass reads mid[(p >> 10) + t] up to index AV1_MC_MAX_MID - 1 EXACTLY, for every
+# legal step — the buffer is tight with ZERO slack, so a one-row sizing error is an immediate
+# out-of-bounds read, not a latent one. tests/av1_mc.tcyr pins both the value and the fact
+# that av1_mc_scaled_mid_h never exceeds it over the whole legal (h, step) space.
+enum Av1McScaledBuf {
+    AV1_MC_MAX_MID = 262;
+}
+
+# Kept OUT of av1_mc_drv_scratch deliberately: that function's OOM check is one big
+# disjunction, and a partial failure there would return DR_OK with this pointer still 0,
+# turning every store into a wild write to address 0. A dedicated lazy allocator whose
+# caller null-checks the result (the av1_mc_mid_scratch precedent) also keeps 268 KB off the
+# heap for the overwhelmingly common streams that never use a scaled reference.
+#
+# The caller's `mid == 0 -> DR_ERR_OOM` branch is UNWITNESSED by the suite: alloc never fails
+# under test and drishti has no allocator fault-injection harness, so deleting that check
+# leaves every test green. That is the same posture as every other lazy scratch in this file
+# (av1_mc_mid_scratch, av1_mc_drv_scratch) and repo-wide — no DR_ERR_OOM branch anywhere is
+# mutation-covered. Recorded rather than glossed: it is a real coverage gap, not a proof.
+var Av1_McScaledMid = 0;
+fn av1_mc_scaled_mid_scratch(): i64 {
+    if (Av1_McScaledMid != 0) { return Av1_McScaledMid; }
+    Av1_McScaledMid = alloc((AV1_MC_MAX_MID * AV1_MC_MAX_BLK) * 8);
+    return Av1_McScaledMid;
+}
+
+# One 8-tap dot product against a reference plane ROW, clamping each tap's column to
+# [0, lastX] (spec 7.11.3.4 reads ref[plane][Clip3(0,lastY,..)][Clip3(0,lastX,..)]).
+# `sy` must ALREADY be clamped by the caller. dr_frame_get bounds-checks nothing, so these
+# two clamps are the whole memory-safety story for the scaled path's reference reads.
+# The clip is INSIDE the tap loop: hoisting it (clamping the base, then adding t) would read
+# past the plane edge for any block whose window straddles it.
+fn av1_mc_8tap_clipped(ref, plane, sy, sx0, lastx, f): i64 {
+    var s = 0;
+    var t = 0;
+    while (t < 8) {
+        var sx = av1_clip3(0, lastx, (sx0 + t) - 3);
+        s = s + (load64(f + (t * 8)) * dr_frame_get(ref, plane, sx, sy));
+        t = t + 1;
+    }
+    return s;
+}
+
+# av1_mc_put_8tap_scaled (spec 7.11.3.4) — predict a w x h block into out[doff..] (row
+# stride dstride) from reference frame `ref` plane `plane`, given the 7.11.3.3 geometry
+# (startX/startY and stepX/stepY, all in 1/1024 sample; av1_mc_scaled_start / _scaled_step).
+# filt_x / filt_y are the interpolation filters 0..3. compound=0 gives the final Clip1'd
+# pixel, compound=1 the bit_depth+ib intermediate for the compound combine — the same
+# contract as av1_mc_put_8tap, whose rounding family (6-ib / 6+ib / 6) this mirrors exactly
+# so the scaled and unscaled paths agree bit-for-bit at step 1024.
+#
+# lastX / lastY come from the REFERENCE's own plane dims rather than being passed in: making
+# the clamp depend on a dimension the caller supplies would put every reference read's memory
+# safety at the mercy of a check three call frames up.
+#
+# Phase 0 is handled INLINE in both passes rather than by a table row, because drishti's
+# Subpel_Filters (dav1d convention) drops the spec's phase-0 identity row — index p here is
+# the spec's phase p+1. At phase 0 the identity row {0,0,0,64,0,0,0,0} makes the H dot
+# Round2(64*px, 6-ib) == px << ib and the V dot Round2(64*m, 6+ib) == av1_round2(m, ib), and
+# the sample used is the CENTRE tap (t == 3).
+fn av1_mc_put_8tap_scaled(out, doff, dstride, ref, plane, startx, starty, stepx, stepy,
+w, h, filt_x, filt_y, bit_depth, compound): i64 {
+    if ((out == 0) || (ref == 0)) { return DR_ERR_BOUNDS; }
+    if ((plane < 0) || (plane >= dr_frame_num_planes(ref))) { return DR_ERR_BOUNDS; }
+    # These caps are NOT redundant with the caller's. (h - 1) * stepy is an i64 multiply that
+    # WRAPS: a hostile h near 2^54 with stepy 1024 wraps the product to 0, making
+    # intermediateHeight 8 — which would sail past any bound check on the height alone while
+    # the vertical loop ran 2^54 iterations off the end of the buffer. Bound the INPUTS.
+    if ((w < 1) || (h < 1) || (w > AV1_MC_MAX_BLK) || (h > AV1_MC_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    if ((stepx < 1) || (stepy < 1) || (stepx > AV1_MC_MAX_STEP) || (stepy > AV1_MC_MAX_STEP)) {
+        return DR_ERR_BOUNDS;
+    }
+    # av1_mc_subpel_row does no bounds check and the blob is exactly 6*15*8 i64; the filter
+    # set must land inside it. av1_mc_filter_set is total, but reject junk here anyway so a
+    # caller cannot quietly get set 3 for a filter it never meant.
+    if ((filt_x < 0) || (filt_x > 3) || (filt_y < 0) || (filt_y > 3)) { return DR_ERR_BOUNDS; }
+    var mid = av1_mc_scaled_mid_scratch();
+    if (mid == 0) { return DR_ERR_OOM; }
+    var ib = 4;
+    if (bit_depth == 12) { ib = 2; }
+    var lastx = dr_frame_plane_width(ref, plane) - 1;
+    var lasty = dr_frame_plane_height(ref, plane) - 1;
+    if ((lastx < 0) || (lasty < 0)) { return DR_ERR_BOUNDS; }
+    var inter_h = av1_mc_scaled_mid_h(h, stepy);
+    if (inter_h > AV1_MC_MAX_MID) { return DR_ERR_BOUNDS; }   # defence in depth
+    var hset = av1_mc_filter_set(filt_x, w);
+    var vset = av1_mc_filter_set(filt_y, h);
+
+    # ---- horizontal pass: intermediate[inter_h][w], source rows (starty >> 10) + r - 3 ----
+    var r = 0;
+    while (r < inter_h) {
+        var sy = av1_clip3(0, lasty, ((starty >>> AV1_SCALE_SUBPEL_BITS) + r) - 3);
+        var c = 0;
+        while (c < w) {
+            var p = startx + (stepx * c);
+            var ph = (p >>> 6) & AV1_SUBPEL_MASK;
+            var sx0 = p >>> AV1_SCALE_SUBPEL_BITS;
+            var v = 0;
+            if (ph == 0) {
+                v = dr_frame_get(ref, plane, av1_clip3(0, lastx, sx0), sy) << ib;
+            } else {
+                v = av1_round2(av1_mc_8tap_clipped(ref, plane, sy, sx0, lastx,
+                av1_mc_subpel_row(hset, ph - 1)), 6 - ib);
+            }
+            store64(mid + (((r * w) + c) * 8), v);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+
+    # ---- vertical pass: only the FRACTIONAL part of starty is used here, because its
+    # integer part was already consumed as the horizontal pass's row origin. ----
+    r = 0;
+    while (r < h) {
+        var p = (starty & 1023) + (stepy * r);
+        var ph = (p >>> 6) & AV1_SUBPEL_MASK;
+        var row = p >>> AV1_SCALE_SUBPEL_BITS;
+        var c = 0;
+        while (c < w) {
+            var o = 0;
+            if (ph == 0) {
+                var m = load64(mid + ((((row + 3) * w) + c) * 8));
+                o = m;
+                if (compound == 0) { o = dr_clip1(av1_round2(m, ib), bit_depth); }
+            } else {
+                var vs = av1_mc_8tap(mid, ((row + 3) * w) + c, w, av1_mc_subpel_row(vset, ph - 1));
+                o = av1_round2(vs, 6);
+                if (compound == 0) { o = dr_clip1(av1_round2(vs, 6 + ib), bit_depth); }
+            }
+            store64(out + (((doff + (r * dstride)) + c) * 8), o);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return DR_OK;
+}
+
 # av1_warp_affine_8x8 (spec 7.11.3.5 / dav1d warp_affine_8x8_c) — the per-8x8 warp KERNEL:
 # a two-pass separable filter of the padded reference block `src` (top-left of THIS 8x8 at
 # element `soff`, row stride sstride) into the 8x8 output dst[doff..] (row stride dstride),

@@ -24,6 +24,7 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 | `inter_frame_ref.py` | `inter_frame_mode_info` (5.11.15) outer dispatch — the `read_skip_mode` gate (5.11.11), the skip forcing, the `is_inter` selection, the outer schedules | `tests/av1_intermode.tcyr` (`test_skip_mode_leaf`, `test_is_inter_dispatch`, `test_inter_frame_mode_info`) |
 | `bilinear_mc_ref.py` | BILINEAR motion compensation (7.11.3.4) + the whole unscaled single-ref translation MC path; written in the **spec** convention (16 phases, rows summing to 128) as a cross-convention check on drishti's halved dav1d one. Table machine-generated from the digest-pinned spec markdown; self-validates by reproducing all 17 pre-existing driver KATs first | `tests/av1_mc_driver.tcyr` (`test_mc_pred_bilinear`), `tests/av1_mc.tcyr` (`test_filter_set_selection`) |
 | `scaled_geom_ref.py` | the motion vector scaling process (7.11.3.3) — scale factors, `startX`/`startY`, `stepX`/`stepY`, `lastX`/`lastY`, `intermediateHeight` — cross-checked against libaom's different algebraic form of `startX` over 2688 combinations | `tests/av1_mc.tcyr` (`test_scaled_geometry`, `test_scaled_geometry_bounds`) |
+| `scaled_mc_ref.py` | the scaled convolve (7.11.3.4 with a non-unit step) — imports the geometry from `scaled_geom_ref` and the table from `bilinear_mc_ref` so each is transcribed exactly once | `tests/av1_mc_driver.tcyr` (`test_mc_scaled_known_answers`) |
 
 ## Why these live in the repo
 
