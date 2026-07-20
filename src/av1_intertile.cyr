@@ -4,12 +4,23 @@
 # into decode_block / decode_tile, so av1_decode_stream decodes a GENUINE inter frame
 # referencing the decoded-picture buffer.
 #
-# SCOPE — the SKIP PATH (skip = 1 inter blocks): the MC prediction IS the
-# reconstruction (no residual), tx_size is the largest rect size with NO symbols
-# (5.11.15), single-reference translation-only SIMPLE prediction on an unscaled
-# reference. Gated DR_ERR_UNSUPPORTED, each a tracked later bite (roadmap.md):
-# the non-skip inter residual (var-tx reads + inter coeffs), compound averaging,
-# inter-intra blending, OBMC / warped motion, scaled-reference / BILINEAR MC.
+# SCOPE (current, as of 0.7.110 — this list was badly stale and is now re-derived from the
+# gates below): skip AND non-skip blocks; single-reference and compound (AVERAGE / DISTANCE /
+# DIFFWTD / WEDGE); inter-intra (smooth + wedge); all three motion modes SIMPLE / OBMC /
+# LOCALWARP, plus GLOBALWARP and the compound + inter-intra warp forms; every interpolation
+# filter including BILINEAR; and both unscaled and SCALED references.
+#
+# Still gated DR_ERR_UNSUPPORTED, each a tracked later bite (roadmap.md):
+#   - a sub-8x8 block whose CHROMA UNIT SPANS SIBLING blocks (subx && bw4==1, or
+#     suby && bh4==1). The spec's compute_prediction predicts the full even-aligned chroma
+#     unit using the SIBLINGS' MVs read back from the MI grid; drishti predicts per block.
+#     Rejected on GEOMETRY ALONE, before any symbol is read — never silent garbage.
+#   - an INTER-INTRA block that OVERHANGS the frame edge: av1_intra_predict writes the
+#     NOMINAL block extent without clamping to the plane, so a nominal extent past the plane
+#     would write out of bounds.
+# The compound-type and motion-mode gates further down are DEFENSIVE, not scope limits: the
+# compound_type alphabet is 2 values and the motion-mode enum has exactly 3, so both are
+# unreachable from any conformant bitstream.
 # fwd_eq_bck (the compound_idx ctx's order-hint state, 5.11.29) is STILL threaded as 0:
 # the fix (av1_ref_dist(ref0)==av1_ref_dist(ref1)) only shifts a single binary symbol's
 # CDF context, which a self-consistent drishti round-trip cannot witness fail — it needs an

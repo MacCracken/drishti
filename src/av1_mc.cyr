@@ -1017,9 +1017,13 @@ fn av1_mc_scaled_mid_h(h, step_y): i64 {
 # (EIGHTTAP / EIGHTTAP_SMOOTH / EIGHTTAP_SHARP / BILINEAR — spec InterpFilters[..][1] /
 # [..][0]; the w<=4 / h<=4 4-tap remap happens inside put_8tap, and does NOT apply to
 # BILINEAR). Any MV is safe: out-of-frame reads clamp to the edge (7.11.3.4).
-# Returns DR_OK, or
-#   DR_ERR_UNSUPPORTED — scaled / mismatched reference (the last bite of the inter
-#                        arc; roadmap.md)
+# A SCALED reference (dimensions differing from the current frame's) is predicted through
+# the full 7.11.3.3 geometry + av1_mc_put_8tap_scaled; an unscaled one takes the faster
+# gather + put_8tap path. Returns DR_OK, or
+#   DR_ERR_UNSUPPORTED — reference bit depth or subsampling differs from the current frame
+#   DR_ERR_BAD_HEADER  — reference/current size ratio outside the 7.11.3.3 conformance
+#                        bounds (a reference may be at most 2x larger, and at most 16x
+#                        smaller, on each axis)
 #   DR_ERR_BOUNDS      — bad plane / block dims / block outside the destination plane
 #   DR_ERR_OOM         — scratch allocation failure
 # The MC CORE (7.11.3.3/4): produce one reference's prediction into `out` (a w*h
@@ -1037,24 +1041,45 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
     var bd = dr_frame_bit_depth(dst);
     var pw = dr_frame_plane_width(dst, plane);
     var ph = dr_frame_plane_height(dst, plane);
-    # Format incompatibility is permanent; unscaledness is a limitation for now (roadmap.md —
-    # scaled-reference prediction is the last inter bite). Both reject here.
-    if ((av1_mc_ref_compat(ref, dst) == 0) || (av1_mc_ref_unscaled(ref, dst, plane) == 0)) {
-        return DR_ERR_UNSUPPORTED;
-    }
+    # Format incompatibility is PERMANENT — differing bit depth or subsampling makes the two
+    # sample grids incomparable and no amount of scaling reconciles them.
+    if (av1_mc_ref_compat(ref, dst) == 0) { return DR_ERR_UNSUPPORTED; }
     # overflow-safe block-inside-plane check: form the bound by SUBTRACTION (pw - w, ph - h
     # cannot overflow — w,h in [1,128], pw,ph in [1,16384]) rather than the addition x + w,
     # which would wrap for a hostile x near i64-max and slip an unclamped coord into the
     # write-back. x,y already proven >= 0 above, so a negative (pw - w) rejects everything.
     if ((x < 0) || (y < 0) || (x > (pw - w)) || (y > (ph - h))) { return DR_ERR_BOUNDS; }
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
-    # ---- 7.11.3.3 (unscaled): integer top-left + 1/16-pel phase per axis ----
     var sx = 0;
     var sy = 0;
     if (plane > 0) {
         sx = dr_frame_subx(dst);
         sy = dr_frame_suby(dst);
     }
+    # ---- SCALED reference: the full 7.11.3.3 geometry + the stepping convolve ----
+    # The selector is EXACT dimension equality, not "is the rounded scale factor 1 << 14".
+    # Those differ: a >= 32768-wide frame with a reference one sample narrower still rounds
+    # to a unit scale factor, and taking the unscaled fast path there would read the wrong
+    # source samples (and, at the plane edge, out of bounds).
+    #
+    # The scale factors are LUMA-derived, per spec 7.11.3.3 — RefUpscaledWidth vs FrameWidth
+    # and RefFrameHeight vs FrameHeight — and the same pair applies to every plane; a
+    # subsampled plane differs only through origX's (2*mv) >> subX and through the kernel's
+    # own lastX/lastY. The DPB stores post-superres frames, so `ref`'s width IS
+    # RefUpscaledWidth, while tile decode runs at FrameWidth, so `dst`'s width is FrameWidth
+    # — exactly the pair the spec names.
+    if (av1_mc_ref_unscaled(ref, dst, plane) == 0) {
+        if (av1_mc_scale_valid(dr_frame_width(ref), dr_frame_height(ref),
+        dr_frame_width(dst), dr_frame_height(dst)) == 0) {
+            return DR_ERR_BAD_HEADER;   # ratio outside the 7.11.3.3 conformance bounds
+        }
+        var xs = av1_scale_factor(dr_frame_width(ref), dr_frame_width(dst));
+        var ys = av1_scale_factor(dr_frame_height(ref), dr_frame_height(dst));
+        return av1_mc_put_8tap_scaled(out, 0, w, ref, plane,
+        av1_mc_scaled_start(x, mv_col, sx, xs), av1_mc_scaled_start(y, mv_row, sy, ys),
+        av1_mc_scaled_step(xs), av1_mc_scaled_step(ys), w, h, filt_x, filt_y, bd, compound);
+    }
+    # ---- 7.11.3.3 (unscaled): integer top-left + 1/16-pel phase per axis ----
     var p16x = av1_mc_pos16(x, mv_col, sx);
     var p16y = av1_mc_pos16(y, mv_row, sy);
     var ix = p16x >>> 4;

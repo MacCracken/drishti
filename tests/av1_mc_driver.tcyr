@@ -381,6 +381,156 @@ fn test_mc_pred_border_independent() {
     return 0;
 }
 
+# The scaled path WIRED through av1_mc_pred_block (0.7.110). Every fixture here used to be a
+# DR_ERR_UNSUPPORTED reject; each now decodes, and is pinned against
+# scripts/refs/scaled_mc_ref.py. Goldens are written into the destination FRAME, so this also
+# checks the write-back, not just the kernel.
+fn mcs_wired(name, rw, rh, plane, x, y, w, h, mvr, mvc, cs, first, last) {
+    var ref0 = mcd_pair(24, 18, 3, 1, 1, 8, 0);   # dst is 24x18; ref0 unused here
+    var d = Mcd_Dst;
+    var r = dr_frame_new(rw, rh, 3, 1, 1, 8, 0, Mcd_Err);
+    assert_eq(load64(Mcd_Err), DR_OK, name);
+    mcd_fill(r);
+    assert_eq(av1_mc_pred_block(d, r, plane, x, y, w, h, mvr, mvc, 0, 0), DR_OK, name);
+    assert_eq(mcd_cs(d, plane, x, y, w, h), cs, name);
+    assert_eq(dr_frame_get(d, plane, x, y), first, name);
+    assert_eq(dr_frame_get(d, plane, (x + w) - 1, (y + h) - 1), last, name);
+    return 0;
+}
+
+fn test_mc_scaled_wired() {
+    #        name                     rw  rh  p   x  y  w  h  mvr mvc  checksum first last
+    mcs_wired("f01 scaled 20x18 luma", 20, 18, 0, 4, 3, 8, 8, 0, 0, 274694, 185, 218);
+    mcs_wired("f02 collision 23x17 luma", 23, 17, 0, 4, 3, 8, 8, 0, 0, 273666, 164, 250);
+    # THE CHROMA-COLLISION TRIPLE, and the sharpest test of the whole bite. Luma 23x17,
+    # 23x18 and 24x17 ALL collide to 12x9 chroma against a 24x18 current frame at 4:2:0, so
+    # the chroma PLANE dimensions are identical in all three. Spec 7.11.3.3 derives the scale
+    # factors from LUMA, so the three must give THREE DIFFERENT results — if the factors were
+    # taken from the plane dims instead, these checksums would collapse to one value. This is
+    # the exact case the pre-0.7.110 gate rejected precisely because getting it wrong emits
+    # plausible-looking wrong chroma with no error.
+    mcs_wired("f03 collision 23x17 chroma", 23, 17, 1, 2, 2, 4, 4, 0, 0, 22733, 136, 16);
+    mcs_wired("f04 collision 23x18 chroma", 23, 18, 1, 2, 2, 4, 4, 0, 0, 20529, 141, 14);
+    mcs_wired("f05 collision 24x17 chroma", 24, 17, 1, 2, 2, 4, 4, 0, 0, 21361, 139, 7);
+    return 0;
+}
+
+# COMPOUND with a scaled reference, and the warp gate that must NOT follow it (0.7.110).
+#
+# Spec 7.11.3.1 evaluates useWarp inside the per-refList loop (step 14), while
+# read_motion_mode forces SIMPLE for any compound block — so a compound block with one
+# reference scaled and the other not is REACHABLE and conformant, and after this bite it must
+# produce pixels on BOTH lanes. It needed no code change: av1_mc_pred_compound already routes
+# each reference through av1_mc_pred_core independently, so the scaled lane falls out.
+# THE FAST-PATH SELECTOR is EXACT dimension equality, not "does the scale factor round to
+# 1 << 14". Those two predicates genuinely differ — a 32768-wide frame with a 32767-wide
+# reference rounds to a unit factor (stepX comes out exactly 1024) while lastX still differs
+# (32766 vs 32767), so at the far right of the frame the unscaled path would clamp reference
+# reads to the DESTINATION's lastX and read one column past the reference's own last valid
+# column.
+#
+# THAT DIVERGENCE IS UNREACHABLE IN DRISHTI, and this test pins WHY rather than asserting it
+# from a comment. dr_frame_new caps either dimension at DR_FRAME_MAX_DIM = 16384
+# (DR_ERR_OVERSIZE), and the rounding cannot collapse below 32768: scale_factor(ref,cur)
+# equals 1 << 14 exactly when (ref-cur) * 16384 lands in [-floor(cur/2), cur-1-floor(cur/2)],
+# a window of half-width at most cur/2 <= 8192, which no nonzero (ref-cur) step of 16384 can
+# enter. The smallest cur for which ref == cur-1 rounds to unit is exactly 32768 — twice the
+# cap. So the exact-dims selector is strictly safer but currently outcome-neutral, the same
+# status the !is_scaled warp conjunct carried at 0.7.100 until this arc made it load-bearing.
+# I built the witness before concluding this; it fails at frame allocation, not at the gate.
+fn test_mc_scaled_selector_exact() {
+    # the cap is what makes the divergence unreachable — assert it, do not assume it.
+    var over = dr_frame_new(32768, 8, 1, 0, 0, 8, 0, Mcd_Err);
+    assert_eq(load64(Mcd_Err), DR_ERR_OVERSIZE, "selector: 32768-wide frame is over the cap");
+    assert_eq(av1_scale_factor(32767, 32768), 1 << AV1_REF_SCALE_SHIFT,
+    "selector: 32767/32768 WOULD round to a unit scale factor");
+    # ...and within the cap, a one-sample difference NEVER rounds to unit, on either side,
+    # at the cap itself and just above/below the half-way points that bound the window.
+    var bad = 0;
+    var i = 0;
+    var probes = alloc(6 * 8);
+    store64(probes + 0, 3);
+    store64(probes + 8, 599);
+    store64(probes + 16, 8191);
+    store64(probes + 24, 8192);
+    store64(probes + 32, 16383);
+    store64(probes + 40, 16384);
+    while (i < 6) {
+        var cur = load64(probes + (i * 8));
+        if (av1_scale_factor(cur - 1, cur) == (1 << AV1_REF_SCALE_SHIFT)) { bad = bad + 1; }
+        if (av1_scale_factor(cur + 1, cur) == (1 << AV1_REF_SCALE_SHIFT)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "selector: within the 16384 cap a 1-sample size difference never rounds to unit");
+    return 0;
+}
+
+fn test_mc_compound_scaled() {
+    var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    var r = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);      # unscaled vs the 32x32 dst
+    mcd_fill(r);
+    var rs = dr_frame_new(16, 16, 1, 0, 0, 8, 8, Mcd_Err);     # 2x-DOWN scaled reference
+    mcd_fill(rs);
+    # A: AVERAGE-of-self against the VERIFIED single-ref scaled prediction. This anchors the
+    # compound INTERMEDIATE precision without a fresh reference port: averaging two identical
+    # intermediates must reproduce the single-ref final, so a wrong intermediate shift blows
+    # the difference far past +-1.
+    var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_block(s, rs, 0, 0, 0, 32, 32, 5, 0 - 3, 0, 0), DR_OK,
+    "compound scaled: single-ref scaled DR_OK");
+    assert_eq(av1_mc_pred_compound(d, rs, rs, 0, 0, 0, 32, 32, 5, 0 - 3, 5, 0 - 3, 0, 0, 8, 8,
+    0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound scaled: AVERAGE-of-self DR_OK");
+    var big = 0;
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            var dd = dr_frame_get(d, 0, x, y) - dr_frame_get(s, 0, x, y);
+            if (dd < 0) { dd = 0 - dd; }
+            if (dd > 1) { big = big + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(big, 0, "compound scaled: AVERAGE-of-self == single-ref scaled (+-1, 1024 px)");
+    # B: the MIXED lane — ref0 unscaled, ref1 scaled — must differ from BOTH both-unscaled and
+    # both-scaled, which is what proves the two references are scaled INDEPENDENTLY rather
+    # than the whole block taking one path.
+    var du = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_compound(du, r, r, 0, 0, 0, 32, 32, 5, 0 - 3, 5, 0 - 3, 0, 0, 8, 8,
+    0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound scaled: both-unscaled DR_OK");
+    var dm = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    assert_eq(av1_mc_pred_compound(dm, r, rs, 0, 0, 0, 32, 32, 5, 0 - 3, 5, 0 - 3, 0, 0, 8, 8,
+    0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound MIXED unscaled+scaled DR_OK (was UNSUPPORTED)");
+    var nu = 0;
+    var ns = 0;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            if (dr_frame_get(dm, 0, x, y) != dr_frame_get(du, 0, x, y)) { nu = nu + 1; }
+            if (dr_frame_get(dm, 0, x, y) != dr_frame_get(d, 0, x, y)) { ns = ns + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(nu > 0, 1, "compound MIXED differs from both-unscaled");
+    assert_eq(ns > 0, 1, "compound MIXED differs from both-scaled");
+    # C: WARP still REJECTS a scaled reference, and must keep doing so. Two independent spec
+    # mechanisms forbid it and they are NOT the same rule: 7.11.3.1 step 7 gates useWarp==2
+    # (GLOBALWARP) on is_scaled(refFrame)==0, while LOCALWARP is unreachable because
+    # read_motion_mode (5.11.27) refuses to code the motion_mode symbol at all when
+    # is_scaled(RefFrame[0]). This asserts the MC-layer half; the syntax half is witnessed in
+    # tests/av1_intermode.tcyr.
+    var wm = warp_model();
+    var dw = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    assert_eq(av1_warp_pred_block(dw, rs, 0, 0, 0, 32, 32, wm), DR_ERR_UNSUPPORTED,
+    "warp still rejects a scaled reference");
+    assert_eq(av1_warp_pred_block(dw, r, 0, 0, 0, 32, 32, wm), DR_OK,
+    "...but accepts an unscaled one (the reject is about SCALE, not the model)");
+    return 0;
+}
+
 fn test_mc_pred_rejects() {
     var ref = mcd_pair(24, 18, 3, 1, 1, 8, 0);
     var d = Mcd_Dst;
@@ -392,32 +542,41 @@ fn test_mc_pred_rejects() {
     assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0, 4), DR_ERR_BOUNDS, "filter fy 4 out of range");
     assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0 - 1, 0), DR_ERR_BOUNDS, "filter fx negative");
     assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0, 0 - 1), DR_ERR_BOUNDS, "filter fy negative");
-    # scaled / mismatched reference — clean reject until the scaled-MC bite lands.
-    var small = dr_frame_new(20, 18, 3, 1, 1, 8, 0, Mcd_Err);
-    mcd_fill(small);
-    assert_eq(av1_mc_pred_block(d, small, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "scaled ref");
+    # Reference FORMAT mismatch stays a PERMANENT hard reject: differing bit depth or
+    # subsampling makes the two sample grids incomparable, and no scaling reconciles them.
     var deep = dr_frame_new(24, 18, 3, 1, 1, 10, 0, Mcd_Err);
     assert_eq(av1_mc_pred_block(d, deep, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "bit-depth mismatch");
-    # scaled-CHROMA blind spot: luma 24x18 vs 23x17 collide to 12x9 chroma at 4:2:0. The gate
-    # must reject on BOTH the luma plane AND the chroma plane (a per-plane-only check would
-    # accept the chroma plane and emit wrong pixels — spec 7.11.3.3 scaledness is luma-derived).
-    var odd = dr_frame_new(23, 17, 3, 1, 1, 8, 0, Mcd_Err);
-    mcd_fill(odd);
-    assert_eq(av1_mc_pred_block(d, odd, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "scaled ref luma plane");
-    assert_eq(av1_mc_pred_block(d, odd, 1, 2, 2, 4, 4, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "scaled ref chroma collision");
-    # ...and each luma AXIS independently. 24x18 vs 23x17 differs in BOTH dimensions, so it is
-    # rejected even if only one of the two luma conjuncts survives — a symmetric fixture that
-    # witnesses the pair but neither half (the 0.7.76 ref_count_ctx lesson). All four of
-    # 24x18 / 23x18 / 24x17 / 23x17 collide to 12x9 chroma at 4:2:0, so a width-only and a
-    # height-only reference pin each conjunct on its own.
-    var odd_w = dr_frame_new(23, 18, 3, 1, 1, 8, 0, Mcd_Err);
-    mcd_fill(odd_w);
-    assert_eq(av1_mc_pred_block(d, odd_w, 1, 2, 2, 4, 4, 0, 0, 0, 0), DR_ERR_UNSUPPORTED,
-    "chroma collision width-only");
-    var odd_h = dr_frame_new(24, 17, 3, 1, 1, 8, 0, Mcd_Err);
-    mcd_fill(odd_h);
-    assert_eq(av1_mc_pred_block(d, odd_h, 1, 2, 2, 4, 4, 0, 0, 0, 0), DR_ERR_UNSUPPORTED,
-    "chroma collision height-only");
+    var sub444 = dr_frame_new(24, 18, 3, 0, 0, 8, 0, Mcd_Err);
+    mcd_fill(sub444);
+    assert_eq(av1_mc_pred_block(d, sub444, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_UNSUPPORTED,
+    "subsampling mismatch");
+    # A reference whose SIZE RATIO is outside the 7.11.3.3 conformance bounds is a bitstream
+    # ERROR (DR_ERR_BAD_HEADER), not an unsupported feature: at most 2x larger and at most
+    # 16x smaller, per axis. Pinned on each axis in both directions.
+    var too_wide = dr_frame_new(49, 18, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(too_wide);
+    assert_eq(av1_mc_pred_block(d, too_wide, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
+    "ref more than 2x wide");
+    var too_tall = dr_frame_new(24, 37, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(too_tall);
+    assert_eq(av1_mc_pred_block(d, too_tall, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
+    "ref more than 2x tall");
+    var too_narrow = dr_frame_new(1, 18, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(too_narrow);
+    assert_eq(av1_mc_pred_block(d, too_narrow, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
+    "ref more than 16x narrow");
+    var too_short = dr_frame_new(24, 1, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(too_short);
+    assert_eq(av1_mc_pred_block(d, too_short, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
+    "ref more than 16x short");
+    # ...and exactly AT each bound the reference is ACCEPTED — a lone reject case cannot
+    # distinguish > from >=, so both sides of every comparator are pinned.
+    var at2x = dr_frame_new(48, 36, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(at2x);
+    assert_eq(av1_mc_pred_block(d, at2x, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_OK, "ref exactly 2x accepted");
+    var at16x = dr_frame_new(2, 2, 3, 1, 1, 8, 0, Mcd_Err);
+    mcd_fill(at16x);
+    assert_eq(av1_mc_pred_block(d, at16x, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_OK, "ref exactly 16x smaller accepted");
     # hostile geometry.
     assert_eq(av1_mc_pred_block(0, ref, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BOUNDS, "null dst");
     assert_eq(av1_mc_pred_block(d, 0, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BOUNDS, "null ref");
@@ -1684,6 +1843,10 @@ fn main() {
     test_group("SCALED convolve known answers + hostile input");
     test_mc_scaled_known_answers();
     test_mc_scaled_rejects();
+    test_group("SCALED path WIRED through av1_mc_pred_block");
+    test_mc_scaled_wired();
+    test_mc_scaled_selector_exact();
+    test_mc_compound_scaled();
     test_group("MC driver write confinement + border independence");
     test_mc_pred_confinement();
     test_mc_pred_border_independent();

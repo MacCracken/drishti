@@ -363,7 +363,14 @@ Baseline (0.7.0): OBU layer + sequence header.
   `_scaled_mid_h` as unwired KAT'd leaves, and `av1_scale_factor` shared with `av1_is_scaled`).
   Then the **scaled convolve kernel 0.7.109** (`av1_mc_put_8tap_scaled` — the two-pass stepping convolve
   with per-tap `Clip3` reads and its own 262x128 intermediate; verified standalone, bit-identical to the
-  unscaled path at step 1024). Then WIRING it — the LAST
+  unscaled path at step 1024), and **scaled-reference MC WIRED 0.7.110** (`av1_mc_pred_core` splits the
+  reference gate by kind: format mismatch stays a permanent reject, exact dimension equality becomes the
+  unscaled fast-path selector, a non-conformant ratio is `DR_ERR_BAD_HEADER`, and anything else takes the
+  scaled convolve; warp deliberately keeps rejecting a scaled reference). This closes the last
+  **MC-geometry** track; two inter gaps remain, each cleanly rejected on geometry before any symbol is
+  read — **sub-8x8 chroma units spanning sibling blocks** (the spec's `compute_prediction` uses the
+  siblings' MVs from the MI grid) and **inter-intra overhanging the frame edge** (`av1_intra_predict`
+  writes the nominal extent unclamped). Formerly the LAST
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

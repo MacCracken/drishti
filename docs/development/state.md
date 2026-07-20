@@ -6,6 +6,52 @@
 
 ## Version
 
+**0.7.110** — cut 2026-07-19, not yet tagged (user's git). **SCALED-REFERENCE MC IS WIRED — the last
+MC-GEOMETRY track closes.** A block whose reference differs in size from the current frame now decodes to
+correctly scaled pixels instead of DR_ERR_UNSUPPORTED. Every motion mode (SIMPLE/OBMC/LOCALWARP/GLOBALWARP),
+every compound and masked form, the full temporal-MV arc, every interpolation filter, and now every reference
+geometry are in. **NOT "the inter arc is complete" — I wrote that first and it was an OVERCLAIM caught by
+auditing the gates instead of re-reading my own prose ([[av1-arc-end-audit]]'s standing lesson, recurring).
+TWO inter-prediction gaps remain, both still DR_ERR_UNSUPPORTED in av1_intertile.cyr:** (a) a sub-8x8 block
+whose CHROMA UNIT SPANS SIBLING blocks (subx && bw4==1, or suby && bh4==1) — the spec's compute_prediction
+predicts the full even-aligned chroma unit using the SIBLINGS' MVs from the MI grid, drishti predicts per
+block; rejected on GEOMETRY ALONE before any symbol is read, so never silent garbage; (b) an INTER-INTRA
+block OVERHANGING the frame edge — av1_intra_predict writes the NOMINAL extent without clamping to the plane.
+The compound-type and motion-mode gates beside them are DEFENSIVE, not scope limits (a 2-value alphabet and a
+3-value enum; unreachable from a conformant bitstream). av1_intertile.cyr's scope comment still listed OBMC,
+compound, inter-intra and scaled MC as pending bites — re-derived from the actual gates this bite.
+av1_mc_pred_core: the reference gate SPLIT BY KIND — bit-depth/subsampling mismatch stays a PERMANENT
+DR_ERR_UNSUPPORTED (incomparable sample grids); EXACT dim equality is the fast-path selector; any difference
+runs av1_mc_scale_valid then av1_mc_put_8tap_scaled. A non-conformant ratio (ref >2x larger or >16x smaller on
+either axis) is now DR_ERR_BAD_HEADER — a bitstream violation, not an unsupported feature. WARP DELIBERATELY
+KEEPS REJECTING a scaled ref, on TWO INDEPENDENT spec mechanisms that are NOT the same rule (the spec-fidelity
+lens's correction): 7.11.3.1 step 7 gates useWarp==2 on is_scaled==0, while LOCALWARP is unreachable because
+read_motion_mode (5.11.27) refuses to code the motion_mode symbol when is_scaled(RefFrame[0]). COMPOUND with
+ONE ref scaled and one not now produces pixels on both lanes — NO code change needed (av1_mc_pred_compound
+already routes each ref through av1_mc_pred_core independently), and it is genuinely reachable: 7.11.3.1
+evaluates useWarp inside the per-refList loop, so ref0 can warp while ref1 scale-translates. PROOF: the five
+fixtures that used to assert DR_ERR_UNSUPPORTED are now correctness KATs, chief among them **THE
+CHROMA-COLLISION TRIPLE** — luma 23x17 / 23x18 / 24x17 ALL collide to 12x9 chroma against a 24x18 frame at
+4:2:0, so the chroma PLANE dims are identical in all three; because 7.11.3.3 derives the scale factors from
+LUMA the three must give THREE DIFFERENT results, and deriving them from plane dims collapses the checksums to
+one value (mutation W1, red). That is exactly the case the old gate rejected because getting it wrong emits
+plausible wrong chroma with no error. Compound anchored by AVERAGE-of-self vs the verified single-ref scaled
+prediction + a mixed lane differing from both all-unscaled and all-scaled. MUTATIONS (8, all red): plane-vs-luma
+scale factors, stepX/stepY swap, startX/startY swap, chroma sub forced to 0, dropping scale_valid, keeping the
+old blanket reject (dead-path check), relaxing the warp reject, and dropping the compound flag.
+**ONE DOCUMENTED NON-WITNESS:** the fast-path selector is EXACT dim equality, not "does the scale factor round
+to 1<<14". Those genuinely differ — a 32768-wide frame with a 32767-wide ref rounds to a unit factor while
+lastX still differs, so the unscaled path would read one column past the ref's last valid column at the right
+edge. But it is UNREACHABLE here: dr_frame_new caps dims at DR_FRAME_MAX_DIM=16384 and the rounding cannot
+collapse below 32768 (scale_factor==1<<14 needs (ref-cur)*16384 inside a window of half-width <= cur/2 <= 8192,
+which no nonzero step of 16384 enters; the smallest cur where ref==cur-1 rounds to unit is exactly 32768, twice
+the cap). The test pins the CAP and the ARITHMETIC rather than asserting it from a comment — per the 0.7.98
+lesson I BUILT the witness first and it fails at frame allocation, not at the gate. The exact selector is kept
+as the strictly safer form. 38 suites, **29,373** suite + **1,140** fuzz assertions, all six gates green.
+Next: **B5 = witness the is_scaled gates that just became load-bearing** (the GLOBALWARP pixel witness and the
+LOCALWARP symbol-not-consumed witness are DIFFERENT mechanisms and need separate fixtures; plus the
+metadata-vs-pixel-dims disagreement case — Av1RefState governs gating, the DrFrame governs MC geometry).
+
 **0.7.109** — cut 2026-07-19, not yet tagged (user's git). **THE SCALED CONVOLVE KERNEL (spec 7.11.3.4 with a
 non-unit step) — OUTPUT-NEUTRAL, not yet wired.** The largest and riskiest bite of the track; only the wiring
 (B4) and the is_scaled gate witnesses (B5) remain before inter frames decode end-to-end. av1_mc.cyr:

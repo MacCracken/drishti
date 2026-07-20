@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.110] - 2026-07-19
+
+**SCALED-REFERENCE MOTION COMPENSATION IS WIRED — the last MC-geometry track closes.** A block whose
+reference frame differs in size from the current frame now decodes to correctly scaled pixels instead of
+returning `DR_ERR_UNSUPPORTED`. Every motion mode (SIMPLE / OBMC / LOCALWARP / GLOBALWARP), every
+compound and masked form, the full temporal-MV arc, every interpolation filter, and now every reference
+geometry are in.
+
+**Two inter-prediction gaps remain** — stated explicitly because the module header had drifted into
+claiming otherwise, and both are still `DR_ERR_UNSUPPORTED` in `av1_intertile.cyr`:
+
+- a **sub-8×8 block whose chroma unit spans sibling blocks** (`subx && bw4 == 1`, or `suby && bh4 == 1`).
+  The spec's `compute_prediction` predicts the full even-aligned chroma unit using the *siblings'* motion
+  vectors read back from the MI grid; drishti predicts per block. Rejected on geometry alone, before any
+  symbol is read, so it is never silent garbage.
+- an **inter-intra block overhanging the frame edge**: `av1_intra_predict` writes the nominal block extent
+  without clamping to the plane.
+
+The compound-type and motion-mode gates alongside them are **defensive, not scope limits** — the
+`compound_type` alphabet has 2 values and the motion-mode enum exactly 3, so neither is reachable from a
+conformant bitstream. `av1_intertile.cyr`'s scope comment, which still listed OBMC, compound, inter-intra
+and scaled MC as pending, has been re-derived from the actual gates.
+
+### Changed
+
+- **`av1_mc_pred_core`** (`av1_mc.cyr`) — the reference gate split by kind. Bit-depth and subsampling
+  mismatch stay a **permanent** `DR_ERR_UNSUPPORTED` (the sample grids are incomparable and no scaling
+  reconciles them). Exact dimension equality is now the **fast-path selector**; any difference runs the
+  7.11.3.3 conformance check and then the scaled convolve. A ratio outside those bounds — a reference
+  more than 2× larger, or more than 16× smaller, on either axis — is now `DR_ERR_BAD_HEADER`, since it
+  is a bitstream-conformance violation rather than an unsupported feature.
+- The **warp path deliberately keeps rejecting** a scaled reference. Two *independent* spec mechanisms
+  forbid it and they are not the same rule: 7.11.3.1 step 7 gates `useWarp == 2` (GLOBALWARP) on
+  `is_scaled(refFrame) == 0`, while LOCALWARP is unreachable because `read_motion_mode` (5.11.27)
+  refuses to code the motion-mode symbol at all when `is_scaled(RefFrame[0])`.
+- **Compound with one reference scaled and one not** now produces pixels on both lanes. It needed no
+  code change — `av1_mc_pred_compound` already routes each reference through `av1_mc_pred_core`
+  independently — but it is genuinely reachable and conformant: 7.11.3.1 evaluates `useWarp` inside the
+  per-refList loop, so ref0 can warp while ref1 scale-translates.
+
+### Verification
+
+The five fixtures that previously asserted `DR_ERR_UNSUPPORTED` are now correctness KATs. Chief among
+them is the **chroma-collision triple**: luma `23×17`, `23×18` and `24×17` all collide to `12×9` chroma
+against a `24×18` frame at 4:2:0, so the chroma *plane* dimensions are identical in all three. Because
+spec 7.11.3.3 derives the scale factors from **luma**, the three must give three *different* results —
+and they do. Deriving them from plane dimensions instead collapses the checksums to one value and turns
+that mutation red. This is the exact case the old gate rejected precisely because getting it wrong emits
+plausible-looking wrong chroma with no error.
+
+Compound is anchored by AVERAGE-of-self against the verified single-ref scaled prediction (which pins
+the intermediate precision without a fresh reference port), plus a mixed lane that must differ from
+both all-unscaled and all-scaled. 8 wiring mutations, all red.
+
+**One documented non-witness.** The fast-path selector is exact dimension equality rather than "does
+the scale factor round to `1 << 14`". Those predicates genuinely differ — a 32768-wide frame with a
+32767-wide reference rounds to a unit factor while `lastX` still differs, so the unscaled path would
+read one column past the reference's last valid column at the frame's right edge. **That divergence is
+unreachable here**: `dr_frame_new` caps dimensions at 16384, and the rounding cannot collapse below
+32768 (the window `scale_factor == 1 << 14` requires has half-width at most `cur/2 ≤ 8192`, which no
+nonzero size difference's step of 16384 can enter). The test pins the cap and the arithmetic rather than
+asserting the claim from a comment — the witness was built first, and it fails at frame allocation, not
+at the gate. The exact selector is kept as the strictly safer form.
+
+38 suites, **29,373** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.109] - 2026-07-19
 
 **The SCALED convolve kernel** (spec 7.11.3.4 with a non-unit step) — motion compensation from a
