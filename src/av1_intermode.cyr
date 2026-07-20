@@ -382,6 +382,10 @@ enum Av1InterModeConst {
     AV1_BLOCK_8X8             = 3;    # BLOCK_8X8
     AV1_BLOCK_32X32           = 9;    # BLOCK_32X32
     AV1_EIGHTTAP              = 0;    # EIGHTTAP (the filter an ungated dir takes)
+    # BILINEAR is signalled ONLY by the frame header's interpolation_filter f(2); the
+    # SWITCHABLE per-block symbol has a 3-value alphabet (EIGHTTAP/SMOOTH/SHARP) and can
+    # never code it. av1_read_interp_filters copies the frame-level value to both dirs.
+    AV1_BILINEAR              = 3;    # BILINEAR
     # compound type (5.11.29)
     AV1_COMPOUND_TYPES        = 2;    # COMPOUND_TYPES (the @@compound_type alphabet: WEDGE/DIFFWTD)
     AV1_COMP_GROUP_IDX_CONTEXTS = 6;  # COMP_GROUP_IDX_CONTEXTS

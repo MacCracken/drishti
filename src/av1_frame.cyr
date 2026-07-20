@@ -368,6 +368,22 @@ fn av1_ref_saved_gm(r, i, ref, idx): i64 {
 enum Av1RefScale {
     AV1_REF_SCALE_SHIFT = 14;    # REF_SCALE_SHIFT (spec section 3 symbols)
 }
+
+# One axis's scale factor (spec 7.11.3.3):
+#   xScale = ( ( RefUpscaledWidth[refIdx] << REF_SCALE_SHIFT ) + ( FrameWidth / 2 ) ) / FrameWidth
+#   yScale = ( ( RefFrameHeight[refIdx]  << REF_SCALE_SHIFT ) + ( FrameHeight / 2 ) ) / FrameHeight
+# i.e. the reference's size relative to the current frame, where 1 << 14 means "same size".
+# The + cur_dim/2 term makes the division round-to-nearest rather than truncate.
+#
+# Shared by av1_is_scaled (which asks only "is it exactly 1 << 14 on both axes?") and by the
+# MC geometry leaves in av1_mc.cyr, so the two can never disagree about what "scaled" means.
+# Returns 0 for a non-positive cur_dim (a dimension-bomb backstop: no divide by zero); every
+# caller treats 0 as "not unscaled".
+fn av1_scale_factor(ref_dim, cur_dim): i64 {
+    if (cur_dim < 1) { return 0; }
+    return ((ref_dim << AV1_REF_SCALE_SHIFT) + (cur_dim / 2)) / cur_dim;
+}
+
 fn av1_is_scaled(fh, refs, ref_frame): i64 {
     # hostile guards: a refFrame outside LAST..ALTREF or an unset/lying slot index
     # must not index fh/refs OOB — report "scaled" (the conservative branch: the
@@ -378,8 +394,8 @@ fn av1_is_scaled(fh, refs, ref_frame): i64 {
     var fw = av1_fh_frame_width(fh);
     var fht = av1_fh_frame_height(fh);
     if (fw < 1 || fht < 1) { return 1; }    # dimension-bomb backstop: no divide-by-zero
-    var x_scale = ((av1_ref_upscaled_width(refs, ref_idx) << AV1_REF_SCALE_SHIFT) + (fw / 2)) / fw;
-    var y_scale = ((av1_ref_frame_height(refs, ref_idx) << AV1_REF_SCALE_SHIFT) + (fht / 2)) / fht;
+    var x_scale = av1_scale_factor(av1_ref_upscaled_width(refs, ref_idx), fw);
+    var y_scale = av1_scale_factor(av1_ref_frame_height(refs, ref_idx), fht);
     var no_scale = 1 << AV1_REF_SCALE_SHIFT;
     return (x_scale != no_scale) || (y_scale != no_scale);
 }

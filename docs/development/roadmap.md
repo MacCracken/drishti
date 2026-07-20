@@ -357,7 +357,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   `compound` flag + a dedicated `Av1_McWarp8` kernel scratch), and the **filter-set + reference-geometry
   leaves 0.7.107** (output-neutral: `av1_mc_filter_set` — the 7.11.3.4 `Subpel_Filters` set selection, total
   by construction, closing a latent unmasked-vertical-set OOB — plus `av1_mc_ref_compat` / `av1_mc_ref_unscaled`
-  split along the seam where the translation and warp gates will diverge). Then scaled-reference/BILINEAR MC — the LAST
+  split along the seam where the translation and warp gates will diverge), and **BILINEAR MC + the 7.11.3.3
+  scaling geometry 0.7.108** (`av1_mc_filter_set` admits filter 3 -> the already-present bilinear set 5, the
+  `av1_mc_pred_core` reject lifted; plus `av1_mc_scale_valid`/`_scaled_step`/`_scaled_start`/`_scaled_last`/
+  `_scaled_mid_h` as unwired KAT'd leaves, and `av1_scale_factor` shared with `av1_is_scaled`).
+  Then scaled-reference MC — the LAST
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

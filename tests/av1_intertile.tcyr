@@ -2226,6 +2226,27 @@ fn ir_ref(w, h, planes, sx, sy): i64 {
     }
     return f;
 }
+# A HIGH-CONTRAST, NON-LINEAR mono reference plane.
+#
+# ir_ref above fills with v = x + 2*y — a linear ramp. Every AV1 sub-pel filter is designed
+# to reproduce a linear function exactly, so on that plane BILINEAR, EIGHTTAP and SHARP all
+# return bit-identical pixels: the fixture cannot witness WHICH filter ran (the same
+# secretly-an-identity trap OBMC hit at 0.7.101, where the x+2y gradient made a blend a
+# no-op). Any test that discriminates between interpolation filters must use this instead.
+fn ir_ref_hc(w, h): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(w, h, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            dr_frame_set(f, 0, x, y, (((x * 37) + (y * 53)) + (((x * y) % 7) * 29)) & 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
 fn ir_fh(w, h, mic, mir, tx_mode): i64 {
     var fh = alloc(AV1FH_SIZE);
     memset(fh, 0, AV1FH_SIZE);
@@ -2310,7 +2331,16 @@ fn ir_roundtrip(ref, fh, refs, seq, blk, nsplit, w, h, planes, sx, sy, mic, mir)
     return df;
 }
 # oracle: MC each plane + reconstruct(residual) with the given per-plane tx types.
+# ir_oracle keeps its original 13-arg shape (EIGHTTAP) and delegates; ir_oracle_f takes the
+# interpolation filter. A new param was NOT added to ir_oracle itself because Cyrius does not
+# hard-fail a wrong ARG COUNT (the 0.7.77 lesson) — every existing call site would have
+# compiled while silently reading garbage for the new trailing argument.
 fn ir_oracle(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma, tx_luma, chroma_tt): i64 {
+    return ir_oracle_f(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma,
+    tx_luma, chroma_tt, AV1_EIGHTTAP);
+}
+fn ir_oracle_f(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma, tx_luma,
+chroma_tt, filt): i64 {
     var oe = alloc(8);
     var xf = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
     var q_dc = av1_get_dc_quant(8, 40, 0);
@@ -2320,7 +2350,7 @@ fn ir_oracle(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma,
         var pw = w;
         var ph = h;
         if (p > 0) { pw = w >> sx; ph = h >> sy; }
-        av1_mc_pred_block(xf, ref, p, 0, 0, pw, ph, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP);
+        av1_mc_pred_block(xf, ref, p, 0, 0, pw, ph, mvr, mvc, filt, filt);
         var eob = load64(resid + ((1 + (p * 2)) * 8));
         var coeff = load64(resid + ((2 + (p * 2)) * 8));
         if (eob > 0) {
@@ -2394,6 +2424,49 @@ fn test_ir_inter1() {
     assert_eq(ir_diff(df, xf, 8, 8, 1, 0, 0), 0, "INTER_1 8x8: decode == MC+residual oracle (64)");
     return 0;
 }
+# BILINEAR end-to-end (0.7.108): the frame header's interpolation_filter f(2) == BILINEAR.
+# This is the ONLY way BILINEAR reaches a block — the SWITCHABLE per-block symbol has a
+# 3-value alphabet (EIGHTTAP/SMOOTH/SHARP) and can never code it, so a fixture that sets the
+# BLOCK's filter instead of the HEADER's would prove nothing: av1_read_interp_filters
+# overwrites both directions from the frame-level value whenever it is not SWITCHABLE.
+# The MV is deliberately sub-pel on BOTH axes — at an integer position every filter
+# degenerates to a copy and the test would pass no matter which set were selected.
+#
+# WHAT THIS TEST PROVES, AND WHAT IT DOES NOT. Its oracle calls av1_mc_pred_block with
+# BILINEAR, so it shares av1_mc_filter_set with the code under test — a COMPLEMENTARY
+# oracle, not an independent one. Verified by mutation: deleting the `f == 3` branch in
+# av1_mc_filter_set leaves this test GREEN (decode and oracle move together), while
+# breaking the header->block plumbing (forcing EIGHTTAP in av1_read_interp_filters) turns
+# it RED. So this test witnesses the PLUMBING — that a BILINEAR frame header actually
+# reaches the kernel — and the set-selection MATHS is pinned elsewhere, by the
+# tests/av1_mc_driver.tcyr b01..b14 known answers, whose goldens come from the
+# spec-convention scripts/refs/bilinear_mc_ref.py and share no code with drishti.
+fn test_ir_bilinear() {
+    var ref = ir_ref_hc(16, 16);   # NOT ir_ref — a linear ramp cannot distinguish filters
+    var fh = ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST);
+    store64(fh + AV1FH_INTERP_FILTER, AV1_BILINEAR);
+    assert_eq(av1_fh_interpolation_filter(fh), 3, "fh: interpolation_filter = BILINEAR");
+    var refs = ir_refs(16, 16);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 0 - 120);
+    store64(coeff + (1 * 8), 55);
+    var resid = ir_resid1(AV1_DCT_ADST, 2, coeff);
+    var blk = ir_blk(0 - 6, 10, resid);          # mvr/mvc both sub-pel (1/8 pel, not /8)
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
+    # decodes to BILINEAR-filtered pixels...
+    var xb = ir_oracle_f(ref, 0 - 6, 10, resid, 16, 16, 1, 0, 0, 6, 2, AV1_DCT_ADST, 0,
+    AV1_BILINEAR);
+    assert_eq(ir_diff(df, xb, 16, 16, 1, 0, 0), 0, "BILINEAR e2e: decode == bilinear oracle");
+    # ...and NOT to EIGHTTAP pixels. Without this the test would pass even if the header
+    # value never reached the kernel.
+    var xe = ir_oracle_f(ref, 0 - 6, 10, resid, 16, 16, 1, 0, 0, 6, 2, AV1_DCT_ADST, 0,
+    AV1_EIGHTTAP);
+    assert_eq(ir_diff(df, xe, 16, 16, 1, 0, 0) > 0, 1, "BILINEAR e2e: differs from EIGHTTAP");
+    return 0;
+}
+
 # INTER_2 (BLOCK_16X16 -> TX_16X16): DCT_ADST luma tx (in INTER_2).
 fn test_ir_inter2() {
     var ref = ir_ref(16, 16, 1, 0, 0);
@@ -4018,6 +4091,8 @@ fn main() {
     test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
     test_ir_inter1();
     test_ir_inter2();
+    test_group("BILINEAR interpolation filter e2e (0.7.108)");
+    test_ir_bilinear();
     test_ir_inter3();
     test_ir_420();
     test_ir_zero();

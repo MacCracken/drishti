@@ -4,6 +4,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.108] - 2026-07-19
+
+**BILINEAR motion compensation + the 7.11.3.3 scaling geometry.** Two halves of the last
+inter-prediction track: BILINEAR is **output-changing** (it lifts an explicit reject — a BILINEAR frame
+now decodes instead of returning `DR_ERR_UNSUPPORTED`), while the scaling geometry is **output-neutral**
+(KAT'd leaves nothing calls yet). Only scaled-reference MC now remains before inter frames decode
+end-to-end.
+
+### Added
+
+- **BILINEAR interpolation filter** (`av1_mc.cyr`) — `av1_mc_filter_set` gained the `filt == 3 -> set 5`
+  branch and `av1_mc_pred_core`'s reject is gone (its filter guard widened to `0..3`). **No table work
+  was needed**: drishti's set 5 already *is* the halved bilinear kernel, `{0,0,0, 64-4p, 4p, 0,0,0}`.
+  The branch sits **before** the narrow-block remap because spec 7.11.3.4's `w <= 4` branch has no
+  `else` — BILINEAR is never remapped to a 4-tap set. BILINEAR reaches a block **only** via the frame
+  header's `interpolation_filter` f(2); the SWITCHABLE per-block symbol has a 3-value alphabet and can
+  never code it.
+- **`scripts/refs/bilinear_mc_ref.py`** — a spec-literal oracle written deliberately in the **spec**
+  convention (16 phases, rows summing to 128, spec `InterRound0`/`InterRound1`) rather than drishti's
+  halved dav1d one, so agreement *proves* the halving-plus-reduced-shift equivalence instead of assuming
+  it. Its `Subpel_Filters` table is **machine-generated** from the digest-pinned spec markdown, never
+  hand-typed, and `verify_against_spec()` re-derives and re-checks it. It **reproduces all 17
+  pre-existing driver known answers** before emitting the new ones — which also re-establishes the
+  provenance those tests lost when `mc_driver_ref.py`'s scratchpad was wiped.
+- **`scripts/refs/scaled_geom_ref.py`** — the 7.11.3.3 scaling process, cross-checked internally
+  against libaom's *different* algebraic form of `startX` (`av1_scaled_x` / `SCALE_EXTRA_OFF`) over 2688
+  combinations. Two independent algebraic forms agreeing is a real second source, not a restatement.
+- **7.11.3.3 geometry leaves** (`av1_mc.cyr`) — `av1_mc_scale_valid` (the four conformance conditions),
+  `av1_mc_scaled_step`, `av1_mc_scaled_start`, `av1_mc_scaled_last`, `av1_mc_scaled_mid_h`. Unwired;
+  the scaled convolve consumes them next.
+- **`av1_scale_factor`** (`av1_frame.cyr`) — extracted from `av1_is_scaled`, which computed the
+  7.11.3.3 factor inline twice. `is_scaled` and the MC geometry now share one derivation and cannot
+  disagree about what "scaled" means.
+- **`ir_ref_hc`** (`tests/av1_intertile.tcyr`) — a high-contrast, **non-linear** reference plane. See
+  below.
+
+### Fixed
+
+- **The e2e inter harness could not distinguish interpolation filters at all.** `ir_ref` fills with
+  `x + 2*y`, a linear ramp, and every AV1 sub-pel filter reproduces a linear function exactly — so
+  BILINEAR, EIGHTTAP and SHARP returned bit-identical pixels and the first BILINEAR e2e assertion
+  passed for the wrong reason. Caught because the test asserts `decode != EIGHTTAP oracle` as well as
+  `decode == BILINEAR oracle`; the negative half failed. Fixed with `ir_ref_hc`. This is the same
+  secretly-an-identity trap OBMC hit at 0.7.101.
+- **Square conformance fixtures aliased the axes.** With `fw == fht`, rewriting the *height*
+  conformance condition to test `fw` passed green. The bounds fixtures are now deliberately
+  non-square, and both axis-swap mutations go red.
+
+### Verification
+
+BILINEAR: 14 driver KATs (`b01`–`b14`: both axes, each axis alone, the `w<=4`/`h<=4` extents, chroma,
+edge-clamp, 8/10/12-bit, 16×16), an e2e header→pixels witness, and direct set-selection assertions.
+Mutation-verified 6 ways, including the **latent-mis-decode** case (deleting the `f == 3` branch yields
+plausible wrong pixels with no error) and the **ordering** case (moving it after the `dim <= 4` remap
+breaks only narrow blocks). Recorded explicitly: the e2e test's oracle shares `av1_mc_filter_set` with
+the code under test, so it witnesses the *plumbing* only — deleting the branch leaves it green, while
+breaking `av1_read_interp_filters` turns it red. The set-selection *maths* is pinned by the driver KATs,
+whose goldens share no code with drishti.
+
+Geometry: 15 KATs including non-square frames with different x and y scales, both conformance
+boundaries from both sides on each axis independently, and **`g15`, a `Round2Signed` tie case**.
+`av1_round2` is arithmetic, so it agrees with `av1_round2_signed` everywhere *except* an exact tie — a
+merely-negative MV does not witness it (the 0.7.103 half-boundary lesson), so `g15` is tuned to
+`baseX == -408704 == -1597*256 + 128`, where the two round apart. 13 mutations, all red. The joint
+`halfSample` drop is caught **only** by the scaled cases, the unscaled ones staying green — mutation-
+confirmed, and the reason the 1:1 fixtures alone would not have sufficed.
+
+38 suites, **29,129** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.107] - 2026-07-19
 
 **Filter-set + reference-geometry leaves** — an **output-neutral** refactor opening the last inter-prediction

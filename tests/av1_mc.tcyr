@@ -69,6 +69,37 @@ fn test_filter_set_selection() {
     assert_eq(av1_mc_filter_set(1, 2), 4, "SMOOTH dim 2 -> set 4");
     assert_eq(av1_mc_filter_set(2, 2), 3, "SHARP dim 2 -> set 3");
     assert_eq(av1_mc_filter_set(0, 1), 3, "REGULAR dim 1 -> set 3");
+    # BILINEAR (filter 3) -> drishti set 5, at EVERY extent. Spec 7.11.3.4's narrow-block
+    # branch has no `else`, so BILINEAR alone is never remapped to a 4-tap set. If the
+    # `f == 3` test were moved AFTER the dim check, the first three of these would return
+    # set 3 / set 4 instead — plausible-looking wrong pixels with no error code.
+    assert_eq(av1_mc_filter_set(3, 2), 5, "BILINEAR dim 2 -> set 5 (NOT remapped)");
+    assert_eq(av1_mc_filter_set(3, 4), 5, "BILINEAR dim 4 -> set 5 (NOT remapped)");
+    assert_eq(av1_mc_filter_set(3, 1), 5, "BILINEAR dim 1 -> set 5 (NOT remapped)");
+    assert_eq(av1_mc_filter_set(3, 5), 5, "BILINEAR dim 5 -> set 5");
+    assert_eq(av1_mc_filter_set(3, 8), 5, "BILINEAR dim 8 -> set 5");
+    assert_eq(av1_mc_filter_set(3, 128), 5, "BILINEAR dim 128 -> set 5");
+    # set 5 really IS bilinear, in the right tap order. The half-pel row (5,7) is SYMMETRIC
+    # (32/32) and so survives a tap reversal — pin an ASYMMETRIC row from both ends.
+    assert_eq(av1_subpel_filter(5, 0, 3), 60, "set 5 phase 0 tap 3 = 60 (asymmetric anchor)");
+    assert_eq(av1_subpel_filter(5, 0, 4), 4, "set 5 phase 0 tap 4 = 4");
+    assert_eq(av1_subpel_filter(5, 14, 3), 4, "set 5 phase 14 tap 3 = 4");
+    assert_eq(av1_subpel_filter(5, 14, 4), 60, "set 5 phase 14 tap 4 = 60");
+    # ...and that it is a genuine 2-TAP kernel: only taps 3 and 4 are ever nonzero.
+    var nz = 0;
+    var ph = 0;
+    while (ph < 15) {
+        var k = 0;
+        while (k < 8) {
+            if (av1_subpel_filter(5, ph, k) != 0) {
+                nz = nz + 1;
+                if ((k != 3) && (k != 4)) { nz = nz + 1000; }
+            }
+            k = k + 1;
+        }
+        ph = ph + 1;
+    }
+    assert_eq(nz, 30, "set 5 has exactly 2 nonzero taps per phase, both at index 3/4");
     # TOTALITY. av1_mc_subpel_row does no bounds check and the blob is exactly 6*15*8 i64, so
     # an out-of-range set index reads off the end. The leading `& 3` must keep EVERY input --
     # including negative and wide-of-range -- inside 0..AV1_SUBPEL_SETS-1.
@@ -84,6 +115,112 @@ fn test_filter_set_selection() {
         filt = filt + 1;
     }
     assert_eq(bad, 0, "filter set stays in range over hostile filt x dim sweep");
+    return 0;
+}
+
+# ================================================================
+# The 7.11.3.3 motion vector scaling geometry (0.7.108) — known answers from
+# scripts/refs/scaled_geom_ref.py, which transcribes the spec verbatim AND cross-checks
+# every startX against libaom's different algebraic form (av1_scaled_x / SCALE_EXTRA_OFF)
+# over 2688 combinations. Pure leaves; nothing in the decode path calls them yet (roadmap.md
+# — the scaled convolve consumes them next).
+# ================================================================
+fn mcs_case(name, ruw, rfh, fw, fht, sub, x, y, mvr, mvc, xs, ys, stx, sty, sx, sy) {
+    assert_eq(av1_mc_scale_valid(ruw, rfh, fw, fht), 1, name);
+    assert_eq(av1_scale_factor(ruw, fw), xs, name);
+    assert_eq(av1_scale_factor(rfh, fht), ys, name);
+    assert_eq(av1_mc_scaled_step(av1_scale_factor(ruw, fw)), stx, name);
+    assert_eq(av1_mc_scaled_step(av1_scale_factor(rfh, fht)), sty, name);
+    assert_eq(av1_mc_scaled_start(x, mvc, sub, av1_scale_factor(ruw, fw)), sx, name);
+    assert_eq(av1_mc_scaled_start(y, mvr, sub, av1_scale_factor(rfh, fht)), sy, name);
+    return 0;
+}
+
+fn test_scaled_geometry() {
+    #   name, ruw, rfh, fw, fht, sub, x, y, mvr, mvc,
+    #     then the expected xScale, yScale, stepX, stepY, startX, startY
+    # 1:1 — every scaling term must cancel; startX collapses to (pos16 << 6) + 32.
+    mcs_case("g01 unscaled 1:1", 32, 32, 32, 32, 0, 4, 3, 0, 0, 16384, 16384, 1024, 1024, 4128, 3104);
+    mcs_case("g02 unscaled neg-mv", 32, 32, 32, 32, 0, 0, 0, 0 - 9, 0 - 7, 16384, 16384, 1024, 1024,
+    0 - 864, 0 - 1120);
+    mcs_case("g03 unscaled chroma", 32, 32, 32, 32, 1, 3, 2, 7, 0 - 5, 16384, 16384, 1024, 1024, 2784, 2528);
+    # 2x DOWN / 2x UP at the exact conformance boundaries.
+    mcs_case("g04 2x-down", 16, 16, 32, 32, 0, 4, 3, 5, 0 - 3, 8192, 8192, 512, 512, 1632, 1632);
+    mcs_case("g05 2x-up boundary", 64, 64, 32, 32, 0, 4, 3, 5, 0 - 3, 32768, 32768, 2048, 2048, 7968, 7968);
+    # the other bound: a reference 16x smaller.
+    mcs_case("g07 16x-smaller", 2, 2, 32, 32, 0, 1, 1, 3, 3, 1024, 1024, 64, 64, 0 - 360, 0 - 360);
+    # NON-SQUARE with DIFFERENT x and y scales — a square fixture lets an x/y swap pass.
+    mcs_case("g08 asymmetric", 40, 24, 20, 18, 0, 3, 2, 11, 19, 32768, 21845, 2048, 1365, 11552, 4811);
+    mcs_case("g09 asymmetric chroma", 40, 24, 20, 18, 1, 1, 1, 0 - 6, 10, 32768, 21845, 2048, 1365, 3872, 1056);
+    # NEGATIVE baseX/baseY — the ONLY place Round2Signed's away-from-zero branch fires.
+    mcs_case("g10 negative base", 48, 48, 32, 32, 0, 0, 0, 0 - 40, 0 - 40, 24576, 24576, 1536, 1536,
+    0 - 7392, 0 - 7392);
+    mcs_case("g11 negative base chroma", 48, 48, 32, 32, 1, 0, 0, 0 - 40, 0 - 40, 24576, 24576, 1536, 1536,
+    0 - 3552, 0 - 3552);
+    # ODD ratios -> a scale factor that is NOT a multiple of 16, so the step's ROUNDING bias
+    # (Round2Signed vs a bare arithmetic shift) is visible: 8440 >> 4 = 527 but Round2 = 528.
+    mcs_case("g12 odd 17->33", 17, 17, 33, 33, 0, 2, 2, 1, 1, 8440, 8440, 528, 528, 905, 905);
+    mcs_case("g13 odd 33->17", 33, 33, 17, 17, 0, 2, 2, 1, 1, 31804, 31804, 1988, 1988, 4738, 4738);
+    # both axes odd-ratio AND in OPPOSITE directions (ref narrower but taller).
+    mcs_case("g14 odd asymmetric", 23, 41, 31, 25, 0, 5, 4, 0 - 7, 13, 12156, 26870, 760, 1679, 4933, 5608);
+    # THE Round2Signed WITNESS. av1_round2 is ARITHMETIC (>>>), so it AGREES with
+    # av1_round2_signed everywhere EXCEPT an exact tie: writing baseX = -256k - r, Round2
+    # gives -k - [r > 128] while Round2Signed gives -k - [r >= 128]. They part only at
+    # r == 128. A merely-NEGATIVE MV does not witness it (g10/g11 above stay green under
+    # the mutation — the 0.7.103 half-boundary lesson). Here baseX is exactly
+    # -408704 = -1597*256 + 128, so startX is -1565 signed and would be -1564 unsigned.
+    mcs_case("g15 Round2Signed tie", 2, 2, 17, 17, 0, 0, 0, 0 - 76, 0 - 76, 1928, 1928, 121, 121,
+    0 - 1565, 0 - 1565);
+    return 0;
+}
+
+fn test_scaled_geometry_bounds() {
+    # conformance (7.11.3.3): the reference may be at most 2x the current frame, and the
+    # current frame at most 16x the reference. Pinned from BOTH sides at each boundary, on
+    # each axis independently — a single-sided fixture cannot catch a > vs >= slip.
+    # NON-SQUARE on purpose (fw=32, fht=20). With a square frame every one of these passes
+    # even if the height condition is rewritten to test fw — the axes are indistinguishable
+    # and an x/y swap aliases green (mutation-confirmed).
+    assert_eq(av1_mc_scale_valid(64, 40, 32, 20), 1, "ref exactly 2x on both axes: valid");
+    assert_eq(av1_mc_scale_valid(65, 40, 32, 20), 0, "ref 2x+1 WIDE: reject");
+    assert_eq(av1_mc_scale_valid(64, 41, 32, 20), 0, "ref 2x+1 TALL: reject");
+    assert_eq(av1_mc_scale_valid(2, 40, 32, 20), 1, "current exactly 16x wider: valid");
+    assert_eq(av1_mc_scale_valid(2, 40, 33, 20), 0, "current 16x+1 WIDER: reject");
+    assert_eq(av1_mc_scale_valid(64, 2, 32, 32), 1, "current exactly 16x taller: valid");
+    assert_eq(av1_mc_scale_valid(64, 2, 32, 33), 0, "current 16x+1 TALLER: reject");
+    # dimension-bomb backstops: no divide by zero, no negative dims.
+    assert_eq(av1_mc_scale_valid(0, 32, 32, 32), 0, "zero ref width: reject");
+    assert_eq(av1_mc_scale_valid(32, 32, 0, 32), 0, "zero frame width: reject");
+    assert_eq(av1_scale_factor(32, 0), 0, "scale_factor: zero cur_dim -> 0");
+    assert_eq(av1_scale_factor(32, 0 - 4), 0, "scale_factor: negative cur_dim -> 0");
+
+    # lastX/lastY (7.11.3.4) — the bottom-right sample of the REFERENCE plane.
+    assert_eq(av1_mc_scaled_last(32, 0), 31, "lastX luma 32 -> 31");
+    assert_eq(av1_mc_scaled_last(32, 1), 15, "lastX chroma 32 -> 15");
+    assert_eq(av1_mc_scaled_last(23, 1), 11, "lastX chroma 23 -> 11 (ceil then -1)");
+    assert_eq(av1_mc_scaled_last(1, 1), 0, "lastX chroma 1 -> 0");
+
+    # intermediateHeight — the CEILING is load-bearing. (h-1)*stepY = 1*1024 is an exact
+    # multiple, so floor and ceil agree; 1*1025 is not, and only the ceiling gets it right.
+    assert_eq(av1_mc_scaled_mid_h(1, 1024), 8, "midH h=1 -> 8 rows (no vertical span)");
+    assert_eq(av1_mc_scaled_mid_h(2, 1024), 9, "midH exact multiple: floor == ceil");
+    assert_eq(av1_mc_scaled_mid_h(2, 1025), 10, "midH non-multiple: ceiling adds the row");
+    assert_eq(av1_mc_scaled_mid_h(2, 1), 9, "midH tiny step still spans a row");
+    # the exact worst case over the whole legal space (h <= 128, stepY <= 2048): 262 rows,
+    # and the vertical pass reads up to index 261 = midH - 1, so the buffer has ZERO slack.
+    assert_eq(av1_mc_scaled_mid_h(128, AV1_MC_MAX_STEP), 262, "midH worst case = 262 rows");
+    var worst = 0;
+    var hh = 1;
+    while (hh < 129) {
+        var st = 1;
+        while (st < (AV1_MC_MAX_STEP + 1)) {
+            var m = av1_mc_scaled_mid_h(hh, st);
+            if (m > worst) { worst = m; }
+            st = st + 1;
+        }
+        hh = hh + 1;
+    }
+    assert_eq(worst, 262, "midH never exceeds 262 over the whole legal (h, step) space");
     return 0;
 }
 
@@ -202,6 +339,9 @@ fn main() {
     test_subpel_invariants();
     test_group("sub-pel filter SET selection (7.11.3.4)");
     test_filter_set_selection();
+    test_group("motion vector scaling geometry (7.11.3.3)");
+    test_scaled_geometry();
+    test_scaled_geometry_bounds();
     test_group("sub-pel filter position checksum");
     test_subpel_checksum();
     test_group("warp filter table (7.11.3.5) — invariants + anchors + digest");

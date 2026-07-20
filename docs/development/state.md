@@ -6,6 +6,46 @@
 
 ## Version
 
+**0.7.108** — cut 2026-07-19, not yet tagged (user's git). **BILINEAR MC (output-CHANGING, lifts an explicit
+reject) + the 7.11.3.3 SCALING GEOMETRY (output-neutral leaves).** Two halves of the last inter track; only
+scaled-reference MC now remains. **BILINEAR:** av1_mc_filter_set gained `f == 3 -> set 5` and
+av1_mc_pred_core's reject is gone (filter guard widened 0..2 -> 0..3). NO table work — drishti set 5 already
+IS the halved bilinear kernel {0,0,0,64-4p,4p,0,0,0}; I verified all 720 coefficients against the spec under
+the permutation (spec 3->drishti 5, 4->3, 5->4). The branch precedes the narrow remap because spec 7.11.3.4's
+`w <= 4` branch has NO else — BILINEAR is never remapped. Reachable ONLY via the frame header's
+interpolation_filter f(2) (SWITCHABLE's alphabet is 3 symbols); av1_read_interp_filters copies the frame-level
+value to both dirs. PROOF scripts/refs/bilinear_mc_ref.py — deliberately in the SPEC convention (16 phases,
+rows summing 128, spec InterRound0/1) rather than drishti's halved dav1d one, so agreement PROVES the
+halving-plus-reduced-shift equivalence instead of assuming it; its table is MACHINE-GENERATED from the
+digest-pinned spec markdown (md5 51249ad9) with a verify_against_spec() re-derivation; and it REPRODUCES ALL
+17 pre-existing driver KATs before emitting the new ones — which also re-establishes the provenance those
+tests lost when mc_driver_ref.py's scratchpad was wiped. 14 new driver KATs (b01-b14) + an e2e + direct
+set-selection asserts. MUTATIONS (6, all red) incl. the LATENT-MIS-DECODE (delete the f==3 branch -> wrong
+pixels, no error) and the ORDERING (move it after the dim remap -> only narrow blocks break).
+**GEOMETRY:** av1_mc_scale_valid / _scaled_step / _scaled_start / _scaled_last / _scaled_mid_h, plus
+av1_scale_factor EXTRACTED into av1_frame.cyr (av1_is_scaled computed it inline twice; is_scaled and the MC
+geometry now share one derivation). scripts/refs/scaled_geom_ref.py cross-checks every startX against
+libaom's DIFFERENT algebraic form (av1_scaled_x / SCALE_EXTRA_OFF) over 2688 combinations. 15 KATs; 13
+mutations, all red. Max intermediateHeight over the whole legal space is EXACTLY 262 with the vertical read
+topping out at 261 — zero slack, so B3's buffer sizing is an immediate-OOB risk, not a latent one.
+**TWO ALIASED-FIXTURE DEFECTS FOUND AND FIXED — both mine, both caught by mutation, not by reading:**
+(a) the e2e inter harness could not distinguish interpolation filters AT ALL — ir_ref fills with x+2*y, a
+LINEAR RAMP, and every AV1 sub-pel filter reproduces a linear function exactly, so BILINEAR == EIGHTTAP ==
+SHARP bit-for-bit. The first BILINEAR e2e assertion passed for the wrong reason; only the paired
+`decode != EIGHTTAP oracle` half failed. New ir_ref_hc (non-linear, high-contrast). Same secretly-an-identity
+trap as OBMC 0.7.101. (b) the conformance fixtures were SQUARE (fw==fht), so rewriting the HEIGHT condition to
+test fw passed green; now deliberately non-square and both axis-swap mutations redden. **AND A DOC CLAIM I GOT
+WRONG AND MUTATION CORRECTED:** I wrote that the halfSample terms cancel at 1:1 so an unscaled fixture cannot
+witness EITHER — false. Dropping ONE breaks 1:1 too; only the JOINT drop is invisible there (residue
+8*(scale-(1<<14))). The comment now says that, and G13 confirms the joint drop reddens exactly g04-g15 and
+leaves g01-g03 green. LESSONS: (a) Round2Signed is witnessable ONLY at an exact tie — av1_round2 is arithmetic
+so it agrees everywhere else; a merely-NEGATIVE input is not enough (0.7.103's half-boundary lesson recurring),
+so g15 is tuned to baseX == -408704 == -1597*256+128. (b) A complementary oracle that calls the function under
+test witnesses WIRING, not MATHS — recorded in the e2e test itself, mutation-demonstrated both ways. 38 suites,
+**29,129** suite + **1,140** fuzz assertions, all six gates green. Next: **B3 = the scaled convolve kernel
+(unwired; carries the memory-safety lens's mandatory w/h/step guards — (h-1)*stepY WRAPS i64 so an
+intermediateHeight-only reject is insufficient), then B4 the wiring, B5 the is_scaled gate witnesses.**
+
 **0.7.107** — cut 2026-07-19, not yet tagged (user's git). **FILTER-SET + REFERENCE-GEOMETRY LEAVES — an
 OUTPUT-NEUTRAL refactor opening the LAST inter track (scaled-reference / BILINEAR MC).** Preceded by a
 multi-source understand workflow (spec 7.11.3.3/7.11.3.4 + Subpel set map re-fetched from AOMediaCodec/av1-spec,

@@ -119,6 +119,37 @@ fn test_mc_pred_known_answers() {
     return 0;
 }
 
+# BILINEAR (interpolation filter 3 -> drishti set 5), landed 0.7.108. Known answers from
+# scripts/refs/bilinear_mc_ref.py, which is written in the SPEC convention (16 phases, rows
+# summing to 128, spec InterRound0/InterRound1) rather than drishti's halved dav1d one — so
+# agreement here PROVES the halving-plus-reduced-shift equivalence rather than assuming it.
+# That port reproduces all 17 rows above before emitting these, so it is validated first.
+fn test_mc_pred_bilinear() {
+    #                        fw  fh  pl sx sy  bd  p   x   y   w   h    mvr     mvc  fx fy  checksum first last
+    mcd_case("b01 bilin hv", 24, 18, 3, 1, 1, 8, 0, 10, 8, 8, 8, 0 - 13, 21, 3, 3, 279296, 174, 103);
+    mcd_case("b02 bilin h-only", 24, 18, 3, 1, 1, 8, 0, 8, 5, 8, 8, 0, 3, 3, 3, 260512, 65, 143);
+    mcd_case("b03 bilin v-only", 24, 18, 3, 1, 1, 8, 0, 6, 4, 8, 8, 5, 0, 3, 3, 295836, 114, 76);
+    # b04 is a CONTROL, not a witness: at an integer position every filter degenerates to a
+    # copy, so it must equal c01 exactly (300779/166/241). It catches a kernel that filters
+    # when it should not; it can NOT distinguish bilinear from any other set.
+    mcd_case("b04 bilin integer", 24, 18, 3, 1, 1, 8, 0, 4, 3, 8, 8, 0, 0, 3, 3, 300779, 166, 241);
+    # per-axis: bilinear on ONE axis only, an 8-tap on the other. A single-axis mix-up
+    # (feeding the h filter to the v pass) moves exactly one of these two.
+    mcd_case("b05 bilin-x eighttap-y", 24, 18, 3, 1, 1, 8, 0, 6, 6, 8, 8, 11, 19, 3, 0, 263008, 141, 187);
+    mcd_case("b06 eighttap-x bilin-y", 24, 18, 3, 1, 1, 8, 0, 6, 6, 8, 8, 11, 19, 0, 3, 263707, 143, 166);
+    # the narrow extents where a mis-ORDERED set selection silently falls into the 4-tap
+    # sets: BILINEAR is NOT remapped at w<=4 or h<=4 (spec 7.11.3.4 has no else branch).
+    mcd_case("b07 bilin w4", 24, 18, 3, 1, 1, 8, 0, 5, 5, 4, 8, 0, 9, 3, 3, 81578, 39, 61);
+    mcd_case("b08 bilin h4", 24, 18, 3, 1, 1, 8, 0, 6, 6, 8, 4, 9, 0, 3, 3, 85906, 109, 62);
+    mcd_case("b09 bilin 4x4", 24, 18, 3, 1, 1, 8, 0, 5, 5, 4, 4, 7, 9, 3, 3, 20731, 51, 194);
+    mcd_case("b10 bilin chroma", 24, 18, 3, 1, 1, 8, 1, 3, 2, 4, 4, 7, 0 - 5, 3, 3, 15223, 183, 66);
+    mcd_case("b11 bilin tl-overhang", 24, 18, 3, 1, 1, 8, 0, 0, 0, 8, 8, 0 - 9, 0 - 7, 3, 3, 287565, 0, 51);
+    mcd_case("b12 bilin 10-bit", 16, 12, 1, 0, 0, 10, 0, 4, 4, 8, 8, 0 - 3, 5, 3, 3, 875125, 220, 539);
+    mcd_case("b13 bilin 12-bit", 16, 12, 1, 0, 0, 12, 0, 4, 4, 8, 8, 0 - 3, 5, 3, 3, 875348, 220, 539);
+    mcd_case("b14 bilin 16x16", 48, 32, 3, 1, 1, 8, 0, 12, 9, 16, 16, 0 - 27, 43, 3, 3, 4157811, 181, 170);
+    return 0;
+}
+
 fn test_mc_pred_chroma_full() {
     # c09 full 4x4 block, every pixel (chroma plane, subsampled MV, w<=4 remap, SMOOTH v).
     var ref = mcd_pair(24, 18, 3, 1, 1, 8, 0);
@@ -163,10 +194,14 @@ fn test_mc_pred_border_independent() {
 fn test_mc_pred_rejects() {
     var ref = mcd_pair(24, 18, 3, 1, 1, 8, 0);
     var d = Mcd_Dst;
-    # BILINEAR interpolation filter — clean reject until its bite lands.
-    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 3, 0), DR_ERR_UNSUPPORTED, "bilinear fx");
-    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0, 3), DR_ERR_UNSUPPORTED, "bilinear fy");
-    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 4, 0), DR_ERR_BOUNDS, "filter out of range");
+    # BILINEAR (filter 3) is ACCEPTED as of 0.7.108 — these were DR_ERR_UNSUPPORTED before.
+    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 3, 0), DR_OK, "bilinear fx accepted");
+    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0, 3), DR_OK, "bilinear fy accepted");
+    # ...and 4 is now the first out-of-range filter, on EITHER axis (the guard is 0..3).
+    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 4, 0), DR_ERR_BOUNDS, "filter fx 4 out of range");
+    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0, 4), DR_ERR_BOUNDS, "filter fy 4 out of range");
+    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0 - 1, 0), DR_ERR_BOUNDS, "filter fx negative");
+    assert_eq(av1_mc_pred_block(d, ref, 0, 4, 3, 8, 8, 0, 0, 0, 0 - 1), DR_ERR_BOUNDS, "filter fy negative");
     # scaled / mismatched reference — clean reject until the scaled-MC bite lands.
     var small = dr_frame_new(20, 18, 3, 1, 1, 8, 0, Mcd_Err);
     mcd_fill(small);
@@ -1452,6 +1487,8 @@ fn main() {
     test_group("MC driver known answers (7.11.3.4 spec-literal reference)");
     test_mc_pred_known_answers();
     test_mc_pred_chroma_full();
+    test_group("MC driver BILINEAR filter (7.11.3.4 set 3 -> drishti set 5)");
+    test_mc_pred_bilinear();
     test_group("MC driver write confinement + border independence");
     test_mc_pred_confinement();
     test_mc_pred_border_independent();
