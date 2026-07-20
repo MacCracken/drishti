@@ -294,6 +294,128 @@ fn its_build_seq(out_len): i64 {
 }
 # the KEY frame header for that sequence (error_resilient implied 1, refresh
 # implied 255, sizes from the sequence maxima).
+# ---- ORDER-HINT-ENABLED builders (0.7.x Phase C part 2) ----
+# The degenerate its_build_* path uses enable_order_hint=0 + error_resilient=1, which gates OFF
+# order_hint, primary_ref_frame, frame_refs_short_signaling and get_relative_dist. These build
+# the REALISTIC path a real encoder emits: enable_order_hint=1 (OrderHintBits=7), per-frame
+# order_hint, and an inter frame with error_resilient=0 + explicit primary_ref_frame=7.
+fn its_build_seq_oh(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0                       f(3)
+    dr_bw_put_bit(bw, 0);            # still_picture = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # reduced_still_picture_header = 0      f(1)
+    dr_bw_put_bit(bw, 0);            # timing_info_present_flag = 0          f(1)
+    dr_bw_put_bit(bw, 0);            # initial_display_delay_present = 0     f(1)
+    dr_bw_put_bits(bw, 0, 5);        # operating_points_cnt_minus_1 = 0      f(5)
+    dr_bw_put_bits(bw, 0, 12);       # operating_point_idc[0] = 0            f(12)
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0                  f(5)
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15         f(4)
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15        f(4)
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_width_minus_1 = 63 -> 64    f(16)
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63 -> 64   f(16)
+    dr_bw_put_bit(bw, 0);            # frame_id_numbers_present_flag = 0     f(1)
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0            f(1)
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra = 0               f(1)
+    dr_bw_put_bit(bw, 0);            # enable_intra_edge_filter = 0          f(1)
+    dr_bw_put_bit(bw, 0);            # enable_interintra_compound = 0        f(1)
+    dr_bw_put_bit(bw, 0);            # enable_masked_compound = 0            f(1)
+    dr_bw_put_bit(bw, 0);            # enable_warped_motion = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # enable_dual_filter = 0                f(1)
+    dr_bw_put_bit(bw, 1);            # enable_order_hint = 1                 f(1)
+    dr_bw_put_bit(bw, 0);            # enable_jnt_comp = 0                   f(1)
+    dr_bw_put_bit(bw, 0);            # enable_ref_frame_mvs = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # seq_choose_screen_content_tools = 0   f(1)
+    dr_bw_put_bit(bw, 0);            # seq_force_screen_content_tools = 0    f(1)
+    dr_bw_put_bits(bw, 6, 3);        # order_hint_bits_minus_1 = 6 -> 7 bits f(3)
+    dr_bw_put_bit(bw, 0);            # enable_superres = 0                   f(1)
+    dr_bw_put_bit(bw, 0);            # enable_cdef = 0                       f(1)
+    dr_bw_put_bit(bw, 0);            # enable_restoration = 0                f(1)
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0                     f(1)
+    dr_bw_put_bit(bw, 1);            # mono_chrome = 1                       f(1)
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0    f(1)
+    dr_bw_put_bit(bw, 0);            # color_range = 0                       f(1)
+    dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0         f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+fn its_build_key_fh_oh(order_hint, out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
+    dr_bw_put_bits(bw, 0, 2);        # frame_type = KEY                      f(2)
+    dr_bw_put_bit(bw, 1);            # show_frame = 1                        f(1)
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1                f(1)
+    dr_bw_put_bit(bw, 0);            # frame_size_override_flag = 0          f(1)
+    dr_bw_put_bits(bw, order_hint, 7);   # order_hint f(OrderHintBits=7)     f(7)
+    #                                  primary_ref: intra -> NONE (no bit)
+    #                                  refresh: KEY+show -> implied 255
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0   f(1)
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1         f(1)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40                       f(8)
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0             f(1)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0                   f(1)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1                    f(1)
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+fn its_build_inter_fh_oh(order_hint, tx_sel, out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
+    dr_bw_put_bits(bw, 1, 2);        # frame_type = INTER                    f(2)
+    dr_bw_put_bit(bw, 1);            # show_frame = 1                        f(1)
+    dr_bw_put_bit(bw, 0);            # error_resilient_mode = 0              f(1)
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1                f(1)
+    dr_bw_put_bit(bw, 0);            # frame_size_override_flag = 0          f(1)
+    dr_bw_put_bits(bw, order_hint, 7);   # order_hint f(7)                   f(7)
+    dr_bw_put_bits(bw, 7, 3);        # primary_ref_frame = 7 (PRIMARY_REF_NONE) f(3)
+    dr_bw_put_bits(bw, 255, 8);      # refresh_frame_flags = 255             f(8)
+    #                                  ref_order_hint loop: error_resilient 0 -> skipped
+    dr_bw_put_bit(bw, 0);            # frame_refs_short_signaling = 0        f(1)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[0] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[1] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[2] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[3] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[4] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[5] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[6] = 0                  f(3)
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0   f(1)
+    dr_bw_put_bit(bw, 1);            # allow_high_precision_mv = 1           f(1)
+    dr_bw_put_bit(bw, 0);            # is_filter_switchable = 0              f(1)
+    dr_bw_put_bits(bw, 0, 2);        # interpolation_filter = EIGHTTAP       f(2)
+    dr_bw_put_bit(bw, 0);            # is_motion_mode_switchable = 0         f(1)
+    #                                  use_ref_frame_mvs: enable_ref_frame_mvs 0 -> no bit
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1         f(1)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40                       f(8)
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0             f(1)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0                   f(1)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
+    dr_bw_put_bit(bw, tx_sel);       # tx_mode_select (0 = TX_MODE_LARGEST)  f(1)
+    dr_bw_put_bit(bw, 0);            # reference_select = 0                  f(1)
+    #                                  skip_mode: not allowed -> no bit
+    #                                  allow_warped: enable_warped 0 -> no bit
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST] = 0                   f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST2] = 0                  f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST3] = 0                  f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[GOLDEN] = 0                 f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[BWDREF] = 0                 f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF2] = 0                f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF] = 0                 f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+
 fn its_build_key_fh(out_len): i64 {
     var bw = dr_bw_init(16);
     dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
@@ -460,6 +582,125 @@ fn its_enc_inter_content(dpb, refs, seq, out_len): i64 {
     var resid = ir_resid1(AV1_DCT_DCT, 2, coeff);
     var blk = ir_blk(0, 0, resid);        # ref=LAST, MV=0, SKIP=0, the residual
     return it_enc_tile(dpb, refs, seq, fh, blk, out_len);
+}
+
+# Phase C part 2 — the REALISTIC order-hint header parses correctly (isolate the bit-packing
+# before wiring it into a full decode). Parse the OH seq + a KEY OH fh + an INTER OH fh through
+# the REAL parser and assert the order-hint fields that the degenerate path never exercised.
+fn test_inter_oh_header_parseback() {
+    var slen = 0;
+    var sb = its_build_seq_oh(&slen);
+    var se = alloc(8);
+    var seq = av1_seq_parse(sb, slen, se);
+    assert_eq(load64(se), DR_OK, "OH seq parses");
+    assert_eq(av1_seq_enable_order_hint(seq), 1, "OH seq: enable_order_hint = 1");
+    assert_eq(av1_seq_order_hint_bits(seq), 7, "OH seq: OrderHintBits = 7");
+    # the KEY frame reads order_hint (a keyframe resets ref state, so parse it first).
+    var refs = av1_ref_state_new();
+    var klen = 0;
+    var kb = its_build_key_fh_oh(5, &klen);
+    var ke = alloc(8);
+    var kfh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, kb, klen, ke);
+    assert_eq(load64(ke), DR_OK, "OH key fh parses");
+    assert_eq(av1_fh_frame_is_intra(kfh), 1, "OH key: intra");
+    assert_eq(av1_fh_order_hint(kfh), 5, "OH key: order_hint = 5 (read as f(7))");
+    # store the key into the DPB ref state so the inter frame's OrderHints resolve.
+    av1_frame_update_refs(refs, seq, kfh);
+    var ilen = 0;
+    var ib = its_build_inter_fh_oh(9, 1, &ilen);
+    var ie = alloc(8);
+    var ifh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, ib, ilen, ie);
+    assert_eq(load64(ie), DR_OK, "OH inter fh parses (the realistic error_resilient=0 header)");
+    assert_eq(av1_fh_frame_is_intra(ifh), 0, "OH inter: inter frame");
+    assert_eq(av1_fh_order_hint(ifh), 9, "OH inter: order_hint = 9 (explicit f(7))");
+    assert_eq(av1_fh_primary_ref_frame(ifh), 7, "OH inter: primary_ref_frame = 7 read EXPLICITLY (never before)");
+    assert_eq(av1_fh_frame_refs_short_signaling(ifh), 0,
+    "OH inter: frame_refs_short_signaling = 0 (read, was gated off)");
+    # OrderHints[LAST] = the key's order_hint (5) since ref_frame_idx[0] -> slot 0 = key.
+    assert_eq(av1_fh_order_hint_ref(ifh, AV1_LAST_FRAME), 5, "OH inter: OrderHints[LAST] = key order_hint 5");
+    # get_relative_dist(OrderHints[LAST]=5, OrderHint=9) is now NON-ZERO for the first time.
+    assert_eq(av1_ref_dist(seq, ifh, AV1_LAST_FRAME) != 0, 1, "OH inter: get_relative_dist is non-zero (5 vs 9)");
+    return 0;
+}
+
+# append TD + SEQ(oh) + KEY(oh, flat) + INTER(oh, content residual) to a writer — the realistic
+# order-hint variant of its_append_content_prefix. Order hints: key=0, content=1.
+fn its_append_content_prefix_oh(bw): i64 {
+    var slen = 0;
+    var sb = its_build_seq_oh(&slen);
+    var kflen = 0;
+    var kfb = its_build_key_fh_oh(0, &kflen);
+    var ktlen = 0;
+    var ktb = its_enc_key_tile(&ktlen);
+    var dpb0 = av1_dpb_new();
+    var fh0 = it_fh();
+    av1_dpb_store(dpb0, fh0, it_ref_frame());
+    var ctlen = 0;
+    var ctb = its_enc_inter_content(dpb0, it_refs(), it_seq(), &ctlen);
+    var iflen = 0;
+    var ifb = its_build_inter_fh_oh(1, 0, &iflen);
+    its_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    its_wrap(bw, AV1_OBU_SEQUENCE_HEADER, sb, slen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, kfb, kflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ktb, ktlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, ifb, iflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ctb, ctlen);
+    return 0;
+}
+
+# Phase C part 2 — a REALISTIC (order-hint-enabled, error_resilient=0, explicit primary_ref_frame)
+# inter frame decodes end-to-end with WITNESSED motion. Same pixel result as the degenerate-header
+# milestone (single-ref forward MC ignores order hints), so this proves the realistic PARSE path
+# feeds the decode correctly — get_relative_dist and explicit primary_ref_frame now run on a frame
+# that decodes to pixels, not just a parseback.
+fn test_inter_stream_motion_oh() {
+    var mvr = 8;
+    var mvc = 8;
+    var pbw = dr_bw_init(512);
+    its_append_content_prefix_oh(pbw);
+    var pn = dr_bw_flush(pbw);
+    var pdpb = av1_dpb_new();
+    var poc = alloc(8);
+    var poe = alloc(8);
+    var content = av1_decode_stream(pdpb, dr_bw_buf(pbw), pn, poc, poe);
+    assert_eq(load64(poe), DR_OK, "OH milestone: realistic content prefix decodes");
+    var snap = its_snapshot(content, 64, 64);
+    var dpbe = av1_dpb_new();
+    var fhe = it_fh();
+    av1_dpb_store(dpbe, fhe, it_ref_frame());
+    var mtlen = 0;
+    var mtb = it_enc_tile(dpbe, it_refs(), it_seq(), fhe, it_blk(mvr, mvc), &mtlen);
+    var mflen = 0;
+    var mfb = its_build_inter_fh_oh(2, 0, &mflen);   # motion frame, order_hint = 2
+    var bw = dr_bw_init(768);
+    its_append_content_prefix_oh(bw);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, mfb, mflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, mtb, mtlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var moved = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "OH MILESTONE: realistic-header key + content + MOTION decodes from bytes");
+    assert_eq(load64(oc), 3, "OH milestone: three frames decoded");
+    var oe2 = alloc(8);
+    var orc = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
+    av1_mc_pred_block(orc, snap, 0, 0, 0, 64, 64, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff_oracle = 0;
+    var diff_copy = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(moved, 0, x, y) != dr_frame_get(orc, 0, x, y)) { diff_oracle = diff_oracle + 1; }
+            if (dr_frame_get(moved, 0, x, y) != dr_frame_get(snap, 0, x, y)) { diff_copy = diff_copy + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff_oracle, 0, "OH MILESTONE: realistic-header motion frame == independent MC of content");
+    assert_eq(diff_copy > 0, 1, "OH MILESTONE: motion moved pixels under the realistic header too");
+    return 0;
 }
 
 fn test_inter_stream_content() {
@@ -4851,6 +5092,8 @@ fn main() {
     test_inter_cdef_plan_refused();
     test_group("the byte-stream layer: real headers drive the inter lane");
     test_inter_header_parseback();
+    test_inter_oh_header_parseback();
+    test_inter_stream_motion_oh();
     test_inter_stream_content();
     test_inter_stream_motion();
     test_inter_stream_e2e();

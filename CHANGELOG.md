@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **Realistic order-hint inter header decodes** (Phase C part 2). The degenerate inter path
+  (`enable_order_hint = 0`, `error_resilient = 1`) gated off `order_hint`, explicit
+  `primary_ref_frame`, `frame_refs_short_signaling` and `get_relative_dist`. New OH-enabled builders
+  (`its_build_seq_oh` / `its_build_key_fh_oh` / `its_build_inter_fh_oh`, `OrderHintBits = 7`) and two
+  tests: `test_inter_oh_header_parseback` — the realistic header parses, with **`get_relative_dist`
+  non-zero and `primary_ref_frame` read explicitly on decoded-frame data for the first time**
+  (teeth-verified: a one-field bit misalignment reddens it); `test_inter_stream_motion_oh` — a
+  realistic-header inter frame decodes end-to-end with witnessed motion (== an independent MC oracle),
+  proving the order-hint parse path feeds the decode. Still single-ref forward-only; compound/backward
+  refs (`RefFrameSignBias`), CDF inheritance, the intra fork and segmentation remain out.
+
 ## [0.7.119] - 2026-07-20
 
 **First MOTION-WITNESSING inter frame decode from real bytes** (Phase C, part 1). An inter frame's
