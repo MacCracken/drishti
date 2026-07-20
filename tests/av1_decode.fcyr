@@ -1,0 +1,311 @@
+# tests/av1_decode.fcyr — AV1 DECODE-PATH fuzz harness (0.7.118). The 0.7.116 audit found
+# the only fuzz harness (tests/drishti.fcyr) contained ZERO codec symbols — it exercised the
+# IVF container and the generic VLC readers, never a decoder. This one hammers the real AV1
+# decode path with mutated OBU streams.
+#
+# THE CONTRACT UNDER FUZZ (CLAUDE.md "trust no input byte"): for ANY byte buffer, the decode
+# entry points NEVER crash, NEVER read out of bounds, NEVER loop forever. Every outcome is a
+# valid frame or a clean DR_ERR_* code. The assertion is simply that we come back at all, and
+# that any error is a documented code.
+#
+# The seed is a real reduced-still-picture keyframe OBU stream (TD + SEQ + FRAME_HEADER +
+# TILE_GROUP), built byte-identically to tests/av1_dpb.tcyr's dpb_build_* helpers; the passes
+# mutate it and feed both av1_decode_obus (single-frame) and av1_decode_stream (multi-frame).
+include "src/main.cyr"
+
+# Deterministic xorshift PRNG so any failure reproduces from the fixed seed.
+var afz_seed = 0x9E3779B1;
+fn afz_rand(): i64 {
+    var s = afz_seed;
+    s = s ^ (s << 13);
+    s = s ^ (s >> 7);
+    s = s ^ (s << 17);
+    s = s & 0x7FFFFFFFFFFFFFFF;
+    afz_seed = s;
+    return s;
+}
+
+# ---- seed builders (reduced-still-picture 128x64 8-bit mono keyframe) ----
+fn afz_build_seq(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 1);            # still_picture = 1
+    dr_bw_put_bit(bw, 1);            # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 127, 16);     # max_frame_width_minus_1 = 127
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock = 0
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra = 0
+    dr_bw_put_bit(bw, 1);            # enable_intra_edge_filter = 1
+    dr_bw_put_bit(bw, 0);            # enable_superres = 0
+    dr_bw_put_bit(bw, 0);            # enable_cdef = 0
+    dr_bw_put_bit(bw, 0);            # enable_restoration = 0
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0
+    dr_bw_put_bit(bw, 1);            # mono_chrome = 1
+    dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
+    dr_bw_put_bit(bw, 0);            # color_range = 0
+    dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+fn afz_build_fh(out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1
+    dr_bw_put_bit(bw, 0);            # allow_screen_content_tools = 0
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1
+    dr_bw_put_bit(bw, 0);            # increment_tile_cols_log2 = 0
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0
+    dr_bw_put_bit(bw, 1);            # tx_mode_select = 1
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+fn afz_enc_keyframe(out_len): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);
+    store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);
+    store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) {
+        store64(pm + (k * 8), mi);
+        store64(pt + (k * 8), 3);
+        k = k + 1;
+    }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    return av1_encode_intra_tile(etile, pp, pm, pt, 1, out_len);
+}
+fn afz_obus_append(bw, src, n): i64 {
+    var i = 0;
+    while (i < n) { dr_bw_put_bits(bw, load8(src + i), 8); i = i + 1; }
+    return 0;
+}
+fn afz_obus_wrap(bw, type, payload, plen): i64 {
+    av1_obu_write_header(bw, type, 0, 0, 0, 1, plen);
+    if (plen > 0) { afz_obus_append(bw, payload, plen); }
+    return 0;
+}
+# Build a fresh valid keyframe OBU stream into a NEW buffer; returns ptr, *out_len set.
+# A fresh copy per mutation so passes never share state.
+fn afz_build_stream(out_len): i64 {
+    var slen = 0;
+    var seq = afz_build_seq(&slen);
+    var flen = 0;
+    var fhb = afz_build_fh(&flen);
+    var tlen = 0;
+    var tile = afz_enc_keyframe(&tlen);
+    var bw = dr_bw_init(256);
+    afz_obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    afz_obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    afz_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen);
+    afz_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n = dr_bw_flush(bw);
+    # copy out of the writer's arena so a mutation cannot disturb the next build.
+    var out = alloc(n);
+    var i = 0;
+    while (i < n) { store8(out + i, load8(dr_bw_buf(bw) + i)); i = i + 1; }
+    store64(out_len, n);
+    return out;
+}
+
+# A decode error must be one of the documented codes — never an unlabelled crash. Core codes
+# are 0..9 plus DR_ERR_OTHER (99); the AV1 family mints its own in the reserved band 10..29
+# (AV1_ERR_BAD_PROFILE / _BAD_SEQ / _BAD_FRAME, src/av1_seq.cyr), so an av1_decode_* fault is
+# legitimately one of those too.
+fn afz_known_err(e): i64 {
+    if (e == DR_ERR_OTHER) { return 1; }
+    if ((e >= DR_OK) && (e <= DR_ERR_OOM)) { return 1; }   # core band 0..9
+    if ((e >= 10) && (e <= 29)) { return 1; }              # AV1 family band
+    return 0;
+}
+
+# Drive BOTH decode entry points + the raw OBU iterator over an arbitrary buffer. The whole
+# point is that we return at all (no crash/hang/OOB); the assertion is on the error code.
+fn afz_drive(buf, len): i64 {
+    # 1. the OBU iterator: walk headers only, must terminate and stay in bounds. av1_obu_next
+    #    returns DR_OK per OBU, AV1_OBU_END (-1) at a clean end, else a sticky error code.
+    var it = av1_obu_iter_init(buf, len);
+    if (it != 0) {
+        var ot = alloc(8);
+        var oo = alloc(8);
+        var os = alloc(8);
+        var steps = 0;
+        var rc = av1_obu_next(it, ot, oo, os);
+        while ((rc == DR_OK) && (steps < 4096)) {
+            # a yielded payload must lie fully inside the buffer — no OOB offset/size.
+            assert((load64(oo) >= 0) && ((load64(oo) + load64(os)) <= len),
+            "obu payload inside buffer");
+            rc = av1_obu_next(it, ot, oo, os);
+            steps = steps + 1;
+        }
+        assert(steps < 4096, "obu iter terminates (no infinite walk)");
+        assert((rc == AV1_OBU_END) || (afz_known_err(rc) == 1), "obu walk exit is a known code");
+    }
+    # 2. single-frame decode.
+    var e1 = alloc(8);
+    av1_decode_obus(buf, len, e1);
+    assert(afz_known_err(load64(e1)) == 1, "av1_decode_obus err is a known code");
+    # 3. multi-frame stream decode.
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var e2 = alloc(8);
+    av1_decode_stream(dpb, buf, len, oc, e2);
+    assert(afz_known_err(load64(e2)) == 1, "av1_decode_stream err is a known code");
+    return 0;
+}
+
+# Pass 1: single-byte mutation across the WHOLE stream x interesting values. Catches OBU
+# header / leb128-size / payload-length corruption that could drive an OOB read.
+fn afz_pass_byte_mutate(): i64 {
+    var len = 0;
+    var seed = afz_build_stream(&len);
+    var vals = alloc(6);
+    store8(vals, 0x00);
+    store8(vals + 1, 0x01);
+    store8(vals + 2, 0x7F);
+    store8(vals + 3, 0x80);
+    store8(vals + 4, 0xFF);
+    store8(vals + 5, 0x55);
+    var idx = 0;
+    while (idx < len) {
+        var vi = 0;
+        while (vi < 6) {
+            var b = alloc(len);
+            var i = 0;
+            while (i < len) { store8(b + i, load8(seed + i)); i = i + 1; }
+            store8(b + idx, load8(vals + vi));
+            afz_drive(b, len);
+            vi = vi + 1;
+        }
+        idx = idx + 1;
+    }
+    return 0;
+}
+
+# Pass 2: truncation — every prefix. A short buffer must be reported, never over-read.
+fn afz_pass_truncate(): i64 {
+    var len = 0;
+    var seed = afz_build_stream(&len);
+    var cut = 0;
+    while (cut <= len) {
+        afz_drive(seed, cut);
+        cut = cut + 1;
+    }
+    return 0;
+}
+
+# Pass 3: OBU leb128 size-field attacks. The size field sits right after each OBU header
+# byte; overwrite the byte after each header with a lying single-byte leb128 length.
+fn afz_pass_size_fields(): i64 {
+    var len = 0;
+    var seed = afz_build_stream(&len);
+    var lies = alloc(5);
+    store8(lies, 0x00);       # size 0
+    store8(lies + 1, 0x7F);   # size 127 (past a short OBU)
+    store8(lies + 2, 0x80);   # continuation bit set, incomplete leb128
+    store8(lies + 3, 0xFF);   # continuation + max low byte
+    store8(lies + 4, 0x01);   # size 1
+    var pos = 0;
+    while (pos < len) {
+        var li = 0;
+        while (li < 5) {
+            var b = alloc(len);
+            var i = 0;
+            while (i < len) { store8(b + i, load8(seed + i)); i = i + 1; }
+            store8(b + pos, load8(lies + li));
+            afz_drive(b, len);
+            li = li + 1;
+        }
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+# Pass 4: random garbage buffers straight into the decoders + the iterator. The arithmetic
+# tile decoder over garbage symbols is the deepest reach: it must terminate, never hang.
+fn afz_pass_garbage(): i64 {
+    var round = 0;
+    while (round < 400) {
+        var n = (afz_rand() & 255) + 1;
+        var b = alloc(n);
+        var i = 0;
+        while (i < n) { store8(b + i, afz_rand() & 255); i = i + 1; }
+        afz_drive(b, n);
+        round = round + 1;
+    }
+    # pathological shapes.
+    var z = alloc(96);
+    var o = alloc(96);
+    var k = 0;
+    while (k < 96) { store8(z + k, 0); store8(o + k, 0xFF); k = k + 1; }
+    afz_drive(z, 96);
+    afz_drive(o, 96);
+    return 0;
+}
+
+# Pass 5: corrupt ONLY the entropy-coded tile payload (the last OBU's body), leaving every
+# header valid — so the mutation reaches the symbol decoder / partition walk / reconstruction
+# rather than being rejected at a header. Random byte in the tail quarter of the stream.
+fn afz_pass_tile_corrupt(): i64 {
+    var len = 0;
+    var seed = afz_build_stream(&len);
+    var tail = len - (len >>> 2);    # last quarter ~ the tile payload
+    var round = 0;
+    while (round < 300) {
+        var b = alloc(len);
+        var i = 0;
+        while (i < len) { store8(b + i, load8(seed + i)); i = i + 1; }
+        var pos = tail + (afz_rand() % (len - tail));
+        store8(b + pos, afz_rand() & 255);
+        afz_drive(b, len);
+        round = round + 1;
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    afz_pass_byte_mutate();
+    afz_pass_truncate();
+    afz_pass_size_fields();
+    afz_pass_garbage();
+    afz_pass_tile_corrupt();
+    # the pristine seed still decodes cleanly after all that — a self-check of the harness.
+    var len = 0;
+    var seed = afz_build_stream(&len);
+    var oe = alloc(8);
+    var frame = av1_decode_obus(seed, len, oe);
+    assert_eq(load64(oe), DR_OK, "pristine seed: decodes clean");
+    assert_eq(frame != 0, 1, "pristine seed: frame returned");
+    assert_eq(dr_frame_get(frame, 0, 40, 30), 128, "pristine seed: flat-DC 128");
+    var rc = assert_summary();
+    if (rc == 0) { println("av1 decode fuzz: ok"); }
+    return rc;
+}
+
+var afz_result = main();
+syscall(60, afz_result);

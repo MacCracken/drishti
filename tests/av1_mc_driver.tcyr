@@ -722,6 +722,65 @@ fn test_mc_compound_warp() {
     }
     assert_eq(nmw > 0, 1, "mixed (warp0, trans1) != both-warp (ref0 warps independently)");
     assert_eq(nmt > 0, 1, "mixed (warp0, trans1) != both-translation (ref1 translates independently)");
+    # D: THE LANE-DISCRIMINATING witness. Everything above uses ONE frame + ONE model for
+    # both references, so warping ref0 and warping ref1 produce identical pixels and a
+    # use_warp0<->use_warp1 swap in the dispatch is INVISIBLE (mutation-confirmed: the swap
+    # survived the whole suite). Give the two references DISTINCT content, then mixed(warp0,
+    # trans1) and mixed(trans0, warp1) must DIFFER — which they cannot if the code gates the
+    # wrong lane. r0 keeps the fill above; r1 gets a different salt.
+    var r1 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    warp_fill(r1, 0, 137);
+    var m10 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);   # ref0 warps, ref1 translates
+    av1_mc_pred_compound(m10, r, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, wm, wm, 1, 0);
+    var m01 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);   # ref0 translates, ref1 warps
+    av1_mc_pred_compound(m01, r, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, wm, wm, 0, 1);
+    var nlane = 0;
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            if (dr_frame_get(m10, 0, x, y) != dr_frame_get(m01, 0, x, y)) { nlane = nlane + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(nlane > 0, 1, "compound warp: mixed lanes differ (distinct refs)");
+    # ...but "they differ" is symmetric AND the AVERAGE combine is commutative, so a
+    # use_warp0<->use_warp1 swap merely EXCHANGES m10 and m01 and every symmetric test passes
+    # both ways (mutation-confirmed). m10 must be pinned to an ABSOLUTE lane assignment.
+    #
+    # m10 is (ref0=r WARPS, ref1=r1 TRANSLATES) -> its per-pixel neighbourhood is
+    # AVERAGE(warp(r), trans(r1)); the swapped code would instead produce AVERAGE(trans(r),
+    # warp(r1)). Build BOTH finals-averaged oracles from the VERIFIED single-ref warp path and
+    # integer-MV copies, and assert m10 sits CLOSER to the correct one. This is threshold-free:
+    # it does not care that combining intermediates double-rounds vs averaging finals (~26 LSB
+    # here), only that m10 tracks the correct lane assignment (~26) not the swapped one (~119).
+    var t1 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_mc_pred_block(t1, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0);   # trans(r1) = copy (integer MV)
+    var s1 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_warp_pred_block(s1, r1, 0, 0, 0, 32, 32, wm);         # verified single-ref warp of r1
+    var t0 = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
+    av1_mc_pred_block(t0, r, 0, 0, 0, 32, 32, 0, 0, 0, 0);    # trans(r) = copy
+    var dcorrect = 0;   # max |m10 - AVERAGE(warp(r), trans(r1))|  (ref0 warps)
+    var dswapped = 0;   # max |m10 - AVERAGE(trans(r), warp(r1))|  (ref1 warps)
+    y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            var oc = (dr_frame_get(s, 0, x, y) + dr_frame_get(t1, 0, x, y) + 1) >>> 1;
+            var osw = (dr_frame_get(t0, 0, x, y) + dr_frame_get(s1, 0, x, y) + 1) >>> 1;
+            var dc = dr_frame_get(m10, 0, x, y) - oc;
+            if (dc < 0) { dc = 0 - dc; }
+            if (dc > dcorrect) { dcorrect = dc; }
+            var ds = dr_frame_get(m10, 0, x, y) - osw;
+            if (ds < 0) { ds = 0 - ds; }
+            if (ds > dswapped) { dswapped = ds; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert(dcorrect < dswapped,
+    "compound warp: m10 tracks ref0=warp lane, not the use_warp0<->use_warp1 swap");
     return 0;
 }
 

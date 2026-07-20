@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.118] - 2026-07-20
+
+**The AV1 decode path is now fuzzed.** The 0.7.116 audit found the only fuzz harness contained
+**zero codec symbols** — it exercised the IVF container and the generic bit readers, never a decoder,
+so "fuzz-tested from day one" was true only of the container layer. `tests/av1_decode.fcyr` closes that:
+it hammers `av1_decode_obus`, `av1_decode_stream` and the OBU iterator with mutated OBU streams and
+asserts the trust-no-input contract — never crash, never read out of bounds, never loop forever; every
+outcome is a valid frame or a documented `DR_ERR_*` / AV1-family error code.
+
+### The passes
+
+From a real reduced-still-picture keyframe seed (TD + SEQ + FRAME_HEADER + TILE_GROUP): single-byte
+mutation across the whole stream × interesting values; every truncation prefix; OBU leb128 size-field
+attacks; 400 rounds of random garbage plus all-zeros/all-ones; and 300 rounds corrupting **only** the
+entropy-coded tile payload with headers left valid, so the mutation reaches the symbol decoder, partition
+walk and reconstruction rather than bouncing off a header check. **+6,270 fuzz assertions** (1,140 →
+7,410).
+
+### The harness was itself verified
+
+Per "a test you have not seen fail is not evidence", the harness was canary-tested: removing the OBU
+`obu_size <= remaining` guard makes a lying size yield an out-of-bounds payload, and the harness catches
+it (the per-OBU `payload inside buffer` assertion reddens). A finding worth recording: the **deep** decode
+path is structurally safe rather than guard-based — the arithmetic decoder reads size-matched CDFs, so
+garbage bytes always decode to in-range symbols and in-range `eob`/coefficient positions. Removing a
+reconstruction-origin guard did *not* OOB from fuzz, because the MI-bounded partition walk and the frame
+border make it unreachable for a header-bounded frame. The decoder holds the contract on garbage by
+construction, not by luck.
+
+38 suites, **29,494** suite + **7,410** fuzz assertions, all six gates green.
+
+## [0.7.117] - 2026-07-20
+
+**Test hardening — the compound-warp lane dispatch was untested.** The 0.7.116 audit flagged that a
+`use_warp0` ↔ `use_warp1` swap in `av1_mc_pred_compound` **survived the entire suite** (exit 0 across
+`av1_mc_driver`, `av1_intertile`, `av1_mc`, `av1_decode`). Confirmed by mutation: the per-reference warp
+gating had no witness. The code was correct all along — this closes a coverage hole, not a bug.
+
+### Why it was invisible
+
+Every compound-warp test used **one frame and one warp model for both references**, so warping ref0 and
+warping ref1 produce identical pixels. The existing "mixed lane" test only asserted the two mixed cases
+*differ* — which is symmetric, and the AVERAGE combine is commutative, so a swap merely **exchanges** the
+two cases and every symmetric assertion passes both ways.
+
+### The fix
+
+A lane-discriminating witness in `tests/av1_mc_driver.tcyr`: give the two references **distinct** content,
+then pin `mixed(ref0=warp, ref1=trans)` to an **absolute** oracle rather than a symmetric comparison. The
+oracle is built from the verified single-reference warp path and integer-MV copies, averaged; the
+assertion is **threshold-free** — it asserts `m10` tracks the correct lane assignment (~26 LSB from the
+finals-averaged oracle, an inherent double-rounding gap) more closely than the swapped one (~119 LSB),
+rather than picking a magic tolerance. The swap now reddens.
+
+Not done, and deferred with reason: the audit also suggested replacing the linear-ramp `it_ref_frame`
+(27 call sites) with a non-linear fill. Most of those sites are decode-vs-oracle comparisons where a
+shared ramp hides nothing, and the genuinely filter-sensitive tests (BILINEAR, OBMC, sub-8×8 chroma)
+already carry non-linear references. A blanket replacement would churn hardcoded goldens for little gain;
+it stays a per-test fix when a specific test is shown blind.
+
+38 suites, **29,494** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.116] - 2026-07-20
 
 **Arc audit, silent-mis-decode rejects, and the stale-band fix. The 0.7.x AV1 arc does NOT close.**

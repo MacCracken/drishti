@@ -416,9 +416,11 @@ Baseline (0.7.0): OBU layer + sequence header.
       chunking, CDEF grid all assume 64×64). Correctly rejected today.
   11. **Scalability** — operating-point selection + 6.2.1 `drop_obu`, or a clean
       reject of `operating_points_cnt_minus_1 > 0`. SMALL for the reject.
-  12. **Fuzz the decode path.** The only harness covers IVF and the generic bit
-      readers — zero codec symbols. SMALL-MEDIUM, and the cheapest confidence win
-      available while no conformance vectors exist.
+  12. **Fuzz the decode path.** ✅ DONE 0.7.118 — `tests/av1_decode.fcyr` mutates
+      OBU streams into `av1_decode_obus` / `av1_decode_stream` / the OBU iterator
+      (+6,270 fuzz assertions); canary-verified. The deep decode path proved
+      structurally safe (size-matched CDFs bound every symbol). A coverage-guided
+      fuzzer over a real corpus remains a later, larger want.
   13. **OOM fault injection** — `lib/alloc.cyr` has `test_allocator_fail_after`, but
       `src/` calls the global `alloc()` directly, so none of the ~140 `DR_ERR_OOM`
       branches is mutation-covered anywhere in the repo. SMALL-MEDIUM.

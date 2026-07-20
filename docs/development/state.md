@@ -6,6 +6,49 @@
 
 ## Version
 
+**0.7.118** — cut 2026-07-20, not yet tagged (user's git). **THE AV1 DECODE PATH IS NOW FUZZED**
+(roadmap item 12). The 0.7.116 audit found the only fuzz harness (tests/drishti.fcyr) contained ZERO
+codec symbols — IVF + generic bit readers only, so "fuzz from day one" was true only of the container.
+tests/av1_decode.fcyr hammers av1_decode_obus / av1_decode_stream / the OBU iterator with mutated OBU
+streams and asserts the trust-no-input contract: never crash, never OOB, never hang; every outcome is a
+valid frame or a documented DR_ERR_* / AV1-family (band 10..29) code. PASSES from a real
+reduced-still-picture keyframe seed: single-byte mutation across the whole stream x interesting values;
+every truncation prefix; OBU leb128 size-field attacks; 400 random-garbage rounds + all-zeros/all-ones;
+300 rounds corrupting ONLY the tile payload with headers valid, so the mutation reaches the symbol
+decoder / partition walk / reconstruction. +6,270 fuzz assertions (1,140 -> 7,410). THE HARNESS WAS
+CANARY-VERIFIED (the "test the harness before the code" discipline): removing the OBU obu_size<=remaining
+guard makes a lying size yield an OOB payload and the harness's per-OBU "payload inside buffer" assertion
+reddens (rc=174). FINDING worth recording: the DEEP decode path is STRUCTURALLY safe, not guard-based —
+the arithmetic decoder reads size-matched CDFs, so garbage always decodes to in-range symbols and in-range
+eob/coeff positions; removing a reconstruction-origin guard did NOT OOB from fuzz because the MI-bounded
+partition walk + the frame border make it unreachable for a header-bounded frame. Two harness false
+alarms fixed while building it: my known-code list first omitted the AV1 family band 10..29 (a harness
+bug, not a decoder bug — the decoder correctly returns AV1_ERR_BAD_SEQ/BAD_FRAME on malformed headers).
+38 suites, **29,494** suite + **7,410** fuzz assertions, all six gates green. Next remaining AV1 items
+(roadmap): cross-frame CDF inheritance + intra_block_mode_info (module-sized, unblock real inter frames),
+then the conformance-vector harness (the gating item). [[av1-arc-cannot-close-yet]]
+
+**0.7.117** — cut 2026-07-20, not yet tagged (user's git). **TEST HARDENING — the compound-warp lane
+dispatch was UNTESTED.** The 0.7.116 audit flagged (item 16) that a use_warp0<->use_warp1 swap in
+av1_mc_pred_compound SURVIVED THE ENTIRE SUITE across four test files; I confirmed it by mutation before
+trusting the finding. The per-reference warp gating had no witness. Code was correct all along — a
+coverage hole, not a bug. WHY INVISIBLE: every compound-warp test used ONE frame + ONE model for both
+refs, so warping ref0 == warping ref1 pixel-for-pixel, and the "mixed lane" test only asserted the two
+mixed cases DIFFER — symmetric, and AVERAGE is commutative, so a swap merely EXCHANGES them and every
+symmetric assertion passes both ways. THE FIX: distinct content for the two refs, then pin
+mixed(ref0=warp, ref1=trans) to an ABSOLUTE oracle. Threshold-free: the finals-averaged oracle
+double-rounds vs combining intermediates (~26 LSB inherent gap), so rather than a magic tolerance the
+assertion is `dcorrect < dswapped` — m10 tracks the correct lane (~26) closer than the swapped one
+(~119). Swap now reddens (1 failure). DEFERRED WITH REASON: the audit also suggested replacing the
+linear-ramp it_ref_frame (27 sites); most are decode-vs-oracle comparisons where a shared ramp hides
+nothing, and the filter-sensitive tests (BILINEAR/OBMC/sub-8x8) already carry non-linear refs — a blanket
+swap would churn hardcoded goldens for little gain, so it stays a per-test fix. LESSON: "they differ" is
+not a lane test when the operation is commutative and the swap exchanges the operands — pin to an
+absolute oracle, and a relative-ordering assertion (closer-to-correct-than-to-wrong) beats a magic
+tolerance when the oracle is only approximate. 38 suites, **29,494** suite + **1,140** fuzz assertions,
+all six gates green. Next: decode-path fuzzing (roadmap item 12 — the cheapest confidence win, and the
+one the audit showed the "fuzz from day one" claim had overstated).
+
 **0.7.116** — cut 2026-07-20, not yet tagged (user's git). **ARC AUDIT + SILENT-MIS-DECODE REJECTS + the
 stale-band fix. THE 0.7.x AV1 ARC DOES NOT CLOSE.** A full adversarial audit (doc claims / remaining gates /
 deferrals / test quality / charter, 21 agents, every critical+major finding independently re-verified)

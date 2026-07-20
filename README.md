@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.116 (AV1: a complete profile-0 KEYFRAME decoder and a complete set of inter-prediction PRIMITIVES — every motion mode, compound and masked form, the temporal-MV arc, every interpolation filter, every reference geometry. An inter FRAME does not decode yet: segmentation, delta-q, delta-lf and an intra block inside an inter frame each cleanly reject. No external conformance vector has been run, and the AV1 "encoder" is a plan-driven bitstream writer, not an encoder. 8/10/12-bit, multi-tile, superres. See docs/development/roadmap.md for the itemised remaining work)
+## Status — 0.7.118 (AV1: a complete profile-0 KEYFRAME decoder and a complete set of inter-prediction PRIMITIVES — every motion mode, compound and masked form, the temporal-MV arc, every interpolation filter, every reference geometry. An inter FRAME does not decode yet: segmentation, delta-q, delta-lf and an intra block inside an inter frame each cleanly reject. No external conformance vector has been run, and the AV1 "encoder" is a plan-driven bitstream writer, not an encoder. 8/10/12-bit, multi-tile, superres. See docs/development/roadmap.md for the itemised remaining work)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,492 suite assertions + 1,140 fuzz
+derived, and adversarially tested (29,494 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -160,7 +160,7 @@ via a `[deps.drishti]` entry pointing at a git tag.
   [`docs/sources.md`](docs/sources.md).
 - **Trust no input byte** — encoded video is hostile data: every
   length checked, lying headers rejected, sticky error discipline
-  throughout, fuzz-tested at the container and VLC layer from day one (the codec decode paths are NOT yet fuzzed — tests/drishti.fcyr covers IVF and the generic bit readers only).
+  throughout, fuzz-tested from day one at the container/VLC layer (tests/drishti.fcyr), and the AV1 decode path since 0.7.118 (tests/av1_decode.fcyr — mutated OBU streams into av1_decode_obus / av1_decode_stream).
 
 ## License
 
