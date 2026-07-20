@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.111] - 2026-07-19
+
+**Witnesses for the `is_scaled` gates that 0.7.110 made load-bearing.** Tests only — no shipped-code
+change. Until scaled references decoded, these gates were *outcome-neutral*: a scaled reference was
+rejected by the MC layer whatever the warp gate decided, so deleting a conjunct changed nothing
+observable. Now that they matter, all three were confirmed to **survive mutation** before these tests
+were written.
+
+### Added
+
+- **Three GLOBALWARP witnesses** (`tests/av1_intertile.tcyr`) for spec 7.11.3.1 step 7's
+  `is_scaled( refFrame ) == 0` condition on `useWarp == 2` — one for the single-reference model build
+  and one for **each** compound lane. Dropping a conjunct makes that lane build a global warp model and
+  call `av1_warp_pred_gen` on a scaled reference, which still correctly refuses, latching
+  `DR_ERR_UNSUPPORTED` where pixels were expected. The compound pair uses exactly **one** scaled
+  reference each (ref0 scaled / ref1 scaled), because a fixture with both scaled cannot tell the two
+  gates apart; the two orientations are also asserted to produce different pixels.
+- **`it_ref_frame_scaled`** — a 32×32 reference with a **non-linear** fill. `it_ref_frame`'s `x + 2y`
+  gradient is reproduced exactly by every AV1 sub-pel filter, so it cannot distinguish one prediction
+  from another (the same trap 0.7.108 hit in the BILINEAR e2e).
+- **A two-sources-of-truth test.** "Is this reference scaled?" is answered from two places a conformant
+  stream keeps in step but nothing structurally forces to agree: `Av1RefState` metadata, which
+  `av1_is_scaled` reads and which therefore **gates warp**; and the DPB `DrFrame`'s real dimensions,
+  which `av1_mc_pred_core` measures and which therefore drive **MC geometry**. Both disagreement
+  directions are pinned: metadata claiming *unscaled* over half-size pixels yields a clean latched
+  `DR_ERR_UNSUPPORTED` from the warp path, and metadata claiming *scaled* over full-size pixels decodes
+  to the unscaled global-MV translation. Encoded video is hostile — the requirement is a sticky error
+  or correct-per-the-pixels output, never a crash or silent garbage.
+
+### Notes
+
+The **LOCALWARP** half needed nothing: it was already fully witnessed. It rests on a *different*
+mechanism — `read_motion_mode` (5.11.27) refuses to code the motion-mode symbol at all when
+`is_scaled(RefFrame[0])`, which is a symbol-schedule property rather than a prediction one — and
+`tests/av1_intermode.tcyr` already covers it on both lanes with the 0xA5 marker idiom, plus an
+independent decode-side conformance test built from the leaf writers so a gate bug shared by the driver
+and its inverse cannot cancel out. Conflating the two mechanisms (as the original plan did) would have
+produced a redundant test and left the GLOBALWARP gates unwitnessed.
+
+38 suites, **29,400** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.110] - 2026-07-19
 
 **SCALED-REFERENCE MOTION COMPENSATION IS WIRED — the last MC-geometry track closes.** A block whose

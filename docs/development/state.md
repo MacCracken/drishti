@@ -6,6 +6,37 @@
 
 ## Version
 
+**0.7.111** — cut 2026-07-19, not yet tagged (user's git). **WITNESSES FOR THE is_scaled GATES THAT 0.7.110
+MADE LOAD-BEARING.** Tests only, no shipped-code change. Until scaled references decoded these gates were
+OUTCOME-NEUTRAL (a scaled ref was rejected by the MC layer whatever the warp gate decided), and **all three
+were confirmed to SURVIVE mutation before these tests were written** — the honest way to find out what B5
+actually needed. tests/av1_intertile.tcyr: three GLOBALWARP witnesses for spec 7.11.3.1 step 7's
+`is_scaled(refFrame)==0` condition on useWarp==2 — the single-ref model build and EACH compound lane.
+Dropping a conjunct makes that lane build a global model and call av1_warp_pred_gen on a scaled ref, which
+still correctly refuses, latching DR_ERR_UNSUPPORTED where pixels were expected. The compound pair uses
+exactly ONE scaled ref each (ref0-scaled / ref1-scaled) because a both-scaled fixture cannot tell the two
+gates apart; the two orientations are additionally asserted to give DIFFERENT pixels. New it_ref_frame_scaled
+(32x32, NON-LINEAR fill — it_ref_frame's x+2y gradient is reproduced exactly by every AV1 sub-pel filter and
+so cannot distinguish predictions; the same trap 0.7.108 hit in the BILINEAR e2e). Plus a TWO-SOURCES-OF-TRUTH
+test: "is this reference scaled?" is answered from Av1RefState METADATA (what av1_is_scaled reads -> GATES
+warp) and from the DPB DrFrame's real PIXEL dims (what av1_mc_pred_core measures -> drives MC GEOMETRY).
+Both disagreement directions pinned: metadata claiming UNSCALED over half-size pixels gives a clean latched
+DR_ERR_UNSUPPORTED from the warp path; metadata claiming SCALED over full-size pixels decodes to the unscaled
+global-MV translation. Hostile input must yield a sticky error or correct-per-pixels output, never a crash.
+MUTATIONS: the three gates each red INDEPENDENTLY (1 failing assert each for the compound pair, confirming
+the isolation), plus the warp-relax mutation caught by BOTH the gw-scaled reject assert and meta/pixel case A.
+**THE LOCALWARP HALF NEEDED NOTHING — it was already fully witnessed**, and finding that out mattered: it
+rests on a DIFFERENT mechanism (read_motion_mode 5.11.27 refuses to code the motion_mode symbol at all when
+is_scaled(RefFrame[0]) — a SYMBOL-SCHEDULE property, not a prediction one), already covered on both lanes in
+tests/av1_intermode.tcyr by the 0xA5 marker idiom plus an independent decode-side conformance test built from
+the leaf writers (so a gate bug shared by the driver and its inverse cannot cancel). The original plan
+conflated the two mechanisms; doing so would have produced a redundant test AND left the three GLOBALWARP
+gates unwitnessed. LESSON: when a plan says "witness gate X", first MUTATE to find out which parts are
+already covered — the answer here was "the half the plan emphasised, and none of the half it mentioned in
+passing". 38 suites, **29,400** suite + **1,140** fuzz assertions, all six gates green. Next: the AV1 arc's
+remaining decode gaps are the sub-8x8 chroma sibling-span and the inter-intra edge overhang (both cleanly
+rejected, both tracked in roadmap.md), then conformance vectors + the encode lane.
+
 **0.7.110** — cut 2026-07-19, not yet tagged (user's git). **SCALED-REFERENCE MC IS WIRED — the last
 MC-GEOMETRY track closes.** A block whose reference differs in size from the current frame now decodes to
 correctly scaled pixels instead of DR_ERR_UNSUPPORTED. Every motion mode (SIMPLE/OBMC/LOCALWARP/GLOBALWARP),

@@ -1168,6 +1168,247 @@ fn test_inter_tile_globalwarp() {
     assert_eq(difft > 0, 1, "globalwarp: != global-MV translation (warp fired, not the fallback)");
     return 0;
 }
+# ================================================================
+# THE is_scaled GATES ON GLOBALWARP (0.7.111) — spec 7.11.3.1 step 7 lists
+# `is_scaled( refFrame ) is equal to 0` among the conditions for useWarp == 2.
+#
+# These three gates were OUTCOME-NEUTRAL until 0.7.110: a scaled reference was rejected by
+# the MC layer whatever the warp gate decided, so deleting the conjunct changed nothing
+# observable. Now that scaled references decode, the gate is LOAD-BEARING — dropping it makes
+# the block build a global warp model and call av1_warp_pred_gen on a scaled reference, which
+# still (correctly) refuses, latching DR_ERR_UNSUPPORTED where pixels were expected. All three
+# were confirmed to SURVIVE mutation before these tests were written.
+#
+# This is the GLOBALWARP half only. LOCALWARP is unreachable with a scaled reference by a
+# DIFFERENT mechanism — read_motion_mode (5.11.27) refuses to code the motion_mode symbol at
+# all — which is a symbol-schedule property, witnessed with the 0xA5 marker idiom in
+# tests/av1_intermode.tcyr ("K scaled ref -> @@use_obmc" and its decode-side conformance
+# twin). Two distinct rules, two distinct witnesses; do not conflate them.
+# ================================================================
+
+# a 32x32 reference — HALF the 64x64 current frame, so is_scaled is true on both axes.
+# NON-LINEAR fill: every AV1 sub-pel filter reproduces a linear ramp exactly, so the
+# gradient it_ref_frame uses cannot distinguish one prediction from another.
+fn it_ref_frame_scaled(): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 32) {
+            dr_frame_set(f, 0, x, y, (((x * 37) + (y * 53)) + (((x * y) % 7) * 29)) & 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+
+# compare the decoded frame against an oracle frame over the whole 64x64 plane.
+fn it_gws_diff(a, b): i64 {
+    var diff = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            if (dr_frame_get(a, 0, x, y) != dr_frame_get(b, 0, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return diff;
+}
+
+# GATE 1 (single-ref): a GLOBALMV block whose reference carries a would-warp ROTZOOM model but
+# is SCALED must NOT warp — it falls back to translating by its global MV, which since 0.7.110
+# produces pixels through the scaled convolve rather than an error.
+fn test_inter_tile_globalwarp_scaled() {
+    var oe = alloc(8);
+    var ref = it_ref_frame_scaled();
+    var dpb = av1_dpb_new();
+    var fh = it_fh();
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    # The METADATA is what av1_is_scaled reads (the DPB pixels are what MC reads) — set both.
+    store64(refs + AV1REF_UPSCALED_W + 0, 32);
+    store64(refs + AV1REF_FRAME_W + 0, 32);
+    store64(refs + AV1REF_FRAME_H + 0, 32);
+    assert_eq(av1_is_scaled(fh, refs, AV1_LAST_FRAME), 1, "gw-scaled: the reference IS scaled");
+    var seq = it_seq();
+    var tlen = 0;
+    var tb = it_enc_tile(dpb, refs, seq, fh, it_blk_global(), &tlen);
+    assert_eq(tlen > 0, 1, "gw-scaled: tile encoded");
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    # THE WITNESS: dropping the is_scaled conjunct makes this latch DR_ERR_UNSUPPORTED.
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
+    "gw-scaled: decodes (no warp attempted on a scaled ref)");
+    # ...and the pixels are the global-MV translation through the SCALED MC path.
+    var gmv = alloc(16);
+    av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
+    var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
+    AV1_EIGHTTAP, AV1_EIGHTTAP), DR_OK, "gw-scaled: scaled translation oracle predicts");
+    assert_eq(it_gws_diff(df, tf), 0, "gw-scaled: decoded == scaled global-MV translation (4096 px)");
+    # and the warp really is refused for this reference, not merely unused.
+    var wm = av1_warp_model_new();
+    assert_eq(av1_warp_model_from_global(wm, fh, AV1_LAST_FRAME), DR_OK, "gw-scaled: model would build");
+    assert_eq(av1_warp_model_shear_valid(wm), 1, "gw-scaled: ...and would be shear-realizable");
+    var wf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    assert_eq(av1_warp_pred_block(wf, ref, 0, 0, 0, 64, 64, wm), DR_ERR_UNSUPPORTED,
+    "gw-scaled: warping a scaled ref is refused (what the gate spares us)");
+    return 0;
+}
+
+# GATES 2 and 3 (compound GLOBAL_GLOBALMV, one per reference). A fixture with BOTH references
+# scaled cannot tell the two gates apart, so each is witnessed with exactly ONE scaled
+# reference: `which` selects whether ref0 (LAST, slot 0) or ref1 (ALTREF, slot 6) is the
+# scaled one. The unscaled lane still warps; the scaled lane translates.
+fn it_gws_compound(which, tag): i64 {
+    var oe = alloc(8);
+    var big = it_ref_frame();                # 64x64, unscaled
+    var small = it_ref_frame_scaled();       # 32x32, scaled
+    var r0 = big;
+    var r1 = small;
+    if (which != 0) {
+        r0 = small;
+        r1 = big;
+    }
+    var fh = it_fh();
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 6);
+    # would-warp ROTZOOM models for BOTH refs, DISTINCT so the two lanes cannot alias.
+    it_fh_set_gm(fh, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);
+    store64(fh + AV1FH_GM_TYPE + ((AV1_ALTREF_FRAME - 1) * 8), AV1_GM_ROTZOOM);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 0) * 8), 0);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 1) * 8), 0);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 2) * 8), 66560);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 3) * 8), 512);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 4) * 8), 0 - 512);
+    store64(fh + AV1FH_GM_PARAMS + (((AV1_ALTREF_FRAME - 1) * 6 + 5) * 8), 66560);
+    var dpb = av1_dpb_new();
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    av1_dpb_store(dpb, fh, r0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 64);
+    av1_dpb_store(dpb, fh, r1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (6 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (6 * 8), 64);
+    var slot = 0;
+    if (which != 0) { slot = 0; } else { slot = 6; }
+    store64(refs + AV1REF_UPSCALED_W + (slot * 8), 32);
+    store64(refs + AV1REF_FRAME_W + (slot * 8), 32);
+    store64(refs + AV1REF_FRAME_H + (slot * 8), 32);
+    assert_eq(av1_is_scaled(fh, refs, AV1_LAST_FRAME), which == 1, tag);
+    assert_eq(av1_is_scaled(fh, refs, AV1_ALTREF_FRAME), which == 0, tag);
+    var seq = it_seq();
+    var blk = it_blk_comp(0, 0, 0, 0);
+    store64((blk + AV1FB_IB) + AV1IB_YMODE, AV1_GLOBAL_GLOBALMV);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, tag);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    # THE WITNESS: with that reference's is_scaled conjunct dropped, its lane builds a warp
+    # model, av1_warp_pred_gen refuses the scaled reference, and this latches UNSUPPORTED.
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, tag);
+    return df;
+}
+
+fn test_inter_tile_globalwarp_scaled_compound() {
+    # ref1 (ALTREF) scaled, ref0 (LAST) not -> witnesses the ref1 gate.
+    var d1 = it_gws_compound(0, "gg-scaled ref1: compound decodes, ref1 lane does not warp");
+    # ref0 (LAST) scaled, ref1 (ALTREF) not -> witnesses the ref0 gate.
+    var d0 = it_gws_compound(1, "gg-scaled ref0: compound decodes, ref0 lane does not warp");
+    # the two must DIFFER: they scale opposite lanes, so a fixture that accidentally treated
+    # both references alike would produce the same pixels twice.
+    assert_eq(it_gws_diff(d0, d1) > 0, 1,
+    "gg-scaled: scaling ref0 vs ref1 gives different pixels (the lanes are independent)");
+    return 0;
+}
+
+# TWO SOURCES OF TRUTH (0.7.111). "Is this reference scaled?" is answered from two places
+# that a conformant stream keeps in step but nothing structurally forces to agree:
+#   - Av1RefState (AV1REF_UPSCALED_W / _FRAME_H) — the frame-header METADATA, which is what
+#     av1_is_scaled reads, and therefore what GATES warp;
+#   - the DPB's stored DrFrame dimensions — the actual PIXELS, which is what av1_mc_pred_core
+#     measures and therefore what drives MC GEOMETRY.
+# This pins which governs which, and — more importantly — that a DISAGREEMENT between them
+# degrades cleanly. Encoded video is hostile: the answer must be a sticky error code or
+# correct-per-the-pixels output, never a crash, an OOB read, or silent garbage.
+fn test_inter_tile_scaled_metadata_vs_pixels() {
+    var oe = alloc(8);
+    # CASE A — metadata says UNSCALED, pixels are HALF SIZE.
+    # Gating believes the metadata, so the GLOBALWARP model IS built and the block tries to
+    # warp; av1_warp_pred_gen then measures the real DrFrame, finds it scaled, and refuses.
+    # A clean latched DR_ERR_UNSUPPORTED — not a wrong-sized read.
+    var small = it_ref_frame_scaled();          # 32x32 pixels
+    var fhA = it_fh();
+    it_fh_set_gm(fhA, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);
+    var dpbA = av1_dpb_new();
+    av1_dpb_store(dpbA, fhA, small);
+    var refsA = it_refs();                      # metadata still claims 64x64
+    assert_eq(av1_is_scaled(fhA, refsA, AV1_LAST_FRAME), 0,
+    "meta/pixel A: metadata claims UNSCALED (gating believes it)");
+    var seq = it_seq();
+    var tlenA = 0;
+    var tbA = it_enc_tile(dpbA, refsA, seq, fhA, it_blk_global(), &tlenA);
+    assert_eq(tlenA > 0, 1, "meta/pixel A: tile encoded");
+    var dfA = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dtA = av1_tile_new(dfA, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dtA);
+    av1_tile_set_inter_ctx(dtA, fhA, refsA, seq, dpbA);
+    assert_eq(av1_decode_inter_tile(dtA, tbA, tlenA, 1), DR_ERR_UNSUPPORTED,
+    "meta/pixel A: lying metadata -> clean reject from the warp path, no crash");
+    # CASE B — metadata says SCALED, pixels are FULL SIZE.
+    # Gating believes the metadata and suppresses the warp; MC then measures the real
+    # DrFrame, finds it matches the current frame exactly, and takes the UNSCALED fast path.
+    # So it decodes, and to the plain global-MV translation.
+    var full = it_ref_frame();                  # 64x64 pixels
+    var fhB = it_fh();
+    it_fh_set_gm(fhB, AV1_GM_ROTZOOM, 0, 0, 67584, 1024, 0 - 1024, 67584);
+    var dpbB = av1_dpb_new();
+    av1_dpb_store(dpbB, fhB, full);
+    var refsB = it_refs();
+    store64(refsB + AV1REF_UPSCALED_W + 0, 32);   # metadata lies the other way
+    store64(refsB + AV1REF_FRAME_W + 0, 32);
+    store64(refsB + AV1REF_FRAME_H + 0, 32);
+    assert_eq(av1_is_scaled(fhB, refsB, AV1_LAST_FRAME), 1,
+    "meta/pixel B: metadata claims SCALED (gating believes it -> no warp)");
+    var tlenB = 0;
+    var tbB = it_enc_tile(dpbB, refsB, seq, fhB, it_blk_global(), &tlenB);
+    assert_eq(tlenB > 0, 1, "meta/pixel B: tile encoded");
+    var dfB = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dtB = av1_tile_new(dfB, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dtB);
+    av1_tile_set_inter_ctx(dtB, fhB, refsB, seq, dpbB);
+    assert_eq(av1_decode_inter_tile(dtB, tbB, tlenB, 1), DR_OK,
+    "meta/pixel B: decodes — MC measures the PIXELS, which are unscaled");
+    var gmv = alloc(16);
+    av1_setup_global_mv(gmv, fhB, AV1_LAST_FRAME, 0, 0, 12);
+    var tfB = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    av1_mc_pred_block(tfB, full, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
+    AV1_EIGHTTAP, AV1_EIGHTTAP);
+    assert_eq(it_gws_diff(dfB, tfB), 0,
+    "meta/pixel B: == UNSCALED global-MV translation (geometry came from the pixels)");
+    return 0;
+}
+
 # THE GATE CONTROL (0.7.100): the SAME GLOBALMV block with a TRANSLATION global model (GmType ==
 # TRANSLATION, NOT > TRANSLATION) does NOT warp — useWarp stays 0 and the block translates by its
 # global MV. Witnesses the `GmType > TRANSLATION` conjunct of the useWarp==2 gate.
@@ -4063,6 +4304,9 @@ fn main() {
     test_inter_tile_localwarp_edge_chroma();
     test_globalwarp_model_build();
     test_inter_tile_globalwarp();
+    test_inter_tile_globalwarp_scaled();
+    test_inter_tile_globalwarp_scaled_compound();
+    test_inter_tile_scaled_metadata_vs_pixels();
     test_inter_tile_globalwarp_translation();
     test_inter_tile_globalwarp_newmv_gated();
     test_inter_tile_globalwarp_unrealizable();
