@@ -344,6 +344,37 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # valid-but-128-SB seq fails cleanly rather than producing garbage (trust no input
     # byte, CLAUDE.md; 128-SB superblock decode is out of scope, roadmap.md).
     if (av1_seq_use_128x128(seq) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    # ---- SILENT-MIS-DECODE REJECTS (0.7.116) ----
+    # Each of these is a frame-header feature drishti PARSES but does not IMPLEMENT. Parsing
+    # without implementing is the worst of both worlds: the stream is accepted, decoding
+    # proceeds, and the output is wrong with no error — exactly what "trust no input byte"
+    # (CLAUDE.md) forbids. They are rejected at the one chokepoint every decode path shares.
+    # Each is a tracked gap (roadmap.md), and each becomes an un-gating bite when implemented.
+    #
+    # primary_ref_frame: a non-KEY frame with primary_ref_frame != PRIMARY_REF_NONE INHERITS
+    # its CDFs, segmentation data and loop-filter deltas from a reference frame (5.9.2 /
+    # 7.20 / 7.21). drishti always starts from the DEFAULT CDFs, so such a frame would decode
+    # its very first symbol with the wrong probabilities and return DR_OK on garbage. This is
+    # the single most likely stream to meet in the wild: essentially every non-key frame any
+    # real encoder emits sets it.
+    if ((av1_fh_frame_is_intra(fh) == 0)
+    && (av1_fh_primary_ref_frame(fh) != AV1_PRIMARY_REF_NONE)) {
+        store64(out_err, DR_ERR_UNSUPPORTED);
+        return 0;
+    }
+    # segmentation / delta-q / delta-lf: the INTER mode-info reader already rejects these
+    # (av1_intermode.cyr), but the INTRA path had no counterpart and would silently skip the
+    # per-block symbols the spec requires — an entropy desync, not merely wrong pixels.
+    if (av1_fh_segmentation_enabled(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    if (av1_fh_delta_q_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    if (av1_fh_delta_lf_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    # allow_intrabc (5.11.6) and the palette tools gated by allow_screen_content_tools
+    # (5.11.46) are read by neither path; a screen-content stream would desync.
+    if (av1_fh_allow_intrabc(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    if (av1_fh_allow_screen_content_tools(fh) != 0) {
+        store64(out_err, DR_ERR_UNSUPPORTED);
+        return 0;
+    }
     var num_planes = av1_seq_num_planes(seq);
     # Allocate to the MI GRID, not the visible frame. Prediction writes a block's NOMINAL
     # extent, which runs past FrameWidth/FrameHeight in two independent ways: MiCols*MI_SIZE

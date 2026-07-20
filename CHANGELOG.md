@@ -4,6 +4,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.116] - 2026-07-20
+
+**Arc audit, silent-mis-decode rejects, and the stale-band fix. The 0.7.x AV1 arc does NOT close.**
+
+A full adversarial audit of the arc (doc claims, remaining gates, deferrals, test quality, charter) found
+enough that the honest answer to "can AV1 close?" is no, and not close. This release fixes what was
+factually wrong and records the rest.
+
+### Fixed — correctness
+
+- **Inter prediction no longer leaves the MI-grid overhang band stale.** The plane loop clamped
+  predictions to the visible frame, so on any frame whose dimensions are not a multiple of 8 the band
+  `[FrameWidth, MiCols*4)` was never written. The spec, dav1d and libaom all predict over the **nominal**
+  extent into padded storage — and that band *is* read back, since `av1_cdef_get_at` gates availability on
+  `cand_r < mi_rows` rather than plane dimensions and `av1_deblock` walks the full MI grid. `DrFrame` now
+  carries its allocated extent; writers bound against it while reference reads still clamp to the visible
+  plane. Witnessed on **both** axes — the width half only became testable once a right-cut (28×32) fixture
+  was added, since a 32-wide frame has no horizontal overhang at all.
+
+- **Seven silent mis-decodes converted into clean rejects** (`av1_decode.cyr`). Each is a frame-header
+  feature drishti *parses* but does not *implement*, which is the worst of both worlds — accepted, decoded,
+  wrong, no error. Rejected now at the shared chokepoint: `primary_ref_frame != PRIMARY_REF_NONE` on a
+  non-key frame (cross-frame CDF inheritance is unimplemented, so such a frame decoded its very first
+  symbol with the wrong probabilities and returned `DR_OK` on garbage — and essentially every non-key frame
+  a real encoder emits sets it), `segmentation_enabled`, `delta_q_present`, `delta_lf_present`,
+  `allow_intrabc`, and `allow_screen_content_tools`.
+
+### Fixed — a structurally broken gate
+
+`make lint` **could not fail on deferrals**. The Makefile only matched `^\s*warn `, while cyrlint prints
+`N untracked deferrals` and itself exits 0 on them. The gate had been reporting success with 8 untracked
+deferrals present. Fixed, and all 8 resolved — 6 were **stale**, describing work that landed between
+0.7.92 and 0.7.113, and 2 were false positives.
+
+### Fixed — documentation
+
+- **`THE INTER MODE-INFO READ LAYER IS COMPLETE`** was still false, for the same structural reason the
+  0.7.79 audit found it false: `av1_inter_frame_mode_info` rejects segmentation, delta-q, delta-lf and the
+  intra fork before reading anything.
+- **Nine sites** still said only scaled-reference / BILINEAR MC remained; both landed at 0.7.108/0.7.110.
+- `state.md` carried **two mutually inconsistent assertion totals** ~1,000 lines apart, one of them 588
+  short; the duplicate has been removed rather than maintained.
+- **"Fuzzed from day one" was overstated.** The single fuzz harness contains no codec symbols at all — it
+  covers the IVF container and the generic bit readers. The 1,140 figure has not moved in 64 releases.
+
+### The close-out verdict
+
+The roadmap's criterion is *decode conformance-clean + encode round-trip-clean*. Neither half is met:
+
+- **No external conformance vector has ever been run.** There is not one libaom/Argon vector, fixture,
+  download script or CI step in the repo — every AV1 test decodes bytes drishti's own writer produced, and
+  `docs/guides/verification.md` itself says that proves nothing about a bug shared by both lanes.
+- **The "encoder" is a bitstream writer**, not an encoder: it replays a caller-supplied plan and residual,
+  with no forward transform, quantiser, mode decision, motion search, rate control, or sequence/frame-header
+  and OBU writers. It cannot emit a file any external decoder could open.
+- **An inter frame still does not decode**, for the reasons above.
+
+The accurate statement is: *0.7.x delivers a complete profile-0 keyframe decoder and a complete set of
+inter-prediction primitives; inter frames, conformance, decode-path fuzzing and a real encoder all remain.*
+`docs/development/roadmap.md` now carries the itemised remaining work.
+
+38 suites, **29,492** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.115] - 2026-07-20
 
 **Inter-intra blocks may overhang the frame edge — the last tracked AV1 decode gap closes.** Both the

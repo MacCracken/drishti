@@ -1050,11 +1050,18 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
     # Format incompatibility is PERMANENT — differing bit depth or subsampling makes the two
     # sample grids incomparable and no amount of scaling reconciles them.
     if (av1_mc_ref_compat(ref, dst) == 0) { return DR_ERR_UNSUPPORTED; }
-    # overflow-safe block-inside-plane check: form the bound by SUBTRACTION (pw - w, ph - h
-    # cannot overflow — w,h in [1,128], pw,ph in [1,16384]) rather than the addition x + w,
-    # which would wrap for a hostile x near i64-max and slip an unclamped coord into the
-    # write-back. x,y already proven >= 0 above, so a negative (pw - w) rejects everything.
-    if ((x < 0) || (y < 0) || (x > (pw - w)) || (y > (ph - h))) { return DR_ERR_BOUNDS; }
+    # Overflow-safe block-inside-plane check, bounded by the ALLOCATED extent rather than the
+    # visible one: a block's nominal extent legitimately runs past FrameWidth/Height into the
+    # MI-grid padding, and deblocking and CDEF read that band back. Form the bound by
+    # SUBTRACTION (apw - w cannot overflow — w,h in [1,128], apw/aph in [1,16384]) rather than
+    # the addition x + w, which would wrap for a hostile x near i64-max and slip an unclamped
+    # coord into the write-back. x,y are proven >= 0 above, so a negative bound rejects all.
+    #
+    # Reference READS still clamp to the VISIBLE plane below (spec 7.11.3.4's lastX/lastY are
+    # derived from RefUpscaledWidth / RefFrameHeight) — only the WRITE bound widens.
+    var apw = dr_frame_plane_alloc_w(dst, plane);
+    var aph = dr_frame_plane_alloc_h(dst, plane);
+    if ((x < 0) || (y < 0) || (x > (apw - w)) || (y > (aph - h))) { return DR_ERR_BOUNDS; }
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
     var sx = 0;
     var sy = 0;
@@ -1182,7 +1189,11 @@ fn av1_warp_pred_gen(dst, ref, plane, x, y, w, h, wm, out_buf, out_stride, compo
     if ((av1_mc_ref_compat(ref, dst) == 0) || (av1_mc_ref_unscaled(ref, dst, plane) == 0)) {
         return DR_ERR_UNSUPPORTED;
     }
-    if ((x < 0) || (y < 0) || (x > (pw - w)) || (y > (ph - h))) { return DR_ERR_BOUNDS; }
+    # bounded by the ALLOCATED extent (see av1_mc_pred_core) — a warped block may overhang too.
+    if ((x < 0) || (y < 0) || (x > (dr_frame_plane_alloc_w(dst, plane) - w))
+    || (y > (dr_frame_plane_alloc_h(dst, plane) - h))) {
+        return DR_ERR_BOUNDS;
+    }
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
     var m0 = av1_warp_model_param(wm, 0);
     var m1 = av1_warp_model_param(wm, 1);
@@ -1589,7 +1600,7 @@ fn av1_wedge_mask_build(sub_size, wedge_idx, wedge_sign, fill_w, fill_h): i64 {
 # ================================================================
 # INTER-INTRA prediction (spec 7.11.3.13 SMOOTH mask + 7.11.3.14 interintra blend). A single-ref
 # inter block (interintra flag) blends its inter MC prediction with an INTRA prediction. 0.7.91 =
-# SMOOTH interintra (wedge_interintra deferred to 0.7.92). CRITICAL: the blend is FINAL precision
+# SMOOTH interintra; WEDGE interintra landed 0.7.92 and shares this path. CRITICAL: the blend is FINAL precision
 # (both preds at pixel range) — Round2(m*intra + (64-m)*inter, 6), NO ib, NO Clip1 (unlike the
 # compound ib+6/Clip1 combine). m weights the INTRA prediction. 3-source verified (interintra.md).
 # ================================================================

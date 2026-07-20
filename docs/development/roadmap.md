@@ -205,9 +205,8 @@ Baseline (0.7.0): OBU layer + sequence header.
   decode 0.7.49, tile-relative coeff-context + intra-reference rebases 0.7.50,
   multi-tile-**group** frames 0.7.51); **superres COMPLETE** (7.16 — 0.7.52–0.7.56, a
   use_superres keyframe decodes end-to-end, reference-confirmed against dav1d). **INTER
-  nearly complete** (the last of the four tracks, and the biggest — every warp form, the
-  temporal-MV arc, compound and inter-intra are in; only scaled-reference/BILINEAR MC
-  remains — 7.11.3: the Subpel_Filters
+  primitives complete** (the last of the four tracks, and the biggest — every warp form, the
+  temporal-MV arc, compound and inter-intra are in; every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); an inter FRAME still does not decode, because segmentation / delta-q / delta-lf / an intra block inside an inter frame all reject the tile — 7.11.3: the Subpel_Filters
   table 0.7.57, the `put_8tap` 8-tap MC kernel 0.7.58 (reference-confirmed vs dav1d
   `put_8tap_c`), the `emu_edge` frame-boundary block fetch 0.7.59 (reference-confirmed vs
   dav1d `emu_edge_c`), and the **MC driver** `av1_mc_pred_block` 0.7.60 (spec 7.11.3.1
@@ -387,7 +386,53 @@ Baseline (0.7.0): OBU layer + sequence header.
   the `av1_obu_write_header` seed; gate = own-decoder round-trip, then
   cross-decoder (dav1d/libaom).
 - **AV1 100%** = decode conformance-clean + encode round-trip-clean →
-  close 0.7.x.
+  close 0.7.x. **NOT MET as of 0.7.116** — the arc audit found neither half
+  satisfied. Itemised remaining work, roughly ordered by value:
+
+  1. **Conformance-vector harness + first runs** (libaom/Argon subset, per-vector
+     MD5 vs reference YUV, a `make conformance` gate, CI wiring). LARGE and
+     open-ended — the fallout cannot be sized until vectors actually run, and the
+     gaps below guarantee most vectors reject or desync on arrival. **This gates
+     any close claim.** Today every AV1 test decodes bytes drishti itself wrote.
+  2. **Cross-frame CDF inheritance** (7.20/7.21 save/load keyed on
+     `ref_frame_idx[primary_ref_frame]` + `context_update_tile_id`, CDF slots in
+     the DPB). MODULE-SIZED. Cleanly rejected since 0.7.116; until it lands, no
+     non-key frame from a real encoder decodes.
+  3. **`intra_block_mode_info`** — the intra fork inside an inter frame
+     (5.11.15/5.11.17). MODULE-SIZED. Without it no real-world inter frame decodes.
+  4. **Segmentation** — segment-id read on both paths, feature data, per-segment
+     `LosslessArray`/qindex plumbing. MODULE-SIZED.
+  5. **Per-SB delta-q / delta-lf** (5.11.18/5.11.19) on both paths. SMALL-MEDIUM.
+  6. **Loop-filter ref/mode deltas** — the deblocker hardcodes `is_intra = 1` /
+     `ref = INTRA_FRAME` for every block of every frame; thread per-MI RefFrame and
+     mode out of the MV grid, and load deltas from the primary ref instead of the
+     unconditional `setup_past_independence` reset. MEDIUM, wrong pixels today.
+  7. **Block-level lossless** from `CodedLossless`/`LosslessArray[segment_id]`
+     rather than `base_q == 0`. SMALL, but an entropy desync when it bites.
+  8. **Film-grain synthesis** (7.18.3) — parsed and discarded today. ONE MODULE.
+  9. **Palette** (5.11.46) and **intra block copy** (5.11.6). TWO MODULES.
+     Cleanly rejected since 0.7.116.
+  10. **128×128 superblocks** (5.5.1) — invasive (SB loop, partition tree, residual
+      chunking, CDEF grid all assume 64×64). Correctly rejected today.
+  11. **Scalability** — operating-point selection + 6.2.1 `drop_obu`, or a clean
+      reject of `operating_points_cnt_minus_1 > 0`. SMALL for the reject.
+  12. **Fuzz the decode path.** The only harness covers IVF and the generic bit
+      readers — zero codec symbols. SMALL-MEDIUM, and the cheapest confidence win
+      available while no conformance vectors exist.
+  13. **OOM fault injection** — `lib/alloc.cyr` has `test_allocator_fail_after`, but
+      `src/` calls the global `alloc()` directly, so none of the ~140 `DR_ERR_OOM`
+      branches is mutation-covered anywhere in the repo. SMALL-MEDIUM.
+  14. **A real AV1 encoder** — forward transform, quantiser, mode decision/RDO,
+      motion search, rate control, sequence/frame-header and OBU writers, IVF
+      muxing. **ARC-SIZED**, comparable to the decode arc. What exists today is a
+      plan-driven bitstream writer and should be named as one.
+  15. **End-to-end 4:2:2 / 4:4:4 / monochrome decode tests** — the code is
+      subsampling-generic and the parsing is right, but this is untested code
+      rather than verified code. SMALL-MEDIUM.
+  16. **Test-fixture hardening** — de-alias the compound-warp fixture (same frame
+      and model for both refs, so a `use_warp0`/`use_warp1` swap survives the entire
+      suite); replace the linear-ramp `it_ref_frame` (27 call sites) with a
+      non-linear fill. SMALL each, high value.
 
 ## 0.8.x — H.264/AVC → 100% (decode + encode; replaces openh264)
 

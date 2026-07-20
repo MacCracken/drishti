@@ -626,8 +626,8 @@ fn av1_mv_save_field(grid, fmi_cols, fmi_rows, s, fh, out): i64 {
 
 # ================================================================
 # MOTION-FIELD PROJECTION LEAVES (0.7.103, spec 7.9.3 get_mv_projection + 7.9.4 get_block_position) — the
-# pure arithmetic that motion_field_estimation (7.9, a later bite) uses to scale + project a reference's
-# saved MV onto the current 8x8 grid. Output-neutral until wired. 3-source reconciled.
+# pure arithmetic that motion_field_estimation (7.9, landed 0.7.103) uses to scale + project a reference's
+# saved MV onto the current 8x8 grid. 3-source reconciled.
 # ================================================================
 # Div_Mult (spec 7.9.3) — the reciprocal table Div_Mult[i] = floor(16384 / i) for i in 1..31, [0]=0. A
 # clear formula (unlike the warp filter table), so it is FORMULA-GENERATED here and KAT-anchored to the 32
@@ -1428,7 +1428,7 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 # pre-scaled field built by av1_motion_field_estimation, 0.7.103) at sampled positions and folds the
 # projected MVs into the candidate stack, plus derives ZeroMvContext. Gated on use_ref_frame_mvs. 3-source
 # reconciled (spec 7.10.2.5/6 + dav1d refmvs.c + libaom mvref_common.c). drishti reads an ALREADY-projected MV
-# (the producer pre-scaled it) — NO re-projection here, UNLIKE dav1d's deferred single-field scaling.
+# (the producer pre-scaled it) — NO re-projection here, UNLIKE dav1d, which scales a single field lazily.
 # ================================================================
 # Reusable 32-byte scratch for lower_mv_precision (it mutates in place; the field getter returns a value): s0
 # at +0, s1 at +16. Hoisted like Av1_MvProjScratch. The estimation runs per-frame before the per-block scan,
@@ -1849,8 +1849,8 @@ fn av1_find_warp_samples(ctx, ws, mv_row, mv_col): i64 {
 # oracle is scripts/refs/warp_estimation_ref.py. Reuses dr_floor_log2 (bits.cyr),
 # av1_round2 / av1_round2_signed / av1_iabs / av1_clip3 / AV1_WARPEDMODEL_PREC_BITS.
 #
-# NOT modelled here (deferred to a conformance-vector bite — un-witnessable by a
-# self-consistent test; roadmap.md "warp"): the libaom LS_MAT_MIN/MAX accumulator
+# NOT modelled here (roadmap.md "warp" — deferred to a conformance-vector bite, being
+# un-witnessable by a self-consistent test): the libaom LS_MAT_MIN/MAX accumulator
 # clamp (existence + bounds unverified) and the shear-realizability rejection
 # (get_shear_params ~7.11.3.6 — a SEPARATE process run AFTER this one).
 # ================================================================
@@ -2047,7 +2047,7 @@ fn av1_warp_estimation(ws, mi_row, mi_col, mi_size, mv_row, mv_col, out): i64 {
 # ================================================================
 # SETUP SHEAR (spec 7.11.3.6) — derive the four shear parameters (alpha/beta/gamma/delta)
 # + the warpValid realizability flag from a warp model's wmmat[2..5]. Consumed by the warp
-# block-predict (7.11.3.5, a later bite). 3-source reconciled (spec + libaom + dav1d).
+# block-predict (7.11.3.5, landed 0.7.97). 3-source reconciled (spec + libaom + dav1d).
 #
 # REUSES av1_resolve_divisor (0.7.93) but — UNLIKE av1_warp_estimation — on wmmat[2] (the
 # x-scale, NOT the determinant) and with the RAW divisor output: divShift = n+14 fed

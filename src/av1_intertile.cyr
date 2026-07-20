@@ -139,7 +139,7 @@ fn av1_inter_block_setup(tile, r, c, sub_size, out): i64 {
 # IT IS NOT EQUIVALENT ANY MORE, and the reason is easy to miss: compute_prediction's
 # someUseIntra scan reads RefFrames at (candRow + r, candCol + c), and at LUMA
 # (subX = subY = 0) candRow/candCol ARE the block's own MiRow/MiCol. The MV grid is
-# zero-initialised and AV1_INTRA_FRAME == 0, so a block that has not yet written its own cell
+# zero-initialised and AV1_INTRA_FRAME == 0, so a block whose own cell is still unwritten
 # reads itself as intra — someUseIntra fires spuriously, the geometry collapses and the MV
 # reads (0,0). Hoisting this write is therefore a precondition of transcribing
 # compute_prediction at all, for luma as much as for the sub-8x8 chroma case that motivated it.
@@ -1121,8 +1121,8 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             # hoist guarantees the two agree.
             var multi = 0;
             if (((n4w * 4) > pred_w) || ((n4h * 4) > pred_h)) { multi = 1; }
-            var pw = dr_frame_plane_width(frame, plane);
-            var ph = dr_frame_plane_height(frame, plane);
+            var apw = dr_frame_plane_alloc_w(frame, plane);
+            var aph = dr_frame_plane_alloc_h(frame, plane);
             var predicted = 0;
             var yy = 0;
             var sub_r = 0;
@@ -1132,12 +1132,25 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                 while (xx < (n4w * 4)) {
                     var x = base_x + xx;
                     var y = base_y + yy;
+                    # The NOMINAL extent is predicted, NOT an edge-clamped one. Spec 5.11.5
+                    # compute_prediction passes predW/predH straight to predict_inter, whose
+                    # output loop writes the whole rectangle; dav1d and libaom both do the
+                    # same, into padded storage. Clamping here used to leave the band
+                    # [FrameWidth, MiCols*4) unwritten on any frame whose dimensions are not a
+                    # multiple of 8 — and that band is NOT dead: av1_cdef_get_at gates sample
+                    # availability on cand_r < mi_rows rather than the plane dims, and
+                    # av1_deblock walks the full MI grid, so stale samples there reach VISIBLE
+                    # output through CDEF taps. The frame is allocated to the MI grid plus the
+                    # block overhang (av1_decode_alloc_w/_h), so the write is in bounds.
                     var w = pred_w;
                     var h = pred_h;
-                    var nw = w;       # NOMINAL (subsampled, pre-edge-clamp) dims — the warp >=8x8 gate
+                    var nw = w;       # NOMINAL dims — also the warp >=8x8 gate
                     var nh = h;
-                    if ((x + w) > pw) { w = pw - x; }
-                    if ((y + h) > ph) { h = ph - y; }
+                    # clamp only against the ALLOCATED extent, as a backstop for a frame that
+                    # was not allocated with the decode path's padding (tests build frames
+                    # directly); a conformant decode never trims here.
+                    if ((x + w) > apw) { w = apw - x; }
+                    if ((y + h) > aph) { h = aph - y; }
                     if ((w > 0) && (h > 0)) {
                         predicted = 1;
                     }
@@ -1270,8 +1283,8 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
     load64(tile + AV1TILE_ICDEF), 0);
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
-    # mirror the decode SCOPE gates: inter-intra / non-SIMPLE motion are out of scope on both
-    # lanes (roadmap.md). AVERAGE + DISTANCE (comp_group_idx==0) and BOTH masked modes DIFFWTD +
+    # mirror the decode SCOPE gates. Inter-intra and the SIMPLE / OBMC / LOCALWARP motion modes
+    # are all in scope on both lanes; AVERAGE + DISTANCE (comp_group_idx==0) and BOTH masked modes DIFFWTD +
     # WEDGE (comp_group_idx==1) are in scope.
     var eib = av1_fb_ib(fb);
     if (av1_ib_is_comp(eib) != 0) {
@@ -1281,9 +1294,10 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }
-    # inter-intra (ref1==INTRA): SMOOTH (0.7.91) + WEDGE (0.7.92) are in scope; non-SIMPLE motion
-    # (OBMC/warp) stays out of scope. The frame-edge OVERHANG mirror is gone with the decode
-    # gate it mirrored — an edge-cut inter-intra block is now representable on both lanes.
+    # inter-intra (ref1==INTRA): SMOOTH (0.7.91) + WEDGE (0.7.92) are in scope, as are all three
+    # motion modes (SIMPLE / OBMC / LOCALWARP). The motion-mode test below is DEFENSIVE — the
+    # enum has exactly three values — not a scope limit. The frame-edge OVERHANG mirror is gone
+    # with the decode gate it mirrored: an edge-cut inter-intra block is representable on both.
     var emm = av1_ib_motion_mode(eib);
     if ((emm != AV1_MM_SIMPLE) && (emm != AV1_MM_LOCALWARP) && (emm != AV1_MM_OBMC)) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);

@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — keyframes decode to pixels; inter nearly complete (only scaled-ref MC left) |
+| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — keyframes decode to pixels; every inter-prediction PRIMITIVE is in (all four warp forms, OBMC, compound and masked modes, the temporal-MV arc, every interpolation filter, scaled references) — but an inter FRAME does not decode yet: segmentation, delta-q, delta-lf and an intra block inside an inter frame each reject the tile |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.115 (AV1 decode: every motion mode, every compound and masked form, the full temporal-MV arc, every interpolation filter, every reference geometry, and — 0.7.113 — sub-8x8 chroma units that span sibling blocks, where each 2x2 chroma quadrant borrows its own sibling's motion vector. 0.7.114 fixes a heap buffer overflow in the intra decode path (a keyframe whose dimensions are not a multiple of the superblock size could write past a plane allocation and still report success). 0.7.115 lets inter-intra blocks overhang the frame edge, closing the last tracked decode gap. One known gap is now tracked: inter prediction clamps to the visible plane, leaving the MI-grid overhang band stale on frames whose dimensions are not a multiple of 8. 8/10/12-bit, multi-tile, superres)
+## Status — 0.7.116 (AV1: a complete profile-0 KEYFRAME decoder and a complete set of inter-prediction PRIMITIVES — every motion mode, compound and masked form, the temporal-MV arc, every interpolation filter, every reference geometry. An inter FRAME does not decode yet: segmentation, delta-q, delta-lf and an intra block inside an inter frame each cleanly reject. No external conformance vector has been run, and the AV1 "encoder" is a plan-driven bitstream writer, not an encoder. 8/10/12-bit, multi-tile, superres. See docs/development/roadmap.md for the itemised remaining work)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,462 suite assertions + 1,140 fuzz
+derived, and adversarially tested (29,492 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -50,7 +50,7 @@ frame-header + tile-group OBUs) **and** the combined FRAME OBU (type 6 — the c
 real-stream form; it byte-splits off the tile group per spec 5.10). A complete
 keyframe bitstream decodes **from raw bytes all the way to pixels** — both forms
 verified end-to-end, at 8/10/12-bit, single- and multi-tile, with or without
-superres. **Inter prediction** — the last decode track — is **nearly complete** (only
+superres. **Inter prediction** — the last decode track — has every PRIMITIVE in place (only
 scaled-reference / BILINEAR MC remains): the leaf motion-compensation kernels (`av1_mc.cyr`: **Subpel_Filters**
 0.7.57, **`put_8tap`** 0.7.58, **`emu_edge`** 0.7.59, each reference-confirmed against
 dav1d) plus the **MC driver** (0.7.60), the **reference-frame buffer/DPB** + multi-frame
@@ -110,9 +110,9 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   **in-loop filter layer** (deblocking 7.14 / CDEF 7.15 / loop restoration 7.17,
   chained in `av1_apply_loop_filters`) + **superres** upscaling (spec 7.16) +
   **multi-tile** frames (frame-addressed MI grids + tile-group accumulation) +
-  **8/10/12-bit** + **inter prediction** nearly complete (the MC kernels + driver, the DPB,
+  **8/10/12-bit** + **inter prediction** primitives complete (the MC kernels + driver, the DPB,
   the full MV-prediction + temporal-MV arc, all compound + inter-intra prediction, and all
-  four warp forms + OBMC — only scaled-reference / BILINEAR MC remains)
+  four warp forms + OBMC — every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); an inter FRAME still does not decode, because segmentation / delta-q / delta-lf / an intra block inside an inter frame all reject the tile)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,
@@ -160,7 +160,7 @@ via a `[deps.drishti]` entry pointing at a git tag.
   [`docs/sources.md`](docs/sources.md).
 - **Trust no input byte** — encoded video is hostile data: every
   length checked, lying headers rejected, sticky error discipline
-  throughout, fuzzed from day one.
+  throughout, fuzz-tested at the container and VLC layer from day one (the codec decode paths are NOT yet fuzzed — tests/drishti.fcyr covers IVF and the generic bit readers only).
 
 ## License
 

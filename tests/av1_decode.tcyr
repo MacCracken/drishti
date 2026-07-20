@@ -1201,8 +1201,56 @@ fn test_decode_frame_alloc_invariant() {
     return 0;
 }
 
+# ================================================================
+# SILENT-MIS-DECODE REJECTS (0.7.116). Each of these frame-header features is PARSED but not
+# IMPLEMENTED; before this they were accepted and decoded wrong with no error. Parsing without
+# implementing is the failure "trust no input byte" exists to prevent, so each must now fail
+# CLEANLY at the shared chokepoint.
+# ================================================================
+fn dec_reject(mutate_field, value, tag): i64 {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + mutate_field, value);
+    var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
+    assert_eq(frame, 0, tag);
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, tag);
+    return 0;
+}
+
+fn test_silent_misdecode_rejects() {
+    # the control: the same stream decodes when none of the flags are set.
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    assert_eq(av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe) != 0, 1,
+    "reject control: the unflagged stream still decodes");
+    dec_reject(AV1FH_SEG_ENABLED, 1, "segmentation_enabled rejected (no segment-id read)");
+    dec_reject(AV1FH_DELTA_Q_PRESENT, 1, "delta_q_present rejected (per-SB delta-q unread)");
+    dec_reject(AV1FH_DELTA_LF_PRESENT, 1, "delta_lf_present rejected (per-SB delta-lf unread)");
+    dec_reject(AV1FH_ALLOW_INTRABC, 1, "allow_intrabc rejected (5.11.6 unimplemented)");
+    dec_reject(AV1FH_ALLOW_SCT, 1, "allow_screen_content_tools rejected (palette unimplemented)");
+    # primary_ref_frame only binds on a NON-intra frame; the spec forces PRIMARY_REF_NONE on
+    # key frames, so a keyframe fixture must NOT be rejected for it.
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, 0);
+    assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe) != 0, 1,
+    "primary_ref_frame is ignored on a KEY frame (spec forces PRIMARY_REF_NONE)");
+    var fh2 = frame_mk_fh(1, 1, 0, 0);
+    store64(fh2 + AV1FH_FRAME_IS_INTRA, 0);
+    store64(fh2 + AV1FH_PRIMARY_REF_FRAME, 0);
+    assert_eq(av1_decode_frame(frame_mk_seq(0), fh2, out, olen, oe), 0,
+    "an INTER frame inheriting CDFs is rejected, not silently decoded with defaults");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED,
+    "...with DR_ERR_UNSUPPORTED, not a mis-decode returning DR_OK");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("silent-mis-decode rejects (0.7.116)");
+    test_silent_misdecode_rejects();
     test_group("decode frame allocation extent (0.7.114 regression)");
     test_decode_alloc_extent();
     test_decode_frame_alloc_invariant();

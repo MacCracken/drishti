@@ -40,7 +40,9 @@ enum DrFrameOff {
     DR_FRAME_PLANE_W      = 80;   # [3] plane sample widths -> 104
     DR_FRAME_PLANE_H      = 104;  # [3] plane sample heights-> 128
     DR_FRAME_PLANE_STRIDE = 128;  # [3] strides (samples)  -> 152
-    DR_FRAME_SIZE         = 152;
+    DR_FRAME_PLANE_AW     = 152;  # [3] ALLOCATED plane widths  -> 176
+    DR_FRAME_PLANE_AH     = 176;  # [3] ALLOCATED plane heights -> 200
+    DR_FRAME_SIZE         = 200;
 }
 
 # Clip1(x) — clamp a reconstructed sample to the valid range for a bit
@@ -149,6 +151,8 @@ border, out_err): i64 {
         store64(f + DR_FRAME_PLANE_W + (p * 8), pw);
         store64(f + DR_FRAME_PLANE_H + (p * 8), ph);
         store64(f + DR_FRAME_PLANE_STRIDE + (p * 8), stride);
+        store64(f + DR_FRAME_PLANE_AW + (p * 8), apw);
+        store64(f + DR_FRAME_PLANE_AH + (p * 8), aph);
         p = p + 1;
     }
     return f;
@@ -166,6 +170,12 @@ fn dr_frame_plane_ptr(f, p): i64 { return load64(f + DR_FRAME_PLANE_PTR + (p * 8
 fn dr_frame_plane_width(f, p): i64 { return load64(f + DR_FRAME_PLANE_W + (p * 8)); }
 fn dr_frame_plane_height(f, p): i64 { return load64(f + DR_FRAME_PLANE_H + (p * 8)); }
 fn dr_frame_plane_stride(f, p): i64 { return load64(f + DR_FRAME_PLANE_STRIDE + (p * 8)); }
+# The ALLOCATED plane extent, which a codec may legitimately write beyond the VISIBLE one:
+# prediction covers a block's nominal extent, and the band between the two is read back by
+# deblocking and CDEF. Writers bound against these; everything that describes the picture
+# (output crop, superres, loop restoration) uses dr_frame_plane_width/height instead.
+fn dr_frame_plane_alloc_w(f, p): i64 { return load64(f + DR_FRAME_PLANE_AW + (p * 8)); }
+fn dr_frame_plane_alloc_h(f, p): i64 { return load64(f + DR_FRAME_PLANE_AH + (p * 8)); }
 
 # Sample get/set. x/y are plane-local coordinates; the valid range is
 # [-border, plane_w+border) x [-border, plane_h+border). No per-call

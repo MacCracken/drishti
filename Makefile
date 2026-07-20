@@ -67,6 +67,7 @@ lint:
 	for f in src/*.cyr programs/*.cyr tests/*.tcyr; do \
 		out=$$($(CYRIUS) lint $$f 2>&1); echo "$$out"; \
 		echo "$$out" | grep -qE '^\s*warn ' && fail=1; \
+		echo "$$out" | grep -qE '^[1-9][0-9]* untracked deferrals' && fail=1; \
 	done; \
 	[ $$fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
 
