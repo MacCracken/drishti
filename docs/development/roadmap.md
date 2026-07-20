@@ -444,12 +444,17 @@ any real stream.
   - C3. **Real inter-frame integration** through `av1_decode_stream`: a genuine
     multi-frame GOP (KEY then INTER referencing it), DPB reference management,
     order-hint plumbing, `show_existing_frame` / switch frames. **M–L.** PARTLY
-    DONE 0.7.119 — the first MOTION-WITNESSING inter decode (KEY→content→motion,
-    verified vs an MC oracle) landed with the DEGENERATE header. STILL TODO: the
-    realistic order-hint-enabled header (explicit primary_ref_frame, per-frame
-    order_hint, get_relative_dist on a decoded frame), compound / backward refs
-    (needs RefFrameSignBias derivation — `av1_mvctx_set_signbias` has no callers),
-    and multi-frame GOPs beyond 3 frames.
+    DONE 0.7.119–0.7.120. Landed: the first MOTION-WITNESSING inter decode
+    (KEY→content→motion vs an MC oracle, 0.7.119, degenerate header); the realistic
+    order-hint-enabled header (explicit primary_ref_frame, per-frame order_hint,
+    get_relative_dist non-zero on decoded data, 0.7.120); `RefFrameSignBias`
+    derived + wired (0.7.120 — `av1_mvctx_set_signbias` had no callers); and a
+    **COMPOUND / backward-ref frame decoding through `av1_decode_stream`** (0.7.120,
+    `test_inter_stream_compound_oh` — a 4-frame GOP with a real backward ref in the
+    DPB, AVERAGE-blended, verified vs an independent compound oracle and vs either
+    single ref). STILL TODO: witnessing the sign-bias MV **negation** itself (needs a
+    cross-bias inter neighbour; an isolated block is bias-invariant), and multi-frame
+    GOPs beyond 4 frames / `show_existing_frame` / switch frames.
 
 **Phase D — full decode feature coverage (what real `.ivf`s use).**
   - D1. **Segmentation** — segment-id read (intra + inter), feature data, per-segment

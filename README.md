@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.119 (AV1: a complete profile-0 KEYFRAME decoder; as of 0.7.119 a MINIMAL inter frame also decodes end-to-end with WITNESSED motion (single-ref, forward-only, degenerate/no-order-hint header) — the first time the inter primitives run from real bytes and move pixels. A realistic order-hint header, compound/backward refs, cross-frame CDF inheritance and the intra-block fork are still unimplemented / rejected, so a real .ivf does not decode past its first non-key frame. The "encoder" is a plan-driven bitstream writer. No external conformance vector has been run. See docs/development/roadmap.md "HONEST STATUS" for the phased, checkable remainder — no "% done" is printed)
+## Status — 0.7.120 (AV1: a complete profile-0 KEYFRAME decoder; as of 0.7.120 MINIMAL inter frames also decode end-to-end from real bytes with WITNESSED motion — single-ref forward-only (0.7.119), then a realistic order-hint header, and now a COMPOUND / backward-reference frame (two refs in the DPB, AVERAGE-blended, verified against an independent oracle and against either single ref). Still rejected: cross-frame CDF inheritance, the intra-block fork, segmentation, and witnessing the sign-bias MV negation itself — so a real .ivf still does not decode past its first few non-key frames. The "encoder" is a plan-driven bitstream writer. No external conformance vector has been run. See docs/development/roadmap.md "HONEST STATUS" for the phased, checkable remainder — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,508 suite assertions + 1,140 fuzz
+derived, and adversarially tested (29,553 suite assertions + 7,410 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking

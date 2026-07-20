@@ -6,6 +6,31 @@
 
 ## Version
 
+**0.7.120** — cut 2026-07-20, not yet tagged (user's git). **COMPOUND / BACKWARD-REF INTER FRAME DECODES
+THROUGH THE STREAM** (Phase C). Rolls up three commit-stacked bites: (1) the realistic order-hint header
+(seq enable_order_hint=1, explicit primary_ref_frame f(3), order_hint, get_relative_dist non-zero on
+decoded data for the first time — test_inter_oh_header_parseback + test_inter_stream_motion_oh); (2)
+`RefFrameSignBias` derived + wired (spec 7.20, the **signed** get_relative_dist > 0, NOT av1_ref_dist's
+Abs) into a new AV1TILE_SIGNBIAS buffer on both lanes and onto the per-block MV context — av1_mvctx_set_signbias
+previously had ZERO callers, so the compound MV-candidate dedup silently saw all-forward bias (safe only
+while no decoded frame had a backward ref); (3) the payoff — **test_inter_stream_compound_oh** drives a real
+GOP through av1_decode_stream: KEY → content A (slot 0, order_hint 2, forward) → content B (slot 1,
+order_hint 8, **backward**) → a compound AVERAGE frame (reference_select=1, LAST→slot 0, ALTREF→slot 1). The
+decoded frame == an independent av1_mc_pred_compound(A,B) oracle AND differs from either single-ref MC (both
+refs demonstrably contribute); the sign-bias derivation runs on genuine live DPB order hints for the first
+time. TEETH: the compound oracle is live (a 1-unit MV perturbation reddens 1728 px); forcing the parser to
+drop reference_select reddens ONLY this stream test while the tile-level test_ir_compound (sets the field
+directly, no parse) stays green — the guard is on the frame-header parse path, not an aliased oracle. **NOT
+DONE, stated plainly:** witnessing the sign bias actually **negate** an MV in the candidate dedup needs a
+cross-bias inter NEIGHBOUR (an isolated block has an empty candidate stack → zero predictor → bias-invariant),
+so that remains a later bite; cross-frame CDF inheritance, the intra-block fork, and segmentation still
+reject; a real .ivf still does not decode past its first few non-key frames. The "encoder" is a plan-driven
+bitstream writer; no external conformance vector has been run. 38 suites, **29,553** suite + **7,410** fuzz
+assertions, all six gates green. (The 0.7.119 entry below reads "1,140 fuzz" — a stale copy predating
+0.7.118's decode-path fuzzing, which raised it to 7,410; corrected here and in the README.) Next: the
+sign-bias MV-negation witness, then cross-frame CDF inheritance (Phase C), then segmentation/delta-q (Phase
+D), then a conformance harness (Phase E). See docs/development/roadmap.md "HONEST STATUS". [[av1-arc-cannot-close-yet]]
+
 **0.7.119** — cut 2026-07-20, not yet tagged (user's git). **FIRST MOTION-WITNESSING INTER FRAME DECODE
 FROM REAL BYTES** (Phase C part 1). Preceded by a scoping workflow that CORRECTED my own premise: a
 degenerate inter frame ALREADY decoded E2E (test_inter_stream_e2e) — but over a FLAT-128 reference (intra

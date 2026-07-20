@@ -731,6 +731,265 @@ fn test_inter_stream_motion_oh() {
     return 0;
 }
 
+# ---- Phase C: COMPOUND / backward-ref decode through the stream (0.7.120) ----
+# its_build_inter_fh_oh with configurable refresh_frame_flags + a single ref_frame_idx (all 7
+# slots point at idx0). reference_select stays 0 (single-ref content frame). Byte-identical to
+# its_build_inter_fh_oh apart from those two knobs — so the same it_fh()-based content encoder
+# still round-trips (ref_frame_idx / refresh do not affect an isolated single-ref block's symbols).
+fn its_build_content_fh_oh(order_hint, refresh, idx0, out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
+    dr_bw_put_bits(bw, 1, 2);        # frame_type = INTER                    f(2)
+    dr_bw_put_bit(bw, 1);            # show_frame = 1                        f(1)
+    dr_bw_put_bit(bw, 0);            # error_resilient_mode = 0              f(1)
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1                f(1)
+    dr_bw_put_bit(bw, 0);            # frame_size_override_flag = 0          f(1)
+    dr_bw_put_bits(bw, order_hint, 7);   # order_hint                        f(7)
+    dr_bw_put_bits(bw, 7, 3);        # primary_ref_frame = 7 (NONE)         f(3)
+    dr_bw_put_bits(bw, refresh, 8);  # refresh_frame_flags                   f(8)
+    dr_bw_put_bit(bw, 0);            # frame_refs_short_signaling = 0        f(1)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[0]                      f(3)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[1]                      f(3)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[2]                      f(3)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[3]                      f(3)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[4]                      f(3)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[5]                      f(3)
+    dr_bw_put_bits(bw, idx0, 3);     # ref_frame_idx[6]                      f(3)
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0   f(1)
+    dr_bw_put_bit(bw, 1);            # allow_high_precision_mv = 1           f(1)
+    dr_bw_put_bit(bw, 0);            # is_filter_switchable = 0              f(1)
+    dr_bw_put_bits(bw, 0, 2);        # interpolation_filter = EIGHTTAP       f(2)
+    dr_bw_put_bit(bw, 0);            # is_motion_mode_switchable = 0         f(1)
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1         f(1)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40                       f(8)
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0             f(1)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0                   f(1)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
+    dr_bw_put_bit(bw, 0);            # tx_mode_select = 0 (TX_MODE_LARGEST)  f(1)
+    dr_bw_put_bit(bw, 0);            # reference_select = 0                  f(1)
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST]                       f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST2]                      f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST3]                      f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[GOLDEN]                     f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[BWDREF]                     f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF2]                    f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF]                     f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+
+# The COMPOUND frame header: reference_select = 1, LAST -> slot 0 (forward), ALTREF -> slot 1
+# (backward, since slot 1's order_hint 8 > this frame's order_hint 4). Because a forward AND a
+# backward ref are both present, skipModeAllowed is true, so a skip_mode_present bit IS coded here
+# (it is not on the single-ref content frames). refresh targets slot 2 (never referenced again).
+fn its_build_compound_fh_oh(order_hint, out_len): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 0);            # show_existing_frame = 0               f(1)
+    dr_bw_put_bits(bw, 1, 2);        # frame_type = INTER                    f(2)
+    dr_bw_put_bit(bw, 1);            # show_frame = 1                        f(1)
+    dr_bw_put_bit(bw, 0);            # error_resilient_mode = 0              f(1)
+    dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1                f(1)
+    dr_bw_put_bit(bw, 0);            # frame_size_override_flag = 0          f(1)
+    dr_bw_put_bits(bw, order_hint, 7);   # order_hint                        f(7)
+    dr_bw_put_bits(bw, 7, 3);        # primary_ref_frame = 7 (NONE)         f(3)
+    dr_bw_put_bits(bw, 4, 8);        # refresh_frame_flags = 4 (slot 2)      f(8)
+    dr_bw_put_bit(bw, 0);            # frame_refs_short_signaling = 0        f(1)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[0] = 0 (LAST -> slot 0, fwd) f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[1] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[2] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[3] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[4] = 0                  f(3)
+    dr_bw_put_bits(bw, 0, 3);        # ref_frame_idx[5] = 0                  f(3)
+    dr_bw_put_bits(bw, 1, 3);        # ref_frame_idx[6] = 1 (ALTREF -> slot 1, bwd) f(3)
+    dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0   f(1)
+    dr_bw_put_bit(bw, 1);            # allow_high_precision_mv = 1           f(1)
+    dr_bw_put_bit(bw, 0);            # is_filter_switchable = 0              f(1)
+    dr_bw_put_bits(bw, 0, 2);        # interpolation_filter = EIGHTTAP       f(2)
+    dr_bw_put_bit(bw, 0);            # is_motion_mode_switchable = 0         f(1)
+    dr_bw_put_bit(bw, 1);            # uniform_tile_spacing_flag = 1         f(1)
+    dr_bw_put_bits(bw, 40, 8);       # base_q_idx = 40                       f(8)
+    dr_bw_put_bit(bw, 0);            # DeltaQYDc delta_coded = 0             f(1)
+    dr_bw_put_bit(bw, 0);            # using_qmatrix = 0                     f(1)
+    dr_bw_put_bit(bw, 0);            # segmentation_enabled = 0              f(1)
+    dr_bw_put_bit(bw, 0);            # delta_q_present = 0                   f(1)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[0] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 6);        # loop_filter_level[1] = 0              f(6)
+    dr_bw_put_bits(bw, 0, 3);        # loop_filter_sharpness = 0             f(3)
+    dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
+    dr_bw_put_bit(bw, 0);            # tx_mode_select = 0 (TX_MODE_LARGEST)  f(1)
+    dr_bw_put_bit(bw, 1);            # reference_select = 1 (COMPOUND)       f(1)
+    dr_bw_put_bit(bw, 0);            # skip_mode_present = 0 (fwd+bwd -> bit) f(1)
+    dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST]                       f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST2]                      f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[LAST3]                      f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[GOLDEN]                     f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[BWDREF]                     f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF2]                    f(1)
+    dr_bw_put_bit(bw, 0);            # is_global[ALTREF]                     f(1)
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+
+# single-ref content tile: key + (dc,ac) residual, MV 0, ref = LAST. The encode lane never
+# predicts, so it is agnostic to which slot LAST resolves to — only the parsed header's
+# ref_frame_idx (idx0) picks the reference pixels on decode.
+fn its_enc_content_res(dc, ac, out_len): i64 {
+    var fh = it_fh();
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_LARGEST);   # match the parsed header (tx_sel = 0)
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, dc);                # DC
+    store64(coeff + (1 * 8), ac);          # first AC (scan[1]) -> spatial variation
+    var resid = ir_resid1(AV1_DCT_DCT, 2, coeff);
+    var blk = ir_blk(0, 0, resid);
+    return it_enc_tile(av1_dpb_new(), it_refs(), it_seq(), fh, blk, out_len);
+}
+
+# the COMPOUND tile: one AVERAGE block, ref0 = LAST (slot 0), ref1 = ALTREF (slot 1). The encode fh
+# mirrors the parsed compound header (reference_select, ref_frame_idx, and the order hints that
+# drive RefFrameSignBias) so both lanes derive the same sign bias — belt-and-suspenders even though
+# an isolated block's symbols do not depend on it (empty candidate stack -> zero predictor).
+fn its_enc_compound_oh(mvr0, mvc0, mvr1, mvc1, cmp_hint, out_len): i64 {
+    var fh = it_fh();
+    store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_LARGEST);
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    store64(fh + AV1FH_REF_FRAME_IDX + (0 * 8), 0);
+    store64(fh + AV1FH_REF_FRAME_IDX + (6 * 8), 1);
+    store64(fh + AV1FH_ORDER_HINT, cmp_hint);
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 2);     # slot 0 hint (forward)
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_ALTREF_FRAME * 8), 8);   # slot 1 hint (backward)
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + (0 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (0 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (0 * 8), 64);
+    store64(refs + AV1REF_UPSCALED_W + (1 * 8), 64);
+    store64(refs + AV1REF_FRAME_W + (1 * 8), 64);
+    store64(refs + AV1REF_FRAME_H + (1 * 8), 64);
+    store64(refs + AV1REF_ORDER_HINT + (0 * 8), 2);
+    store64(refs + AV1REF_ORDER_HINT + (1 * 8), 8);
+    var seq = it_seq();
+    store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(seq + AV1_SEQ_ORDER_HINT_BITS, 7);
+    var blk = it_blk_comp(mvr0, mvc0, mvr1, mvc1);
+    return it_enc_tile(av1_dpb_new(), refs, seq, fh, blk, out_len);
+}
+
+# TD + SEQ(oh) + KEY(flat, hint 0) + content A (slot 0, hint 2) + content B (slot 1, hint 8).
+# A and B build on the (flat 128) key via DISTINCT residuals through DISTINCT still-key slots, so
+# A != B. After this prefix the DPB holds slot0 = A (fwd), slot1 = B (bwd), slots 2..7 = key.
+fn its_append_compound_prefix(bw): i64 {
+    var slen = 0;
+    var sb = its_build_seq_oh(&slen);
+    var kflen = 0;
+    var kfb = its_build_key_fh_oh(0, &kflen);
+    var ktlen = 0;
+    var ktb = its_enc_key_tile(&ktlen);
+    var aflen = 0;
+    var afb = its_build_content_fh_oh(2, 1, 1, &aflen);   # hint 2, refresh slot 0, ref -> slot 1 (key)
+    var atlen = 0;
+    var atb = its_enc_content_res(320, 0 - 160, &atlen);
+    var bflen = 0;
+    var bfb = its_build_content_fh_oh(8, 2, 2, &bflen);   # hint 8, refresh slot 1, ref -> slot 2 (key)
+    var btlen = 0;
+    var btb = its_enc_content_res(0 - 256, 220, &btlen);
+    its_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    its_wrap(bw, AV1_OBU_SEQUENCE_HEADER, sb, slen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, kfb, kflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ktb, ktlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, afb, aflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, atb, atlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, bfb, bflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, btb, btlen);
+    return 0;
+}
+
+# Phase C MILESTONE (0.7.120): a COMPOUND inter frame decodes end-to-end from bytes, with a real
+# BACKWARD reference in the DPB (slot 1, order_hint 8 > this frame's 4 -> RefFrameSignBias[ALTREF]=1
+# is derived on live DPB state). The decoded frame == an independent av1_mc_pred_compound(A, B)
+# AVERAGE oracle, AND differs from either single-reference MC (so both refs demonstrably contribute).
+fn test_inter_stream_compound_oh() {
+    var mvr0 = 16;
+    var mvc0 = 8;
+    var mvr1 = 0 - 8;
+    var mvc1 = 24;
+    # decode the prefix alone to snapshot the two references straight out of the DPB slots.
+    var pbw = dr_bw_init(1024);
+    its_append_compound_prefix(pbw);
+    var pn = dr_bw_flush(pbw);
+    var pdpb = av1_dpb_new();
+    var poc = alloc(8);
+    var poe = alloc(8);
+    av1_decode_stream(pdpb, dr_bw_buf(pbw), pn, poc, poe);
+    assert_eq(load64(poe), DR_OK, "compound prefix (KEY + A + B) decodes");
+    assert_eq(load64(poc), 3, "compound prefix: three frames");
+    var snapA = its_snapshot(av1_dpb_frame(pdpb, 0), 64, 64);
+    var snapB = its_snapshot(av1_dpb_frame(pdpb, 1), 64, 64);
+    # A and B must be distinct or the AVERAGE oracle could not tell "used both" from "copied one".
+    var diff_ab = 0;
+    var yy = 0;
+    while (yy < 64) {
+        var xx = 0;
+        while (xx < 64) {
+            if (dr_frame_get(snapA, 0, xx, yy) != dr_frame_get(snapB, 0, xx, yy)) { diff_ab = diff_ab + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(diff_ab > 0, 1, "compound refs A and B are distinct");
+    # full stream: prefix + the compound frame.
+    var bw = dr_bw_init(1280);
+    its_append_compound_prefix(bw);
+    var cflen = 0;
+    var cfb = its_build_compound_fh_oh(4, &cflen);   # compound frame, order_hint = 4
+    var ctlen = 0;
+    var ctb = its_enc_compound_oh(mvr0, mvc0, mvr1, mvc1, 4, &ctlen);
+    its_wrap(bw, AV1_OBU_FRAME_HEADER, cfb, cflen);
+    its_wrap(bw, AV1_OBU_TILE_GROUP, ctb, ctlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var oc = alloc(8);
+    var oe = alloc(8);
+    var out = av1_decode_stream(dpb, dr_bw_buf(bw), n, oc, oe);
+    assert_eq(load64(oe), DR_OK, "COMPOUND MILESTONE: KEY + A + B + compound decodes from bytes");
+    assert_eq(load64(oc), 4, "compound milestone: four frames decoded");
+    # oracle: an independent compound AVERAGE of the two snapshots at the block's two MVs.
+    var oe2 = alloc(8);
+    var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
+    av1_mc_pred_compound(xf, snapA, snapB, 0, 0, 0, 64, 64, mvr0, mvc0, mvr1, mvc1,
+    AV1_EIGHTTAP, AV1_EIGHTTAP, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    # and each single-reference MC, to prove neither ref alone reproduces the compound output.
+    var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
+    av1_mc_pred_block(af, snapA, 0, 0, 0, 64, 64, mvr0, mvc0, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var bf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
+    av1_mc_pred_block(bf, snapB, 0, 0, 0, 64, 64, mvr1, mvc1, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    var diff_oracle = 0;
+    var diff_a = 0;
+    var diff_b = 0;
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            var p = dr_frame_get(out, 0, x, y);
+            if (p != dr_frame_get(xf, 0, x, y)) { diff_oracle = diff_oracle + 1; }
+            if (p != dr_frame_get(af, 0, x, y)) { diff_a = diff_a + 1; }
+            if (p != dr_frame_get(bf, 0, x, y)) { diff_b = diff_b + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(diff_oracle, 0, "COMPOUND MILESTONE: decode == independent av1_mc_pred_compound(A, B) AVERAGE");
+    assert_eq(diff_a > 0, 1, "compound milestone: decode != ref0-only MC (ref1 contributed)");
+    assert_eq(diff_b > 0, 1, "compound milestone: decode != ref1-only MC (ref0 contributed)");
+    return 0;
+}
+
 fn test_inter_stream_content() {
     var slen = 0;
     var sb = its_build_seq(&slen);
@@ -5123,6 +5382,7 @@ fn main() {
     test_sign_bias_wiring();
     test_inter_oh_header_parseback();
     test_inter_stream_motion_oh();
+    test_inter_stream_compound_oh();
     test_inter_stream_content();
     test_inter_stream_motion();
     test_inter_stream_e2e();

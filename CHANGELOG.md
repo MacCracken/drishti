@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.120] - 2026-07-20
+
+- **Compound / backward-ref inter frame decodes through the stream** (Phase C milestone — the
+  payoff for the `RefFrameSignBias` wiring below). `test_inter_stream_compound_oh` drives a real
+  GOP through `av1_decode_stream`: KEY → content A (slot 0, order_hint 2, forward) → content B
+  (slot 1, order_hint 8, **backward** — `get_relative_dist(8, 4) > 0`) → a compound `AVERAGE`
+  frame (`reference_select = 1`, LAST → slot 0, ALTREF → slot 1). The decoded frame equals an
+  independent `av1_mc_pred_compound(A, B)` oracle **and** differs from either single-reference MC,
+  so both references demonstrably contribute; the sign-bias derivation runs on genuine live DPB
+  order hints for the first time. New builders: `its_build_content_fh_oh` (per-slot refresh +
+  ref_frame_idx), `its_build_compound_fh_oh` (`reference_select` + the `skip_mode_present` bit that
+  a forward+backward pair forces), `its_enc_compound_oh`. Teeth-verified: the compound oracle is a
+  live comparison (a one-unit MV perturbation reddens 1728 px), and forcing the parser to drop
+  `reference_select` reddens **only** this stream test while the tile-level `test_ir_compound`
+  (which sets the field directly, no parse) stays green — the guard is on the frame-header parse
+  path, not an aliased oracle. Still open: witnessing the sign bias actually **negate** an MV in
+  the candidate dedup (needs a cross-bias inter neighbour), plus cross-frame CDF inheritance, the
+  intra fork, and segmentation.
 - **`RefFrameSignBias` is now derived and wired** (Phase C — the first real correctness gap, not
   parse coverage). Per spec 7.20, `RefFrameSignBias[ref] = get_relative_dist(OrderHints[ref], OrderHint)
   > 0` — a reference whose order hint is *after* the current frame is a backward reference (bias 1). This
