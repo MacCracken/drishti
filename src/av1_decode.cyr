@@ -129,6 +129,38 @@ fn av1_activate_intra_filters(tile, seq, fh, lr_params): i64 {
 }
 
 # ================================================================
+# The DECODE FRAME ALLOCATION EXTENT (0.7.114). Prediction writes a block's NOMINAL extent,
+# which runs past the visible frame in two independent ways:
+#   1. MiCols*MI_SIZE already exceeds FrameWidth by up to 7 samples (MiCols = 2*((W+7)>>3));
+#   2. a block may legally overhang the MI grid by half-1 MI units on top of that, because
+#      decode_partition only requires the block's HALF to be inside (has_rows / has_cols) —
+#      7 MI = 28 luma samples for a BLOCK_64X64, the largest drishti admits.
+# Allocating to the MI grid removes (1); AV1_DECODE_BORDER covers (2) with room to spare.
+#
+# This is not defensive padding, it is a correctness requirement: intra prediction writes that
+# extent unclamped through the deliberately unchecked dr_frame_set, and the overhang band is
+# then READ back by deblocking and CDEF into visible output. A 64x40 keyframe with one legal
+# BLOCK_64X64 block wrote 2048 bytes past the plane and returned DR_OK before this landed.
+# ================================================================
+enum Av1DecodeAlloc {
+    AV1_DECODE_BORDER = 32;   # >= 28, the worst-case block overhang past the MI grid
+}
+
+# MiCols/MiRows are DERIVED from the frame dims (5.9.9) so the MI extent normally covers them,
+# but take the max anyway rather than trusting two header fields to agree: a header whose dims
+# were overwritten out from under its MI counts must still allocate at least the visible frame.
+fn av1_decode_alloc_w(fh): i64 {
+    var v = av1_fh_mi_cols(fh) * AV1_MI_SIZE;
+    if (v < av1_fh_frame_width(fh)) { v = av1_fh_frame_width(fh); }
+    return v;
+}
+fn av1_decode_alloc_h(fh): i64 {
+    var v = av1_fh_mi_rows(fh) * AV1_MI_SIZE;
+    if (v < av1_fh_frame_height(fh)) { v = av1_fh_frame_height(fh); }
+    return v;
+}
+
+# ================================================================
 # le(n) — spec 4.10.4: read n bytes little-endian into an unsigned value. The
 # tile-group parser calls this only after byte_alignment (byte-aligned), so it
 # reads straight from the buffer; the caller guarantees n bytes exist. n is
@@ -313,9 +345,22 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # byte, CLAUDE.md; 128-SB superblock decode is out of scope, roadmap.md).
     if (av1_seq_use_128x128(seq) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     var num_planes = av1_seq_num_planes(seq);
-    var frame = dr_frame_new(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
+    # Allocate to the MI GRID, not the visible frame. Prediction writes a block's NOMINAL
+    # extent, which runs past FrameWidth/FrameHeight in two independent ways: MiCols*MI_SIZE
+    # already exceeds FrameWidth by up to 7 samples (MiCols = 2*((W+7)>>3)), and a block may
+    # legally overhang the MI grid by half-1 MI units on top of that — 7 MI = 28 luma samples
+    # for a BLOCK_64X64, since decode_partition only requires the block's HALF to be inside.
+    #
+    # An 8-sample border did NOT cover that. A 64x40 keyframe with one legal BLOCK_64X64
+    # intra block wrote 2048 bytes past the plane allocation and the decode returned DR_OK;
+    # nothing caught it because every fixture was a multiple of 64 and so nothing overhung.
+    # MI-aligning the allocation removes the first term and the 32-sample border covers the
+    # second with room to spare. Reported plane dims are unchanged, so CDEF, loop restoration,
+    # superres and the output crop all still measure the VISIBLE frame.
+    var frame = dr_frame_new_ext(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
+    av1_decode_alloc_w(fh), av1_decode_alloc_h(fh),
     num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),
-    av1_seq_bitdepth(seq), 8, out_err);
+    av1_seq_bitdepth(seq), AV1_DECODE_BORDER, out_err);
     if (frame == 0) { return 0; }   # dr_frame_new already wrote the precise cause
     var terr = 0;
     var lr_params = av1_lr_params_from_fh(fh, seq, av1_fh_upscaled_width(fh),

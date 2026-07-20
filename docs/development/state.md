@@ -6,6 +6,41 @@
 
 ## Version
 
+**0.7.114** — cut 2026-07-20, not yet tagged (user's git). **SECURITY: HEAP BUFFER OVERFLOW IN THE AV1
+INTRA DECODE PATH.** A conformant keyframe whose dimensions are not a multiple of the superblock size
+could make the decoder write PAST THE END of a plane allocation and still return DR_OK. Measured: a 64x40
+mono keyframe with one legal PARTITION_NONE/BLOCK_64X64 block wrote **2048 bytes** beyond the buffer.
+THE DEFECT: prediction writes a block's NOMINAL extent through the deliberately-unchecked dr_frame_set,
+and that extent exceeds the visible frame two ways — (1) MiCols*MI_SIZE already exceeds FrameWidth by up
+to 7 samples (MiCols = 2*((W+7)>>3)); (2) a block may overhang the MI grid by a further half-1 MI units
+because decode_partition only requires the block's HALF to be inside (has_rows/has_cols) — 7 MI = 28 luma
+samples for a BLOCK_64X64. The decode border was 8. For 64x40 the buffer held 56 rows while the block
+wrote 64, so rows 48..63 landed outside. **NOTHING CAUGHT IT BECAUSE EVERY FIXTURE IN THE CORPUS WAS A
+MULTIPLE OF 64** — no test block had ever overhung. Reachable from ORDINARY video, not just crafted input.
+THE FIX: dr_frame_new_ext allocates to an explicit (alloc_w, alloc_h) while REPORTING the visible dims;
+dr_frame_new is now a wrapper passing visible for both, so every other caller is unchanged. The AV1
+decode path allocates to the MI GRID (av1_decode_alloc_w/_h, which max() against the visible dims rather
+than trusting two header fields to agree) with a 32-sample border, covering the 28-sample worst case.
+Reported plane dims untouched, so CDEF/LR/superres/output crop still measure the visible frame. NOT merely
+defensive padding: the overhang band is READ BACK by deblocking and CDEF into visible output, so clamping
+the write would have produced WRONG PIXELS rather than a fix (the intra-parity lens established this, with
+the spec + dav1d + libaom all blending over the nominal extent into padded storage). dr_frame_new_ext also
+reorders its guards so an oversize frame reports OVERSIZE rather than being masked by the new
+alloc-consistency BOUNDS check. PROOF: a canary alloc'd immediately after the plane buffer, with the
+ADJACENCY ITSELF asserted so the test fails loudly rather than quietly stopping witnessing if the
+allocator changes. Reverting the border to 8 clobbers exactly 256 u64 words = 2048 bytes — matching the
+original probe AND an independent hand calculation (three concordant measurements). MUTATIONS (5 on the
+decode site, all red) incl. **border 27 vs 32**, one below the worst case, pinning the BOUND and not just
+its sufficiency. HOW IT WAS FOUND: an adversarial review of the INTER-INTRA overhang gate. The gate's
+premise — "plain intra blocks survive an overhang" — was FALSE; the gate is sound but over-strict, and
+the real bug was in the path nobody was looking at. LESSON: a gate's stated justification is a hypothesis,
+not evidence; this one had been read past for many releases. Also: a corpus whose fixtures all share an
+alignment cannot witness ANY alignment-dependent bug — the 64-multiple habit hid this for the whole arc.
+38 suites, **29,442** suite + **1,140** fuzz assertions, all six gates green. Next: **the inter-intra
+overhang gate itself** — now that the allocation covers the nominal extent, lift it and blend over the
+NOMINAL w x h (what spec/dav1d/libaom all do) rather than the clamped extent; note the plain-inter clamp
+at av1_intertile.cyr leaves the same band stale for every edge-cut inter block and is part of that bite.
+
 **0.7.113** — cut 2026-07-20, not yet tagged (user's git). **SUB-8x8 CHROMA SIBLING-MV PREDICTION (spec
 5.11.5 compute_prediction) — the sibling-span gate is LIFTED on both lanes.** At 4:2:0 four BLOCK_4X4 luma
 blocks share ONE 4x4 chroma unit, and the spec does NOT predict it with a single MV: it emits FOUR 2x2

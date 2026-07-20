@@ -61,8 +61,48 @@ fn dr_clip1(x, bit_depth): i64 {
 #   DR_ERR_OVERSIZE — width or height exceeds DR_FRAME_MAX_DIM
 #   DR_ERR_OOM      — allocation failure
 fn dr_frame_new(width, height, num_planes, subx, suby, bit_depth, border, out_err): i64 {
+    return dr_frame_new_ext(width, height, width, height, num_planes, subx, suby,
+    bit_depth, border, out_err);
+}
+
+# dr_frame_new_ext — allocate to (alloc_w, alloc_h) while REPORTING (width, height).
+#
+# WHY THE TWO EXTENTS DIFFER. A codec writes predictions over a block's NOMINAL extent, which
+# legitimately runs past the visible frame: AV1 pads its MI grid to superblock multiples, and a
+# block is legal as long as its HALF is inside (decode_partition's has_rows/has_cols), so a
+# BLOCK_64X64 may overhang the MI grid by up to half-1 = 7 MI units = 28 luma samples — on top
+# of the up-to-7 samples by which the MI grid itself exceeds FrameWidth. Intra prediction
+# writes that whole extent unclamped (av1_intra.cyr writeback, through the deliberately
+# unchecked dr_frame_set), and the overhang band is NOT dead: deblocking and CDEF read
+# [FrameWidth, MiCols*4) back into visible output.
+#
+# So the allocation must cover the MI grid plus the block overhang, while every reported
+# dimension stays the VISIBLE one — dr_frame_plane_width/height are what CDEF, loop
+# restoration, superres and the output crop all measure, and none of them should see the pad.
+# Callers that do not need the distinction use dr_frame_new, which passes the visible dims for
+# both.
+#
+# Returns the DrFrame handle, or 0 with *out_err set (see dr_frame_new above); additionally
+# DR_ERR_BOUNDS if alloc_w/alloc_h are smaller than the visible dimensions.
+fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit_depth,
+border, out_err): i64 {
     store64(out_err, DR_OK);
     if ((width <= 0) || (height <= 0) || (border < 0)) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    # The dimension-bomb check comes FIRST, on the VISIBLE dims: an oversize frame must report
+    # DR_ERR_OVERSIZE whatever allocation extent the caller derived from it, rather than being
+    # masked as a BOUNDS complaint about the two disagreeing.
+    if ((width > DR_FRAME_MAX_DIM) || (height > DR_FRAME_MAX_DIM)) {
+        store64(out_err, DR_ERR_OVERSIZE);
+        return 0;
+    }
+    if ((alloc_w > DR_FRAME_MAX_DIM) || (alloc_h > DR_FRAME_MAX_DIM)) {
+        store64(out_err, DR_ERR_OVERSIZE);
+        return 0;
+    }
+    if ((alloc_w < width) || (alloc_h < height)) {
         store64(out_err, DR_ERR_BOUNDS);
         return 0;
     }
@@ -74,10 +114,6 @@ fn dr_frame_new(width, height, num_planes, subx, suby, bit_depth, border, out_er
     if ((suby != 0) && (suby != 1)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
     if ((bit_depth != 8) && (bit_depth != 10) && (bit_depth != 12)) {
         store64(out_err, DR_ERR_BOUNDS);
-        return 0;
-    }
-    if ((width > DR_FRAME_MAX_DIM) || (height > DR_FRAME_MAX_DIM)) {
-        store64(out_err, DR_ERR_OVERSIZE);
         return 0;
     }
     var f = alloc(DR_FRAME_SIZE);
@@ -93,12 +129,17 @@ fn dr_frame_new(width, height, num_planes, subx, suby, bit_depth, border, out_er
     while (p < num_planes) {
         var pw = width;
         var ph = height;
+        var apw = alloc_w;
+        var aph = alloc_h;
         if (p > 0) {
             pw = (width + subx) >> subx;    # ceil(width / 2^subx)
             ph = (height + suby) >> suby;
+            apw = (alloc_w + subx) >> subx;
+            aph = (alloc_h + suby) >> suby;
         }
-        var stride = pw + (2 * border);
-        var rows = ph + (2 * border);
+        # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
+        var stride = apw + (2 * border);
+        var rows = aph + (2 * border);
         var buf = alloc(stride * rows * 2);   # u16 samples
         if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
         memset(buf, 0, stride * rows * 2);

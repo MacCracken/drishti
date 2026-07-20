@@ -184,6 +184,91 @@ fn test_frame_reject() {
     return 0;
 }
 
+# ================================================================
+# REGRESSION (0.7.114): the allocation must cover a block's NOMINAL write extent.
+#
+# THE BUG THIS PINS. Prediction writes a block's nominal extent through the deliberately
+# unchecked dr_frame_set. A 64x40 keyframe with one legal PARTITION_NONE / BLOCK_64X64 block
+# wrote 2048 bytes PAST the end of the plane allocation and the decode returned DR_OK. Nothing
+# caught it because every fixture in the corpus was a multiple of 64, so nothing ever overhung.
+#
+# The geometry, exactly: MiRows = 2*((40+7)>>3) = 10, so the MI grid is 40 rows — but
+# decode_partition only requires a block's HALF to be inside (has_rows: 0+8 < 10), so a
+# BLOCK_64X64 at MI (0,0) is conformant and writes rows 0..63. With the old 8-sample border the
+# buffer held 40+16 = 56 rows, so rows 48..63 (16 rows x 64 samples x 2 bytes = 2048 bytes)
+# landed past the end.
+#
+# The canary is alloc'd immediately after the frame so it occupies exactly that memory. The
+# test asserts the canary is ADJACENT first: if the allocator ever stops being a bump
+# allocator, this test must fail loudly rather than quietly stop witnessing anything.
+# ================================================================
+fn test_alloc_covers_nominal_overhang() {
+    var oe = alloc(8);
+    # 64x40 with the MI grid (16x10 MI = 64x40 samples) and the shipped decode border.
+    var f = dr_frame_new_ext(64, 40, 64, 40, 1, 0, 0, 8, 32, oe);
+    assert_eq(load64(oe), DR_OK, "overhang: frame allocated");
+    var stride = dr_frame_plane_stride(f, 0);
+    var border = dr_frame_border(f);
+    assert_eq(stride, 64 + (2 * 32), "overhang: stride spans the allocated extent + 2*border");
+    # the canary must sit immediately after the plane buffer, or it witnesses nothing.
+    var plane_end = (dr_frame_plane_ptr(f, 0) - (((border * stride) + border) * 2))
+    + ((stride * (40 + (2 * border))) * 2);
+    var canary = alloc(8192);
+    assert_eq(canary, plane_end, "overhang: canary is ADJACENT to the plane buffer (bump allocator)");
+    var i = 0;
+    while (i < 1024) { store64(canary + (i * 8), 0 - 424242); i = i + 1; }
+    # write the NOMINAL extent of a BLOCK_64X64 at (0,0) — precisely what av1_intra_predict does.
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            dr_frame_set(f, 0, x, y, 123);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var clobbered = 0;
+    i = 0;
+    while (i < 1024) {
+        if (load64(canary + (i * 8)) != (0 - 424242)) { clobbered = clobbered + 1; }
+        i = i + 1;
+    }
+    assert_eq(clobbered, 0, "overhang: a nominal BLOCK_64X64 write stays INSIDE the allocation");
+    # ...and the old geometry provably did not fit: 40 + 2*8 = 56 rows < the 64 needed.
+    assert_eq((40 + (2 * 8)) < 64, 1, "overhang: the old 8-sample border could NOT fit it");
+    assert_eq((40 + (2 * 32)) >= 64, 1, "overhang: a 32-sample border does");
+    return 0;
+}
+
+# The allocation invariant the decode path must satisfy, expressed directly: a block may
+# overhang the MI grid by half-1 MI units (7 for a BLOCK_64X64 = 28 luma samples), so the
+# addressable extent right of the origin must reach MiCols*4 + 28.
+fn test_alloc_invariant() {
+    var oe = alloc(8);
+    var mi_cols = 16;
+    var mi_rows = 10;
+    var f = dr_frame_new_ext(64, 40, mi_cols * 4, mi_rows * 4, 1, 0, 0, 8, 32, oe);
+    assert_eq(load64(oe), DR_OK, "invariant: allocated");
+    var border = dr_frame_border(f);
+    var addressable_x = (dr_frame_plane_stride(f, 0) - border);
+    assert_eq(addressable_x >= ((mi_cols * 4) + 28), 1,
+    "invariant: addressable width covers MiCols*4 + the 28-sample block overhang");
+    # reported dims stay VISIBLE — CDEF / LR / superres / output crop must not see the pad.
+    assert_eq(dr_frame_plane_width(f, 0), 64, "invariant: reported width is the VISIBLE width");
+    assert_eq(dr_frame_plane_height(f, 0), 40, "invariant: reported height is the VISIBLE height");
+    assert_eq(dr_frame_width(f), 64, "invariant: frame width is visible");
+    # dr_frame_new keeps the old behaviour exactly (alloc == visible).
+    var g = dr_frame_new(64, 40, 1, 0, 0, 8, 8, oe);
+    assert_eq(dr_frame_plane_stride(g, 0), 64 + 16, "invariant: dr_frame_new is unchanged");
+    # alloc smaller than visible is a bounds error, and an oversize VISIBLE dim still reports
+    # OVERSIZE rather than being masked by the alloc-consistency check.
+    dr_frame_new_ext(64, 40, 32, 40, 1, 0, 0, 8, 8, oe);
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "invariant: alloc < visible rejected");
+    dr_frame_new_ext(20000, 40, 8, 8, 1, 0, 0, 8, 8, oe);
+    assert_eq(load64(oe), DR_ERR_OVERSIZE, "invariant: oversize visible dim reports OVERSIZE");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("frame geometry");
@@ -199,6 +284,9 @@ fn main() {
     test_group("frame fill / clip");
     test_frame_fill();
     test_clip1();
+    test_group("allocation covers the nominal write extent (0.7.114 regression)");
+    test_alloc_covers_nominal_overhang();
+    test_alloc_invariant();
     test_group("frame adversarial");
     test_frame_reject();
     return assert_summary();

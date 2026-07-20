@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.114] - 2026-07-20
+
+**SECURITY — heap buffer overflow in the AV1 intra decode path.** A conformant keyframe whose height
+or width is not a multiple of the superblock size could make the decoder write **past the end of a plane
+allocation and still return `DR_OK`**. Measured: a 64×40 monochrome keyframe with one legal
+`PARTITION_NONE` / `BLOCK_64X64` block wrote **2048 bytes** beyond the buffer.
+
+### The defect
+
+Prediction writes a block's **nominal** extent through `dr_frame_set`, which is deliberately unchecked
+for speed. That extent legitimately exceeds the visible frame in two independent ways:
+
+1. `MiCols * MI_SIZE` already exceeds `FrameWidth` by up to 7 samples, since `MiCols = 2*((W+7)>>3)`;
+2. a block may overhang the MI grid by a further `half-1` MI units, because `decode_partition` only
+   requires a block's **half** to be inside (`has_rows` / `has_cols`) — 7 MI = **28 luma samples** for a
+   `BLOCK_64X64`.
+
+The decode-side border was **8 samples**. For the 64×40 case the buffer held 56 rows while the block
+wrote 64, so rows 48–63 landed outside it.
+
+Nothing caught this because **every fixture in the corpus was a multiple of 64**, so no test block had
+ever overhung. Reachable from ordinary video, not only crafted input, and it violates the project's own
+rule that a decoder must never write out of bounds.
+
+### The fix
+
+`dr_frame_new_ext` allocates to an explicit `(alloc_w, alloc_h)` while **reporting** the visible
+`(width, height)`; `dr_frame_new` is now a wrapper passing the visible dims for both, so every other
+caller is unchanged. The AV1 decode path allocates to the **MI grid** (`av1_decode_alloc_w` /
+`av1_decode_alloc_h`, which also `max()` against the visible dims rather than trusting two header fields
+to agree) with a **32-sample border**, covering the 28-sample worst case.
+
+Reported plane dimensions are untouched, so CDEF, loop restoration, superres and the output crop all
+still measure the visible frame. This is not merely defensive padding: the overhang band is **read back**
+by deblocking and CDEF into visible output, so clamping the write instead would have produced wrong
+pixels rather than a fix.
+
+`dr_frame_new_ext` also reorders its guards so an oversize frame reports `DR_ERR_OVERSIZE` rather than
+having it masked by the new alloc-consistency `DR_ERR_BOUNDS` check.
+
+### Verification
+
+A canary allocated immediately after the plane buffer — with the adjacency itself asserted, so the test
+fails loudly rather than quietly stops witnessing if the allocator ever changes. Reverting the border to
+8 clobbers exactly **256 u64 words = 2048 bytes**, matching both the original probe and an independent
+hand calculation. 5 further mutations on the decode site, all red, including **border 27 versus 32** —
+one below the worst-case overhang — which pins the bound rather than just its sufficiency.
+
+Found by an adversarial review of the *inter-intra* overhang gate: the gate's premise ("plain intra
+blocks survive an overhang") turned out to be false, and the gate itself is sound but over-strict. That
+work continues in the next release.
+
+38 suites, **29,442** suite + **1,140** fuzz assertions, all six gates green.
+
 ## [0.7.113] - 2026-07-20
 
 **SUB-8×8 CHROMA SIBLING-MV PREDICTION** (spec 5.11.5 `compute_prediction`) — the sibling-span gate is

@@ -1154,8 +1154,58 @@ fn test_obus_metadata_padding_skipped() {
     return 0;
 }
 
+# ================================================================
+# REGRESSION (0.7.114): the decode frame allocation must cover a block's NOMINAL write extent.
+# The overflow this pins is proven in tests/frame.tcyr (test_alloc_covers_nominal_overhang);
+# these two assertions pin the DECODE SITE — that av1_decode_frame actually asks for it.
+# ================================================================
+fn test_decode_alloc_extent() {
+    var fh = frame_mk_fh(1, 1, 0, 0);          # 128x64, MI 32x16 -> MI extent == visible
+    assert_eq(av1_decode_alloc_w(fh), 128, "alloc extent: MI grid covers a 128-wide frame exactly");
+    assert_eq(av1_decode_alloc_h(fh), 64, "alloc extent: ...and a 64-tall one");
+    # a width that is NOT a multiple of 8 is where MI-alignment actually does work:
+    # MiCols = 2*((65+7)>>3) = 18 -> 72 samples, seven past the visible 65.
+    store64(fh + AV1FH_FRAME_WIDTH, 65);
+    store64(fh + AV1FH_MI_COLS, 18);
+    assert_eq(av1_decode_alloc_w(fh), 72, "alloc extent: MI grid exceeds a 65-wide frame by 7");
+    store64(fh + AV1FH_FRAME_HEIGHT, 33);
+    store64(fh + AV1FH_MI_ROWS, 10);
+    assert_eq(av1_decode_alloc_h(fh), 40, "alloc extent: MI grid exceeds a 33-tall frame by 7");
+    # ...and the max() guard: MI counts inconsistent with the dims must not shrink the alloc.
+    store64(fh + AV1FH_MI_COLS, 2);
+    assert_eq(av1_decode_alloc_w(fh), 65, "alloc extent: never smaller than the visible frame");
+    return 0;
+}
+
+# the BORDER half of the invariant, on a genuinely decoded frame. frame_mk_seq(0) disables
+# CDEF and restoration, so av1_decode_frame returns the PREDICTION frame — the one whose
+# allocation prediction writes into.
+fn test_decode_frame_alloc_invariant() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
+    assert_eq(load64(oe), DR_OK, "alloc invariant: frame decoded");
+    # the addressable extent right of the origin must reach the MI grid plus the worst-case
+    # 28-sample block overhang. With the old 8-sample border this is 136 against a required
+    # 156 and goes red.
+    var addressable = dr_frame_plane_stride(frame, 0) - dr_frame_border(frame);
+    assert_eq(addressable >= (av1_decode_alloc_w(fh) + 28), 1,
+    "alloc invariant: decoded frame covers MiCols*4 + the 28-sample block overhang");
+    assert_eq(dr_frame_border(frame) >= 28, 1,
+    "alloc invariant: the border alone covers the worst-case overhang past the MI grid");
+    # reported dims stay VISIBLE — CDEF / LR / superres / output crop must not see the pad.
+    assert_eq(dr_frame_width(frame), 128, "alloc invariant: reported width is still visible");
+    assert_eq(dr_frame_plane_width(frame, 0), 128, "alloc invariant: plane width is still visible");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("decode frame allocation extent (0.7.114 regression)");
+    test_decode_alloc_extent();
+    test_decode_frame_alloc_invariant();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
     test_pipeline_none();
     test_pipeline_cdef();

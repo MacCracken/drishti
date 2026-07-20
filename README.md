@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.113 (AV1 decode: every motion mode, every compound and masked form, the full temporal-MV arc, every interpolation filter, every reference geometry, and — 0.7.113 — sub-8x8 chroma units that span sibling blocks, where each 2x2 chroma quadrant borrows its own sibling's motion vector. One tracked decode gap remains, cleanly rejected: inter-intra blocks overhanging the frame edge. 8/10/12-bit, multi-tile, superres)
+## Status — 0.7.114 (AV1 decode: every motion mode, every compound and masked form, the full temporal-MV arc, every interpolation filter, every reference geometry, and — 0.7.113 — sub-8x8 chroma units that span sibling blocks, where each 2x2 chroma quadrant borrows its own sibling's motion vector. 0.7.114 fixes a heap buffer overflow in the intra decode path (a keyframe whose dimensions are not a multiple of the superblock size could write past a plane allocation and still report success). One tracked decode gap remains, cleanly rejected: inter-intra blocks overhanging the frame edge. 8/10/12-bit, multi-tile, superres)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,418 suite assertions + 1,140 fuzz
+derived, and adversarially tested (29,442 suite assertions + 1,140 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
