@@ -3577,6 +3577,7 @@ fn ir_fh(w, h, mic, mir, tx_mode): i64 {
     store64(fh + AV1FH_BASE_Q_IDX, 40);
     store64(fh + AV1FH_TX_MODE, tx_mode);
     store64(fh + AV1FH_DISABLE_CDF_UPDATE, 1);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);   # decode from DEFAULT CDFs (no 7.21 inherit)
     store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 1);
     store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
     store64(fh + AV1FH_TILE_COLS, 1);
@@ -3723,6 +3724,174 @@ fn ir_resid1(luma_tt, eob, coeff): i64 {
     store64(r + (1 * 8), eob);
     store64(r + (2 * 8), coeff);
     return r;
+}
+
+# ============ C1: cross-frame CDF inheritance (7.20 save / 7.21 load) ============
+# Encode/decode a 32x32 single-block residual inter tile with an EXPLICIT adapt flag (disable_cdf),
+# so a two-frame inheritance can be driven at the tile level. fh/refs/dpb carry the 7.21 inherit.
+fn cdfw_encode(ref, fh, refs, seq, blk, disable_cdf, out_len): i64 {
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(2 * 8);
+    ir_plan(pp, 1);
+    var pf = alloc(8);
+    store64(pf, blk);
+    return av1_encode_inter_tile(et, pp, pf, disable_cdf, out_len);
+}
+fn cdfw_decode(ref, fh, refs, seq, tb, tlen, disable_cdf, out_rc): i64 {
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    store64(out_rc, av1_decode_inter_tile(dt, tb, tlen, disable_cdf));
+    return dt;
+}
+# THE C1 WITNESS: frame-1's adapted CDFs are SAVED (7.20) and INHERITED by frame-2 (7.21) — proven
+# load-bearing. Frame 1 decodes a residual block with adaptation ON (disable_cdf=0) so its coeff/mode
+# CDFs drift from the defaults; av1_cdf_bundle_save captures them. Frame 2's SAME content is then
+# encoded twice: against the inherited bundle S (primary_ref=0 -> ref slot 0) and against the defaults.
+# (1) Decoding the inherited-CDF bytes WITH inheritance reconstructs the exact same content as decoding
+# the default-CDF bytes with defaults — inheritance round-trips cleanly. (2) Decoding the inherited-CDF
+# bytes WITHOUT inheritance desyncs the arithmetic coder — so the loaded CDFs are genuinely consumed.
+fn test_cdf_inheritance() {
+    var ref = ir_ref(32, 32, 1, 0, 0);
+    var seq = ir_seq(1, 0, 0);
+    # frame 1: a residual block, decoded with adaptation ON.
+    var c1 = alloc(1024 * 8);
+    memset(c1, 0, 1024 * 8);
+    store64(c1 + 0, 240);
+    store64(c1 + 8, 0 - 120);
+    var blk1 = ir_blk(12, 4, ir_resid1(AV1_DCT_DCT, 2, c1));
+    var fh1 = ir_fh(32, 32, 8, 8, AV1_TX_MODE_LARGEST);          # primary_ref = NONE
+    var refs1 = ir_refs(32, 32);
+    var l1 = 0;
+    var tb1 = cdfw_encode(ref, fh1, refs1, seq, blk1, 0, &l1);   # disable_cdf = 0 -> adapt
+    assert_eq(l1 > 0, 1, "C1 frame1 encodes (adapting)");
+    var rc1 = alloc(8);
+    var dt1 = cdfw_decode(ref, fh1, refs1, seq, tb1, l1, 0, rc1);
+    assert_eq(load64(rc1), DR_OK, "C1 frame1 decodes (adapting)");
+    # SAVE (7.20): capture frame 1's adapted CDFs.
+    var bundle = av1_cdf_bundle_new();
+    av1_cdf_bundle_save(bundle, dt1);
+    # SAVE correctness (not just "some non-default bundle"): the bundle's coeff-CDF region is a faithful
+    # COPY of frame1's adapted coeff CDFs, AND those differ from a fresh default (adaptation happened and
+    # was captured — else there is nothing to inherit). This pins the 7.20 copy so a broken save reddens.
+    var dt1cc = load64(dt1 + AV1TILE_CC);
+    var defcc = av1_ccdf_new(av1_coeff_cdf_qbucket(40));
+    var save_copied = 1;
+    var adapted = 0;
+    var wi = 0;
+    while (wi < 3999) {
+        if (load64(bundle + ((1756 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
+        if (load64(dt1cc + (wi * 8)) != load64(defcc + (wi * 8))) { adapted = 1; }
+        wi = wi + 1;
+    }
+    assert_eq(save_copied, 1, "C1 save (7.20): bundle coeff region == frame1's adapted coeff CDFs");
+    assert_eq(adapted, 1, "C1 frame1 actually adapted its coeff CDFs (else nothing to inherit)");
+
+    # frame 2: its own residual block.
+    var c2 = alloc(1024 * 8);
+    memset(c2, 0, 1024 * 8);
+    store64(c2 + 0, 176);
+    store64(c2 + 8, 0 - 88);
+    store64(c2 + 16, 60);
+    var blk2 = ir_blk(0 - 8, 16, ir_resid1(AV1_DCT_DCT, 3, c2));
+    # encode frame 2 against S: primary_ref_frame = 0 -> CDF source = ref_frame_idx[0] = slot 0 (bundle).
+    var refsS = ir_refs(32, 32);
+    av1_ref_set_saved_cdf(refsS, 0, bundle);
+    var fhS = ir_fh(32, 32, 8, 8, AV1_TX_MODE_LARGEST);
+    store64(fhS + AV1FH_PRIMARY_REF_FRAME, 0);
+    var lS = 0;
+    var bS = cdfw_encode(ref, fhS, refsS, seq, blk2, 0, &lS);
+    # encode frame 2 against the DEFAULTS (primary_ref = NONE).
+    var refsD = ir_refs(32, 32);
+    var fhD = ir_fh(32, 32, 8, 8, AV1_TX_MODE_LARGEST);          # primary_ref = NONE
+    var lD = 0;
+    var bD = cdfw_encode(ref, fhD, refsD, seq, blk2, 0, &lD);
+    assert_eq((lS > 0) && (lD > 0), 1, "C1 frame2 encodes both ways");
+
+    # (1) inheritance round-trips: inherited-CDF decode of bS == default-CDF decode of bD (same content).
+    var rcSS = alloc(8);
+    var dtSS = cdfw_decode(ref, fhS, refsS, seq, bS, lS, 0, rcSS);
+    assert_eq(load64(rcSS), DR_OK, "C1 frame2 decodes WITH inheritance");
+    var rcDD = alloc(8);
+    var dtDD = cdfw_decode(ref, fhD, refsD, seq, bD, lD, 0, rcDD);
+    assert_eq(load64(rcDD), DR_OK, "C1 frame2 decodes with defaults");
+    var fSS = load64(dtSS + AV1TILE_FRAME);
+    var fDD = load64(dtDD + AV1TILE_FRAME);
+    assert_eq(ir_diff(fSS, fDD, 32, 32, 1, 0, 0), 0,
+    "C1 inheritance round-trips: inherited-CDF decode == default-CDF decode of the same content");
+
+    # (2) load-bearing: decode bS (coded against S) with the DEFAULT CDFs -> arithmetic coder desyncs.
+    var rcSD = alloc(8);
+    var dtSD = cdfw_decode(ref, fhD, refsD, seq, bS, lS, 0, rcSD);
+    var diverged = 0;
+    if (load64(rcSD) != DR_OK) { diverged = 1; }
+    if (load64(rcSD) == DR_OK) {
+        if (ir_diff(load64(dtSD + AV1TILE_FRAME), fSS, 32, 32, 1, 0, 0) != 0) { diverged = 1; }
+    }
+    assert_eq(diverged, 1,
+    "C1 load is load-bearing: decoding inherited-CDF bytes WITHOUT inheritance diverges");
+    return 0;
+}
+
+# DIRECT save/load round-trip: stamp six blobs with DISTINCT per-family sentinels on a source "tile",
+# save to a bundle, load into a SEPARATE dest tile's six blobs, and assert every family copied EXACTLY.
+# Asymmetric (src != dst) and per-family — so a wrong offset/size or a dropped family in EITHER
+# av1_cdf_bundle_save OR av1_cdf_bundle_load reddens that specific family. test_cdf_inheritance cannot
+# see this: it runs the SAME load on both the encode and decode lanes, so a symmetric load bug hides.
+fn cdfw_stamp(n, base): i64 {
+    var b = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(b + (i * 8), base + i);
+        i = i + 1;
+    }
+    return b;
+}
+fn cdfw_eq(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load64(a + (i * 8)) != load64(b + (i * 8))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+fn test_cdf_bundle_roundtrip() {
+    var src = alloc(AV1TILE_SIZE);
+    memset(src, 0, AV1TILE_SIZE);
+    store64(src + AV1TILE_NCC, cdfw_stamp(1756, 100000));
+    store64(src + AV1TILE_CC, cdfw_stamp(3999, 200000));
+    store64(src + AV1TILE_CCREF, cdfw_stamp(177, 300000));
+    store64(src + AV1TILE_CCIM, cdfw_stamp(341, 400000));
+    store64(src + AV1TILE_CCII, cdfw_stamp(566, 500000));
+    store64(src + AV1TILE_CCMV, cdfw_stamp(286, 600000));
+    var dst = alloc(AV1TILE_SIZE);
+    memset(dst, 0, AV1TILE_SIZE);
+    store64(dst + AV1TILE_NCC, alloc(1756 * 8));
+    store64(dst + AV1TILE_CC, alloc(3999 * 8));
+    store64(dst + AV1TILE_CCREF, alloc(177 * 8));
+    store64(dst + AV1TILE_CCIM, alloc(341 * 8));
+    store64(dst + AV1TILE_CCII, alloc(566 * 8));
+    store64(dst + AV1TILE_CCMV, alloc(286 * 8));
+    var bundle = av1_cdf_bundle_new();
+    assert_eq(av1_cdf_bundle_save(bundle, src), DR_OK, "bundle save ok");
+    assert_eq(av1_cdf_bundle_load(bundle, dst), DR_OK, "bundle load ok");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1756), 1, "ncc family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_CC), load64(src + AV1TILE_CC), 3999), 1, "cc family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_CCREF), load64(src + AV1TILE_CCREF), 177), 1, "ref family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_CCIM), load64(src + AV1TILE_CCIM), 341), 1, "im family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_CCII), load64(src + AV1TILE_CCII), 566), 1, "ii family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_CCMV), load64(src + AV1TILE_CCMV), 286), 1, "mv family save+load exact");
+    return 0;
 }
 
 # ============ per-set residual round-trip (mono) ============
@@ -5522,6 +5691,8 @@ fn main() {
     test_inter_stream_motion();
     test_inter_stream_e2e();
     test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
+    test_cdf_inheritance();
+    test_cdf_bundle_roundtrip();
     test_ir_inter1();
     test_ir_inter2();
     test_group("BILINEAR interpolation filter e2e (0.7.108)");

@@ -6,6 +6,31 @@
 
 ## Version
 
+**0.7.121** — cut 2026-07-20, not yet tagged (user's git). **CROSS-FRAME CDF INHERITANCE (C1) — the 7.20
+save / 7.21 load, implemented + witnessed**, plus the sign-bias MV-negation witness (Phase C). CDF
+inheritance: a non-key frame whose primary_ref_frame != NONE starts its six adaptive-CDF families from the
+DPB slot ref_frame_idx[primary_ref_frame]'s saved bundle instead of the defaults; every frame saves its
+exit context into refresh_frame_flags-marked slots. New per-slot AV1REF_SAVED_CDF bundle (Av1RefState);
+av1_cdf_bundle_new/save/load + av1_tile_inherit_cdfs (BOTH lanes) in av1_intertile.cyr; the save loop in
+av1_frame_dec_finish. The blanket primary_ref!=NONE reject is LIFTED; a primary_ref selecting a slot with
+no saved bundle rejects at the inherit (malformed). disable_frame_end_update_cdf=1 saves the frame's
+INITIAL context (q-bucket defaults or the inherited source bundle), reconstructed tile-independently — so
+an adapting AVIF still (reduced forces the flag) is NOT rejected. An adapting non-tile0 context_update_tile_id
+is rejected (only tile0 retained — a later bite). WITNESSES: test_cdf_inheritance (frame2 compressed against
+frame1's ADAPTED CDFs decodes only WITH inheritance, desyncs against defaults; save pinned to frame1's actual
+adapted coeff CDFs), test_cdf_bundle_roundtrip (all six families save+load exact, ASYMMETRIC per-family
+sentinels — catches the symmetric-load bug the inheritance round-trip cannot), test_cdf_save_populates_slots
+(finish-save respects refresh_frame_flags + saves initial defaults), test_cdf_multitile_ctx_rejected. **A
+16-agent adversarial review (5 lenses) found 8 REAL issues** — the multi-tile context_update_tile_id
+mis-save, the AVIF over-reject I introduced, an OOM null-deref, and three witness-coverage gaps — ALL fixed
+here and re-verified by mutation (the review earned its keep on a silent-corruption-prone module). The
+sign-bias negation witness (test_inter_tile_signbias_negation): a 4-SB tile where a NEARESTMV block's
+predictor is the NEGATED MV of a cross-bias ALTREF neighbour; decoded MI-grid MV + pixels flip with ALTREF's
+order hint (mutation-verified necessary AND sufficient). 38 suites, **29,593** suite + **7,410** fuzz
+assertions, all six gates green. STILL OPEN: the intra-block fork inside an inter frame (C2, rejected),
+segmentation / delta-q (Phase D), a conformance harness (Phase E); a real .ivf does not decode past its first
+few non-key frames; the "encoder" is a plan-driven bitstream writer. Next: C2 (intra fork). [[av1-arc-cannot-close-yet]]
+
 **0.7.120** — cut 2026-07-20, not yet tagged (user's git). **COMPOUND / BACKWARD-REF INTER FRAME DECODES
 THROUGH THE STREAM** (Phase C). Rolls up three commit-stacked bites: (1) the realistic order-hint header
 (seq enable_order_hint=1, explicit primary_ref_frame f(3), order_hint, get_relative_dist non-zero on

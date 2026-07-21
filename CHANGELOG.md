@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.121] - 2026-07-20
+
+- **Cross-frame CDF inheritance (C1) — the AV1 7.20 save / 7.21 load, implemented + witnessed.** A
+  non-key frame whose `primary_ref_frame != NONE` now starts its six adaptive-CDF families from the DPB
+  slot `ref_frame_idx[primary_ref_frame]` saved bundle instead of the defaults; every frame saves its
+  exit CDF context into the slots `refresh_frame_flags` marks. New per-slot `AV1REF_SAVED_CDF` bundle in
+  `Av1RefState`; `av1_cdf_bundle_new/save/load` + `av1_tile_inherit_cdfs` (both lanes) in
+  `av1_intertile.cyr`; the save loop in `av1_frame_dec_finish`. The old blanket `primary_ref != NONE`
+  reject is lifted; a `primary_ref` selecting a slot with no saved bundle is rejected at the inherit
+  (malformed). `disable_frame_end_update_cdf=1` correctly saves the frame's INITIAL context (q-bucketed
+  defaults, or the inherited source bundle), reconstructed tile-independently — so an adapting AVIF
+  still (`reduced` forces the flag) is NOT rejected. An adapting frame naming a non-tile0
+  `context_update_tile_id` is rejected (only tile0 is retained — a later bite). Witnesses:
+  `test_cdf_inheritance` (frame-2 compressed against frame-1's *adapted* CDFs decodes only WITH
+  inheritance and desyncs against defaults; the save is pinned to frame-1's actual adapted coeff CDFs),
+  `test_cdf_bundle_roundtrip` (all six families save+load exact, asymmetric per-family sentinels),
+  `test_cdf_save_populates_slots` (the finish-save respects `refresh_frame_flags` and saves the initial
+  defaults), `test_cdf_multitile_ctx_rejected`. A 16-agent adversarial review (5 lenses) found 8 real
+  issues — a multi-tile `context_update_tile_id` mis-save, the AVIF over-reject, an OOM null-deref, and
+  three witness-coverage gaps — all fixed here and re-verified by mutation. Still rejected downstream:
+  the intra-block fork inside an inter frame (C2), segmentation (D). [[av1-arc-cannot-close-yet]]
 - **The sign-bias MV negation is now witnessed through a real decode** (Phase C — closes the gap
   0.7.120 left open). `RefFrameSignBias` negates a cross-bias neighbour's MV in the extra-candidate
   fill (7.10.2.12); D9 (`av1_mv.tcyr`) pinned that at the `find_mv_stack` unit level with a *hand-set*

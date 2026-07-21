@@ -1355,6 +1355,93 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     return av1_sym_enc_err(enc);
 }
 
+# ================================================================
+# C1: cross-frame CDF inheritance (spec 7.20 save / 7.21 load).
+# A saved-CDF bundle is ONE flat alloc holding COPIES of all six adaptive-CDF families back to back
+# (ncc 1756, cc 3999, ref 177, im 341, ii 566, mv 286 = 7125 i64). The symbol coder adapts the per-tile
+# copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future frame whose
+# primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families are flat
+# and pointer-free, so a plain word copy is a full copy. Bundle offsets (i64): ncc 0, cc 1756, ref 5755,
+# im 5932, ii 6273, mv 6839.
+# ================================================================
+fn av1_cdf_bundle_new(): i64 { return alloc(7125 * 8); }
+fn av1_cdf_copy_words(dst, src, n): i64 {
+    var i = 0;
+    while (i < n) { store64(dst + (i * 8), load64(src + (i * 8))); i = i + 1; }
+    return DR_OK;
+}
+# SAVE (7.20): capture a decoded tile's six families into `bundle`. An INTRA (key) tile carries only
+# ncc + cc (the four inter families were never created); for those the DEFAULT read-only blobs are saved,
+# so an inter frame later inheriting from a keyframe gets adapted ncc/cc + default ref/im/ii/mv (correct —
+# the keyframe never touched them).
+fn av1_cdf_bundle_save(bundle, tile): i64 {
+    var ncc = load64(tile + AV1TILE_NCC);
+    var cc = load64(tile + AV1TILE_CC);
+    var ref = load64(tile + AV1TILE_CCREF);
+    if (ref == 0) { ref = av1_refcdf_blob(); }
+    var im = load64(tile + AV1TILE_CCIM);
+    if (im == 0) { im = av1_imcdf_blob(); }
+    var ii = load64(tile + AV1TILE_CCII);
+    if (ii == 0) { ii = av1_iicdf_blob(); }
+    var mv = load64(tile + AV1TILE_CCMV);
+    if (mv == 0) { mv = av1_mvcdf_blob(); }
+    # null-check EVERY source before any copy — the fallback blob accessors alloc() lazily and return
+    # 0 on OOM, and av1_cdf_copy_words would dereference a null source.
+    if ((ncc == 0) || (cc == 0) || (ref == 0) || (im == 0) || (ii == 0) || (mv == 0)) { return DR_ERR_OOM; }
+    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1756);
+    av1_cdf_copy_words(bundle + (1756 * 8), cc, 3999);
+    av1_cdf_copy_words(bundle + (5755 * 8), ref, 177);
+    av1_cdf_copy_words(bundle + (5932 * 8), im, 341);
+    av1_cdf_copy_words(bundle + (6273 * 8), ii, 566);
+    av1_cdf_copy_words(bundle + (6839 * 8), mv, 286);
+    return DR_OK;
+}
+# fill `bundle` with the DEFAULT CDFs (q-bucketed coeff defaults + the read-only family blobs) — the
+# INITIAL CDF state of a frame whose primary_ref_frame == NONE. Used by the save when
+# disable_frame_end_update_cdf = 1 (the spec saves the frame's initial, not adapted, context).
+fn av1_cdf_bundle_defaults(bundle, q): i64 {
+    var ncc = av1_noncoeff_cdf_blob();
+    var cc = av1_ccdf_new(q);
+    var ref = av1_refcdf_blob();
+    var im = av1_imcdf_blob();
+    var ii = av1_iicdf_blob();
+    var mv = av1_mvcdf_blob();
+    if ((ncc == 0) || (cc == 0) || (ref == 0) || (im == 0) || (ii == 0) || (mv == 0)) { return DR_ERR_OOM; }
+    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1756);
+    av1_cdf_copy_words(bundle + (1756 * 8), cc, 3999);
+    av1_cdf_copy_words(bundle + (5755 * 8), ref, 177);
+    av1_cdf_copy_words(bundle + (5932 * 8), im, 341);
+    av1_cdf_copy_words(bundle + (6273 * 8), ii, 566);
+    av1_cdf_copy_words(bundle + (6839 * 8), mv, 286);
+    return DR_OK;
+}
+# LOAD (7.21): copy `bundle` INTO an inter tile's six freshly-allocated families (all present on inter).
+fn av1_cdf_bundle_load(bundle, tile): i64 {
+    av1_cdf_copy_words(load64(tile + AV1TILE_NCC), bundle + (0 * 8), 1756);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CC), bundle + (1756 * 8), 3999);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCREF), bundle + (5755 * 8), 177);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCIM), bundle + (5932 * 8), 341);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCII), bundle + (6273 * 8), 566);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCMV), bundle + (6839 * 8), 286);
+    return DR_OK;
+}
+# INHERIT (7.21): if primary_ref_frame != NONE, replace the tile's just-defaulted CDFs with the saved
+# bundle of the DPB slot that primary_ref_frame selects. Called by BOTH lanes after the six *_new()
+# allocations. No FH / no refs (a tile-level or encode caller without ref state) / a NONE primary each
+# leave the defaults in place. With a real ref state and a non-NONE primary, a MISSING bundle (the slot
+# was never a decoded frame) is a malformed stream and REJECTS — trust no input byte.
+fn av1_tile_inherit_cdfs(tile): i64 {
+    var fh = load64(tile + AV1TILE_FH);
+    if (fh == 0) { return DR_OK; }
+    if (av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE) { return DR_OK; }
+    var refs = load64(tile + AV1TILE_REFS);
+    if (refs == 0) { return DR_OK; }
+    var slot = av1_fh_ref_frame_idx(fh, av1_fh_primary_ref_frame(fh));
+    var bundle = av1_ref_saved_cdf(refs, slot);
+    if (bundle == 0) { return DR_ERR_UNSUPPORTED; }
+    return av1_cdf_bundle_load(bundle, tile);
+}
+
 # av1_decode_inter_tile — the inter tile entry point: the intra contexts (ncc/cc)
 # PLUS the four per-tile adaptive inter CDF families, then the shared SB loop
 # (decode_tile; decode_block dispatches per block on the tile's FH).
@@ -1375,6 +1462,8 @@ fn av1_decode_inter_tile(tile, buf, sz, disable_cdf): i64 {
     store64(tile + AV1TILE_CCIM, cim);
     store64(tile + AV1TILE_CCII, cii);
     store64(tile + AV1TILE_CCMV, cmv);
+    var inh = av1_tile_inherit_cdfs(tile);   # 7.21: primary_ref_frame != NONE -> load the ref slot's CDFs
+    if (inh != DR_OK) { return inh; }
     av1_decode_tile(tile);
     av1_sym_dec_exit(sd);
     if (load64(tile + AV1TILE_IERR) != DR_OK) { return load64(tile + AV1TILE_IERR); }
@@ -1400,6 +1489,8 @@ fn av1_encode_inter_tile(tile, plan_part, plan_fb, disable_cdf, out_len): i64 {
     store64(tile + AV1TILE_CCIM, cim);
     store64(tile + AV1TILE_CCII, cii);
     store64(tile + AV1TILE_CCMV, cmv);
+    var inh = av1_tile_inherit_cdfs(tile);   # 7.21: mirror the decode lane so both start from the same CDFs
+    if (inh != DR_OK) { return 0; }
     # plan_fb doubles as plan_tx: the partition walker loads plan_tx[bc] before the
     # per-block dispatch, and the inter path ignores the value — passing plan_fb keeps
     # that load in-bounds and parallel to the block plan (a literal 0 would deref null).

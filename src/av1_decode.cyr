@@ -351,14 +351,16 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # (CLAUDE.md) forbids. They are rejected at the one chokepoint every decode path shares.
     # Each is a tracked gap (roadmap.md), and each becomes an un-gating bite when implemented.
     #
-    # primary_ref_frame: a non-KEY frame with primary_ref_frame != PRIMARY_REF_NONE INHERITS
-    # its CDFs, segmentation data and loop-filter deltas from a reference frame (5.9.2 /
-    # 7.20 / 7.21). drishti always starts from the DEFAULT CDFs, so such a frame would decode
-    # its very first symbol with the wrong probabilities and return DR_OK on garbage. This is
-    # the single most likely stream to meet in the wild: essentially every non-key frame any
-    # real encoder emits sets it.
-    if ((av1_fh_frame_is_intra(fh) == 0)
-    && (av1_fh_primary_ref_frame(fh) != AV1_PRIMARY_REF_NONE)) {
+    # primary_ref_frame != NONE now INHERITS the ref slot's saved CDFs (C1, 7.20/7.21 — see
+    # av1_tile_inherit_cdfs + the save in av1_frame_dec_finish). A primary_ref that selects a slot
+    # with no saved CDFs is caught at the tile inherit (malformed -> DR_ERR_UNSUPPORTED). One reject
+    # remains: an ADAPTING frame (disable_frame_end_update_cdf == 0, i.e. it saves its adapted CDFs)
+    # whose context_update_tile_id names a tile OTHER than tile0 cannot be saved correctly — the
+    # frame-decode context retains only tile0's adapted CDFs (roadmap.md C1 follow-on: retain the
+    # named context tile). A single-tile frame forces context_update_tile_id = 0, and a non-adapting
+    # frame's saved CDFs are its (tile-independent) initial context, so both are handled.
+    if ((av1_fh_disable_frame_end_update_cdf(fh) == 0)
+    && (av1_fh_context_update_tile_id(fh) != 0)) {
         store64(out_err, DR_ERR_UNSUPPORTED);
         return 0;
     }
@@ -531,6 +533,38 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                     i = i + 1;
                 }
             }
+        }
+    }
+    # CDF SAVE (C1, 7.20): save the frame's exit CDF context into every refreshed DPB slot, so a future
+    # non-key frame whose primary_ref_frame selects one inherits it (7.21). Two cases per spec:
+    #  - disable_frame_end_update_cdf == 0: save the ADAPTED context tile (tile0; a non-tile0
+    #    context_update_tile_id is rejected in av1_frame_dec_new since only tile0 is retained).
+    #  - disable_frame_end_update_cdf == 1: save the frame's INITIAL CDFs, NOT the adapted ones — the
+    #    q-bucketed defaults (primary_ref_frame == NONE) or the inherited source bundle (otherwise).
+    #    Reconstructed here (tile-independent), so this needs no per-tile pre-decode snapshot.
+    # Runs for intra + inter (a keyframe's CDFs are inheritable). One bundle is aliased into every
+    # refreshed slot — never mutated after (the inherit COPIES out of it).
+    if (refs != 0) {
+        var cdfb = av1_cdf_bundle_new();
+        if (cdfb == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        var serr = DR_OK;
+        if (av1_fh_disable_frame_end_update_cdf(fh) == 0) {
+            serr = av1_cdf_bundle_save(cdfb, tile0);
+        } else {
+            var pr = av1_fh_primary_ref_frame(fh);
+            if (pr == AV1_PRIMARY_REF_NONE) {
+                serr = av1_cdf_bundle_defaults(cdfb, av1_coeff_cdf_qbucket(load64(tile0 + AV1TILE_BASE_Q)));
+            } else {
+                var src = av1_ref_saved_cdf(refs, av1_fh_ref_frame_idx(fh, pr));
+                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7125); }
+            }
+        }
+        if (serr != DR_OK) { store64(out_err, serr); return 0; }
+        var crff = av1_fh_refresh_frame_flags(fh);
+        var ci = 0;
+        while (ci < 8) {
+            if (((crff >> ci) & 1) != 0) { av1_ref_set_saved_cdf(refs, ci, cdfb); }
+            ci = ci + 1;
         }
     }
     return result;

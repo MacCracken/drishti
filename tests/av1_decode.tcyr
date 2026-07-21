@@ -1219,6 +1219,61 @@ fn dec_reject(mutate_field, value, tag): i64 {
     return 0;
 }
 
+# C1 (7.20): decoding a frame through the frame path SAVES its CDFs into every DPB slot its
+# refresh_frame_flags marks (and leaves the others null), so a future frame can inherit them.
+# Witnesses the av1_frame_dec_finish save loop + its refresh_frame_flags gating + the one-bundle
+# aliasing. (The save/load COPY correctness + load-bearingness are pinned by test_cdf_inheritance.)
+fn test_cdf_save_populates_slots() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 5);   # refresh slots 0 and 2 (bits 0b101)
+    var refs = av1_ref_state_new();
+    var dpb = av1_dpb_new();
+    var frame = av1_decode_frame_ref(frame_mk_seq(0), fh, dpb, refs, out, olen, oe);
+    assert_eq(frame != 0, 1, "CDF save: keyframe decodes");
+    assert_eq(load64(oe), DR_OK, "CDF save: DR_OK");
+    assert_eq(av1_ref_saved_cdf(refs, 0) != 0, 1, "CDF save: refreshed slot 0 has a saved bundle");
+    assert_eq(av1_ref_saved_cdf(refs, 2) != 0, 1, "CDF save: refreshed slot 2 has a saved bundle");
+    assert_eq(av1_ref_saved_cdf(refs, 1), 0, "CDF save: un-refreshed slot 1 stays null");
+    var si = 3;
+    while (si < 8) {
+        assert_eq(av1_ref_saved_cdf(refs, si), 0, "CDF save: every un-refreshed high slot stays null");
+        si = si + 1;
+    }
+    assert_eq(av1_ref_saved_cdf(refs, 0), av1_ref_saved_cdf(refs, 2),
+    "CDF save: ONE bundle is aliased into every refreshed slot");
+    # this keyframe has disable_frame_end_update_cdf=1 (forced by disable_cdf_update=1), so 7.20 saves the
+    # frame's INITIAL context — the bundle's coeff region equals a fresh q-bucket default, not adapted CDFs.
+    var b = av1_ref_saved_cdf(refs, 0);
+    var defcc = av1_ccdf_new(av1_coeff_cdf_qbucket(40));
+    var cceq = 1;
+    var wj = 0;
+    while (wj < 3999) {
+        if (load64(b + ((1756 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
+        wj = wj + 1;
+    }
+    assert_eq(cceq, 1, "CDF save: disable_frame_end_update_cdf=1 saves the INITIAL (default) coeff CDFs");
+    return 0;
+}
+# C1 gate: an ADAPTING frame (disable_frame_end_update_cdf=0) whose context_update_tile_id names a tile
+# other than tile0 cannot have the right tile's CDFs saved (only tile0 is retained) -> reject cleanly
+# rather than silently save tile0's context for a future inheritor.
+fn test_cdf_multitile_ctx_rejected() {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 0);          # adapting
+    store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, 0);       # ...and saving the adapted context
+    store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 1);      # ...from a NON-tile0 context tile
+    assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe), 0,
+    "adapting frame with context_update_tile_id != 0 rejected (context tile not retained)");
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "...with DR_ERR_UNSUPPORTED");
+    return 0;
+}
+
 fn test_silent_misdecode_rejects() {
     # the control: the same stream decodes when none of the flags are set.
     var olen = 0;
@@ -1237,11 +1292,16 @@ fn test_silent_misdecode_rejects() {
     store64(fh + AV1FH_PRIMARY_REF_FRAME, 0);
     assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe) != 0, 1,
     "primary_ref_frame is ignored on a KEY frame (spec forces PRIMARY_REF_NONE)");
+    # CDF inheritance (C1) is now IMPLEMENTED, but an inter frame whose primary_ref_frame selects a
+    # DPB slot that was NEVER a decoded frame (no saved CDFs) is malformed — the tile inherit rejects
+    # it rather than silently start from defaults. Here nothing was decoded into any slot, so the
+    # inheriting inter frame still rejects DR_ERR_UNSUPPORTED (the load-bearing WITH a valid bundle is
+    # test_cdf_inheritance / test_cdf_save_populates_slots).
     var fh2 = frame_mk_fh(1, 1, 0, 0);
     store64(fh2 + AV1FH_FRAME_IS_INTRA, 0);
     store64(fh2 + AV1FH_PRIMARY_REF_FRAME, 0);
     assert_eq(av1_decode_frame(frame_mk_seq(0), fh2, out, olen, oe), 0,
-    "an INTER frame inheriting CDFs is rejected, not silently decoded with defaults");
+    "an INTER frame inheriting from a slot with NO saved CDFs is rejected, not mis-decoded");
     assert_eq(load64(oe), DR_ERR_UNSUPPORTED,
     "...with DR_ERR_UNSUPPORTED, not a mis-decode returning DR_OK");
     return 0;
@@ -1250,6 +1310,8 @@ fn test_silent_misdecode_rejects() {
 fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
+    test_cdf_save_populates_slots();
+    test_cdf_multitile_ctx_rejected();
     test_silent_misdecode_rejects();
     test_group("decode frame allocation extent (0.7.114 regression)");
     test_decode_alloc_extent();

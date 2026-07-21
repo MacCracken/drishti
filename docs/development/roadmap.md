@@ -436,9 +436,14 @@ ARC ≈ 40+.
 **Phase C — make a real inter FRAME decode (the gating hole).** Until this lands the
 decoder is keyframe-only and the ~60 releases of inter primitives are unexercised by
 any real stream.
-  - C1. **Cross-frame CDF inheritance** (7.20/7.21; save/load keyed on
-    `ref_frame_idx[primary_ref_frame]` + `context_update_tile_id`; CDF slots in the
-    DPB). **MODULE.** Gates every non-key frame. Rejected since 0.7.116.
+  - C1. **Cross-frame CDF inheritance** (7.20/7.21). **DONE 0.7.121.** Per-slot
+    `AV1REF_SAVED_CDF` bundle; `av1_cdf_bundle_save/load` + `av1_tile_inherit_cdfs`
+    (both lanes) + the finish-save; the `primary_ref != NONE` reject lifted; witnessed
+    load-bearing (`test_cdf_inheritance`) + per-family (`test_cdf_bundle_roundtrip`),
+    and adversarially reviewed (16 agents, 8 real issues fixed). REMAINING follow-on:
+    saving the named `context_update_tile_id` tile for multi-tile adaptive frames
+    (currently rejected, not mis-saved), and the `disable_frame_end_update_cdf=1`-with-
+    adaptation initial-CDF snapshot (currently reconstructed tile-independently).
   - C2. **`intra_block_mode_info`** — the intra-block fork inside an inter frame
     (5.11.15/5.11.17). **MODULE.** Gates every real inter frame. Rejected today.
   - C3. **Real inter-frame integration** through `av1_decode_stream`: a genuine

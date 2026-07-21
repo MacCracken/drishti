@@ -238,7 +238,8 @@ enum Av1RefOff {
     AV1REF_SAVED_ORDER_HINTS  = 896;    # [8][8]  -> 1408
     AV1REF_SAVED_GM           = 1408;   # [8][7][6] -> 4096
     AV1REF_SAVED_MF           = 4096;    # [8] i64 pointers to each slot's saved motion field (0.7.102) -> 4160
-    AV1REF_SIZE               = 4160;
+    AV1REF_SAVED_CDF          = 4160;    # [8] i64 pointers to each slot's saved CDF bundle (7.20/7.21, C1) -> 4224
+    AV1REF_SIZE               = 4224;
 }
 
 # ================================================================
@@ -377,6 +378,11 @@ fn av1_ref_saved_order_hint(r, i, refFrame): i64 {
 # output; 0 for an intra/never-refreshed slot), read by a FUTURE frame's motion_field_estimation.
 fn av1_ref_saved_mf(r, i): i64 { return load64(r + AV1REF_SAVED_MF + (i * 8)); }
 fn av1_ref_set_saved_mf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_MF + (i * 8), ptr); return 0; }
+# saved CDF bundle (C1, 7.20/7.21): the per-slot pointer to slot i's saved adaptive-CDF set
+# (av1_cdf_bundle_new output; 0 for a never-refreshed slot), loaded by a FUTURE non-key frame whose
+# primary_ref_frame selects this slot. See av1_cdf_bundle_* in av1_intertile.cyr.
+fn av1_ref_saved_cdf(r, i): i64 { return load64(r + AV1REF_SAVED_CDF + (i * 8)); }
+fn av1_ref_set_saved_cdf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_CDF + (i * 8), ptr); return 0; }
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }
