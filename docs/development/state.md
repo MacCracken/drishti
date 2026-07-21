@@ -6,6 +6,21 @@
 
 ## Version
 
+**0.7.124** — cut 2026-07-21, not yet tagged (user's git). **MIXED-TILE BlockDecoded FIX — closes the C2
+reconstruction follow-on.** av1_transform_block_inter never raised BlockDecoded, so a DIRECTIONAL intra
+block whose above-right/below-left neighbour was a prior INTER block in the same SB read have_ar/have_bl=0
+(fallback) instead of the decoded neighbour — a SILENT mis-prediction for mixed inter+intra tiles. Fix: new
+av1_bd_mark_block marks an inter block's whole footprint (all planes, skip AND non-skip) in BlockDecoded at
+the end of av1_decode_block_inter, using the SAME SB-relative plane-4x4 coords as the intra
+av1_transform_block (base_r=(r&15)>>suby etc.), clamped to the tile window. Decode-only (the encode never
+predicts). WITNESS (test_mixed_tile_blockdecoded): a 64x64 SB split into four 32x32 — TL/TR/BR skip-inter
+(MV 0 → = ref), BL a D45 DIRECTIONAL intra whose above-right is the INTER block TR. Decoding with two refs
+differing ONLY in TR's region, BL's pixels change (it reads TR's bottom row via have_ar=1); TEETH-verified —
+neutering av1_bd_mark_block makes BL ignore TR (bl_diff=0). Small localized fix, teeth-decisive, no full
+workflow review (proportionate). 38 suites, **29,801** suite + **7,410** fuzz, all six gates green. STILL
+OPEN: segmentation/delta-q (Phase D — the next big gate for a real inter frame), a conformance harness
+(Phase E). [[av1-arc-cannot-close-yet]]
+
 **0.7.123** — cut 2026-07-21, not yet tagged (user's git). **C2 RECONSTRUCTION — an intra block inside an
 inter frame now decodes to PIXELS.** The mode-info fork (0.7.122) read the intra Av1ModeInfo into AV1FB_MI;
 this reconstructs it. DECODE (av1_decode_block_inter is_inter=0 branch): build an Av1Block from that mode

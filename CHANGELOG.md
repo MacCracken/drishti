@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.124] - 2026-07-21
+
+- **Mixed-tile `BlockDecoded` fix — closes the C2 reconstruction follow-on.** `av1_transform_block_inter`
+  never raised `BlockDecoded`, so a DIRECTIONAL intra block whose above-right/below-left neighbour was a
+  prior INTER block in the same superblock read `have_ar`/`have_bl = 0` (fallback) instead of the decoded
+  neighbour — a silent mis-prediction for mixed inter+intra tiles. New `av1_bd_mark_block` marks an inter
+  block's whole footprint (all planes, skip AND non-skip) in `BlockDecoded` at the end of
+  `av1_decode_block_inter`, using the same SB-relative plane-4×4 coords as the intra `av1_transform_block`,
+  clamped to the tile window. Decode-only (the encode lane never predicts). WITNESS
+  (`test_mixed_tile_blockdecoded`): a 64×64 SB split into four 32×32 — TL/TR/BR skip-inter (MV 0 → = ref),
+  BL a **D45 directional** intra block whose above-right is the INTER block TR. Decoding with two refs that
+  differ only in TR's region, BL's pixels change (it reads TR's bottom row via `have_ar = 1`);
+  teeth-verified — neutering `av1_bd_mark_block` makes BL ignore TR (`bl_diff = 0`). Still rejected
+  downstream: segmentation (Phase D).
+
 ## [0.7.123] - 2026-07-21
 
 - **C2 RECONSTRUCTION — an intra block inside an inter frame now decodes to PIXELS.** The mode-info fork

@@ -946,6 +946,46 @@ fn av1_residual_intra_encode(tile, r, c, sub_size, has_chroma, tx_size, mi, resi
     }
     return DR_OK;
 }
+# mark an INTER block's whole footprint in BlockDecoded (all planes) so a LATER directional intra block's
+# above-right / below-left availability (have_ar / have_bl) sees it decoded. The intra path marks per-tx in
+# av1_transform_block; the inter path (skip AND non-skip) never did — this closes that mixed-tile gap.
+# SB-relative plane-4x4 coords (matching av1_transform_block), clamped to the tile window (an overhanging
+# block's out-of-window cells were never decoded). Decode-only — the encode lane never predicts.
+fn av1_bd_mark_block(tile, r, c, sub_size, num_planes): i64 {
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var col_end = load64(tile + AV1TILE_COL_END);
+    var row_end = load64(tile + AV1TILE_ROW_END);
+    var plane = 0;
+    while (plane < num_planes) {
+        var sx = 0;
+        var sy = 0;
+        if (plane > 0) {
+            sx = subx;
+            sy = suby;
+        }
+        var plane_sz = av1_get_plane_residual_size(sub_size, plane, subx, suby);
+        var p_w4 = av1_num_4x4_w(plane_sz);
+        var p_h4 = av1_num_4x4_h(plane_sz);
+        var max_pw = (col_end >> sx) - (c >> sx);
+        var max_ph = (row_end >> sy) - (r >> sy);
+        if (p_w4 > max_pw) { p_w4 = max_pw; }
+        if (p_h4 > max_ph) { p_h4 = max_ph; }
+        var base_r = (r & 15) >> sy;
+        var base_c = (c & 15) >> sx;
+        var i = 0;
+        while (i < p_h4) {
+            var j = 0;
+            while (j < p_w4) {
+                av1_bd_set(tile, plane, base_r + i, base_c + j, 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        plane = plane + 1;
+    }
+    return DR_OK;
+}
 fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     # the partition walk DISCARDS block returns (the intra lane's errors are sticky
     # in the symbol decoder) — the inter lane's gate/scope errors latch here and the
@@ -1387,6 +1427,9 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         if (er != DR_OK) { return av1_ierr_latch(tile, er); }
     }
     av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx);
+    var nbdp = 1;
+    if (has_chroma != 0) { nbdp = 3; }
+    av1_bd_mark_block(tile, r, c, sub_size, nbdp);   # mixed-tile BlockDecoded (0.7.124)
     return av1_sym_dec_err(sd);
 }
 

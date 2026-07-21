@@ -3783,6 +3783,95 @@ fn test_intra_block_reconstruct() {
     return 0;
 }
 
+# ---- 0.7.124: the mixed-tile BlockDecoded fix (inter neighbour → directional intra availability) ----
+fn its_intra_skip(ymode): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIP, 1);
+    store64(b + AV1FB_ISINTER, 0);
+    store64((b + AV1FB_MI) + AV1MI_YMODE, ymode);
+    store64((b + AV1FB_MI) + AV1MI_UVMODE, AV1_DC_PRED);
+    store64((b + AV1FB_MI) + AV1MI_SKIP, 1);
+    return b;
+}
+# a 64x64 mono reference: constant 128 everywhere EXCEPT the top-right 32x32 quadrant (x 32..63, y 0..31),
+# filled with `tr_fill`. That quadrant is what a skip inter TR block (MV 0) reconstructs, and its bottom row
+# is the ABOVE-RIGHT of the bottom-left intra block.
+fn its_bd_ref(tr_fill): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            var v = 128;
+            if ((x >= 32) && (y < 32)) { v = tr_fill; }
+            dr_frame_set(f, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+fn its_bd_decode(tb, tlen, fh, refs, seq, ref): i64 {
+    var oe = alloc(8);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    av1_decode_inter_tile(dt, tb, tlen, 1);
+    return df;
+}
+# THE MIXED-TILE WITNESS: a 64x64 SB split into 4 32x32 — TL/TR/BR skip-inter (MV 0 → = ref), BL a D45
+# DIRECTIONAL intra block. BL's above-right is TR (a prior INTER block). With the 0.7.124 fix TR marks
+# BlockDecoded, so BL's have_ar = 1 and its prediction READS TR's bottom row — so BL's pixels change when
+# TR's content changes (bright vs dark ref). Without the fix, have_ar = 0 (fallback) and BL ignores TR →
+# BL identical in both decodes (the teeth: neutering av1_bd_mark_block reddens this).
+fn test_mixed_tile_blockdecoded() {
+    var fh = ir_fh(64, 64, 16, 16, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(64, 64);
+    var seq = ir_seq(1, 0, 0);
+    var oe = alloc(8);
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    var dpb0 = av1_dpb_new();
+    av1_dpb_store(dpb0, fh, its_bd_ref(128));   # encode is symbol-only; ref content is irrelevant here
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb0);
+    var pp = alloc(5 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);       # 64 SB -> four 32x32 quadrants
+    store64(pp + 8, AV1_PARTITION_NONE);
+    store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);
+    store64(pp + 32, AV1_PARTITION_NONE);
+    var pf = alloc(4 * 8);
+    store64(pf + 0, it_blk(0, 0));                    # TL skip-inter MV 0
+    store64(pf + 8, it_blk(0, 0));                    # TR skip-inter MV 0 (BL's above-right neighbour)
+    store64(pf + 16, its_intra_skip(AV1_D45_PRED));   # BL directional intra (reads above-right)
+    store64(pf + 24, it_blk(0, 0));                   # BR skip-inter MV 0
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "mixed tile encoded");
+    var db = its_bd_decode(tb, tlen, fh, refs, seq, its_bd_ref(200));   # TR bright
+    var dd = its_bd_decode(tb, tlen, fh, refs, seq, its_bd_ref(50));    # TR dark
+    # BL occupies pixels x 0..31, y 32..63. It differs between the two decodes ONLY via the above-right
+    # (TR); TL/left are the constant 128 in both. So a non-zero BL diff proves have_ar = 1 read the INTER
+    # neighbour.
+    var bl_diff = 0;
+    var yy = 32;
+    while (yy < 64) {
+        var xx = 0;
+        while (xx < 32) {
+            if (dr_frame_get(db, 0, xx, yy) != dr_frame_get(dd, 0, xx, yy)) { bl_diff = bl_diff + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert_eq(bl_diff > 0, 1, "mixed-tile BlockDecoded: the directional intra block reads its INTER above-right");
+    return 0;
+}
+
 # a 1-plane residual plan (luma tx type + eob + coeff buffer).
 fn ir_resid1(luma_tt, eob, coeff): i64 {
     var r = alloc(8 * 8);
@@ -5758,6 +5847,7 @@ fn main() {
     test_inter_stream_motion();
     test_inter_stream_e2e();
     test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
+    test_mixed_tile_blockdecoded();
     test_intra_block_reconstruct();
     test_cdf_inheritance();
     test_cdf_bundle_roundtrip();

@@ -452,10 +452,10 @@ any real stream.
     `av1_encode_block_inter` writes the residual via a new `av1_residual_intra_encode`;
     the intra MI-grid stores (`is_inter=0`/`RefFrame[0]=INTRA`). Round-trip witnessed
     (decode == DC-predict + reconstruct oracle), teeth-verified, adversarially reviewed
-    (0 confirmed). REMAINING follow-on: `av1_transform_block_inter` never sets
-    `BlockDecoded`, so a DIRECTIONAL intra block reading a prior INTER neighbour's
-    above-right/below-left in the same SB gets fallback availability (a mixed-tile
-    edge; not reachable in a full frame yet).
+    (0 confirmed). Mixed-tile follow-on **DONE 0.7.124**: `av1_bd_mark_block` marks an
+    inter block's footprint in `BlockDecoded`, so a DIRECTIONAL intra block now reads a
+    prior INTER neighbour's above-right/below-left correctly (witnessed with a D45 block
+    reading an inter neighbour, teeth-verified).
   - C3. **Real inter-frame integration** through `av1_decode_stream`: a genuine
     multi-frame GOP (KEY then INTER referencing it), DPB reference management,
     order-hint plumbing, `show_existing_frame` / switch frames. **M–L.** PARTLY
