@@ -445,13 +445,17 @@ any real stream.
     (currently rejected, not mis-saved), and the `disable_frame_end_update_cdf=1`-with-
     adaptation initial-CDF snapshot (currently reconstructed tile-independently).
   - C2. **`intra_block_mode_info`** — the intra-block fork inside an inter frame
-    (5.11.24). **MODE-INFO HALF DONE 0.7.122**: the neighbour-free Size-Group
-    Y-mode CDF + the intra reads/writes, wired into `av1_inter_frame_mode_info`
-    on both lanes, round-trip + integration witnessed. REMAINING (the coupled
-    follow-on): the RECONSTRUCTION — intra predict + residual for an intra block
-    inside an inter tile (reuse `av1_residual` with a constructed `Av1Block`/
-    `Av1ModeInfo` + the intra decode context), plus the `is_inter=0` MI-grid store;
-    `av1_decode_block_inter`/`_encode` reject `is_inter=0` at reconstruction today.
+    (5.11.24). **DONE 0.7.122–0.7.123.** Mode-info half (0.7.122): the neighbour-free
+    Size-Group Y-mode CDF + the intra reads/writes on both lanes. RECONSTRUCTION
+    (0.7.123): an intra block decodes to PIXELS — `av1_decode_block_inter` builds an
+    `Av1Block` and runs `av1_residual` (intra predict + coeff + reconstruct);
+    `av1_encode_block_inter` writes the residual via a new `av1_residual_intra_encode`;
+    the intra MI-grid stores (`is_inter=0`/`RefFrame[0]=INTRA`). Round-trip witnessed
+    (decode == DC-predict + reconstruct oracle), teeth-verified, adversarially reviewed
+    (0 confirmed). REMAINING follow-on: `av1_transform_block_inter` never sets
+    `BlockDecoded`, so a DIRECTIONAL intra block reading a prior INTER neighbour's
+    above-right/below-left in the same SB gets fallback availability (a mixed-tile
+    edge; not reachable in a full frame yet).
   - C3. **Real inter-frame integration** through `av1_decode_stream`: a genuine
     multi-frame GOP (KEY then INTER referencing it), DPB reference management,
     order-hint plumbing, `show_existing_frame` / switch frames. **M–L.** PARTLY

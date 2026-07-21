@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.123] - 2026-07-21
+
+- **C2 RECONSTRUCTION — an intra block inside an inter frame now decodes to PIXELS.** The mode-info fork
+  (0.7.122) read the intra `Av1ModeInfo` into `AV1FB_MI`; this reconstructs it. The DECODE lane
+  (`av1_decode_block_inter`, `is_inter=0` branch) builds an `Av1Block` from that mode info (availability
+  incl. the sub-8×8 chroma `avail_uc`/`avail_lc`, the intra `read_tx_size`) and runs the KEYFRAME driver
+  `av1_residual` — intra predict + coeff decode + reconstruct, skip-aware. The ENCODE lane
+  (`av1_encode_block_inter`) writes the intra `tx_size` and encodes the residual via a new
+  `av1_residual_intra_encode` (the IS_INTER=0 analogue of the inter encoder, reusing the shared coeff-encode
+  leaf with the intra `ttx` context). New `av1_intra_store_mode`/`av1_intra_store_block` write `is_inter=0`,
+  `RefFrame[0]=INTRA_FRAME`, `RefFrame[1]=NONE`, and the intra Y/UV modes into the MV grid + the intra
+  grids. WITNESS (`test_intra_block_reconstruct`): a 32×32 DC-mode intra block with a DC+AC residual, at the
+  tile origin (no neighbours → DC = 128), round-trips `av1_encode_inter_tile → av1_decode_inter_tile` and
+  equals an independent DC-predict + `av1_reconstruct` oracle, with the residual demonstrably moving pixels
+  off the flat 128. Teeth-verified: neutering either the encode residual driver or the decode `av1_residual`
+  call reddens the oracle match. Adversarially reviewed (8 agents, 4 lenses): 0 confirmed bugs, 4 refuted;
+  the one real inconsistency it surfaced (lossless encode stored `max_rect` vs the decode's `TX_4X4`) is
+  fixed. **KNOWN LIMITATION (roadmap C2 follow-on):** `av1_transform_block_inter` never sets `BlockDecoded`,
+  so a DIRECTIONAL intra block whose above-right/below-left neighbour is a prior INTER block in the same SB
+  reads fallback availability — correct for the witnessed (intra/edge-neighbour) case, and not reachable in
+  a full frame yet (segmentation etc. reject a mixed inter frame earlier). Still rejected downstream:
+  segmentation (Phase D).
+
 ## [0.7.122] - 2026-07-21
 
 - **C2 — `intra_block_mode_info`, the intra fork inside an inter frame (5.11.24), the MODE-INFO half.**

@@ -6,6 +6,28 @@
 
 ## Version
 
+**0.7.123** — cut 2026-07-21, not yet tagged (user's git). **C2 RECONSTRUCTION — an intra block inside an
+inter frame now decodes to PIXELS.** The mode-info fork (0.7.122) read the intra Av1ModeInfo into AV1FB_MI;
+this reconstructs it. DECODE (av1_decode_block_inter is_inter=0 branch): build an Av1Block from that mode
+info (availability incl. sub-8x8 chroma avail_uc/avail_lc, the intra read_tx_size) and run the KEYFRAME
+driver av1_residual (intra predict + coeff + reconstruct, skip-aware — av1_transform_block gates coeff reads
+on AV1MI_SKIP). ENCODE: write intra tx_size + a NEW av1_residual_intra_encode (the IS_INTER=0 analogue of
+av1_residual_inter_encode, reusing the shared coeff-encode leaf with the intra ttx context; no var-tx). New
+av1_intra_store_mode/av1_intra_store_block write is_inter=0 / RefFrame[0]=INTRA / RefFrame[1]=NONE into the
+MV grid + the intra YModes/UVModes grids. WITNESS (test_intra_block_reconstruct): a 32x32 DC intra block +
+DC+AC residual at the tile origin (no neighbours → DC=128) round-trips av1_encode_inter_tile →
+av1_decode_inter_tile == an independent DC-predict + av1_reconstruct oracle, residual demonstrably moving
+pixels off 128. Teeth: neutering EITHER the encode residual driver OR the decode av1_residual reddens the
+oracle match. Adversarially reviewed (8 agents, 4 lenses): **0 confirmed, 4 refuted** (all the same lossless
+tx-size concern, harmless since lossless is frame-global — no ctx-dependent symbol, deblock off); the one
+real inconsistency it surfaced (lossless encode stored max_rect vs decode TX_4X4) is FIXED. **KNOWN
+LIMITATION (roadmap C2 follow-on):** av1_transform_block_inter never sets BlockDecoded, so a DIRECTIONAL
+intra block whose above-right/below-left neighbour is a prior INTER block in the same SB reads fallback
+availability — correct for the witnessed case, not reachable in a full frame yet (segmentation etc. reject a
+mixed inter frame earlier). 38 suites, **29,799** suite + **7,410** fuzz, all six gates green. STILL OPEN:
+the mixed-tile BlockDecoded fix, segmentation/delta-q (Phase D), conformance harness (Phase E); a real .ivf
+does not decode past its first few non-key frames. [[av1-arc-cannot-close-yet]]
+
 **0.7.122** — cut 2026-07-21, not yet tagged (user's git). **C2 — the intra-block fork inside an inter
 frame (intra_block_mode_info, 5.11.24): the MODE-INFO half.** An inter frame's block can be intra
 (is_inter=0); that fork was rejected. Now its mode-info decodes: a new neighbour-free Size-Group Y-mode CDF

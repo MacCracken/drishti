@@ -3716,6 +3716,73 @@ fn ir_diff_p(a, b, plane, pw, ph): i64 {
     }
     return diff;
 }
+# ---- C2 reconstruction: an INTRA block inside an INTER frame → pixels ----
+# an is_inter=0 block for the inter tile: intra Y/UV mode in the embedded Av1ModeInfo + a residual plan.
+fn its_intra_blk(ymode, resid): i64 {
+    var b = av1_blockinfo_new();
+    store64(b + AV1FB_SKIP, 0);
+    store64(b + AV1FB_ISINTER, 0);
+    store64((b + AV1FB_MI) + AV1MI_YMODE, ymode);
+    store64((b + AV1FB_MI) + AV1MI_UVMODE, AV1_DC_PRED);
+    store64((b + AV1FB_MI) + AV1MI_SKIP, 0);
+    av1_fb_set_resid(b, resid);
+    return b;
+}
+# oracle for a DC-mode intra block with NO available neighbours: the prediction is flat 128
+# (1 << (bitdepth-1)); add the reconstructed residual (av1_reconstruct — the trusted primitive the
+# inter oracle also uses). Non-circular for the wiring: the 128 is asserted by construction.
+fn iir_oracle(resid, w, sub_size, tx_size_luma, tx_luma): i64 {
+    var oe = alloc(8);
+    var xf = dr_frame_new(w, w, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < w) {
+        var x = 0;
+        while (x < w) {
+            dr_frame_set(xf, 0, x, y, 128);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var eob = load64(resid + (1 * 8));
+    var coeff = load64(resid + (2 * 8));
+    if (eob > 0) {
+        var ptx = av1_get_tx_size(0, tx_size_luma, sub_size, 0, 0);
+        av1_reconstruct(xf, 0, 0, 0, ptx, tx_luma, 0, coeff, av1_get_dc_quant(8, 40, 0), av1_get_ac_quant(8, 40, 0));
+    }
+    return xf;
+}
+# THE C2 RECONSTRUCTION WITNESS: an INTRA block inside an INTER frame decodes to PIXELS. A single 32x32
+# DC-mode intra block (is_inter=0) with a DC+AC residual, at the tile origin (no neighbours → DC = 128),
+# round-trips through av1_encode_inter_tile → av1_decode_inter_tile and equals an independent
+# DC-predict + av1_reconstruct oracle; and the residual demonstrably moved pixels off the flat 128.
+fn test_intra_block_reconstruct() {
+    var ref = ir_ref(32, 32, 1, 0, 0);            # unused by intra; ir_roundtrip stores it in the DPB
+    var fh = ir_fh(32, 32, 8, 8, AV1_TX_MODE_LARGEST);
+    var refs = ir_refs(32, 32);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 200);                       # DC
+    store64(coeff + (1 * 8), 0 - 100);             # first AC (scan[1]) → spatial variation
+    var resid = ir_resid1(AV1_DCT_DCT, 2, coeff);
+    var df = ir_roundtrip(ref, fh, refs, seq, its_intra_blk(AV1_DC_PRED, resid), 1, 32, 32, 1, 0, 0, 8, 8);
+    var xf = iir_oracle(resid, 32, 9, 3, AV1_DCT_DCT);   # sub_size 9 = BLOCK_32X32, tx 3 = TX_32X32
+    assert_eq(ir_diff(df, xf, 32, 32, 1, 0, 0), 0,
+    "C2 RECON: intra block in an inter frame == DC-predict + reconstruct oracle (1024 px)");
+    var moved = 0;
+    var my = 0;
+    while (my < 32) {
+        var mx = 0;
+        while (mx < 32) {
+            if (dr_frame_get(df, 0, mx, my) != 128) { moved = moved + 1; }
+            mx = mx + 1;
+        }
+        my = my + 1;
+    }
+    assert_eq(moved > 0, 1, "C2 RECON: the residual moved pixels off the flat DC prediction");
+    return 0;
+}
+
 # a 1-plane residual plan (luma tx type + eob + coeff buffer).
 fn ir_resid1(luma_tt, eob, coeff): i64 {
     var r = alloc(8 * 8);
@@ -5691,6 +5758,7 @@ fn main() {
     test_inter_stream_motion();
     test_inter_stream_e2e();
     test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
+    test_intra_block_reconstruct();
     test_cdf_inheritance();
     test_cdf_bundle_roundtrip();
     test_ir_inter1();

@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — keyframes decode to pixels; every inter-prediction PRIMITIVE is in (all four warp forms, OBMC, compound and masked modes, the temporal-MV arc, every interpolation filter, scaled references) — but an inter FRAME does not decode yet: segmentation, delta-q, delta-lf and an intra block inside an inter frame each reject the tile |
+| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — keyframes decode to pixels; every inter-prediction PRIMITIVE is in (all four warp forms, OBMC, compound and masked modes, the temporal-MV arc, every interpolation filter, scaled references) — but an inter FRAME does not decode yet: segmentation, delta-q and delta-lf each still reject the tile (an intra block inside an inter frame now decodes, 0.7.122–0.7.123) |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.7.121 (AV1: a complete profile-0 KEYFRAME decoder; MINIMAL inter frames also decode end-to-end from real bytes with WITNESSED motion — single-ref forward-only (0.7.119), a realistic order-hint header, a COMPOUND / backward-reference frame (0.7.120), and the sign-bias MV negation witnessed to reach pixels. Cross-frame CDF inheritance (7.20/7.21) is implemented + witnessed (0.7.121). As of 0.7.122 the **intra-block fork inside an inter frame (`intra_block_mode_info`, 5.11.24) decodes its mode-info** — the neighbour-free Size-Group Y-mode CDF + the intra reads, round-trip-witnessed on both lanes; the intra-block RECONSTRUCTION (predict + residual) is the coupled follow-on, so `is_inter=0` blocks now reject at reconstruction, not mode-info. Still rejected downstream: that reconstruction, and segmentation — so a real .ivf still does not decode past its first few non-key frames. The "encoder" is a plan-driven bitstream writer. No external conformance vector has been run. See docs/development/roadmap.md "HONEST STATUS" for the phased, checkable remainder — no "% done" is printed)
+## Status — 0.7.121 (AV1: a complete profile-0 KEYFRAME decoder; MINIMAL inter frames also decode end-to-end from real bytes with WITNESSED motion — single-ref forward-only (0.7.119), a realistic order-hint header, a COMPOUND / backward-reference frame (0.7.120), and the sign-bias MV negation witnessed to reach pixels. Cross-frame CDF inheritance (7.20/7.21) is implemented + witnessed (0.7.121). As of 0.7.123 an **intra block inside an inter frame decodes to PIXELS** — the mode-info fork (0.7.122) plus the reconstruction (intra predict + residual, reusing the keyframe `av1_residual`; a DC intra block with a residual round-trips through the inter encode/decode to a DC-predict + reconstruct oracle). Still rejected downstream: segmentation — so a real .ivf still does not decode past its first few non-key frames. The "encoder" is a plan-driven bitstream writer. No external conformance vector has been run. See docs/development/roadmap.md "HONEST STATUS" for the phased, checkable remainder — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (29,793 suite assertions + 7,410 fuzz
+derived, and adversarially tested (29,799 suite assertions + 7,410 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
