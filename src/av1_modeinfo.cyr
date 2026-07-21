@@ -215,6 +215,60 @@ fn av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ym
     return av1_sym_encode_symbol(enc, av1_ncdf_y_mode(ncc, ac, lc), 13, ymode);
 }
 
+# y_mode (5.11.24) — the intra Y-mode of an intra block INSIDE an inter frame. Unlike the keyframe's
+# neighbour-conditioned intra_frame_y_mode, this uses the neighbour-free Size_Group CDF
+# (Default_Y_Mode_Cdf, av1_ncdf_intra_y_mode). INTRA_MODES = 13 symbols.
+fn av1_read_y_mode(sd, ncc, size_group): i64 {
+    return av1_sym_read_symbol(sd, av1_ncdf_intra_y_mode(ncc, size_group), 13);
+}
+fn av1_write_y_mode(enc, ncc, size_group, ymode): i64 {
+    return av1_sym_encode_symbol(enc, av1_ncdf_intra_y_mode(ncc, size_group), 13, ymode);
+}
+
+# intra_block_mode_info (5.11.24) — the INTRA fork inside an inter frame. Identical to the keyframe
+# intra_frame_mode_info reads EXCEPT the Y-mode uses the Size_Group CDF (above), and skip / cdef /
+# segment_id were already read by av1_inter_frame_mode_info. Fills the embedded Av1ModeInfo `mi`.
+# RefFrame[0]=INTRA / RefFrame[1]=NONE are set by the caller. Returns the sticky symbol-decoder error.
+fn av1_read_intra_block_mode_info(sd, ncc, mi, mi_size, has_chroma, enable_filter_intra, subx, suby, lossless): i64 {
+    var ymode = av1_read_y_mode(sd, ncc, av1_size_group(mi_size));
+    store64(mi + AV1MI_YMODE, ymode);
+    store64(mi + AV1MI_ANGLE_Y, av1_read_angle_delta_y(sd, ncc, mi_size, ymode));
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_ANGLE_UV, 0);
+    store64(mi + AV1MI_CFL_U, 0);
+    store64(mi + AV1MI_CFL_V, 0);
+    if (has_chroma) {
+        var cfl_ok = av1_cfl_allowed(mi_size, lossless, subx, suby);
+        var uvmode = av1_read_uv_mode(sd, ncc, ymode, cfl_ok);
+        store64(mi + AV1MI_UVMODE, uvmode);
+        if (uvmode == AV1_UV_CFL_PRED) {
+            av1_read_cfl_alphas(sd, ncc, mi + AV1MI_CFL_U, mi + AV1MI_CFL_V);
+        }
+        store64(mi + AV1MI_ANGLE_UV, av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode));
+    }
+    var ufi = av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, 0, mi + AV1MI_FI_MODE);
+    store64(mi + AV1MI_USE_FI, ufi);
+    return av1_sym_dec_err(sd);
+}
+# the exact inverse — writes the same symbols from an already-filled Av1ModeInfo `mi`.
+fn av1_write_intra_block_mode_info(enc, ncc, mi, mi_size, has_chroma, enable_filter_intra, subx, suby, lossless): i64 {
+    var ymode = load64(mi + AV1MI_YMODE);
+    av1_write_y_mode(enc, ncc, av1_size_group(mi_size), ymode);
+    av1_write_angle_delta_y(enc, ncc, mi_size, ymode, load64(mi + AV1MI_ANGLE_Y));
+    if (has_chroma) {
+        var cfl_ok = av1_cfl_allowed(mi_size, lossless, subx, suby);
+        var uvmode = load64(mi + AV1MI_UVMODE);
+        av1_write_uv_mode(enc, ncc, ymode, cfl_ok, uvmode);
+        if (uvmode == AV1_UV_CFL_PRED) {
+            av1_write_cfl_alphas(enc, ncc, load64(mi + AV1MI_CFL_U), load64(mi + AV1MI_CFL_V));
+        }
+        av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, load64(mi + AV1MI_ANGLE_UV));
+    }
+    av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, 0,
+    load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
+    return av1_sym_enc_err(enc);
+}
+
 # intra_angle_info_y (5.11.20): AngleDeltaY = 0, and only for MiSize >= BLOCK_8X8
 # and a directional YMode read angle_delta_y (7 symbols, cdf indexed YMode-V_PRED)
 # with AngleDeltaY = angle_delta_y - MAX_ANGLE_DELTA.

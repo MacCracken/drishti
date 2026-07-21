@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.122] - 2026-07-21
+
+- **C2 — `intra_block_mode_info`, the intra fork inside an inter frame (5.11.24), the MODE-INFO half.**
+  An inter frame's block can be intra (`is_inter = 0`); that fork was rejected. Now it decodes: new
+  neighbour-free Size-Group Y-mode CDF (`Default_Y_Mode_Cdf[4][13]`, appended to the ncc blob at 1756 →
+  the blob grows 1756→1812, so the C1 saved-CDF bundle layout shifts +56 in lockstep — validated by the
+  sentinel round-trip test); `av1_read_y_mode`/`av1_write_y_mode`; `av1_read_intra_block_mode_info` /
+  `av1_write_intra_block_mode_info` (Y-mode + angle + uv + cfl + filter-intra, reusing the keyframe intra
+  reads), storing into an embedded `Av1ModeInfo` on the block record (`AV1FB_MI`). Wired into
+  `av1_inter_frame_mode_info` on BOTH lanes (new `has_chroma` / `enable_filter_intra` / `lossless` params);
+  `RefFrame[0]=INTRA_FRAME`, `RefFrame[1]=NONE`. **Scope, stated plainly:** this is the mode-info READ/WRITE
+  fork only — the RECONSTRUCTION (intra predict + residual for an intra block inside an inter tile) is the
+  coupled follow-on, so `av1_decode_block_inter` / `av1_encode_block_inter` now reject `is_inter=0` at
+  reconstruction (the reject MOVED from mode-info to reconstruction). Witnesses: `test_intra_block_mode_info`
+  (round-trips all fields across 4 scenarios spanning the 4 Size-Groups, both CDF modes), `test_ymode_cdf_valid`
+  (every Y-mode CDF row well-formed + exact spec spot-values), and an integration round-trip through the full
+  `av1_inter_frame_mode_info` dispatch. Teeth-verified: a 13→12 symbol-count mutation desyncs the round-trip;
+  corrupting a blob value reddens the spot-check. The `Default_Y_Mode_Cdf` values are from the AV1 spec
+  additional-tables annex, extraction validated byte-identical against the already-committed
+  `Default_Cfl_Sign_Cdf` (libaom mirrors were unreachable). Still rejected downstream: segmentation (Phase D).
+
 ## [0.7.121] - 2026-07-20
 
 - **Cross-frame CDF inheritance (C1) — the AV1 7.20 save / 7.21 load, implemented + witnessed.** A

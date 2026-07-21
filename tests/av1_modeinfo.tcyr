@@ -408,6 +408,70 @@ fn test_clear_cdef() {
     return 0;
 }
 
+# ---- C2: intra_block_mode_info (the intra fork inside an inter frame, 5.11.24) ----
+# The new Size_Group Y-mode CDF (Default_Y_Mode_Cdf) is well-formed for every size group: strictly
+# increasing, terminator 32768, count 0 — catches any transcription typo into the blob. Plus two exact
+# spec anchors (the extraction was validated against Default_Cfl_Sign_Cdf; these re-pin the blob).
+fn test_ymode_cdf_valid() {
+    var blob = av1_noncoeff_cdf_blob();
+    var sg = 0;
+    while (sg < 4) {
+        var row = av1_ncdf_intra_y_mode(blob, sg);
+        var prev = 0;
+        var k = 0;
+        while (k < 12) {
+            var v = load64(row + (k * 8));
+            assert_eq(v > prev, 1, "Y-mode CDF strictly increasing");
+            assert_eq(v < 32768, 1, "Y-mode CDF cumulative < 32768");
+            prev = v;
+            k = k + 1;
+        }
+        assert_eq(load64(row + (12 * 8)), 32768, "Y-mode CDF terminator = 32768");
+        assert_eq(load64(row + (13 * 8)), 0, "Y-mode CDF count = 0");
+        sg = sg + 1;
+    }
+    assert_eq(load64(av1_ncdf_intra_y_mode(blob, 0) + 0), 22801, "Y-mode[0][0] = 22801 (spec)");
+    assert_eq(load64(av1_ncdf_intra_y_mode(blob, 3) + (11 * 8)), 28049, "Y-mode[3][11] = 28049 (spec)");
+    return 0;
+}
+# round-trip an intra-block mode-info through av1_write/read_intra_block_mode_info (the fork), both cdf
+# modes. The fork does NOT touch SKIP (av1_inter_frame_mode_info owns it), so keep it 0 to match.
+fn ibm_rt(mi, mi_size, has_chroma, lossless, subx, suby, efi, disable, tag): i64 {
+    var nce = av1_noncoeff_cdf_blob();
+    var ncd = av1_noncoeff_cdf_blob();
+    if (disable == 0) {
+        nce = av1_ncdf_new();
+        ncd = av1_ncdf_new();
+    }
+    var enc = av1_sym_enc_init(64, disable);
+    av1_write_intra_block_mode_info(enc, nce, mi, mi_size, has_chroma, efi, subx, suby, lossless);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "ibm enc ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dmi = av1_modeinfo_new();
+    var sd = av1_sym_dec_init(out, olen, disable);
+    av1_read_intra_block_mode_info(sd, ncd, dmi, mi_size, has_chroma, efi, subx, suby, lossless);
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "ibm dec ok");
+    mi_assert(mi, dmi, tag);
+    return 0;
+}
+fn ibm_rt_both(mi, mi_size, has_chroma, lossless, subx, suby, efi, tag): i64 {
+    ibm_rt(mi, mi_size, has_chroma, lossless, subx, suby, efi, 1, tag);
+    ibm_rt(mi, mi_size, has_chroma, lossless, subx, suby, efi, 0, tag);
+    return 0;
+}
+fn test_intra_block_mode_info() {
+    # S1: DC luma, no chroma, 8x8 (Size_Group 1).
+    ibm_rt_both(mk_mi(0, AV1_DC_PRED, AV1_DC_PRED, 0, 0, 0, 0, 0, 0), AV1_BLOCK_8X8, 0, 0, 0, 0, 1, "S1 DC no-chroma");
+    # S2: directional V_PRED + angle delta, chroma UV_CFL_PRED with alphas, 16x16 (Size_Group 2), 4:4:4.
+    ibm_rt_both(mk_mi(0, AV1_V_PRED, AV1_UV_CFL_PRED, 2, 0, 3, 0 - 2, 0, 0), 6, 1, 0, 0, 0, 1, "S2 V+CFL");
+    # S3: DC + filter-intra used, 32x32 (Size_Group 3).
+    ibm_rt_both(mk_mi(0, AV1_DC_PRED, AV1_DC_PRED, 0, 0, 0, 0, 1, 2), AV1_BLOCK_32X32, 1, 0, 0, 0, 1, "S3 fi");
+    # S4: PAETH luma (non-directional -> no angle), DC chroma, 4x4 (Size_Group 0), 4:2:0.
+    ibm_rt_both(mk_mi(0, AV1_PAETH_PRED, AV1_DC_PRED, 0, 0, 0, 0, 0, 0), AV1_BLOCK_4X4, 1, 0, 1, 1, 1, "S4 PAETH 420");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("block-size conversion tables");
@@ -427,6 +491,9 @@ fn main() {
     test_rt_no_cfl();
     test_group("mode-info adaptive CDF context");
     test_rt_adaptive_multiblock();
+    test_group("C2 intra_block_mode_info (intra fork in an inter frame)");
+    test_ymode_cdf_valid();
+    test_intra_block_mode_info();
     test_group("cdef index syntax (read_cdef / write_cdef / clear_cdef)");
     test_cdef_rt_two_units();
     test_cdef_rt_once_per_unit();

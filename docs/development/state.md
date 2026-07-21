@@ -6,6 +6,26 @@
 
 ## Version
 
+**0.7.122** — cut 2026-07-21, not yet tagged (user's git). **C2 — the intra-block fork inside an inter
+frame (intra_block_mode_info, 5.11.24): the MODE-INFO half.** An inter frame's block can be intra
+(is_inter=0); that fork was rejected. Now its mode-info decodes: a new neighbour-free Size-Group Y-mode CDF
+(Default_Y_Mode_Cdf[4][13], appended to the ncc blob at 1756 → blob grows 1756→1812, so the C1 saved-CDF
+bundle layout shifts +56 in LOCKSTEP — validated by the sentinel round-trip); av1_read_y_mode/write_y_mode;
+av1_read_intra_block_mode_info/write (Y-mode + angle + uv + cfl + filter-intra, REUSING the keyframe intra
+reads) into an embedded Av1ModeInfo on the block record (AV1FB_MI); wired into av1_inter_frame_mode_info on
+BOTH lanes (new has_chroma/enable_filter_intra/lossless params). RefFrame[0]=INTRA, RefFrame[1]=NONE. SCOPE
+(user chose this split): mode-info READ/WRITE only — the RECONSTRUCTION (intra predict + residual for an
+intra block in an inter tile) is the coupled follow-on, so av1_decode_block_inter/encode reject is_inter=0
+at RECONSTRUCTION (the reject MOVED from mode-info). WITNESS: test_intra_block_mode_info (round-trips all
+fields, 4 scenarios × 4 Size-Groups, both CDF modes), test_ymode_cdf_valid (well-formed + exact spec
+spot-values), an integration round-trip through av1_inter_frame_mode_info. Teeth: 13→12 symbol count
+desyncs; a corrupted blob value reddens the spot-check. CDF SOURCING: the Y-mode values are from the AV1
+spec additional-tables annex (10.additional.tables.md), extraction validated BYTE-IDENTICAL against the
+already-committed Default_Cfl_Sign_Cdf (libaom mirrors were unreachable — a known limitation). 38 suites,
+**29,793** suite + **7,410** fuzz, all six gates green. STILL OPEN: the intra-block RECONSTRUCTION (the C2
+follow-on), segmentation/delta-q (Phase D), conformance harness (Phase E); a real .ivf does not decode past
+its first few non-key frames. Next: the C2 reconstruction (intra block → pixels). [[av1-arc-cannot-close-yet]]
+
 **0.7.121** — cut 2026-07-20, not yet tagged (user's git). **CROSS-FRAME CDF INHERITANCE (C1) — the 7.20
 save / 7.21 load, implemented + witnessed**, plus the sign-bias MV-negation witness (Phase C). CDF
 inheritance: a non-key frame whose primary_ref_frame != NONE starts its six adaptive-CDF families from the

@@ -22,10 +22,22 @@ fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
     store64(t + ((off + 6) * 8), v6);   store64(t + ((off + 7) * 8), v7);
     return 0;
 }
+# one 13-symbol Y-mode row (Default_Y_Mode_Cdf): 12 cumulative values + the 32768 terminator + a 0
+# adaptation count = 14 i64.
+fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
+    store64(t + ((off + 0) * 8), a);    store64(t + ((off + 1) * 8), b);
+    store64(t + ((off + 2) * 8), c);    store64(t + ((off + 3) * 8), d);
+    store64(t + ((off + 4) * 8), e);    store64(t + ((off + 5) * 8), f);
+    store64(t + ((off + 6) * 8), g);    store64(t + ((off + 7) * 8), h);
+    store64(t + ((off + 8) * 8), i);    store64(t + ((off + 9) * 8), j);
+    store64(t + ((off + 10) * 8), k);   store64(t + ((off + 11) * 8), l);
+    store64(t + ((off + 12) * 8), 32768);   store64(t + ((off + 13) * 8), 0);
+    return 0;
+}
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1758 * 8);   # 1756 entries (+ txfm_partition 1693..1755) + pad
+    var t = alloc(1814 * 8);   # 1812 entries (+ Default_Y_Mode_Cdf 1756..1811) + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -287,17 +299,25 @@ fn av1_noncoeff_cdf_blob(): i64 {
     store64(t + (1747 * 8), 28165); store64(t + (1748 * 8), 32768); store64(t + (1749 * 8), 0);
     store64(t + (1750 * 8), 22401); store64(t + (1751 * 8), 32768); store64(t + (1752 * 8), 0);
     store64(t + (1753 * 8), 16088); store64(t + (1754 * 8), 32768); store64(t + (1755 * 8), 0);
+    # Default_Y_Mode_Cdf[BLOCK_SIZE_GROUPS=4][INTRA_MODES=13] @ 1756 (56 i64) — the neighbour-free intra
+    # Y-mode CDF for an intra block INSIDE an inter frame (5.11.24), indexed by Size_Group[MiSize]. From
+    # the AV1 spec additional-tables annex (10.additional.tables.md), the same source as every CDF above;
+    # extraction validated against the committed Default_Cfl_Sign_Cdf @952 (byte-identical re-fetch).
+    av1_ncdffill_ym(t, 1756, 22801, 23489, 24293, 24756, 25601, 26123, 26606, 27418, 27945, 29228, 29685, 30349);
+    av1_ncdffill_ym(t, 1770, 18673, 19845, 22631, 23318, 23950, 24649, 25527, 27364, 28152, 29701, 29984, 30852);
+    av1_ncdffill_ym(t, 1784, 19770, 20979, 23396, 23939, 24241, 24654, 25136, 27073, 27830, 29360, 29730, 30659);
+    av1_ncdffill_ym(t, 1798, 20155, 21301, 22838, 23178, 23261, 23533, 23703, 24804, 25352, 26575, 27016, 28049);
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1756 * 8);   # + txfm_partition 1693..1755
+    var cc = alloc(1812 * 8);   # + Default_Y_Mode_Cdf 1756..1811
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1756) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < 1812) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -315,6 +335,8 @@ fn av1_ncdf_angle_delta(cc, dir): i64 { return cc + ((888 + dir * 8) * 8); }
 fn av1_ncdf_cfl_sign(cc): i64 { return cc + (952 * 8); }
 fn av1_ncdf_cfl_alpha(cc, ctx): i64 { return cc + ((961 + ctx * 17) * 8); }
 fn av1_ncdf_filter_intra(cc, bsize): i64 { return cc + ((1063 + bsize * 3) * 8); }
+# intra Y-mode CDF (Default_Y_Mode_Cdf) for an intra block in an inter frame, by Size_Group (0..3).
+fn av1_ncdf_intra_y_mode(cc, sg): i64 { return cc + ((1756 + sg * 14) * 8); }
 fn av1_ncdf_filter_intra_mode(cc): i64 { return cc + (1129 * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }

@@ -2613,7 +2613,8 @@ enum Av1BlockInfoOff {
     AV1FB_IB       = 32;    # embedded Av1InterBlock (AV1IB_SIZE = 192)
     AV1FB_RESID    = 224;   # encode-only: residual-coeff plan ptr (0 = zero residual)
     AV1FB_VARTX    = 232;   # encode-only: var-tx plan ptr (0 = uniform tx)
-    AV1FB_SIZE     = 240;
+    AV1FB_MI       = 240;   # embedded Av1ModeInfo (AV1MI_SIZE=72) — the intra-fork mode fields (5.11.24)
+    AV1FB_SIZE     = 312;
 }
 fn av1_blockinfo_new(): i64 {
     var b = alloc(AV1FB_SIZE);
@@ -2643,7 +2644,7 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # (roadmap.md).
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
 fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-fwd_eq_bck): i64 {
+fwd_eq_bck, has_chroma, enable_filter_intra, lossless): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -2680,7 +2681,14 @@ fwd_eq_bck): i64 {
     # with them disabled the spec reads nothing here (roadmap.md).
     var is_inter = av1_read_is_inter(sd, cc_ref, nb, fh, skip_mode, segment_id);
     store64(out + AV1FB_ISINTER, is_inter);
-    if (is_inter == 0) { return DR_ERR_UNSUPPORTED; }   # intra_block_mode_info: next bite (roadmap.md)
+    if (is_inter == 0) {
+        # intra_block_mode_info (5.11.24): RefFrame[0]=INTRA_FRAME, RefFrame[1]=NONE; fill the embedded
+        # Av1ModeInfo. Reconstruction (intra predict + residual) is the coupled follow-on (roadmap.md C2).
+        store64((out + AV1FB_IB) + AV1IB_REF0, AV1_INTRA_FRAME);
+        store64((out + AV1FB_IB) + AV1IB_REF1, AV1_REF_NONE);
+        return av1_read_intra_block_mode_info(sd, ncc, out + AV1FB_MI, mi_size, has_chroma,
+        enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
+    }
     return av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out + AV1FB_IB,
     ctx, nb, ws, fh, refs, s, skip_mode, segment_id, fwd_eq_bck);
 }
@@ -2688,7 +2696,7 @@ fwd_eq_bck): i64 {
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
 ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-fwd_eq_bck): i64 {
+fwd_eq_bck, has_chroma, enable_filter_intra, lossless): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
@@ -2724,7 +2732,11 @@ fwd_eq_bck): i64 {
     var is_inter = load64(blk + AV1FB_ISINTER);
     var e2 = av1_write_is_inter(enc, cc_ref, nb, fh, skip_mode, segment_id, is_inter);
     if (e2 != DR_OK) { return e2; }
-    if (is_inter == 0) { return DR_ERR_UNSUPPORTED; }   # intra fork: next bite (roadmap.md)
+    if (is_inter == 0) {
+        # intra_block_mode_info (5.11.24) inverse — write the intra mode-info from the embedded Av1ModeInfo.
+        return av1_write_intra_block_mode_info(enc, ncc, blk + AV1FB_MI, mi_size, has_chroma,
+        enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
+    }
     return av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv,
     blk + AV1FB_IB, ctx, nb, ws, fh, refs, s, skip_mode, segment_id, fwd_eq_bck);
 }
