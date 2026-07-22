@@ -22,13 +22,21 @@ pins, neg_interleave inverse, pred/ctx oracle, the gate + SegIdPreSkip/LastActiv
 hostile out-of-range segment symbol clamped. Adversarially reviewed (5 lenses × find→verify, 18 agents): 2/13
 confirmed — FIXED the encode/decode skip-block mirror (a skip block's segment_id is DERIVED = pred by the
 decoder; a plan claiming ≠ pred now surfaces DR_ERR_BOUNDS, witnessed); the other (frame-level DeltaQ*Dc/Ac
-per-plane deltas passed as 0 to dequant) — PRE-EXISTING + orthogonal — is now FIXED: both `av1_transform_block`
-and `av1_transform_block_inter` thread the per-plane delta (7.12.2) via `av1_plane_dc_delta`/`av1_plane_ac_delta`
-(DC = DeltaQYDc/UDc/VDc by plane, AC = 0 luma / DeltaQUAc/VAc chroma), each reading the delta off the fh its own
-lane resolves qindex from (SEG_FH intra / AV1TILE_FH inter, fh==0 → deltas 0). WITNESSED intra + inter (a
-non-zero DeltaQYDc reconstructs at the shifted DC quant vs a delta-0 oracle) + a plane→field selection unit
-test, all teeth-verified. 38 suites (assertion/fuzz totals refreshed at release), all six gates green. STILL
-OPEN: D1 temporal follow-on, per-SB delta-q/lf (D2), a conformance harness (Phase E). [[av1-decode-remaining-tracks]]
+per-plane deltas passed as 0 to dequant) — PRE-EXISTING + orthogonal (it affects non-segmented frames equally,
+not a D1 regression) — is fixed in the NEXT cut, on top of this one, NOT in 0.7.125 (see CHANGELOG
+`[Unreleased]`). 38 suites, **30,085** suite + **7,410** fuzz, all six gates green at this cut. STILL OPEN:
+D1 temporal follow-on, per-SB delta-q/lf (D2), a conformance harness (Phase E). [[av1-decode-remaining-tracks]]
+
+**[Unreleased, on top of 0.7.125]** — **frame-level per-plane DeltaQ*Dc/Ac deltas (7.12.2) now reach the
+dequant** (the second confirmed D1-review finding; PRE-EXISTING, not a D1 regression). Both
+`av1_transform_block` and `av1_transform_block_inter` thread the per-plane delta via
+`av1_plane_dc_delta`/`av1_plane_ac_delta` (av1_quant.cyr — DC = DeltaQYDc/UDc/VDc by plane, AC = 0 luma /
+DeltaQUAc/VAc chroma), each reading it off the fh its own lane already resolves qindex from (SEG_FH intra /
+AV1TILE_FH inter; fh==0 → deltas 0, the pre-fix behaviour for a bare test tile). Applied only on the
+non-lossless path (a lossless block keeps dc_q(0)/ac_q(0) for its WHT; also shields the deltas-blind
+qindex==0 lossless shortcut from a hostile base_q-0-with-delta stream). WITNESSED intra + inter (a non-zero
+DeltaQYDc reconstructs at the shifted DC quant vs a delta-0 oracle) + a plane→field selection unit test, all
+teeth-verified. 38 suites, **30,105** suite assertions, all six gates green.
 
 **0.7.124** — cut 2026-07-21, not yet tagged (user's git). **MIXED-TILE BlockDecoded FIX — closes the C2
 reconstruction follow-on.** av1_transform_block_inter never raised BlockDecoded, so a DIRECTIONAL intra

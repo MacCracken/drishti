@@ -42,6 +42,10 @@ build: check-lib-wiring
 	@mkdir -p build
 	$(CYRIUS) build programs/smoke.cyr build/drishti-smoke
 	@echo "smoke: $$(wc -c < build/drishti-smoke) bytes"
+	@# RUN it — building alone never executed a single assertion, so the smoke
+	@# program's stale version check rotted undetected from 0.7.1 to 0.7.125.
+	@./build/drishti-smoke || { echo "smoke: FAILED"; exit 1; }
+	@echo "smoke: OK"
 
 .PHONY: test
 # Globs ALL tests/*.tcyr so codec-family suites (av1.tcyr, h264.tcyr, …)
@@ -60,6 +64,13 @@ bench: check-lib-wiring
 # `cyrius test` (project-local convention; `cyrius fuzz` looks in fuzz/).
 fuzz: check-lib-wiring
 	@for f in tests/*.fcyr; do $(CYRIUS) test "$$f" || exit 1; done
+
+# Decode streams drishti did NOT produce and compare pixels against libaom's own
+# decoder — the only gate here whose reference drishti cannot have colluded with.
+# Skips cleanly when libaom/ffmpeg are absent (CONFORMANCE_STRICT=1 to fail).
+.PHONY: conformance
+conformance:
+	@scripts/conformance.sh
 
 .PHONY: lint
 lint:

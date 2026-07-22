@@ -504,11 +504,34 @@ any real stream.
     **S–M.** Untested code, not verified code.
 
 **Phase E — conformance (the gate on any close claim).**
-  - E1. **Conformance-vector harness** — acquire a libaom/Argon subset, per-vector
-    MD5 vs reference YUV, a `make conformance` gate, CI wiring. **L, open-ended.**
-  - E2. **Fix what the vectors expose.** **UNKNOWN, likely large** — Phases C/D
-    guarantee most vectors reject or desync until they land, so E2 is where the real
-    long tail lives.
+  - E1. ✅ **Conformance-vector harness — DONE.** `programs/conformance.cyr` (IVF →
+    per-frame raw I420), `programs/vector-probe.cyr` (name the gating header field
+    instead of a bare `DR_ERR_UNSUPPORTED`), `scripts/conformance.sh`, `make
+    conformance`. libaom encodes the stream and `aomdec` produces the reference
+    pixels, so the reference cannot collude with drishti's own reading of the spec.
+    **A 64×64 keyframe decodes BIT-EXACT (byte-identical I420 vs aomdec)** — the
+    first evidence in this arc that drishti did not produce itself. The keyframe path
+    is a HARD gate; inter cases are xfail and tighten as E2 lands.
+  - E2. **Fix what the vectors expose.** Three concrete findings, in priority order:
+    - E2a. **128×128 superblocks — THE blocker for the standard corpus.** libaom
+      DEFAULTS to `use_128x128_superblock=1`; all 8 published AV1 test vectors
+      surveyed use it, and drishti's SB loop is 64×64-only (`av1_decode_tile` steps
+      AV1_SB4 and calls decode_partition with BLOCK_64X64), so every stock vector
+      rejects before a single block is decoded. Needs BLOCK_128X128 in the partition
+      tree, the deferred W128 partition CDFs, the 128×128 residual chunk split, and
+      the SB-loop stride. **L.** Nothing else in Phase E can be measured on real
+      vectors until this lands — it outranks the remaining D items for that reason.
+    - E2b. **Inter reconstruction rounding.** Inter frames with real coded content
+      decode but land within max |delta| 2..4 of the reference (~7% of samples,
+      scattered, no structural offset). Reproduces with CDEF *and* deblocking both
+      disabled — so it is NOT the loop filters; the D3 deblocker hypothesis is
+      refuted by controlled experiment. Suspect sub-pel MC / reconstruction rounding.
+      Invisible to the internal suites: drishti's MC oracle shares the rounding code
+      under test. **M.**
+    - E2c. **Inter entropy desync.** Busier inter frames trip the spec's
+      `SymbolMaxBits >= -14` bound at `av1_sym_dec_exit` (`AV1_ERR_BAD_FRAME`) —
+      drishti consumed symbols the encoder never wrote. Caught cleanly (no crash,
+      no OOB, no silent garbage), but it is a genuine mis-parse. **M–L.**
 
 **Phase F — a real AV1 encoder (for "encode round-trip-clean").** What exists is a
 plan-replay bitstream writer, not an encoder. **ARC-SIZED**, comparable to the whole

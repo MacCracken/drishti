@@ -1,0 +1,176 @@
+# drishti vector probe (Phase E1 diagnostic) — walk the OBUs of a real AV1 stream
+# and print every sequence/frame-header field that drishti currently GATES on, so a
+# conformance rejection can be attributed to a specific unimplemented feature
+# instead of a bare DR_ERR_UNSUPPORTED.
+#
+# This is the companion to programs/conformance.cyr: that one answers "do the pixels
+# match", this one answers "if not, which feature stopped us". Reads the same fixed
+# input path (build/conformance-input.ivf) for the same reason (no arg module in
+# [deps].stdlib); scripts/conformance.sh copies each vector into place.
+#
+# Fields are read via the raw AV1FH_* / AV1_SEQ_* record offsets rather than the
+# accessor wrappers — the offsets are the enum contract and cannot drift out from
+# under this program without the record itself changing.
+#
+# Build: cyrius build programs/vector-probe.cyr build/drishti-vector-probe
+
+include "src/main.cyr"
+
+enum ProbeConst {
+    PROBE_MAX_INPUT = 8388608;
+}
+
+fn probe_puts(s): i64 { return print(s, strlen(s)); }
+fn probe_putn(n): i64 {
+    if (n == 0) { return probe_puts("0"); }
+    var d = alloc(24);
+    var i = 0;
+    var v = n;
+    if (v < 0) { probe_puts("-"); v = 0 - v; }
+    while (v > 0) {
+        store8(d + i, 48 + (v % 10));
+        v = v / 10;
+        i = i + 1;
+    }
+    var o = alloc(24);
+    var j = 0;
+    while (j < i) { store8(o + j, load8((d + i - 1) - j)); j = j + 1; }
+    return print(o, i);
+}
+fn probe_kv(k, v): i64 {
+    probe_puts("  ");
+    probe_puts(k);
+    probe_puts("=");
+    probe_putn(v);
+    probe_puts("\n");
+    return 0;
+}
+# flag a field drishti REJECTS on when non-zero (or, for a few, when it differs from
+# the supported value) so the offending feature is obvious in the output.
+fn probe_gate(k, v, bad): i64 {
+    probe_puts("  ");
+    probe_puts(k);
+    probe_puts("=");
+    probe_putn(v);
+    if (v == bad) { probe_puts("   <-- REJECTED BY DRISHTI"); }
+    probe_puts("\n");
+    return 0;
+}
+
+fn probe_seq(seq): i64 {
+    probe_puts(" SEQUENCE HEADER\n");
+    probe_gate("use_128x128_superblock", load64(seq + AV1_SEQ_SB128), 1);
+    probe_kv("bit_depth", load64(seq + AV1_SEQ_BITDEPTH));
+    probe_kv("num_planes", load64(seq + AV1_SEQ_NUM_PLANES));
+    probe_kv("subsampling_x", load64(seq + AV1_SEQ_SUBX));
+    probe_kv("subsampling_y", load64(seq + AV1_SEQ_SUBY));
+    probe_kv("enable_cdef", load64(seq + AV1_SEQ_ENABLE_CDEF));
+    probe_kv("enable_restoration", load64(seq + AV1_SEQ_ENABLE_RESTORATION));
+    probe_kv("enable_filter_intra", load64(seq + AV1_SEQ_ENABLE_FILTER_INTRA));
+    probe_kv("enable_intra_edge_filter", load64(seq + AV1_SEQ_ENABLE_INTRA_EDGE));
+    probe_kv("enable_order_hint", load64(seq + AV1_SEQ_ENABLE_ORDER_HINT));
+    probe_kv("enable_superres", load64(seq + AV1_SEQ_ENABLE_SUPERRES));
+    return 0;
+}
+
+fn probe_fh(fh): i64 {
+    probe_puts(" FRAME HEADER\n");
+    probe_kv("frame_type", load64(fh + AV1FH_FRAME_TYPE));
+    probe_kv("frame_is_intra", load64(fh + AV1FH_FRAME_IS_INTRA));
+    probe_kv("show_frame", load64(fh + AV1FH_SHOW_FRAME));
+    probe_kv("mi_cols", load64(fh + AV1FH_MI_COLS));
+    probe_kv("mi_rows", load64(fh + AV1FH_MI_ROWS));
+    probe_kv("base_q_idx", load64(fh + AV1FH_BASE_Q_IDX));
+    probe_kv("coded_lossless", load64(fh + AV1FH_CODED_LOSSLESS));
+    probe_kv("tx_mode", load64(fh + AV1FH_TX_MODE));
+    probe_kv("reduced_tx_set", load64(fh + AV1FH_REDUCED_TX_SET));
+    probe_kv("primary_ref_frame", load64(fh + AV1FH_PRIMARY_REF_FRAME));
+    probe_kv("refresh_frame_flags", load64(fh + AV1FH_REFRESH_FRAME_FLAGS));
+    probe_kv("tile_cols", load64(fh + AV1FH_TILE_COLS));
+    probe_kv("tile_rows", load64(fh + AV1FH_TILE_ROWS));
+    probe_kv("uses_lr", load64(fh + AV1FH_USES_LR));
+    probe_puts(" --- drishti reject gates ---\n");
+    probe_gate("allow_screen_content_tools", load64(fh + AV1FH_ALLOW_SCT), 1);
+    probe_gate("allow_intrabc", load64(fh + AV1FH_ALLOW_INTRABC), 1);
+    probe_gate("delta_q_present", load64(fh + AV1FH_DELTA_Q_PRESENT), 1);
+    probe_gate("delta_lf_present", load64(fh + AV1FH_DELTA_LF_PRESENT), 1);
+    probe_kv("segmentation_enabled", load64(fh + AV1FH_SEG_ENABLED));
+    probe_kv("segmentation_update_map", load64(fh + AV1FH_SEG_UPDATE_MAP));
+    probe_kv("segmentation_temporal_update", load64(fh + AV1FH_SEG_TEMPORAL_UPDATE));
+    probe_kv("segmentation_update_data", load64(fh + AV1FH_SEG_UPDATE_DATA));
+    probe_gate("seg_supported", av1_seg_supported(fh), 0);
+    probe_kv("disable_frame_end_update_cdf", load64(fh + AV1FH_DISABLE_FE_UPDATE_CDF));
+    probe_kv("context_update_tile_id", load64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var buf = alloc(PROBE_MAX_INPUT);
+    var n = file_read_all("build/conformance-input.ivf", buf, PROBE_MAX_INPUT);
+    if (n <= 0) { probe_puts("cannot-read-input\n"); return 1; }
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, n, &e);
+    if ((r == 0) || (e != DR_OK)) { probe_puts("not-an-ivf\n"); return 1; }
+
+    var refs = av1_ref_state_new();
+    var seq = 0;
+    var tu = 0;
+    var go = 1;
+    while (go == 1) {
+        var pp = 0;
+        var ps = 0;
+        var pt = 0;
+        if (dr_ivf_next_frame(r, &pp, &ps, &pt) != DR_OK) { go = 0; }
+        else {
+            tu = tu + 1;
+            probe_puts("=== temporal unit ");
+            probe_putn(tu);
+            probe_puts(" (");
+            probe_putn(ps);
+            probe_puts(" bytes) ===\n");
+            var it = av1_obu_iter_init(pp, ps);
+            var otype = 0;
+            var ooff = 0;
+            var osize = 0;
+            var rc = av1_obu_next(it, &otype, &ooff, &osize);
+            while (rc == DR_OK) {
+                probe_puts(" OBU type=");
+                probe_putn(otype);
+                probe_puts(" size=");
+                probe_putn(osize);
+                probe_puts("\n");
+                if (otype == AV1_OBU_SEQUENCE_HEADER) {
+                    var serr = 0;
+                    seq = av1_seq_parse(pp + ooff, osize, &serr);
+                    if ((seq == 0) || (serr != DR_OK)) {
+                        probe_puts("  SEQ PARSE FAILED err=");
+                        probe_putn(serr);
+                        probe_puts("\n");
+                    } else { probe_seq(seq); }
+                }
+                if ((otype == AV1_OBU_FRAME) || (otype == AV1_OBU_FRAME_HEADER)) {
+                    if (seq == 0) { probe_puts("  (no seq yet)\n"); }
+                    else {
+                        var o = av1_obu_iter_obu(it);
+                        var ferr = 0;
+                        var fh = av1_frame_parse_uncompressed_header(seq, refs,
+                        av1_obu_tid(o), av1_obu_sid(o), pp + ooff, osize, &ferr);
+                        if ((fh == 0) || (ferr != DR_OK)) {
+                            probe_puts("  FH PARSE FAILED err=");
+                            probe_putn(ferr);
+                            probe_puts(" (");
+                            probe_puts(dr_err_name(ferr));
+                            probe_puts(")\n");
+                        } else { probe_fh(fh); }
+                    }
+                }
+                rc = av1_obu_next(it, &otype, &ooff, &osize);
+            }
+        }
+    }
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -11,8 +11,12 @@ include "src/main.cyr"
 
 fn main() {
     alloc_init();
-    # core: version + a leb128 round-trip through writer and reader.
-    if (drishti_version() != 700) { return 1; }
+    # core: version + a leb128 round-trip through writer and reader. The version is
+    # checked for PLAUSIBILITY only — tests/drishti.tcyr pins the exact packed value
+    # and scripts/version-check.sh enforces it against VERSION, so hardcoding the
+    # number here too would add a third version-sync site (it silently rotted at 700
+    # from 0.7.1 until 0.7.125, undetected because nothing ever RAN this binary).
+    if (drishti_version() <= 0) { return 1; }
     var bw = dr_bw_init(16);
     dr_leb128_write(bw, 300);
     var blen = dr_bw_flush(bw);

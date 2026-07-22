@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **Phase E1 — the FIRST external validation in the AV1 arc: a real libaom-encoded keyframe decodes
+  BIT-EXACT.** Every prior gate round-trips drishti's own bitstream writer into drishti's own decoder, or
+  compares against an oracle transcribed from the same spec reading as the implementation — so a shared
+  misreading passes both sides silently. New `programs/conformance.cyr` (decode an IVF, dump each frame as
+  raw I420), `programs/vector-probe.cyr` (print every sequence/frame-header field drishti GATES on, so a
+  rejection names the feature instead of a bare `DR_ERR_UNSUPPORTED`), `scripts/conformance.sh` and a
+  `make conformance` target: libaom encodes the stream, libaom's own decoder produces the reference pixels,
+  drishti must match a bitstream and an output it had no hand in creating. RESULT: a 64×64 keyframe decodes
+  to **byte-identical** I420 vs `aomdec` (all 6144 bytes), as do all-skip inter frames. Three findings the
+  internal suites structurally could not reach:
+  (1) **libaom defaults to 128×128 superblocks** — all 8 published AV1 test vectors surveyed use them, and
+  drishti's SB loop is 64×64-only, so it rejects every stock vector up front. This is the single gate
+  blocking the entire standard corpus and reprioritises the roadmap (see E2).
+  (2) **inter reconstruction rounding** — inter frames carrying real coded content decode but land within
+  max |delta| 2..4 of the reference (~7% of samples, scattered). It reproduces with CDEF *and* deblocking
+  both disabled, which REFUTES the loop-filter hypothesis (roadmap D3) by controlled experiment.
+  (3) **inter entropy desync** — busier inter frames trip the spec's `SymbolMaxBits >= -14` bound at
+  `av1_sym_dec_exit` (`AV1_ERR_BAD_FRAME`): drishti consumed symbols the encoder never wrote. Caught
+  cleanly — no crash, no OOB, no silent garbage.
+  The gate treats the keyframe path as HARD (bit-exactness must not regress) and records the inter cases as
+  xfail, so it tightens as E2 lands. Skips cleanly when libaom/ffmpeg are absent.
+
+- **Frame-level per-plane `DeltaQ*Dc/Ac` deltas (7.12.2) now reach the dequant** — they were passed as 0 at
+  both sites, so a stream carrying a non-zero `DeltaQYDc`/`UDc`/`UAc`/`VDc`/`VAc` dequantized at the wrong
+  DC/AC quantizer. PRE-EXISTING (it affects non-segmented frames equally — not a 0.7.125 D1 regression); it
+  was the second confirmed finding of the D1 adversarial review, fixed on top of that cut. Now
+  `av1_transform_block` (intra) and `av1_transform_block_inter` (inter) thread the per-plane delta via new
+  `av1_plane_dc_delta` / `av1_plane_ac_delta` (`av1_quant.cyr`): DC uses `DeltaQYDc`/`UDc`/`VDc` by plane, AC
+  uses 0 for luma / `DeltaQUAc`/`VAc` for chroma. Each site reads the delta off the SAME frame header its own
+  lane already resolves the per-segment qindex from — `SEG_FH` on the intra lane (where `AV1TILE_FH` is 0),
+  `AV1TILE_FH` on the inter lane — with an `fh == 0` guard degrading to the pre-fix deltas-0 behaviour for a
+  bare test tile. Applied only on the non-lossless path: a lossless block keeps the fixed `dc_q(0)`/`ac_q(0)`
+  its WHT inverts (a conformant lossless block has all deltas 0 per `av1_compute_lossless`; the guard also
+  shields the deltas-blind `base_q/qindex == 0` lossless shortcut from a hostile stream setting `base_q 0`
+  with a non-zero delta). WITNESSES (teeth-verified — reverting either site to `0` reddens the diff): a
+  non-zero `DeltaQYDc` reconstructs an 8×8 luma DC block at the shifted quant vs a delta-0 oracle on both the
+  intra (`test_deltaq_ydc_shifts_dc`) and inter (`test_inter_residual_deltaq_ydc`) sites, plus a plane→field
+  selection unit test covering chroma U/V DC+AC and the `fh == 0` guard (`test_plane_delta_select`).
+
 ## [0.7.125] - 2026-07-21
 
 - **Phase D1 — SEGMENTATION decodes end-to-end, to PIXELS (intra + inter).** The segment-id map is read and
@@ -35,22 +74,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **skip** block on a `!SegIdPreSkip` frame: the decoder derives `segment_id = pred` (no symbol), so a plan
   whose skip block claims a segment ≠ `pred` is unrepresentable (it would stamp a divergent value into the
   shared map and desync later blocks); `av1_write_segment_id` now surfaces that as `DR_ERR_BOUNDS` (the
-  `av1_write_skip_mode` convention), witnessed + teeth-verified (`test_write_segment_id_skip_mirror`).
-- **Fixed the second confirmed D1-review finding — the frame-level per-plane `DeltaQ*Dc/Ac` deltas (7.12.2)
-  were passed as 0 to both dequant sites**, so a stream carrying a non-zero `DeltaQYDc`/`UDc`/`UAc`/`VDc`/`VAc`
-  dequantized at the wrong DC/AC quantizer (PRE-EXISTING — it affects non-segmented frames equally, not a D1
-  regression). Now `av1_transform_block` (intra) and `av1_transform_block_inter` (inter) thread the per-plane
-  delta via new `av1_plane_dc_delta` / `av1_plane_ac_delta` (av1_quant.cyr): DC uses `DeltaQYDc`/`UDc`/`VDc`
-  by plane, AC uses 0 for luma / `DeltaQUAc`/`VAc` for chroma. Each site reads the delta off the SAME frame
-  header its own lane already resolves the per-segment qindex from — `SEG_FH` on the intra lane (where
-  `AV1TILE_FH` is 0), `AV1TILE_FH` on the inter lane — with an `fh==0` guard that degrades to the pre-fix
-  deltas-0 behaviour for a bare test tile. The delta is applied only on the non-lossless path: a lossless
-  block keeps the fixed `dc_q(0)`/`ac_q(0)` its WHT inverts (a conformant lossless block has all deltas 0 per
-  `av1_compute_lossless`; the guard additionally shields the deltas-blind `base_q/qindex==0` lossless shortcut
-  from a hostile stream that sets `base_q 0` with a non-zero delta). WITNESSES (all teeth-verified — reverting a site to `0` reddens the
-  diff): a non-zero `DeltaQYDc` reconstructs an 8x8 luma DC block at the shifted quant vs a delta-0 oracle on
-  both the intra (`test_deltaq_ydc_shifts_dc`) and inter (`test_inter_residual_deltaq_ydc`) sites, plus a
-  plane→field selection unit test covering chroma U/V DC+AC and the `fh==0` guard (`test_plane_delta_select`).
+  `av1_write_skip_mode` convention), witnessed + teeth-verified (`test_write_segment_id_skip_mirror`). The
+  other confirmed finding — the frame-level per-plane `DeltaQ*Dc/Ac` deltas passed as 0 to the dequant — is
+  PRE-EXISTING (affects non-segmented frames equally, not a D1 regression); it is fixed in the NEXT cut, not
+  this one (see `[Unreleased]`).
 
 ## [0.7.124] - 2026-07-21
 
