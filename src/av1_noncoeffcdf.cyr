@@ -37,7 +37,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1814 * 8);   # 1812 entries (+ Default_Y_Mode_Cdf 1756..1811) + pad
+    var t = alloc(1841 * 8);   # 1839 entries (+ Default_Segment_Id_Cdf 1812..1838) + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -307,17 +307,33 @@ fn av1_noncoeff_cdf_blob(): i64 {
     av1_ncdffill_ym(t, 1770, 18673, 19845, 22631, 23318, 23950, 24649, 25527, 27364, 28152, 29701, 29984, 30852);
     av1_ncdffill_ym(t, 1784, 19770, 20979, 23396, 23939, 24241, 24654, 25136, 27073, 27830, 29360, 29730, 30659);
     av1_ncdffill_ym(t, 1798, 20155, 21301, 22838, 23178, 23261, 23533, 23703, 24804, 25352, 26575, 27016, 28049);
+    # Default_Segment_Id_Cdf[SPATIAL_PREDICTION_PROBS=3][MAX_SEGMENTS=8] @ 1812 (3 rows x 9 i64 = 27) — the
+    # spatial segment-id map CDF (5.11.11 read_segment_id; ctx 0/1/2 from the above/left neighbour segment
+    # ids). 8-symbol CDF = 8 cumulative freqs (ending 32768) + a 0 adaptation count. From the AV1 spec
+    # additional-tables annex (10.additional.tables.md), the same source as every CDF above; extraction
+    # validated against the committed Default_Cfl_Sign_Cdf @952 (byte-identical re-fetch). The TEMPORAL
+    # Default_Segment_Id_Predicted_Cdf is NOT added — the temporal-predicted map read needs PrevSegmentIds
+    # (a DPB-saved seg map), rejected as a follow-on (roadmap.md D1 temporal follow-on).
+    store64(t + (1812 * 8), 5622);  store64(t + (1813 * 8), 7893);  store64(t + (1814 * 8), 16093);
+    store64(t + (1815 * 8), 18233); store64(t + (1816 * 8), 27809); store64(t + (1817 * 8), 28373);
+    store64(t + (1818 * 8), 32533); store64(t + (1819 * 8), 32768); store64(t + (1820 * 8), 0);
+    store64(t + (1821 * 8), 14274); store64(t + (1822 * 8), 18230); store64(t + (1823 * 8), 22557);
+    store64(t + (1824 * 8), 24935); store64(t + (1825 * 8), 29980); store64(t + (1826 * 8), 30851);
+    store64(t + (1827 * 8), 32344); store64(t + (1828 * 8), 32768); store64(t + (1829 * 8), 0);
+    store64(t + (1830 * 8), 27527); store64(t + (1831 * 8), 28487); store64(t + (1832 * 8), 28723);
+    store64(t + (1833 * 8), 28890); store64(t + (1834 * 8), 32397); store64(t + (1835 * 8), 32647);
+    store64(t + (1836 * 8), 32679); store64(t + (1837 * 8), 32768); store64(t + (1838 * 8), 0);
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1812 * 8);   # + Default_Y_Mode_Cdf 1756..1811
+    var cc = alloc(1839 * 8);   # + Default_Segment_Id_Cdf 1812..1838
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1812) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < 1839) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -337,6 +353,9 @@ fn av1_ncdf_cfl_alpha(cc, ctx): i64 { return cc + ((961 + ctx * 17) * 8); }
 fn av1_ncdf_filter_intra(cc, bsize): i64 { return cc + ((1063 + bsize * 3) * 8); }
 # intra Y-mode CDF (Default_Y_Mode_Cdf) for an intra block in an inter frame, by Size_Group (0..3).
 fn av1_ncdf_intra_y_mode(cc, sg): i64 { return cc + ((1756 + sg * 14) * 8); }
+# spatial segment-id map CDF (Default_Segment_Id_Cdf) @ 1812, by neighbour-derived ctx (0..2). 8-symbol
+# (stride 9 = 8 cumulative + count). 5.11.11 read_segment_id.
+fn av1_ncdf_segment_id(cc, ctx): i64 { return cc + ((1812 + ctx * 9) * 8); }
 fn av1_ncdf_filter_intra_mode(cc): i64 { return cc + (1129 * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }

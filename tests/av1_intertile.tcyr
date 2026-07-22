@@ -3872,6 +3872,85 @@ fn test_mixed_tile_blockdecoded() {
     return 0;
 }
 
+# ---- 0.7.125 D1: per-segment qindex → different pixels (the segmentation witness) ----
+# an inter fh with 2 segments: seg1 carries SEG_LVL_ALT_Q = alt_q (seg0 stays base_q). PRIMARY_REF_NONE
+# forces the decodable spatial config; the seg flags are set explicitly (the fh is built via store64).
+fn seg_fh2(w, h, mic, mir, tx_mode, alt_q): i64 {
+    var fh = ir_fh(w, h, mic, mir, tx_mode);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), alt_q);
+    return fh;
+}
+# an intra-in-inter block (C2 fork) assigned to segment 1.
+fn seg_intra_blk1(ymode, resid): i64 {
+    var b = its_intra_blk(ymode, resid);
+    store64(b + AV1FB_SEGID, 1);
+    return b;
+}
+fn seg_resid_dcac(): i64 {
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 200);              # DC
+    store64(coeff + (1 * 8), 0 - 100);    # first AC → spatial variation
+    return ir_resid1(AV1_DCT_DCT, 2, coeff);
+}
+# encode a single-block frame with fh_enc, decode the SAME bitstream with fh_dec; return the decoded frame
+# (and the decode tile via out_tile for the SEGIDS map). fh_enc/fh_dec differ only in FeatureData, which
+# does NOT change the entropy stream (map coding is independent of ALT_Q) — only the dequant.
+fn seg_enc_dec2(ref, fh_enc, fh_dec, refs, seq, blk, nsplit, w, h, mic, mir, out_tile): i64 {
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh_enc, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(w, h, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, mic, mir, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    assert_eq(av1_tile_set_inter_ctx(et, fh_enc, refs, seq, dpb), DR_OK, "seg enc ctx");
+    var pp = alloc((nsplit + 1) * 8);
+    ir_plan(pp, nsplit);
+    var pf = alloc(8);
+    store64(pf, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    assert_eq(tlen > 0, 1, "seg encoded payload");
+    assert_eq(av1_sym_enc_err(load64(et + AV1TILE_ENC)), DR_OK, "seg no enc err");
+    var df = dr_frame_new(w, h, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, mic, mir, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh_dec, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "seg decodes");
+    if (out_tile != 0) { store64(out_tile, dt); }
+    return df;
+}
+# THE SEGMENTATION WITNESS: a 32x32 intra-in-inter block assigned to segment 1. The same stream decoded
+# with seg1's ALT_Q = 0 (qindex 40 == base_q) vs -30 (qindex 10) reconstructs DIFFERENT pixels — per-segment
+# dequant reaching the samples. Teeth: neutering the segment_id read (segment_id -> 0) or the CUR_QINDEX
+# resolution (always base_q) makes both decodes identical, reddening the diff assert.
+fn test_seg_per_segment_qindex() {
+    var ref = ir_ref(32, 32, 1, 0, 0);
+    var refs = ir_refs(32, 32);
+    var seq = ir_seq(1, 0, 0);
+    var fh0 = seg_fh2(32, 32, 8, 8, AV1_TX_MODE_LARGEST, 0);       # seg1 qindex = 40 (== base_q)
+    var fh1 = seg_fh2(32, 32, 8, 8, AV1_TX_MODE_LARGEST, 0 - 30);  # seg1 qindex = 10
+    var dtA = alloc(8);
+    var ba = seg_intra_blk1(AV1_DC_PRED, seg_resid_dcac());
+    var bb = seg_intra_blk1(AV1_DC_PRED, seg_resid_dcac());
+    var fa = seg_enc_dec2(ref, fh0, fh0, refs, seq, ba, 1, 32, 32, 8, 8, dtA);
+    var fb = seg_enc_dec2(ref, fh0, fh1, refs, seq, bb, 1, 32, 32, 8, 8, 0);
+    # entropy: the segment_id symbol round-tripped → the decoded SEGIDS map reads segment 1.
+    assert_eq(av1_grid_get(load64(dtA), AV1TILE_SEGIDS, 0, 0), 1, "D1: segment_id decoded == 1");
+    assert_eq(av1_grid_get(load64(dtA), AV1TILE_SEGIDS, 7, 7), 1, "D1: segment map covers the 32x32 block");
+    # pixels: the SAME stream reconstructs DIFFERENT pixels at qindex 40 vs 10 (per-segment dequant).
+    assert_eq(ir_diff(fa, fb, 32, 32, 1, 0, 0) > 0, 1, "D1 WITNESS: per-segment qindex -> different pixels");
+    # pin the exact qindex: seg1 ALT_Q=0 (qindex 40 == base_q) matches the unsegmented q40 oracle.
+    var xf = iir_oracle(seg_resid_dcac(), 32, 9, 3, AV1_DCT_DCT);
+    assert_eq(ir_diff(fa, xf, 32, 32, 1, 0, 0), 0, "D1: seg1 q40 (==base_q) matches the q40 oracle");
+    return 0;
+}
+
 # a 1-plane residual plan (luma tx type + eob + coeff buffer).
 fn ir_resid1(luma_tt, eob, coeff): i64 {
     var r = alloc(8 * 8);
@@ -3946,7 +4025,7 @@ fn test_cdf_inheritance() {
     var adapted = 0;
     var wi = 0;
     while (wi < 3999) {
-        if (load64(bundle + ((1812 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
+        if (load64(bundle + ((1839 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
         if (load64(dt1cc + (wi * 8)) != load64(defcc + (wi * 8))) { adapted = 1; }
         wi = wi + 1;
     }
@@ -4024,7 +4103,7 @@ fn cdfw_eq(a, b, n): i64 {
 fn test_cdf_bundle_roundtrip() {
     var src = alloc(AV1TILE_SIZE);
     memset(src, 0, AV1TILE_SIZE);
-    store64(src + AV1TILE_NCC, cdfw_stamp(1812, 100000));
+    store64(src + AV1TILE_NCC, cdfw_stamp(1839, 100000));
     store64(src + AV1TILE_CC, cdfw_stamp(3999, 200000));
     store64(src + AV1TILE_CCREF, cdfw_stamp(177, 300000));
     store64(src + AV1TILE_CCIM, cdfw_stamp(341, 400000));
@@ -4032,7 +4111,7 @@ fn test_cdf_bundle_roundtrip() {
     store64(src + AV1TILE_CCMV, cdfw_stamp(286, 600000));
     var dst = alloc(AV1TILE_SIZE);
     memset(dst, 0, AV1TILE_SIZE);
-    store64(dst + AV1TILE_NCC, alloc(1812 * 8));
+    store64(dst + AV1TILE_NCC, alloc(1839 * 8));
     store64(dst + AV1TILE_CC, alloc(3999 * 8));
     store64(dst + AV1TILE_CCREF, alloc(177 * 8));
     store64(dst + AV1TILE_CCIM, alloc(341 * 8));
@@ -4041,7 +4120,7 @@ fn test_cdf_bundle_roundtrip() {
     var bundle = av1_cdf_bundle_new();
     assert_eq(av1_cdf_bundle_save(bundle, src), DR_OK, "bundle save ok");
     assert_eq(av1_cdf_bundle_load(bundle, dst), DR_OK, "bundle load ok");
-    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1812), 1, "ncc family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1839), 1, "ncc family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CC), load64(src + AV1TILE_CC), 3999), 1, "cc family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CCREF), load64(src + AV1TILE_CCREF), 177), 1, "ref family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CCIM), load64(src + AV1TILE_CCIM), 341), 1, "im family save+load exact");
@@ -5849,6 +5928,8 @@ fn main() {
     test_group("non-skip inter residual (0.7.85): per-set round-trip + oracle");
     test_mixed_tile_blockdecoded();
     test_intra_block_reconstruct();
+    test_group("D1 segmentation: per-segment qindex → pixels");
+    test_seg_per_segment_qindex();
     test_cdf_inheritance();
     test_cdf_bundle_roundtrip();
     test_ir_inter1();

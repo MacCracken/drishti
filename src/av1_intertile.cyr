@@ -516,7 +516,7 @@ fn av1_transform_block_inter(tile, r, c, sub_size, plane, tx_sz, x, y): i64 {
     var plane_sz = av1_get_plane_residual_size(sub_size, plane, subx, suby);
     var bw = av1_block_width(plane_sz);
     var bh = av1_block_height(plane_sz);
-    var qindex = load64(tile + AV1TILE_BASE_Q);
+    var qindex = load64(tile + AV1TILE_CUR_QINDEX);   # per-segment qindex (== base_q when unsegmented)
     var quant = load64(tile + AV1TILE_QUANT);
     var ttx = load64(tile + AV1TILE_TTX);
     var row0 = start_y >> 2;
@@ -1010,8 +1010,19 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
     load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
     load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-    (load64(tile + AV1TILE_BASE_Q) == 0));
+    (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
+    # per-segment dequant (0.7.125 D1): resolve this block's qindex from its segment_id so residual()
+    # dequantizes at the right quantizer. == base_q when segmentation is disabled / segment inactive. Also
+    # stamp segment_id across the block footprint in the SEGIDS map so LATER blocks' spatial prediction
+    # (read_segment_id) reads this block's segment id. fh is AV1TILE_FH, set for every inter tile.
+    if (av1_fh_segmentation_enabled(fh) != 0) {
+        store64(tile + AV1TILE_CUR_QINDEX, av1_get_qindex_ignore_delta(fh, av1_fb_segment_id(fb)));
+        av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
+        load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
+    } else {
+        store64(tile + AV1TILE_CUR_QINDEX, load64(tile + AV1TILE_BASE_Q));
+    }
     # the intra fork (5.11.24) RECONSTRUCTION: build an Av1Block from the fork's Av1ModeInfo and run the
     # keyframe residual driver (intra predict + coeff + reconstruct, skip-aware), then the intra stores.
     if (load64(fb + AV1FB_ISINTER) == 0) {
@@ -1461,8 +1472,14 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
     load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
     load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-    (load64(tile + AV1TILE_BASE_Q) == 0));
+    (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
+    # stamp segment_id across the block footprint (mirror of decode) so the encoder's later-block
+    # spatial prediction reads this block's segment id.
+    if ((fh != 0) && (av1_fh_segmentation_enabled(fh) != 0)) {
+        av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
+        load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
+    }
     # the intra fork (5.11.24) RECONSTRUCTION (encode): write tx_size, encode the intra residual from the
     # plan, and mirror the decode's intra stores. tx uses max-rect (TX_MODE_LARGEST writes no tx symbol).
     if (load64(fb + AV1FB_ISINTER) == 0) {
@@ -1553,13 +1570,13 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
 # ================================================================
 # C1: cross-frame CDF inheritance (spec 7.20 save / 7.21 load).
 # A saved-CDF bundle is ONE flat alloc holding COPIES of all six adaptive-CDF families back to back
-# (ncc 1812, cc 3999, ref 177, im 341, ii 566, mv 286 = 7181 i64). The symbol coder adapts the per-tile
+# (ncc 1839, cc 3999, ref 177, im 341, ii 566, mv 286 = 7208 i64). The symbol coder adapts the per-tile
 # copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future frame whose
 # primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families are flat
-# and pointer-free, so a plain word copy is a full copy. Bundle offsets (i64): ncc 0, cc 1812, ref 5811,
-# im 5988, ii 6329, mv 6895.
+# and pointer-free, so a plain word copy is a full copy. Bundle offsets (i64): ncc 0, cc 1839, ref 5838,
+# im 6015, ii 6356, mv 6922. (ncc grew 1812->1839 for Default_Segment_Id_Cdf, 0.7.125 D1.)
 # ================================================================
-fn av1_cdf_bundle_new(): i64 { return alloc(7181 * 8); }
+fn av1_cdf_bundle_new(): i64 { return alloc(7208 * 8); }
 fn av1_cdf_copy_words(dst, src, n): i64 {
     var i = 0;
     while (i < n) { store64(dst + (i * 8), load64(src + (i * 8))); i = i + 1; }
@@ -1583,12 +1600,12 @@ fn av1_cdf_bundle_save(bundle, tile): i64 {
     # null-check EVERY source before any copy — the fallback blob accessors alloc() lazily and return
     # 0 on OOM, and av1_cdf_copy_words would dereference a null source.
     if ((ncc == 0) || (cc == 0) || (ref == 0) || (im == 0) || (ii == 0) || (mv == 0)) { return DR_ERR_OOM; }
-    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1812);
-    av1_cdf_copy_words(bundle + (1812 * 8), cc, 3999);
-    av1_cdf_copy_words(bundle + (5811 * 8), ref, 177);
-    av1_cdf_copy_words(bundle + (5988 * 8), im, 341);
-    av1_cdf_copy_words(bundle + (6329 * 8), ii, 566);
-    av1_cdf_copy_words(bundle + (6895 * 8), mv, 286);
+    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1839);
+    av1_cdf_copy_words(bundle + (1839 * 8), cc, 3999);
+    av1_cdf_copy_words(bundle + (5838 * 8), ref, 177);
+    av1_cdf_copy_words(bundle + (6015 * 8), im, 341);
+    av1_cdf_copy_words(bundle + (6356 * 8), ii, 566);
+    av1_cdf_copy_words(bundle + (6922 * 8), mv, 286);
     return DR_OK;
 }
 # fill `bundle` with the DEFAULT CDFs (q-bucketed coeff defaults + the read-only family blobs) — the
@@ -1602,22 +1619,22 @@ fn av1_cdf_bundle_defaults(bundle, q): i64 {
     var ii = av1_iicdf_blob();
     var mv = av1_mvcdf_blob();
     if ((ncc == 0) || (cc == 0) || (ref == 0) || (im == 0) || (ii == 0) || (mv == 0)) { return DR_ERR_OOM; }
-    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1812);
-    av1_cdf_copy_words(bundle + (1812 * 8), cc, 3999);
-    av1_cdf_copy_words(bundle + (5811 * 8), ref, 177);
-    av1_cdf_copy_words(bundle + (5988 * 8), im, 341);
-    av1_cdf_copy_words(bundle + (6329 * 8), ii, 566);
-    av1_cdf_copy_words(bundle + (6895 * 8), mv, 286);
+    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1839);
+    av1_cdf_copy_words(bundle + (1839 * 8), cc, 3999);
+    av1_cdf_copy_words(bundle + (5838 * 8), ref, 177);
+    av1_cdf_copy_words(bundle + (6015 * 8), im, 341);
+    av1_cdf_copy_words(bundle + (6356 * 8), ii, 566);
+    av1_cdf_copy_words(bundle + (6922 * 8), mv, 286);
     return DR_OK;
 }
 # LOAD (7.21): copy `bundle` INTO an inter tile's six freshly-allocated families (all present on inter).
 fn av1_cdf_bundle_load(bundle, tile): i64 {
-    av1_cdf_copy_words(load64(tile + AV1TILE_NCC), bundle + (0 * 8), 1812);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CC), bundle + (1812 * 8), 3999);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCREF), bundle + (5811 * 8), 177);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCIM), bundle + (5988 * 8), 341);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCII), bundle + (6329 * 8), 566);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCMV), bundle + (6895 * 8), 286);
+    av1_cdf_copy_words(load64(tile + AV1TILE_NCC), bundle + (0 * 8), 1839);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CC), bundle + (1839 * 8), 3999);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCREF), bundle + (5838 * 8), 177);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCIM), bundle + (6015 * 8), 341);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCII), bundle + (6356 * 8), 566);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCMV), bundle + (6922 * 8), 286);
     return DR_OK;
 }
 # INHERIT (7.21): if primary_ref_frame != NONE, replace the tile's just-defaulted CDFs with the saved

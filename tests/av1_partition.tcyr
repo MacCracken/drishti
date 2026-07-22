@@ -151,7 +151,7 @@ fn test_decode_block() {
     az(al, 64); az(ll, 64); az(ad, 64); az(ce, 64);
     # encode the block stream in decode_block order: mode_info, tx_size, coeffs.
     var enc = av1_sym_enc_init(128, 1);
-    av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     av1_write_tx_size(enc, ncc, 3, 0, 2, 1, 0, 1);            # TX_MODE_SELECT, ctx 0, TX_8X8
     av1_coeffs_encode(enc, av1_ccdf_new(0), ncc, 0, 1, ttx, AV1_DCT_DCT, 0, 0, 4, 4, 8, 8, al, ll, ad, ce, qsrc, 1);
     var olen = 0;
@@ -179,6 +179,79 @@ fn test_decode_block() {
         y = y + 1;
     }
     assert_eq(changed, 1, "decode_block reconstructed a residual");
+    return 0;
+}
+
+# ---- 0.7.125 D1: per-segment qindex on the INTRA KEYFRAME path (decode_block) ----
+# a keyframe fh with segment 1 carrying SEG_LVL_ALT_Q = alt_q1 (LastActiveSegId 1).
+fn seg_kf_fh(base_q, alt_q1): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_IS_INTRA, 1);
+    store64(fh + AV1FH_BASE_Q_IDX, base_q);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), alt_q1);
+    return fh;
+}
+fn seg_kf_decode(out, olen, base_q, fh): i64 {
+    var tile = mono_tile(4, 4, base_q);
+    store64(tile + AV1TILE_SEG_FH, fh);
+    store64(tile + AV1TILE_SD, av1_sym_dec_init(out, olen, 1));
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, av1_noncoeff_cdf_blob());
+    av1_bd_clear(tile, 0, 0, 16, 1);
+    av1_decode_block(tile, 0, 0, 3);
+    return tile;
+}
+# THE INTRA-KEYFRAME SEGMENTATION WITNESS: an 8x8 DC block assigned to segment 1. The same stream decoded
+# with seg1 ALT_Q = 0 (qindex 40) vs -30 (qindex 10) reconstructs DIFFERENT pixels — per-segment dequant on
+# the keyframe path. Teeth: forcing segment_id -> 0 (no read) or CUR_QINDEX -> base_q makes both identical.
+fn test_intra_seg_per_segment_qindex() {
+    var base_q = 40;
+    var ncc = av1_noncoeff_cdf_blob();
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 0);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_SEGID, 1);
+    var ttx = av1_txtypectx_new();
+    store64(ttx + AV1TTC_BASE_Q, base_q);
+    var qsrc = alloc(64 * 8);
+    az(qsrc, 64);
+    store64(qsrc + 0, 60);   # a big DC level so the q40 vs q10 dequant clearly separates
+    var al = alloc(64 * 8); var ll = alloc(64 * 8); var ad = alloc(64 * 8); var ce = alloc(64 * 8);
+    az(al, 64); az(ll, 64); az(ad, 64); az(ce, 64);
+    # encode the block stream in decode_block order, with a seg tile so mode_info writes segment_id = 1.
+    var segtile = mono_tile(4, 4, base_q);
+    store64(segtile + AV1TILE_SEG_FH, seg_kf_fh(base_q, 0));
+    var enc = av1_sym_enc_init(128, 1);
+    av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, segtile);
+    av1_write_tx_size(enc, ncc, 3, 0, 2, 1, 0, 1);
+    av1_coeffs_encode(enc, av1_ccdf_new(0), ncc, 0, 1, ttx, AV1_DCT_DCT, 0, 0, 4, 4, 8, 8, al, ll, ad, ce, qsrc, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var tA = seg_kf_decode(out, olen, base_q, seg_kf_fh(base_q, 0));       # qindex 40
+    var tB = seg_kf_decode(out, olen, base_q, seg_kf_fh(base_q, 0 - 30));  # qindex 10
+    # entropy: the segment_id symbol round-tripped through the keyframe path.
+    assert_eq(av1_grid_get(tA, AV1TILE_SEGIDS, 0, 0), 1, "intra kf: segment_id decoded == 1");
+    assert_eq(av1_grid_get(tA, AV1TILE_SEGIDS, 1, 1), 1, "intra kf: segment map covers the 8x8 block");
+    # pixels: per-segment dequant reconstructs different DC.
+    var fA = load64(tA + AV1TILE_FRAME);
+    var fB = load64(tB + AV1TILE_FRAME);
+    var pdiff = 0;
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) {
+            if (dr_frame_get(fA, 0, x, y) != dr_frame_get(fB, 0, x, y)) { pdiff = pdiff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(pdiff > 0, 1, "D1 intra WITNESS: per-segment qindex -> different pixels (keyframe)");
     return 0;
 }
 
@@ -330,13 +403,13 @@ fn test_decode_block_windowed_reset() {
     az(al, 64); az(ll, 64); az(ad, 64); az(ce, 64);
     var enc = av1_sym_enc_init(256, 1);
     # block A at ABSOLUTE (r 8, c 8) = the window origin: no neighbours.
-    av1_intra_frame_mode_info_encode(enc, ncc, miA, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8);
+    av1_intra_frame_mode_info_encode(enc, ncc, miA, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 0);
     av1_write_tx_size(enc, ncc, 3, 0, AV1_TX_MODE_SELECT, 1,
     av1_tx_depth_ctx(0, 0, 0, 0, av1_max_tx_size_rect(3)), 1);            # TX_8X8
     av1_coeffs_encode(enc, av1_ccdf_new(0), ncc, 0, 1, ttx, AV1_DCT_DCT,
     0, 0, 8, 8, 8, 8, al, ll, ad, ce, qsrc, 1);
     # block B at (r 10, c 8), directly below A: above nbr = A (DC, skip 0, TX_8X8).
-    av1_intra_frame_mode_info_encode(enc, ncc, miB, 3, 0, 1, AV1_DC_PRED, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 8);
+    av1_intra_frame_mode_info_encode(enc, ncc, miB, 3, 0, 1, AV1_DC_PRED, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 8, 0);
     av1_write_tx_size(enc, ncc, 3, 0, AV1_TX_MODE_SELECT, 1,
     av1_tx_depth_ctx(1, 1, 0, 0, av1_max_tx_size_rect(3)), 1);
     var olen = 0;
@@ -395,6 +468,8 @@ fn main() {
     test_split_or_rt();
     test_group("decode_block");
     test_decode_block();
+    test_group("D1 segmentation: per-segment qindex on the keyframe path");
+    test_intra_seg_per_segment_qindex();
     test_group("decode_partition tree round-trip");
     test_decode_partition_tree();
     test_group("reset_block_context — tile-relative strips (windowed tile)");

@@ -345,6 +345,49 @@ fn test_av1_fh_segmentation() {
     return 0;
 }
 
+# ---- 0.7.125 D1: SegIdPreSkip / LastActiveSegId derivation + the decodability gate ----
+fn test_seg_id_pre_skip_derivation() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    # no feature -> LastActiveSegId 0, SegIdPreSkip 0.
+    assert_eq(av1_fh_last_active_seg_id(fh), 0, "no feature -> LastActiveSegId 0");
+    assert_eq(av1_fh_seg_id_pre_skip(fh), 0, "no feature -> SegIdPreSkip 0");
+    # ALT_Q (j=0 < SEG_LVL_REF_FRAME) on seg 3 -> LastActiveSegId 3, SegIdPreSkip stays 0.
+    store64(fh + AV1FH_FEATURE_ENABLED + ((3 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    assert_eq(av1_fh_last_active_seg_id(fh), 3, "ALT_Q seg3 -> LastActiveSegId 3");
+    assert_eq(av1_fh_seg_id_pre_skip(fh), 0, "ALT_Q -> SegIdPreSkip 0");
+    # SEG_LVL_SKIP (j=6 >= SEG_LVL_REF_FRAME) -> SegIdPreSkip 1.
+    store64(fh + AV1FH_FEATURE_ENABLED + ((2 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);
+    assert_eq(av1_fh_seg_id_pre_skip(fh), 1, "SEG_LVL_SKIP -> SegIdPreSkip 1");
+    return 0;
+}
+fn test_seg_supported_gate() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_BASE_Q_IDX, 40);
+    assert_eq(av1_seg_supported(fh), 1, "seg disabled -> supported");
+    # spatial config (update_map=1, temporal=0, update_data=1), seg1 ALT_Q=-30 (q10 non-lossless).
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 30);
+    assert_eq(av1_seg_supported(fh), 1, "spatial ALT_Q config -> supported");
+    store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 1);
+    assert_eq(av1_seg_supported(fh), 0, "temporal_update -> unsupported");
+    store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 0);
+    assert_eq(av1_seg_supported(fh), 0, "update_map=0 -> unsupported");
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 0);
+    assert_eq(av1_seg_supported(fh), 0, "update_data=0 -> unsupported");
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    # a lossless-boundary-crossing segment (base_q 40 non-lossless, seg1 ALT_Q=-40 -> q0 lossless).
+    store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);
+    assert_eq(av1_seg_supported(fh), 0, "lossless-crossing segment -> unsupported");
+    return 0;
+}
+
 # Multi-tile (uniform spacing): a 1024x64 frame yields 2 tile columns and
 # exercises the increment_tile_cols_log2 loop + context_update_tile_id.
 # sbCols = 17 -> maxLog2TileCols = 5; one increment bit set then cleared
@@ -711,6 +754,8 @@ fn main() {
     test_av1_fh_superres();
     test_av1_fh_cdef_lf();
     test_av1_fh_segmentation();
+    test_seg_id_pre_skip_derivation();
+    test_seg_supported_gate();
     test_av1_fh_tile_multi_impl(fx_seq_reduced(1024, 64, 0, 0, 0, 0, 0));
     test_group("av1 frame header — full path");
     test_av1_fh_full_key();

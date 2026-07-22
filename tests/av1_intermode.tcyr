@@ -3131,7 +3131,7 @@ fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, ta
     var nbw = av1_nbctx_new();
     var enc = av1_sym_enc_init(160, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, blk,
-    ib_ctx(g, sz), nbw, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0),
+    ib_ctx(g, sz), nbw, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0, 0),
     DR_OK, tag);
     av1_sym_encode_literal(enc, 165, 8);             # marker
     var olen = 0;
@@ -3140,7 +3140,7 @@ fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, ta
     var got = av1_blockinfo_new();
     var nbr = av1_nbctx_new();
     assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got,
-    ib_ctx(g, sz), nbr, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0),
+    ib_ctx(g, sz), nbr, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0, 0),
     DR_OK, tag);
     assert_eq(av1_fb_skip_mode(got), load64(blk + AV1FB_SKIPMODE), tag);
     assert_eq(av1_fb_skip(got), load64(blk + AV1FB_SKIP), tag);
@@ -3354,20 +3354,24 @@ fn test_inter_frame_mode_info() {
     av1_sym_encode_literal(mk, 165, 8);
     var mkl = 0;
     var mkb = av1_sym_enc_finish(mk, &mkl);
+    # an UNSUPPORTED segmentation config (temporal-predicted map needs PrevSegmentIds — a follow-on) still
+    # gates UNSUPPORTED, consuming nothing. The SUPPORTED spatial config decodes (witnessed separately).
     var fh_sg = fb_fh(1, 0, 0);
     store64(fh_sg + AV1FH_SEG_ENABLED, 1);
+    store64(fh_sg + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh_sg + AV1FH_SEG_TEMPORAL_UPDATE, 1);
     var sd = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
     av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0),
-    DR_ERR_UNSUPPORTED, "segmentation gates UNSUPPORTED");
+    av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
+    DR_ERR_UNSUPPORTED, "unsupported seg config (temporal) gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd, 8), 165, "the segmentation gate consumed NOTHING");
     var fh_dq = fb_fh(1, 0, 0);
     store64(fh_dq + AV1FH_DELTA_Q_PRESENT, 1);
     var sd_q = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd_q, av1_refcdf_blob(), av1_imcdf_blob(),
     av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), av1_warp_new(), fh_dq, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0),
+    av1_nbctx_new(), av1_warp_new(), fh_dq, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
     DR_ERR_UNSUPPORTED, "delta_q gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd_q, 8), 165, "the delta_q gate consumed NOTHING");
     var fh_dl = fb_fh(1, 0, 0);
@@ -3375,7 +3379,7 @@ fn test_inter_frame_mode_info() {
     var sd_l = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd_l, av1_refcdf_blob(), av1_imcdf_blob(),
     av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), av1_warp_new(), fh_dl, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0),
+    av1_nbctx_new(), av1_warp_new(), fh_dl, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
     DR_ERR_UNSUPPORTED, "delta_lf gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd_l, 8), 165, "the delta_lf gate consumed NOTHING");
     # the intra fork (5.11.24) now DECODES an is_inter = 0 block's mode-info through the dispatch (both
@@ -3392,7 +3396,7 @@ fn test_inter_frame_mode_info() {
     var enc = av1_sym_enc_init(64, 1);
     av1_write_inter_frame_mode_info(enc, cc, av1_imcdf_blob(), av1_iicdf_blob(),
     av1_mvcdf_blob(), ncc, srcfb, ib_ctx(g, 6), nbw, av1_warp_new(), fb_fh(1, 0, 0),
-    mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+    mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "intra fork write ok");
     var olen = 0;
     var ob = av1_sym_enc_finish(enc, &olen);
@@ -3402,7 +3406,7 @@ fn test_inter_frame_mode_info() {
     av1_nbctx_setup(nbd, g, 16, 4, 4, 1, 1);
     assert_eq(av1_inter_frame_mode_info(sd2, cc, av1_imcdf_blob(), av1_iicdf_blob(),
     av1_mvcdf_blob(), ncd, gotfb, ib_ctx(g, 6), nbd, av1_warp_new(), fb_fh(1, 0, 0),
-    mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "the intra fork DECODES (5.11.24)");
+    mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "the intra fork DECODES (5.11.24)");
     assert_eq(load64(gotfb + AV1FB_ISINTER), 0, "intra fork: is_inter = 0");
     assert_eq(load64((gotfb + AV1FB_MI) + AV1MI_YMODE), AV1_V_PRED, "intra fork: Y-mode round-trips");
     assert_eq(load64((gotfb + AV1FB_MI) + AV1MI_ANGLE_Y), 2, "intra fork: AngleDeltaY round-trips");
@@ -3410,11 +3414,11 @@ fn test_inter_frame_mode_info() {
     # hostile nulls + mi_size bounds (both edges).
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
     av1_mvcdf_blob(), ncc, 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0), DR_ERR_BOUNDS,
+    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
     "out = 0 -> bounds");
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
     av1_mvcdf_blob(), ncc, av1_blockinfo_new(), ib_ctx(g, 22), av1_nbctx_new(),
-    av1_warp_new(), fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0),
+    av1_warp_new(), fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
     DR_ERR_BOUNDS, "MiSize 22 -> bounds");
     return 0;
 }
@@ -3466,7 +3470,7 @@ fn test_inter_frame_hardening() {
     var ncc = av1_ncdf_new();
     assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, b1,
     ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
-    fb_cdef_ctx(wgrid, plan), 0, 1, 0, 0), DR_OK, "C1 write with a live cdef ctx");
+    fb_cdef_ctx(wgrid, plan), 0, 1, 0, 0, 0), DR_OK, "C1 write with a live cdef ctx");
     av1_sym_encode_literal(enc, 165, 8);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -3474,7 +3478,7 @@ fn test_inter_frame_hardening() {
     var got = av1_blockinfo_new();
     assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got,
     ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
-    fb_cdef_ctx(rgrid, 0), 0, 1, 0, 0), DR_OK, "C1 read with a live cdef ctx");
+    fb_cdef_ctx(rgrid, 0), 0, 1, 0, 0, 0), DR_OK, "C1 read with a live cdef ctx");
     assert_eq(load64(rgrid + 0), 5, "C1 the decoded cdef index LANDS in the grid");
     assert_eq(av1_sym_read_literal(sd, 8), 165, "C1 marker");
     # C2: skip = 1 CLOSES the cdef read (the skip argument is load-bearing): nothing
@@ -3494,46 +3498,46 @@ fn test_inter_frame_hardening() {
     var enc2 = av1_sym_enc_init(160, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc2, ccr, ccim, ccii, ccmv, ncc, b2,
     ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
-    fb_cdef_ctx(wg2, plan), 0, 1, 0, 0), DR_OK, "C2 write, skip = 1");
+    fb_cdef_ctx(wg2, plan), 0, 1, 0, 0, 0), DR_OK, "C2 write, skip = 1");
     av1_sym_encode_literal(enc2, 165, 8);
     var ol2 = 0;
     var ob2 = av1_sym_enc_finish(enc2, &ol2);
     var sd2 = av1_sym_dec_init(ob2, ol2, 1);
     assert_eq(av1_inter_frame_mode_info(sd2, ccr, ccim, ccii, ccmv, ncc,
     av1_blockinfo_new(), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0,
-    1, 1, 0, 0, 0, fb_cdef_ctx(rg2, 0), 0, 1, 0, 0), DR_OK, "C2 read, skip = 1");
+    1, 1, 0, 0, 0, fb_cdef_ctx(rg2, 0), 0, 1, 0, 0, 0), DR_OK, "C2 read, skip = 1");
     assert_eq(load64(rg2 + 0), 0 - 1, "C2 skip = 1 leaves the cdef grid untouched");
     assert_eq(av1_sym_read_literal(sd2, 8), 165, "C2 marker: skip coded no cdef literal");
     # the driver-writer desync guards: an inconsistent or uncodable record is surfaced.
     var enc3 = av1_sym_enc_init(32, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
     fb_mk(1, 0, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(1, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0), DR_ERR_BOUNDS,
+    fb_fh(1, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
     "skip_mode = 1 with skip = 0 -> surfaced, not silent");
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
     fb_mk(1, 1, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(0, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0), DR_ERR_BOUNDS,
+    fb_fh(0, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
     "skip_mode = 1 with present off -> surfaced, not silent");
     # the writer's feature gates mirror the reader's (feature-gated list; roadmap.md).
     var fh_sg = fb_fh(1, 0, 0);
     store64(fh_sg + AV1FH_SEG_ENABLED, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
     fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg, refs, s0,
-    1, 1, 0, 0, 0, 0, 0, 1, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");
+    1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");
     var fh_dq = fb_fh(1, 0, 0);
     store64(fh_dq + AV1FH_DELTA_Q_PRESENT, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
     fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dq, refs, s0,
-    1, 1, 0, 0, 0, 0, 0, 1, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_q gates UNSUPPORTED");
+    1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_q gates UNSUPPORTED");
     var fh_dl = fb_fh(1, 0, 0);
     store64(fh_dl + AV1FH_DELTA_LF_PRESENT, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
     fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dl, refs, s0,
-    1, 1, 0, 0, 0, 0, 0, 1, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_lf gates UNSUPPORTED");
+    1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_lf gates UNSUPPORTED");
     # the intra fork (5.11.24) now WRITES an is_inter = 0 block's mode-info (not a reject).
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
     fb_mk(0, 0, 0), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fb_fh(1, 0, 0), refs,
-    s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "writer: the intra fork WRITES its mode-info");
+    s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "writer: the intra fork WRITES its mode-info");
     # the record layout, pinned absolutely (a shrunk AV1FB_IB aliases ISINTER).
     assert_eq(AV1FB_IB, 32, "Av1BlockInfo: IB starts at 32");
     # the embedded IB ends where the (0.7.85) encode-residual-plan slot begins.
@@ -3563,7 +3567,7 @@ fn test_inter_frame_conformance() {
     var got = av1_blockinfo_new();
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
     av1_mvcdf_blob(), ncc, got, ib_ctx(gc, 6), av1_nbctx_new(), av1_warp_new(), fh_p,
-    mm_refs(64, 64), s0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 0), DR_OK, "Ca decode at skip_mode ctx 2");
+    mm_refs(64, 64), s0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0), DR_OK, "Ca decode at skip_mode ctx 2");
     assert_eq(av1_fb_skip_mode(got), 1, "Ca skip_mode decodes at ctx 2");
     assert_eq(av1_fb_skip(got), 1, "Ca skip forced 1");
     assert_eq(av1_ib_ref(av1_fb_ib(got), 0), 1, "Ca SkipModeFrame[0]");
@@ -3598,7 +3602,7 @@ fn test_inter_frame_conformance() {
     var got2 = av1_blockinfo_new();
     assert_eq(av1_inter_frame_mode_info(sd2, cc2, ccim, av1_iicdf_blob(),
     av1_mvcdf_blob(), ncc2, got2, ib_ctx(g, 1), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0), DR_OK, "Cb F5 decode at 4x8");
+    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0), DR_OK, "Cb F5 decode at 4x8");
     assert_eq(av1_fb_skip_mode(got2), 0, "Cb 4x8: NO skip_mode symbol (size gate)");
     assert_eq(av1_fb_skip(got2), 1, "Cb skip decodes at the threaded ctx");
     assert_eq(av1_fb_is_inter(got2), 1, "Cb is_inter");

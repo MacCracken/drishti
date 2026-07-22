@@ -260,6 +260,35 @@ fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
 }
 
 # ================================================================
+# intra segment-id (5.11.9) — the keyframe-path wrappers over the shared av1_read/write_segment_id
+# leaves. The keyframe tile carries its fh in AV1TILE_SEG_FH (NOT AV1TILE_FH, which stays 0 to keep the
+# encode-lane dispatch intact); these read it there. A tile with no SEG_FH / segmentation disabled is a
+# no-op returning segment_id 0 — so the widely-called mode-info functions keep working with tile = 0.
+fn av1_tile_seg_id_pre_skip(tile): i64 {
+    if (tile == 0) { return 0; }
+    var fh = load64(tile + AV1TILE_SEG_FH);
+    if (fh == 0) { return 0; }
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 0; }
+    return av1_fh_seg_id_pre_skip(fh);
+}
+fn av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, skip): i64 {
+    if (tile == 0) { return 0; }
+    var fh = load64(tile + AV1TILE_SEG_FH);
+    if (fh == 0) { return 0; }
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 0; }
+    return av1_read_segment_id(sd, ncc, fh, load64(tile + AV1TILE_SEGIDS),
+    load64(tile + AV1TILE_FMI_COLS), mi_row, mi_col, avail_u, avail_l, skip);
+}
+fn av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l, skip, segment_id): i64 {
+    if (tile == 0) { return DR_OK; }
+    var fh = load64(tile + AV1TILE_SEG_FH);
+    if (fh == 0) { return DR_OK; }
+    if (av1_fh_segmentation_enabled(fh) == 0) { return DR_OK; }
+    return av1_write_segment_id(enc, ncc, fh, load64(tile + AV1TILE_SEGIDS),
+    load64(tile + AV1TILE_FMI_COLS), mi_row, mi_col, avail_u, avail_l, skip, segment_id);
+}
+
+# ================================================================
 # decode_block (5.11.5) — the per-block orchestration for an intra keyframe:
 # mode_info → read_block_tx_size → residual, then the MI-grid writes.
 # ================================================================
@@ -295,7 +324,17 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     var mi = av1_modeinfo_new();
     av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
     avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
-    lossless, subx, suby, enable_fi, load64(tile + AV1TILE_CDEF_CTX), r, c);
+    lossless, subx, suby, enable_fi, load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
+    # per-segment dequant + segid map stamp (0.7.125 D1): resolve this block's qindex from the segment_id
+    # the mode-info read, and stamp it across the footprint for later blocks' spatial prediction.
+    var seg_fh = load64(tile + AV1TILE_SEG_FH);
+    if ((seg_fh != 0) && (av1_fh_segmentation_enabled(seg_fh) != 0)) {
+        store64(tile + AV1TILE_CUR_QINDEX, av1_get_qindex_ignore_delta(seg_fh, load64(mi + AV1MI_SEGID)));
+        av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
+        load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));
+    } else {
+        store64(tile + AV1TILE_CUR_QINDEX, load64(tile + AV1TILE_BASE_Q));
+    }
 
     var max_rect = av1_max_tx_size_rect(sub_size);
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40), max_rect);
@@ -346,9 +385,16 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var nb = alloc(6 * 8);
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
-    av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
+    var eme = av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
     avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
-    lossless, subx, suby, load64(tile + AV1TILE_ENABLE_FI), load64(tile + AV1TILE_CDEF_CTX), r, c);
+    lossless, subx, suby, load64(tile + AV1TILE_ENABLE_FI), load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
+    if (eme != DR_OK) { return eme; }   # e.g. a skip block whose planned segment_id != the spatial pred
+    # stamp segment_id across the footprint (mirror of decode) for the encoder's later-block prediction.
+    var eseg_fh = load64(tile + AV1TILE_SEG_FH);
+    if ((eseg_fh != 0) && (av1_fh_segmentation_enabled(eseg_fh) != 0)) {
+        av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
+        load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));
+    }
 
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40),
     av1_max_tx_size_rect(sub_size));

@@ -1251,7 +1251,7 @@ fn test_cdf_save_populates_slots() {
     var cceq = 1;
     var wj = 0;
     while (wj < 3999) {
-        if (load64(b + ((1812 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
+        if (load64(b + ((1839 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
         wj = wj + 1;
     }
     assert_eq(cceq, 1, "CDF save: disable_frame_end_update_cdf=1 saves the INITIAL (default) coeff CDFs");
@@ -1281,7 +1281,9 @@ fn test_silent_misdecode_rejects() {
     var oe = alloc(8);
     assert_eq(av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe) != 0, 1,
     "reject control: the unflagged stream still decodes");
-    dec_reject(AV1FH_SEG_ENABLED, 1, "segmentation_enabled rejected (no segment-id read)");
+    # segmentation with update_map=0 (the memset default here) needs PrevSegmentIds — an unsupported
+    # config, still rejected. A SUPPORTED spatial-map keyframe now DECODES (witnessed in av1_partition.tcyr).
+    dec_reject(AV1FH_SEG_ENABLED, 1, "segmentation update_map=0 rejected (needs PrevSegmentIds)");
     dec_reject(AV1FH_DELTA_Q_PRESENT, 1, "delta_q_present rejected (per-SB delta-q unread)");
     dec_reject(AV1FH_DELTA_LF_PRESENT, 1, "delta_lf_present rejected (per-SB delta-lf unread)");
     dec_reject(AV1FH_ALLOW_INTRABC, 1, "allow_intrabc rejected (5.11.6 unimplemented)");

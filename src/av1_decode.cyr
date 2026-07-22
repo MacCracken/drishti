@@ -364,10 +364,12 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
         store64(out_err, DR_ERR_UNSUPPORTED);
         return 0;
     }
-    # segmentation / delta-q / delta-lf: the INTER mode-info reader already rejects these
-    # (av1_intermode.cyr), but the INTRA path had no counterpart and would silently skip the
-    # per-block symbols the spec requires — an entropy desync, not merely wrong pixels.
-    if (av1_fh_segmentation_enabled(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    # segmentation (0.7.125 D1): the DECODABLE configs (spatial map read, per-segment qindex) now
+    # decode on BOTH lanes (av1_intra_segment_id / av1_inter_segment_id). av1_seg_supported gates the
+    # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) and
+    # a lossless-boundary-crossing segment — which still REJECT cleanly (trust no input byte). delta-q/lf
+    # remain fully rejected (an entropy desync on the intra path, not merely wrong pixels).
+    if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     if (av1_fh_delta_q_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     if (av1_fh_delta_lf_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     # allow_intrabc (5.11.6) and the palette tools gated by allow_screen_content_tools
@@ -464,6 +466,7 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         if (tile == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
         store64(tile + AV1TILE_TX_MODE, tx_mode);
         store64(tile + AV1TILE_ENABLE_FI, enable_fi);
+        store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
         av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows);
         var tile0 = load64(fdc + AV1FDEC_TILE0);
         if (tile0 == 0) {
@@ -556,7 +559,7 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                 serr = av1_cdf_bundle_defaults(cdfb, av1_coeff_cdf_qbucket(load64(tile0 + AV1TILE_BASE_Q)));
             } else {
                 var src = av1_ref_saved_cdf(refs, av1_fh_ref_frame_idx(fh, pr));
-                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7181); }
+                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7208); }
             }
         }
         if (serr != DR_OK) { store64(out_err, serr); return 0; }

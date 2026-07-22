@@ -127,14 +127,14 @@ fn mi_rt(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, su
     if (disable == 0) { nce = av1_ncdf_new(); ncd = av1_ncdf_new(); }
     var enc = av1_sym_enc_init(64, disable);
     av1_intra_frame_mode_info_encode(enc, nce, mi, mi_size, has_chroma,
-    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0);
+    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, disable);
     av1_intra_frame_mode_info_decode(sd, ncd, dmi, mi_size, has_chroma,
-    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0);
+    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
     mi_assert(mi, dmi, tag);
     return 0;
@@ -207,15 +207,15 @@ fn test_rt_adaptive_multiblock() {
     var mA = mk_mi(0, 0, 13, 0, 0, 3, 0 - 2, 1, 4);       # 8x8 DC/CFL/FI
     var mB = mk_mi(1, 1, 2, 2, 0 - 1, 0, 0, 0, 0);        # 16x16 directional
     var enc = av1_sym_enc_init(128, 0);
-    av1_intra_frame_mode_info_encode(enc, nce, mA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0);
-    av1_intra_frame_mode_info_encode(enc, nce, mB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1, 0, 0, 0);
+    av1_intra_frame_mode_info_encode(enc, nce, mA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0);
+    av1_intra_frame_mode_info_encode(enc, nce, mB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dA = av1_modeinfo_new();
     var dB = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, 0);
-    av1_intra_frame_mode_info_decode(sd, ncd, dA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0);
-    av1_intra_frame_mode_info_decode(sd, ncd, dB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1, 0, 0, 0);
+    av1_intra_frame_mode_info_decode(sd, ncd, dA, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0);
+    av1_intra_frame_mode_info_decode(sd, ncd, dB, 6, 1, 1, 0, 1, 5, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "adaptive dec ok");
     mi_assert(mA, dA, "adaptive block A");
     mi_assert(mB, dB, "adaptive block B");
@@ -331,7 +331,7 @@ fn test_cdef_wired_rt() {
     store64(mi + AV1MI_YMODE, 0);                    # DC_PRED
     var enc = av1_sym_enc_init(64, 1);
     av1_intra_frame_mode_info_encode(enc, av1_noncoeff_cdf_blob(), mi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0);
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
     assert_eq(load64(eg + 0), 5, "encode filled the tracking grid anchor");
     var olen = 0;
@@ -341,7 +341,7 @@ fn test_cdef_wired_rt() {
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, 1);
     av1_intra_frame_mode_info_decode(sd, av1_noncoeff_cdf_blob(), dmi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0);
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
     assert_eq(load64(dmi + AV1MI_YMODE), 0, "y_mode round-trips (cdef bits aligned)");
     assert_eq(load64(dg + 0), 5, "cdef_idx read into the grid at the right position");
@@ -359,7 +359,7 @@ fn test_cdef_wired_skip() {
     store64(mi + AV1MI_YMODE, 0);
     var enc = av1_sym_enc_init(64, 1);
     av1_intra_frame_mode_info_encode(enc, av1_noncoeff_cdf_blob(), mi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0);
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0, 0);
     assert_eq(load64(eg + 0), 0 - 1, "skip -> no cdef emitted, grid stays -1");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -368,7 +368,7 @@ fn test_cdef_wired_skip() {
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, 1);
     av1_intra_frame_mode_info_decode(sd, av1_noncoeff_cdf_blob(), dmi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0);
+    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0, 0);
     assert_eq(load64(dmi + AV1MI_SKIP), 1, "skip round-trips");
     assert_eq(load64(dg + 0), 0 - 1, "skip -> no cdef read, grid stays -1");
     return 0;
@@ -472,6 +472,171 @@ fn test_intra_block_mode_info() {
     return 0;
 }
 
+# ================================================================
+# Segmentation map coding (0.7.125 D1): neg_deinterleave / neg_interleave / read_segment_id.
+# ================================================================
+# Extraction fidelity + offset: av1_ncdf_segment_id returns the committed Default_Segment_Id_Cdf rows.
+fn test_seg_cdf_values() {
+    var cc = av1_noncoeff_cdf_blob();
+    # ctx 0 row.
+    assert_eq(load64(av1_ncdf_segment_id(cc, 0) + 0), 5622, "seg cdf[0][0]");
+    assert_eq(load64(av1_ncdf_segment_id(cc, 0) + (6 * 8)), 32533, "seg cdf[0][6]");
+    assert_eq(load64(av1_ncdf_segment_id(cc, 0) + (7 * 8)), 32768, "seg cdf[0] terminator");
+    assert_eq(load64(av1_ncdf_segment_id(cc, 0) + (8 * 8)), 0, "seg cdf[0] count");
+    # ctx 1 / ctx 2 rows (stride 9).
+    assert_eq(load64(av1_ncdf_segment_id(cc, 1) + 0), 14274, "seg cdf[1][0]");
+    assert_eq(load64(av1_ncdf_segment_id(cc, 2) + 0), 27527, "seg cdf[2][0]");
+    assert_eq(load64(av1_ncdf_segment_id(cc, 2) + (3 * 8)), 28890, "seg cdf[2][3]");
+    return 0;
+}
+# neg_deinterleave pinned against HAND-COMPUTED spec values (independent of neg_interleave, so a
+# broken deinterleave reddens without the encoder masking it).
+fn test_neg_deinterleave_pins() {
+    assert_eq(av1_neg_deinterleave(0, 0, 8), 0, "ref0 -> diff");
+    assert_eq(av1_neg_deinterleave(3, 0, 8), 3, "ref0 -> diff(3)");
+    assert_eq(av1_neg_deinterleave(1, 2, 8), 3, "2ref<max, diff odd");
+    assert_eq(av1_neg_deinterleave(2, 2, 8), 1, "2ref<max, diff even");
+    assert_eq(av1_neg_deinterleave(5, 2, 8), 5, "2ref<max, diff>2ref -> diff");
+    assert_eq(av1_neg_deinterleave(0, 7, 8), 7, "ref>=max-1 branch");
+    assert_eq(av1_neg_deinterleave(1, 7, 8), 6, "ref>=max-1 branch(1)");
+    assert_eq(av1_neg_deinterleave(1, 6, 8), 7, "2ref>=max, small diff odd");
+    assert_eq(av1_neg_deinterleave(3, 6, 8), 4, "2ref>=max, diff big -> max-(diff+1)");
+    return 0;
+}
+# neg_interleave is the exact inverse across every (x, ref, max) in range: deinterleave(interleave)==x.
+# deinterleave is pinned above, so a broken interleave reddens here.
+fn test_neg_interleave_inverse() {
+    var max = 2;
+    while (max <= 8) {
+        var ref = 0;
+        while (ref < max) {
+            var x = 0;
+            while (x < max) {
+                var coded = av1_neg_interleave(x, ref, max);
+                assert_eq(av1_neg_deinterleave(coded, ref, max), x, "interleave inverse");
+                x = x + 1;
+            }
+            ref = ref + 1;
+        }
+        max = max + 1;
+    }
+    return 0;
+}
+# pred/ctx derivation (5.11.11) against a hand oracle, over a small segids grid (stride 4).
+fn seg_pc_assert(segids, r, c, au, al, epred, ectx, tag): i64 {
+    var pc = alloc(16);
+    av1_segid_pred_ctx(segids, 4, r, c, au, al, pc);
+    assert_eq(load64(pc + 0), epred, tag);
+    assert_eq(load64(pc + 8), ectx, tag);
+    return 0;
+}
+fn test_segid_pred_ctx() {
+    var g = alloc(16 * 8);
+    memset(g, 0, 16 * 8);
+    # block at (1,1), stride 4: above=(0,1) left=(1,0) corner=(0,0).
+    # no neighbours -> pred 0, ctx 0.
+    seg_pc_assert(g, 1, 1, 0, 0, 0, 0, "no-nbr pred/ctx");
+    # above only, prevU=3 -> pred 3, ctx 0 (corner needs both avail).
+    store64(g + ((0 * 4 + 1) * 8), 3);
+    seg_pc_assert(g, 1, 1, 1, 0, 3, 0, "above-only");
+    # left only, prevL=2 -> pred 2, ctx 0.
+    store64(g + ((1 * 4 + 0) * 8), 2);
+    seg_pc_assert(g, 1, 1, 0, 1, 2, 0, "left-only");
+    # all three equal (4) -> pred 4, ctx 2.
+    store64(g + ((0 * 4 + 0) * 8), 4);
+    store64(g + ((0 * 4 + 1) * 8), 4);
+    store64(g + ((1 * 4 + 0) * 8), 4);
+    seg_pc_assert(g, 1, 1, 1, 1, 4, 2, "all-equal ctx2");
+    # corner==above(1), left differs(2) -> pred 1 (ul==u), ctx 1.
+    store64(g + ((0 * 4 + 0) * 8), 1);
+    store64(g + ((0 * 4 + 1) * 8), 1);
+    store64(g + ((1 * 4 + 0) * 8), 2);
+    seg_pc_assert(g, 1, 1, 1, 1, 1, 1, "ul==u ctx1");
+    # all three distinct (ul0,u1,l2) -> pred=prevL(2) (ul!=u), ctx 0.
+    store64(g + ((0 * 4 + 0) * 8), 0);
+    store64(g + ((0 * 4 + 1) * 8), 1);
+    store64(g + ((1 * 4 + 0) * 8), 2);
+    seg_pc_assert(g, 1, 1, 1, 1, 2, 0, "all-distinct ctx0");
+    return 0;
+}
+fn seg_fh_last(last_active): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((last_active * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    return fh;
+}
+# Full symbol round-trip: write_segment_id -> read_segment_id agree (disable_cdf for determinism).
+fn seg_rt(fh, segids, r, c, au, al, segid, tag): i64 {
+    var enc = av1_sym_enc_init(64, 1);
+    av1_write_segment_id(enc, av1_noncoeff_cdf_blob(), fh, segids, 4, r, c, au, al, 0, segid);
+    assert_eq(av1_sym_enc_err(enc), DR_OK, "seg enc ok");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_read_segment_id(sd, av1_noncoeff_cdf_blob(), fh, segids, 4, r, c, au, al, 0);
+    assert_eq(got, segid, tag);
+    return 0;
+}
+fn test_read_segment_id_rt() {
+    var fh = seg_fh_last(4);   # LastActiveSegId 4 -> segments 0..4
+    var g = alloc(16 * 8);
+    memset(g, 0, 16 * 8);
+    # no neighbours (pred 0), every segment id 0..4 round-trips.
+    var s = 0;
+    while (s <= 4) { seg_rt(fh, g, 1, 1, 0, 0, s, "rt no-nbr"); s = s + 1; }
+    # with a nonzero neighbour prediction (above=2), the encoder codes a difference; still round-trips.
+    store64(g + ((0 * 4 + 1) * 8), 2);
+    var s2 = 0;
+    while (s2 <= 4) { seg_rt(fh, g, 1, 1, 1, 0, s2, "rt above=2"); s2 = s2 + 1; }
+    # skip=1 short-circuits to pred (no symbol) — read == pred regardless of the coder.
+    var got = av1_read_segment_id(av1_sym_dec_init(alloc(8), 8, 1), av1_noncoeff_cdf_blob(),
+    fh, g, 4, 1, 1, 1, 0, 1);
+    assert_eq(got, 2, "skip -> pred (above=2)");
+    return 0;
+}
+
+# trust no input byte: a hostile stream coding an out-of-range segment symbol must be CLAMPED to
+# [0, LastActiveSegId] — never an OOB segment index. neg_deinterleave can return a NEGATIVE value in
+# the ref>=max-1 branch; read_segment_id's clip3 is the guard.
+fn test_read_segment_id_hostile_clamp() {
+    var fh = seg_fh_last(1);   # LastActiveSegId 1 -> valid {0,1}, max 2
+    var g = alloc(16 * 8);
+    memset(g, 0, 16 * 8);
+    store64(g + ((0 * 4 + 1) * 8), 1);   # above neighbour 1 -> pred 1 (ref >= max-1 branch)
+    var enc = av1_sym_enc_init(64, 1);
+    av1_sym_encode_symbol(enc, av1_ncdf_segment_id(av1_noncoeff_cdf_blob(), 0), AV1_MAX_SEGMENTS, 7);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_read_segment_id(sd, av1_noncoeff_cdf_blob(), fh, g, 4, 1, 1, 1, 0, 0);
+    assert_eq(got >= 0, 1, "hostile segment symbol: clamped >= 0");
+    assert_eq(got <= 1, 1, "hostile segment symbol: clamped <= LastActiveSegId (no OOB)");
+    return 0;
+}
+
+# the encode/decode mirror for a SKIP block (5.11.11): the decoder DERIVES segment_id = pred (no symbol),
+# so the encoder writes no symbol AND must agree — a plan whose skip block claims segment != pred is
+# UNREPRESENTABLE (it would stamp a divergent value into the shared map, desyncing later blocks). The write
+# lane surfaces that as DR_ERR_BOUNDS. (Found by the 0.7.125 adversarial review.)
+fn test_write_segment_id_skip_mirror() {
+    var fh = seg_fh_last(1);
+    var g = alloc(16 * 8);
+    memset(g, 0, 16 * 8);
+    var enc = av1_sym_enc_init(64, 1);
+    var blob = av1_noncoeff_cdf_blob();
+    # no neighbours -> pred 0: a skip block with segid 0 writes nothing; segid 1 is unrepresentable.
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 1, 0), DR_OK, "skip segid==pred(0) -> ok");
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 1, 1), DR_ERR_BOUNDS,
+    "skip segid=1 != pred=0 -> bounds (would desync the map)");
+    # above neighbour = 1 -> pred 1: now segid 1 is representable, segid 0 is not.
+    store64(g + ((0 * 4 + 1) * 8), 1);
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 1, 0, 1, 1), DR_OK, "skip segid==pred(1) -> ok");
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 1, 0, 1, 0), DR_ERR_BOUNDS,
+    "skip segid=0 != pred=1 -> bounds");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("block-size conversion tables");
@@ -494,6 +659,14 @@ fn main() {
     test_group("C2 intra_block_mode_info (intra fork in an inter frame)");
     test_ymode_cdf_valid();
     test_intra_block_mode_info();
+    test_group("D1 segment-id map coding (neg_deinterleave / read_segment_id)");
+    test_seg_cdf_values();
+    test_neg_deinterleave_pins();
+    test_neg_interleave_inverse();
+    test_segid_pred_ctx();
+    test_read_segment_id_rt();
+    test_read_segment_id_hostile_clamp();
+    test_write_segment_id_skip_mirror();
     test_group("cdef index syntax (read_cdef / write_cdef / clear_cdef)");
     test_cdef_rt_two_units();
     test_cdef_rt_once_per_unit();

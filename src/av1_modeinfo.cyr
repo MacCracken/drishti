@@ -157,7 +157,8 @@ enum Av1ModeInfoOff {
     AV1MI_CFL_V     = 48;   # CflAlphaV (-16..16)
     AV1MI_USE_FI    = 56;   # use_filter_intra (0/1)
     AV1MI_FI_MODE   = 64;   # filter_intra_mode (0..4)
-    AV1MI_SIZE      = 72;
+    AV1MI_SEGID     = 72;   # segment_id (5.11.9; 0 when segmentation disabled). 0.7.125 D1.
+    AV1MI_SIZE      = 80;
 }
 fn av1_modeinfo_new(): i64 {
     var mi = alloc(AV1MI_SIZE);
@@ -171,7 +172,136 @@ fn av1_modeinfo_new(): i64 {
     store64(mi + AV1MI_CFL_V, 0);
     store64(mi + AV1MI_USE_FI, 0);
     store64(mi + AV1MI_FI_MODE, 0);
+    store64(mi + AV1MI_SEGID, 0);
     return mi;
+}
+
+# ================================================================
+# Segment-id map coding (5.11.9 / 5.11.10 / 5.11.11 + neg_deinterleave) — the SPATIAL predictor,
+# shared by the intra (keyframe) and inter mode-info drivers. Raw grid pointer + stride (fmi_cols),
+# so this stays independent of the tile struct (defined in a LATER module). The temporal predictor
+# (segmentation_temporal_update) and the whole-map copy (!segmentation_update_map) need PrevSegmentIds
+# and are rejected upstream (av1_seg_supported); only the plain spatial read reaches here.
+# ================================================================
+fn av1_segid_at(segids, fmi_cols, r, c): i64 {
+    return load64(segids + (((r * fmi_cols) + c) * 8));
+}
+# neg_deinterleave (9.2.4) — map the coded difference back to a segment id, given the neighbour
+# prediction `ref` and count `max` (= LastActiveSegId + 1). Transcribed verbatim from the spec (>>
+# is logical, but diff/ref are non-negative here so it matches the spec's arithmetic shift).
+fn av1_neg_deinterleave(diff, ref, max): i64 {
+    if (ref == 0) { return diff; }
+    if (ref >= (max - 1)) { return (max - diff) - 1; }
+    if ((2 * ref) < max) {
+        if (diff <= (2 * ref)) {
+            if ((diff & 1) != 0) { return ref + ((diff + 1) >> 1); }
+            return ref - (diff >> 1);
+        }
+        return diff;
+    }
+    if (diff <= (2 * ((max - ref) - 1))) {
+        if ((diff & 1) != 0) { return ref + ((diff + 1) >> 1); }
+        return ref - (diff >> 1);
+    }
+    return max - (diff + 1);
+}
+# neg_interleave — the ENCODER inverse (libaom av1/encoder/bitstream.c neg_interleave), so the write
+# lane round-trips the decoder's neg_deinterleave. Verified by the segment round-trip test.
+fn av1_neg_interleave(x, ref, max): i64 {
+    if (ref == 0) { return x; }
+    if (ref >= (max - 1)) { return (max - 1) - x; }
+    var diff = x - ref;
+    var adiff = diff;
+    if (adiff < 0) { adiff = 0 - adiff; }
+    if ((2 * ref) < max) {
+        if (adiff <= ref) {
+            if (diff > 0) { return (diff << 1) - 1; }
+            return (0 - diff) << 1;
+        }
+        return x;
+    }
+    if (adiff < (max - ref)) {
+        if (diff > 0) { return (diff << 1) - 1; }
+        return (0 - diff) << 1;
+    }
+    return (max - x) - 1;
+}
+# The pred + ctx derivation shared by the read/write lanes (5.11.11). Writes pred/ctx into out[0]/out[1].
+fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): i64 {
+    var prev_ul = 0 - 1;
+    var prev_u = 0 - 1;
+    var prev_l = 0 - 1;
+    if ((avail_u != 0) && (avail_l != 0)) { prev_ul = av1_segid_at(segids, fmi_cols, mi_row - 1, mi_col - 1); }
+    if (avail_u != 0) { prev_u = av1_segid_at(segids, fmi_cols, mi_row - 1, mi_col); }
+    if (avail_l != 0) { prev_l = av1_segid_at(segids, fmi_cols, mi_row, mi_col - 1); }
+    var pred = 0;
+    if (prev_u == (0 - 1)) {
+        if (prev_l != (0 - 1)) { pred = prev_l; }
+    } else {
+        if (prev_l == (0 - 1)) { pred = prev_u; }
+        else {
+            if (prev_ul == prev_u) { pred = prev_u; } else { pred = prev_l; }
+        }
+    }
+    var ctx = 0;
+    if (prev_ul >= 0) {
+        if ((prev_ul == prev_u) && (prev_ul == prev_l)) { ctx = 2; }
+        else {
+            if ((prev_ul == prev_u) || (prev_ul == prev_l) || (prev_u == prev_l)) { ctx = 1; }
+        }
+    }
+    store64(out + 0, pred);
+    store64(out + 8, ctx);
+    return 0;
+}
+# read_segment_id (5.11.11) — the spatial map read. `skip` short-circuits to pred (no symbol); else
+# read @@segment_id from Segment_Id_Cdf[ctx], map via neg_deinterleave, clamp to [0, LastActiveSegId]
+# (a hostile stream cannot drive an OOB segment index — trust no input byte).
+fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip): i64 {
+    var pc = alloc(16);
+    av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, pc);
+    var pred = load64(pc + 0);
+    if (skip != 0) { return pred; }
+    var last = av1_fh_last_active_seg_id(fh);
+    var coded = av1_sym_read_symbol(sd, av1_ncdf_segment_id(ncc, load64(pc + 8)), AV1_MAX_SEGMENTS);
+    var seg = av1_neg_deinterleave(coded, pred, last + 1);
+    return av1_clip3(0, last, seg);
+}
+# write_segment_id — the encode mirror. Same pred/ctx; !skip writes neg_interleave(segment_id). A SKIP
+# block writes NO symbol: the decoder DERIVES segment_id = pred (5.11.11 skip branch), so a plan whose skip
+# block claims a segment != pred is UNREPRESENTABLE — it would stamp a different value into the shared
+# SegmentIds map than decode derives, desyncing every later block's spatial prediction. Surface it as
+# DR_ERR_BOUNDS (the av1_write_skip_mode / av1_write_is_inter convention), never a silently-desynced stream.
+fn av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip, segment_id): i64 {
+    var pc = alloc(16);
+    av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, pc);
+    var pred = load64(pc + 0);
+    if (skip != 0) {
+        if (segment_id != pred) { return DR_ERR_BOUNDS; }
+        return DR_OK;
+    }
+    var last = av1_fh_last_active_seg_id(fh);
+    var coded = av1_neg_interleave(segment_id, pred, last + 1);
+    av1_sym_encode_symbol(enc, av1_ncdf_segment_id(ncc, load64(pc + 8)), AV1_MAX_SEGMENTS, coded);
+    return DR_OK;
+}
+# av1_segid_store — write segment_id across the block's bw4 x bh4 footprint, clipped to the frame grid
+# (fmi_rows x fmi_cols). The overhang cells are never read back (is_inside gates every neighbour read).
+fn av1_segid_store(segids, fmi_cols, fmi_rows, mi_row, mi_col, bw4, bh4, segment_id): i64 {
+    var y = 0;
+    while (y < bh4) {
+        if ((mi_row + y) < fmi_rows) {
+            var x = 0;
+            while (x < bw4) {
+                if ((mi_col + x) < fmi_cols) {
+                    store64(segids + ((((mi_row + y) * fmi_cols) + (mi_col + x)) * 8), segment_id);
+                }
+                x = x + 1;
+            }
+        }
+        y = y + 1;
+    }
+    return 0;
 }
 
 # ================================================================
@@ -476,12 +606,23 @@ fn av1_clear_cdef(grid, stride, r, c, use_128): i64 {
 # ================================================================
 fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
 avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col): i64 {
+lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
+    # intra_segment_id (5.11.9): read BEFORE skip iff SegIdPreSkip, else after (still before read_cdef).
+    # A tile with no SEG_FH / segmentation disabled makes these a no-op returning 0.
+    var seg_pre = av1_tile_seg_id_pre_skip(tile);
+    var segment_id = 0;
+    if (seg_pre != 0) {
+        segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, 0);
+    }
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
     var skip = av1_read_skip(sd, ncc, sctx);
     store64(mi + AV1MI_SKIP, skip);
+    if (seg_pre == 0) {
+        segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, skip);
+    }
+    store64(mi + AV1MI_SEGID, segment_id);
     # read_cdef (5.11.56) is spliced here — after read_skip, before y_mode (delta_q/
-    # lf + segmentation are disabled for a profile-0 keyframe, so nothing between).
+    # lf disabled for a profile-0 keyframe; segmentation read above per 5.11.9).
     if (cdef_ctx != 0) {
         var ce = load64(cdef_ctx + 0);
         var cb = load64(cdef_ctx + 8);
@@ -517,9 +658,21 @@ lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col): i64 {
 
 fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
 avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col): i64 {
+lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
+    # intra_segment_id (5.11.9) mirror — write the segment BEFORE skip iff SegIdPreSkip, else after.
+    var seg_pre = av1_tile_seg_id_pre_skip(tile);
+    var segment_id = load64(mi + AV1MI_SEGID);
+    if (seg_pre != 0) {
+        var isp = av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l, 0, segment_id);
+        if (isp != DR_OK) { return isp; }
+    }
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
     av1_write_skip(enc, ncc, sctx, load64(mi + AV1MI_SKIP));
+    if (seg_pre == 0) {
+        var isp0 = av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l,
+        load64(mi + AV1MI_SKIP), segment_id);
+        if (isp0 != DR_OK) { return isp0; }
+    }
     # write_cdef mirror — same splice point as read_cdef (after skip).
     if (cdef_ctx != 0) {
         var ce = load64(cdef_ctx + 0);

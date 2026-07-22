@@ -505,6 +505,7 @@ fn av1_fh_reduced_tx_set(fh): i64 { return load64(fh + AV1FH_REDUCED_TX_SET); }
 fn av1_fh_segmentation_enabled(fh): i64 { return load64(fh + AV1FH_SEG_ENABLED); }
 fn av1_fh_segmentation_update_map(fh): i64 { return load64(fh + AV1FH_SEG_UPDATE_MAP); }
 fn av1_fh_segmentation_temporal_update(fh): i64 { return load64(fh + AV1FH_SEG_TEMPORAL_UPDATE); }
+fn av1_fh_segmentation_update_data(fh): i64 { return load64(fh + AV1FH_SEG_UPDATE_DATA); }
 fn av1_fh_feature_enabled(fh, seg, j): i64 { return load64(fh + AV1FH_FEATURE_ENABLED + ((seg * 8 + j) * 8)); }
 fn av1_fh_feature_data(fh, seg, j): i64 { return load64(fh + AV1FH_FEATURE_DATA + ((seg * 8 + j) * 8)); }
 # seg_feature_active (spec 5.11.14) — segmentation_enabled && FeatureEnabled[seg][j].
@@ -882,6 +883,62 @@ fn av1_compute_lossless(fh): i64 {
     }
     store64(fh + AV1FH_ALL_LOSSLESS, all);
     return DR_OK;
+}
+
+# SegIdPreSkip / LastActiveSegId (5.9.14 tail) — DERIVED from FeatureEnabled, not stored.
+# LastActiveSegId = the highest segment with any enabled feature; SegIdPreSkip = 1 iff any
+# enabled feature is >= SEG_LVL_REF_FRAME (segment read BEFORE skip). Both iterate the 64-entry
+# FeatureEnabled once per call (cheap; called once per block).
+fn av1_fh_last_active_seg_id(fh): i64 {
+    var last = 0;
+    var i = 0;
+    while (i < AV1_MAX_SEGMENTS) {
+        var j = 0;
+        while (j < AV1_SEG_LVL_MAX) {
+            if (av1_fh_feature_enabled(fh, i, j) != 0) { last = i; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return last;
+}
+fn av1_fh_seg_id_pre_skip(fh): i64 {
+    var i = 0;
+    while (i < AV1_MAX_SEGMENTS) {
+        var j = AV1_SEG_LVL_REF_FRAME;   # only j >= SEG_LVL_REF_FRAME sets SegIdPreSkip
+        while (j < AV1_SEG_LVL_MAX) {
+            if (av1_fh_feature_enabled(fh, i, j) != 0) { return 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# av1_seg_supported — is this frame's segmentation config DECODABLE by the D1 spatial map reader?
+# 1 = decode it; 0 = reject cleanly (trust no input byte — never silently mis-decode). Rejects the
+# configs that need PrevSegmentIds (a DPB-saved seg map, a follow-on): the temporal-predicted map
+# (temporal_update), the whole-map copy (!update_map), and feature-data inheritance (!update_data).
+# Also rejects a segment whose per-segment lossless would DIFFER from the frame's base_q lossless:
+# the lossless cascade (tx-size / var-tx selection) stays base_q-driven, so a boundary-crossing
+# segment is a lossless-segment follow-on (roadmap.md D1). A keyframe / PRIMARY_REF_NONE frame forces
+# update_map=1, temporal=0, update_data=1, so it always passes the config checks.
+fn av1_seg_supported(fh): i64 {
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 1; }
+    if (av1_fh_segmentation_temporal_update(fh) != 0) { return 0; }
+    if (av1_fh_segmentation_update_map(fh) == 0) { return 0; }
+    if (av1_fh_segmentation_update_data(fh) == 0) { return 0; }
+    var base_lossless = 0;
+    if (av1_fh_base_q_idx(fh) == 0) { base_lossless = 1; }
+    var s = 0;
+    while (s < AV1_MAX_SEGMENTS) {
+        var qs = av1_get_qindex_ignore_delta(fh, s);   # == per-block qindex (delta_q_present rejected)
+        var sl = 0;
+        if (qs == 0) { sl = 1; }
+        if (sl != base_lossless) { return 0; }
+        s = s + 1;
+    }
+    return 1;
 }
 
 # tile_info() — 5.9.15 (+ 5.9.3 tile_log2). Writes MiColStarts/MiRowStarts

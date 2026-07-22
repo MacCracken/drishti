@@ -125,7 +125,16 @@ enum Av1TileOff {
     #                           block returns; the tile driver reads this after the loop)
     AV1TILE_TXTYPES   = 544;  # per-4x4 luma TxTypes grid (var-tx chroma co-location; shared)
     AV1TILE_SIGNBIAS  = 552;  # RefFrameSignBias[8] buffer (derived per frame from OrderHints)
-    AV1TILE_SIZE      = 560;
+    # --- segmentation (0.7.125, D1). SEGIDS is the frame-addressed per-MI SegmentIds map the
+    #     spatial predictor (5.11.11 read_segment_id) reads; shared like the other frame grids.
+    #     SEG_FH carries the fh for segmentation lookups on BOTH lanes (feature data / SegIdPreSkip
+    #     / LastActiveSegId) — DISTINCT from AV1TILE_FH, which stays 0 on an intra tile and doubles
+    #     as the encode-lane dispatch key. CUR_QINDEX is the per-block dequant qindex the two
+    #     transform_block paths read (base_q, or the per-segment qindex when segmentation is active). ---
+    AV1TILE_SEGIDS    = 560;  # SegmentIds grid (frame-addressed; shared)
+    AV1TILE_SEG_FH    = 568;  # fh for segmentation lookups (both lanes; not the dispatch key)
+    AV1TILE_CUR_QINDEX = 576; # per-block dequant qindex (set per block; defaults to base_q)
+    AV1TILE_SIZE      = 584;
 }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
 # 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
@@ -158,6 +167,9 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_SUBY, dr_frame_suby(frame));
     store64(tile + AV1TILE_BIT_DEPTH, dr_frame_bit_depth(frame));
     store64(tile + AV1TILE_BASE_Q, base_q);
+    store64(tile + AV1TILE_CUR_QINDEX, base_q);   # per-block dequant qindex; per-segment override at decode
+    store64(tile + AV1TILE_SEG_FH, 0);            # set by the decode driver (both lanes) when fh is available
+    store64(tile + AV1TILE_SEGIDS, 0);            # allocated by av1_tile_grids_new
     store64(tile + AV1TILE_ENABLE_EF, enable_ef);
     store64(tile + AV1TILE_IS_INTER, 0);
     store64(tile + AV1TILE_REDUCED_TX, reduced_tx);
@@ -272,6 +284,7 @@ fn av1_tile_share_grids(dst, src): i64 {
     # scans legitimately read OUTSIDE the tile window only via is_inside gating).
     store64(dst + AV1TILE_MVGRID, load64(src + AV1TILE_MVGRID));
     store64(dst + AV1TILE_SKIPMODES, load64(src + AV1TILE_SKIPMODES));
+    store64(dst + AV1TILE_SEGIDS, load64(src + AV1TILE_SEGIDS));   # shared SegmentIds map (0.7.125 D1)
     return 0;
 }
 
@@ -302,7 +315,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(9 * 8);
+    var offs = alloc(10 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -311,8 +324,9 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 48, AV1TILE_LFTX + 8);
     store64(offs + 56, AV1TILE_LFTX + 16);
     store64(offs + 64, AV1TILE_TXTYPES);
+    store64(offs + 72, AV1TILE_SEGIDS);   # SegmentIds map (0.7.125 D1); zeroed like the others
     var g = 0;
-    while (g < 9) {
+    while (g < 10) {
         var arr = alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;
@@ -596,7 +610,7 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         var bw = av1_block_width(plane_sz);
         var bh = av1_block_height(plane_sz);
         var bit_depth = load64(tile + AV1TILE_BIT_DEPTH);
-        var qindex = load64(tile + AV1TILE_BASE_Q);
+        var qindex = load64(tile + AV1TILE_CUR_QINDEX);   # per-segment qindex (== base_q when unsegmented)
         var quant = load64(tile + AV1TILE_QUANT);
         var eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
         load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),

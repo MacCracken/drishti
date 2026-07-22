@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.125] - 2026-07-21
+
+- **Phase D1 — SEGMENTATION decodes end-to-end, to PIXELS (intra + inter).** The segment-id map is read and
+  per-segment quantizer reaches the samples on both lanes. Entropy: `Default_Segment_Id_Cdf[3][8]` added to
+  the non-coeff CDF blob (1812→1839 i64; the C1 saved-CDF bundle grows in lockstep, 7181→7208, all downstream
+  offsets +27); `av1_neg_deinterleave` (9.2.4, verbatim) + `av1_read_segment_id`/`av1_write_segment_id`
+  (5.11.11 spatial predictor — the above/left/corner `pred`, the 3-way `ctx`, `neg_deinterleave`, and a
+  `Clip3(0,LastActiveSegId)` guard so a hostile stream can never index a segment OOB). `intra_segment_id`
+  (5.11.9) is wired into `av1_intra_frame_mode_info_decode/_encode` with the `SegIdPreSkip` ordering (read
+  before/after `skip`); `inter_segment_id` (5.11.10) into `av1_inter_frame_mode_info` likewise. A tile-scoped
+  frame-addressed `SegmentIds` grid (`AV1TILE_SEGIDS`) is stamped across each block's footprint for the next
+  block's spatial prediction. Pixels: a per-block `AV1TILE_CUR_QINDEX` (resolved via
+  `av1_get_qindex_ignore_delta`, == base_q when unsegmented) feeds BOTH `av1_transform_block` and
+  `av1_transform_block_inter`, so a segment's `SEG_LVL_ALT_Q` changes its dequant. The keyframe carries its fh
+  in a dedicated `AV1TILE_SEG_FH` (distinct from `AV1TILE_FH`, which stays 0 to keep the encode dispatch
+  intact). SCOPE: only the DECODABLE spatial config decodes — `av1_seg_supported` rejects (cleanly,
+  `DR_ERR_UNSUPPORTED`, consuming nothing) the temporal-predicted map, the whole-map copy (`!update_map`),
+  feature-data inheritance (`!update_data`), and a lossless-boundary-crossing segment; all need a DPB-saved
+  seg map (a follow-on). The lossless cascade (tx-size / var-tx) stays base_q-driven — the gate guarantees
+  per-segment lossless == base_q lossless for every reachable segment. WITNESSES: (inter) a 2-segment inter
+  frame decoded with seg1 `ALT_Q` 0 vs −30 reconstructs different pixels and matches a q40 oracle
+  (`test_seg_per_segment_qindex`); (intra keyframe) the same at `av1_decode_block`
+  (`test_intra_seg_per_segment_qindex`); both teeth-verified (forcing `CUR_QINDEX→base_q` or `segment_id→0`
+  reddens the diff). Plus: `neg_deinterleave` pinned against hand-computed spec values, `neg_interleave` as
+  its exact inverse across all in-range inputs, the `pred`/`ctx` derivation against an oracle, the
+  `av1_seg_supported` gate + `SegIdPreSkip`/`LastActiveSegId` derivation, and a hostile out-of-range segment
+  symbol clamped (trust no input byte). Still open in D1 (follow-on): the temporal / DPB-saved-map cases.
+
 ## [0.7.124] - 2026-07-21
 
 - **Mixed-tile `BlockDecoded` fix — closes the C2 reconstruction follow-on.** `av1_transform_block_inter`
