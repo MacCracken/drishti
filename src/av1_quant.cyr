@@ -273,3 +273,20 @@ fn av1_get_dc_quant(bit_depth, qindex, delta_dc): i64 {
 fn av1_get_ac_quant(bit_depth, qindex, delta_ac): i64 {
     return av1_ac_q(bit_depth, qindex + delta_ac);
 }
+# Per-plane DC/AC quant delta selection (7.12.2). DC: DeltaQYDc/UDc/VDc by plane;
+# AC: 0 for luma, else DeltaQUAc/VAc. These are FRAME-HEADER fields (av1_frame.cyr),
+# so the reconstruct sites read them straight off the fh the tile carries. fh may be
+# 0 — a test tile built with av1_tile_new and no frame header wired — in which case
+# both deltas are 0, exactly the pre-0.7.125 behaviour (no delta applied).
+fn av1_plane_dc_delta(fh, plane): i64 {
+    if (fh == 0) { return 0; }
+    if (plane == 0) { return av1_fh_delta_q_y_dc(fh); }
+    if (plane == 1) { return av1_fh_delta_q_u_dc(fh); }
+    return av1_fh_delta_q_v_dc(fh);
+}
+fn av1_plane_ac_delta(fh, plane): i64 {
+    if (fh == 0) { return 0; }
+    if (plane == 0) { return 0; }   # luma AC delta is always 0 (7.12.2)
+    if (plane == 1) { return av1_fh_delta_q_u_ac(fh); }
+    return av1_fh_delta_q_v_ac(fh);
+}

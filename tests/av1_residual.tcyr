@@ -159,6 +159,94 @@ fn test_reconstruct_consistency() {
     return 0;
 }
 
+# WITNESS the per-plane DeltaQYDc dequant (7.12.2): a frame carrying a non-zero
+# DeltaQYDc must dequantize the luma DC at dc_q(qindex + DeltaQYDc), NOT dc_q(qindex).
+# Drive av1_residual (the intra transform_block dequant site) with a tile whose
+# SEG_FH carries DeltaQYDc=D, then assert the decoded pixels (a) MATCH a manual
+# reconstruct at the SHIFTED DC quant and (b) DIFFER from a manual reconstruct at the
+# delta-0 quant — so reverting the site to a hard 0 would move the pixels (teeth).
+fn test_deltaq_ydc_shifts_dc() {
+    var base_q = 40;
+    var delta_ydc = 40;   # in-range (su(1+6) => [-64,63]); qindex 40 -> dc_q index 80
+    # fixture teeth: the shifted DC quant must actually differ from the unshifted one.
+    assert_neq(av1_get_dc_quant(8, base_q, delta_ydc), av1_get_dc_quant(8, base_q, 0),
+    "DeltaQYDc shifts the DC quant (fixture has teeth)");
+
+    # encode one 8x8 luma tx block with a DC level (same stream as reconstruct_consistency).
+    var qsrc = alloc(64 * 8);
+    az(qsrc, 64);
+    store64(qsrc + (0 * 8), 8);              # DC level 8 (positive; big enough that the
+    #                                          shifted vs delta-0 residual clears a pixel step)
+    var ttx = mk_ttx_dc(base_q);
+    var ae = alloc(64 * 8); var le = alloc(64 * 8); var de = alloc(64 * 8); var ce = alloc(64 * 8);
+    az(ae, 64); az(le, 64); az(de, 64); az(ce, 64);
+    var enc = av1_sym_enc_init(128, 1);
+    av1_coeffs_encode(enc, av1_ccdf_new(0), av1_noncoeff_cdf_blob(), 0, 1, ttx, AV1_DCT_DCT,
+    0, 0, 4, 4, 8, 8, ae, le, de, ce, qsrc, 1);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+
+    # DRIVER decode with a frame header carrying DeltaQYDc=D wired at SEG_FH.
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_DELTA_Q_Y_DC, delta_ydc);
+    var tile = mk_luma_tile(base_q);
+    store64(tile + AV1TILE_SEG_FH, fh);
+    var ftest = load64(tile + AV1TILE_FRAME);
+    store64(tile + AV1TILE_SD, av1_sym_dec_init(out, olen, 1));
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, av1_noncoeff_cdf_blob());
+    av1_bd_clear(tile, 0, 0, 16, 1);
+    av1_residual(tile, mk_block(3, 1, 0, mk_mi_dc(0)));
+
+    # MANUAL reference at the SHIFTED DC quant (the correct 7.12.2 value).
+    var oe = alloc(8);
+    var fref = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
+    av1_intra_predict(fref, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 0, 1, 0, 3, 3, 4, 4);
+    var am = alloc(64 * 8); var lm = alloc(64 * 8); var dm = alloc(64 * 8); var cm = alloc(64 * 8);
+    az(am, 64); az(lm, 64); az(dm, 64); az(cm, 64);
+    var qm = alloc(64 * 8);
+    var ottm = alloc(8);
+    var sdm = av1_sym_dec_init(out, olen, 1);
+    var eob = av1_coeffs_decode(sdm, av1_ccdf_new(0), av1_noncoeff_cdf_blob(), 0, 1, ttx,
+    0, 0, 4, 4, 8, 8, am, lm, dm, cm, qm, ottm);
+    assert_eq(eob, 1, "manual eob = 1");
+    av1_reconstruct(fref, 0, 0, 0, 1, load64(ottm), 0, qm,
+    av1_get_dc_quant(8, base_q, delta_ydc), av1_get_ac_quant(8, base_q, 0));
+
+    # MANUAL reference at the delta-0 quant (the OLD, buggy value) — the driver must NOT match this.
+    var oe2 = alloc(8);
+    var fzero = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe2);
+    av1_intra_predict(fzero, 0, 0, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 0, 1, 0, 3, 3, 4, 4);
+    var az0 = alloc(64 * 8); var lz0 = alloc(64 * 8); var dz0 = alloc(64 * 8); var cz0 = alloc(64 * 8);
+    az(az0, 64); az(lz0, 64); az(dz0, 64); az(cz0, 64);
+    var qz = alloc(64 * 8);
+    var ottz = alloc(8);
+    var sdz = av1_sym_dec_init(out, olen, 1);
+    av1_coeffs_decode(sdz, av1_ccdf_new(0), av1_noncoeff_cdf_blob(), 0, 1, ttx,
+    0, 0, 4, 4, 8, 8, az0, lz0, dz0, cz0, qz, ottz);
+    av1_reconstruct(fzero, 0, 0, 0, 1, load64(ottz), 0, qz,
+    av1_get_dc_quant(8, base_q, 0), av1_get_ac_quant(8, base_q, 0));
+
+    # driver == shifted manual, and driver != delta-0 manual.
+    var mism = 0;
+    var diff0 = 0;
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) {
+            var vt = dr_frame_get(ftest, 0, x, y);
+            if (vt != dr_frame_get(fref, 0, x, y)) { mism = 1; }
+            if (vt != dr_frame_get(fzero, 0, x, y)) { diff0 = 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(mism, 0, "driver dequant uses dc_q(qindex + DeltaQYDc)");
+    assert_eq(diff0, 1, "driver output differs from the delta-0 dequant (delta applied)");
+    return 0;
+}
+
 # all_zero (eob 0): skip=0 but the block codes all_zero -> prediction only (128).
 fn test_all_zero_is_prediction() {
     var base_q = 40;
@@ -481,6 +569,7 @@ fn main() {
     test_three_plane_skip();
     test_group("residual driver — reconstruct path");
     test_reconstruct_consistency();
+    test_deltaq_ydc_shifts_dc();
     test_group("residual driver — chroma-from-luma");
     test_cfl_flat_luma();
     test_group("get_filter_type (intra edge-filter type)");

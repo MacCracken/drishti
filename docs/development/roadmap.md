@@ -476,7 +476,12 @@ any real stream.
 
 **Phase D — full decode feature coverage (what real `.ivf`s use).**
   - D1. **Segmentation** — segment-id read (intra + inter), feature data, per-segment
-    qindex / `LosslessArray`. **MODULE.** Silent desync on the intra path today.
+    qindex / `LosslessArray`. **MODULE.** ✅ 0.7.125: the SPATIAL config decodes end-to-end to
+    pixels on both lanes (5.11.9/10/11 `read_segment_id` + `neg_deinterleave`; per-segment
+    `SEG_LVL_ALT_Q` → dequant; `SegmentIds` map grid; witnessed 2-segment inter + keyframe frames).
+    FOLLOW-ON: the temporal-predicted map (`segmentation_temporal_update`), the whole-map copy
+    (`!update_map`), feature-data inheritance (`!update_data`), and a lossless-boundary-crossing
+    segment need a DPB-saved seg map + `PrevSegmentIds` — `av1_seg_supported` rejects them cleanly.
   - D2. **Per-SB delta-q / delta-lf** (5.11.18/5.11.19), both paths. **S–M.** Silent
     desync on keyframes today (rejected at frame level since 0.7.116).
   - D3. **Loop-filter ref/mode deltas** — the deblocker hardcodes `is_intra = 1` /

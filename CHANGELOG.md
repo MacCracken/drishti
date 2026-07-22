@@ -31,6 +31,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its exact inverse across all in-range inputs, the `pred`/`ctx` derivation against an oracle, the
   `av1_seg_supported` gate + `SegIdPreSkip`/`LastActiveSegId` derivation, and a hostile out-of-range segment
   symbol clamped (trust no input byte). Still open in D1 (follow-on): the temporal / DPB-saved-map cases.
+  Adversarially reviewed (5 lenses × find→verify): 2 of 13 confirmed. Fixed — the encode/decode MIRROR for a
+  **skip** block on a `!SegIdPreSkip` frame: the decoder derives `segment_id = pred` (no symbol), so a plan
+  whose skip block claims a segment ≠ `pred` is unrepresentable (it would stamp a divergent value into the
+  shared map and desync later blocks); `av1_write_segment_id` now surfaces that as `DR_ERR_BOUNDS` (the
+  `av1_write_skip_mode` convention), witnessed + teeth-verified (`test_write_segment_id_skip_mirror`).
+- **Fixed the second confirmed D1-review finding — the frame-level per-plane `DeltaQ*Dc/Ac` deltas (7.12.2)
+  were passed as 0 to both dequant sites**, so a stream carrying a non-zero `DeltaQYDc`/`UDc`/`UAc`/`VDc`/`VAc`
+  dequantized at the wrong DC/AC quantizer (PRE-EXISTING — it affects non-segmented frames equally, not a D1
+  regression). Now `av1_transform_block` (intra) and `av1_transform_block_inter` (inter) thread the per-plane
+  delta via new `av1_plane_dc_delta` / `av1_plane_ac_delta` (av1_quant.cyr): DC uses `DeltaQYDc`/`UDc`/`VDc`
+  by plane, AC uses 0 for luma / `DeltaQUAc`/`VAc` for chroma. Each site reads the delta off the SAME frame
+  header its own lane already resolves the per-segment qindex from — `SEG_FH` on the intra lane (where
+  `AV1TILE_FH` is 0), `AV1TILE_FH` on the inter lane — with an `fh==0` guard that degrades to the pre-fix
+  deltas-0 behaviour for a bare test tile. The delta is applied only on the non-lossless path: a lossless
+  block keeps the fixed `dc_q(0)`/`ac_q(0)` its WHT inverts (a conformant lossless block has all deltas 0 per
+  `av1_compute_lossless`; the guard additionally shields the deltas-blind `base_q/qindex==0` lossless shortcut
+  from a hostile stream that sets `base_q 0` with a non-zero delta). WITNESSES (all teeth-verified — reverting a site to `0` reddens the
+  diff): a non-zero `DeltaQYDc` reconstructs an 8x8 luma DC block at the shifted quant vs a delta-0 oracle on
+  both the intra (`test_deltaq_ydc_shifts_dc`) and inter (`test_inter_residual_deltaq_ydc`) sites, plus a
+  plane→field selection unit test covering chroma U/V DC+AC and the `fh==0` guard (`test_plane_delta_select`).
 
 ## [0.7.124] - 2026-07-21
 

@@ -15,9 +15,10 @@
 # SCOPE (intra keyframe baseline): is_inter=0, one 64x64 superblock chunk
 # (widthChunks==heightChunks==1). The 128x128 chunk split, palette, inter
 # transform_tree, and the loop-filter tx-size grid (LoopfilterTxSizes) are all
-# out of this bite (deferred; roadmap.md). Per-plane quantizer deltas are 0
-# (segmentation / delta-q deferred; roadmap.md). The tile context here (Av1Tile)
-# is populated by the tile/frame loop (bite 7); this bite supplies the driver.
+# out of this bite (deferred; roadmap.md). The per-block dequant qindex reads AV1TILE_CUR_QINDEX
+# (per-segment since 0.7.125 D1); the per-plane DeltaQ*Dc/Ac deltas (7.12.2) are read off the
+# frame header the tile carries at SEG_FH via av1_plane_dc_delta / av1_plane_ac_delta. The tile
+# context here (Av1Tile) is populated by the tile/frame loop (bite 7); this bite supplies the driver.
 #
 # FLAT module — wiring in src/main.cyr after av1_coeffs.cyr (needs the coeffs
 # loop). Family av1_. Depends on: av1_intra (av1_intra_predict /
@@ -620,8 +621,21 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
         quant, load64(tile + AV1TILE_OTT));
         if (eob > 0) {
-            var q_dc = av1_get_dc_quant(bit_depth, qindex, 0);
-            var q_ac = av1_get_ac_quant(bit_depth, qindex, 0);
+            # per-plane DC/AC quant deltas (7.12.2) from the frame header the tile carries at
+            # SEG_FH (the intra lane's qindex source; AV1TILE_FH is 0 on an intra tile). fh==0
+            # for a bare test tile → deltas 0. A LOSSLESS block keeps the fixed dc_q(0)/ac_q(0)
+            # its WHT inverts: a conformant lossless block has all deltas 0 anyway
+            # (av1_compute_lossless requires it), and the guard also shields the base_q==0
+            # lossless shortcut (av1_partition.cyr — deltas-blind) from a hostile delta.
+            var qfh = load64(tile + AV1TILE_SEG_FH);
+            var ddc = 0;
+            var dac = 0;
+            if (load64(blk + AV1BLK_LOSSLESS) == 0) {
+                ddc = av1_plane_dc_delta(qfh, plane);
+                dac = av1_plane_ac_delta(qfh, plane);
+            }
+            var q_dc = av1_get_dc_quant(bit_depth, qindex, ddc);
+            var q_ac = av1_get_ac_quant(bit_depth, qindex, dac);
             av1_reconstruct(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
             load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac);
         }

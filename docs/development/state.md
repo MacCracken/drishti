@@ -6,6 +6,30 @@
 
 ## Version
 
+**0.7.125** — cut 2026-07-21, not yet tagged (user's git). **PHASE D1 — SEGMENTATION decodes end-to-end to
+PIXELS (intra + inter).** The full spatial-config segment-id path: `Default_Segment_Id_Cdf[3][8]` added to the
+ncc blob (1812→1839; the C1 saved-CDF bundle grows in lockstep 7181→7208, all downstream offsets +27);
+`av1_neg_deinterleave` (9.2.4) + `av1_read/write_segment_id` (5.11.11 spatial predictor — pred/ctx/clamp);
+`intra_segment_id` (5.11.9) + `inter_segment_id` (5.11.10) wired with the SegIdPreSkip ordering; a tile-scoped
+`AV1TILE_SEGIDS` map grid stamped per block; a per-block `AV1TILE_CUR_QINDEX` (via `av1_get_qindex_ignore_delta`)
+feeding BOTH `av1_transform_block` + `av1_transform_block_inter` so a segment's `SEG_LVL_ALT_Q` changes its
+dequant. Keyframe fh carried in `AV1TILE_SEG_FH` (distinct from `AV1TILE_FH`). SCOPE: `av1_seg_supported`
+decodes only update_map=1/temporal=0/update_data=1 (+ no lossless-boundary-crossing segment); the temporal /
+copied-map / feature-inheritance configs REJECT cleanly (need a DPB-saved seg map — follow-on). WITNESSES
+(teeth-verified): a 2-segment inter frame (`test_seg_per_segment_qindex`) + a 2-segment keyframe
+(`test_intra_seg_per_segment_qindex`) reconstruct different pixels per segment; plus neg_deinterleave spec
+pins, neg_interleave inverse, pred/ctx oracle, the gate + SegIdPreSkip/LastActiveSegId derivation, and a
+hostile out-of-range segment symbol clamped. Adversarially reviewed (5 lenses × find→verify, 18 agents): 2/13
+confirmed — FIXED the encode/decode skip-block mirror (a skip block's segment_id is DERIVED = pred by the
+decoder; a plan claiming ≠ pred now surfaces DR_ERR_BOUNDS, witnessed); the other (frame-level DeltaQ*Dc/Ac
+per-plane deltas passed as 0 to dequant) — PRE-EXISTING + orthogonal — is now FIXED: both `av1_transform_block`
+and `av1_transform_block_inter` thread the per-plane delta (7.12.2) via `av1_plane_dc_delta`/`av1_plane_ac_delta`
+(DC = DeltaQYDc/UDc/VDc by plane, AC = 0 luma / DeltaQUAc/VAc chroma), each reading the delta off the fh its own
+lane resolves qindex from (SEG_FH intra / AV1TILE_FH inter, fh==0 → deltas 0). WITNESSED intra + inter (a
+non-zero DeltaQYDc reconstructs at the shifted DC quant vs a delta-0 oracle) + a plane→field selection unit
+test, all teeth-verified. 38 suites (assertion/fuzz totals refreshed at release), all six gates green. STILL
+OPEN: D1 temporal follow-on, per-SB delta-q/lf (D2), a conformance harness (Phase E). [[av1-decode-remaining-tracks]]
+
 **0.7.124** — cut 2026-07-21, not yet tagged (user's git). **MIXED-TILE BlockDecoded FIX — closes the C2
 reconstruction follow-on.** av1_transform_block_inter never raised BlockDecoded, so a DIRECTIONAL intra
 block whose above-right/below-left neighbour was a prior INTER block in the same SB read have_ar/have_bl=0
@@ -1250,7 +1274,7 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 | `src/av1_symbol.cyr` | `av1_` | multi-symbol adaptive-CDF arithmetic coder (spec 8.2) — decoder + encoder (Av1SymDec / Av1SymEnc) + subexp-bool primitives (NS / decode_subexp_bool / signed-with-ref, for read_lr) |
 | `src/av1_itx.cyr` | `av1_` | inverse transform block (spec 7.13) — DCT 4-64 / ADST 4-16 / identity / WHT + 2D driver |
 | `src/av1_intra.cyr` | `av1_` | intra prediction (spec 7.11.2 + 7.11.5) — predict_intra + DC/PAETH/SMOOTH×3 + full directional (edge filter/upsample) + recursive filter-intra (7.11.2.3) + chroma-from-luma (7.11.5) |
-| `src/av1_quant.cyr` | `av1_` | dequantization (spec 7.12.2) — Dc/Ac Qlookup tables (8/10/12-bit) + dc_q/ac_q/get_qindex/get_dc_quant/get_ac_quant |
+| `src/av1_quant.cyr` | `av1_` | dequantization (spec 7.12.2) — Dc/Ac Qlookup tables (8/10/12-bit) + dc_q/ac_q/get_qindex/get_dc_quant/get_ac_quant + av1_plane_dc_delta/av1_plane_ac_delta (per-plane DeltaQ*Dc/Ac selection: DC = Y/U/V Dc by plane, AC = 0 luma / U/V Ac chroma; fh==0 → 0) |
 | `src/av1_recon.cyr` | `av1_` | reconstruct process (spec 7.12.3) — dequant + dqDenom + FLIPADST flip + residual-add glue (av1_reconstruct) |
 | `src/av1_scan.cyr` | `av1_` | coefficient scan orders (spec 5.11.41) — 32 Default/Mrow/Mcol scan tables + get_scan + scan_size |
 | `src/av1_coeff.cyr` | `av1_` | coefficient level contexts (spec 8.3.2) — get_tx_class / get_coeff_base_ctx / get_br_ctx + offset tables |

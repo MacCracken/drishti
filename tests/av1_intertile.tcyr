@@ -4147,6 +4147,46 @@ fn test_ir_inter1() {
     assert_eq(ir_diff(df, xf, 8, 8, 1, 0, 0), 0, "INTER_1 8x8: decode == MC+residual oracle (64)");
     return 0;
 }
+
+# WITNESS the per-plane DeltaQYDc dequant on the INTER residual site (av1_transform_block_inter,
+# spec 7.12.2) — the second of the two dequant sites. An inter block's luma DC must dequantize at
+# dc_q(qindex + DeltaQYDc), NOT dc_q(qindex). Same INTER_1 8x8 block, but the frame header carries a
+# non-zero DeltaQYDc (read off AV1TILE_FH, which set_inter_ctx wires). SMALL coeffs so the shifted vs
+# delta-0 residual stays in pixel range (both saturating would hide the teeth). Assert the decode (a)
+# MATCHES an MC + reconstruct oracle at the SHIFTED DC quant and (b) DIFFERS from the delta-0 oracle
+# (ir_oracle hardcodes delta 0 — the old, buggy value), so reverting the site to 0 reddens this.
+fn test_inter_residual_deltaq_ydc() {
+    var delta_ydc = 40;   # in-range su(1+6); qindex 40 -> dc_q index 80 (dc_q 41 -> 74)
+    assert_neq(av1_get_dc_quant(8, 40, delta_ydc), av1_get_dc_quant(8, 40, 0),
+    "inter: DeltaQYDc shifts the DC quant (fixture teeth)");
+    var ref = ir_ref(8, 8, 1, 0, 0);
+    var fh = ir_fh(8, 8, 2, 2, AV1_TX_MODE_LARGEST);
+    store64(fh + AV1FH_DELTA_Q_Y_DC, delta_ydc);   # the field under test
+    var refs = ir_refs(8, 8);
+    var seq = ir_seq(1, 0, 0);
+    var coeff = alloc(1024 * 8);
+    memset(coeff, 0, 1024 * 8);
+    store64(coeff + 0, 12);              # DC (small; residual stays unsaturated on both quants)
+    store64(coeff + (1 * 8), 0 - 6);     # scan[1] AC -> spatial variation
+    var resid = ir_resid1(AV1_ADST_DCT, 2, coeff);
+    var blk = ir_blk(8, 0 - 4, resid);   # inter, ref=LAST, MV (8,-4) — identical to INTER_1
+    var df = ir_roundtrip(ref, fh, refs, seq, blk, 3, 8, 8, 1, 0, 0, 2, 2);
+
+    # oracle at the delta-0 quant (ir_oracle uses av1_get_dc_quant(8,40,0)) — decode must NOT match.
+    var xz = ir_oracle(ref, 8, 0 - 4, resid, 8, 8, 1, 0, 0, AV1_BLOCK_8X8, 1, AV1_ADST_DCT, 0);
+    # oracle at the SHIFTED quant (same MC, DC dequant shifted by DeltaQYDc) — decode MUST match.
+    var oes = alloc(8);
+    var xs = dr_frame_new(8, 8, 1, 0, 0, 8, 8, oes);
+    av1_mc_pred_block(xs, ref, 0, 0, 0, 8, 8, 8, 0 - 4, AV1_EIGHTTAP, AV1_EIGHTTAP);
+    av1_reconstruct(xs, 0, 0, 0, 1, AV1_ADST_DCT, 0, coeff,
+    av1_get_dc_quant(8, 40, delta_ydc), av1_get_ac_quant(8, 40, 0));
+
+    assert_eq(ir_diff(df, xs, 8, 8, 1, 0, 0), 0,
+    "inter deltaq: decode == MC + reconstruct at dc_q(qindex + DeltaQYDc)");
+    assert_eq(ir_diff(df, xz, 8, 8, 1, 0, 0) > 0, 1,
+    "inter deltaq: decode differs from the delta-0 dequant (delta applied)");
+    return 0;
+}
 # BILINEAR end-to-end (0.7.108): the frame header's interpolation_filter f(2) == BILINEAR.
 # This is the ONLY way BILINEAR reaches a block — the SWITCHABLE per-block symbol has a
 # 3-value alphabet (EIGHTTAP/SMOOTH/SHARP) and can never code it, so a fixture that sets the
@@ -5933,6 +5973,7 @@ fn main() {
     test_cdf_inheritance();
     test_cdf_bundle_roundtrip();
     test_ir_inter1();
+    test_inter_residual_deltaq_ydc();
     test_ir_inter2();
     test_group("BILINEAR interpolation filter e2e (0.7.108)");
     test_ir_bilinear();

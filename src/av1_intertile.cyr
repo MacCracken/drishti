@@ -561,8 +561,21 @@ fn av1_transform_block_inter(tile, r, c, sub_size, plane, tx_sz, x, y): i64 {
     if (eob > 0) {
         var lossless = 0;
         if (qindex == 0) { lossless = 1; }
-        var q_dc = av1_get_dc_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, 0);
-        var q_ac = av1_get_ac_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, 0);
+        # per-plane DC/AC quant deltas (7.12.2). On the inter lane the canonical fh is AV1TILE_FH
+        # (set_inter_ctx wires it for every inter tile) — the SAME source this lane's per-segment
+        # qindex derives from (av1_decode_block ~L1024). A LOSSLESS block keeps the fixed
+        # dc_q(0)/ac_q(0) its WHT inverts (conformant lossless has all deltas 0; the guard also
+        # shields the qindex==0 shortcut above from a hostile delta). fh==0 (never on a real inter
+        # tile) degrades to deltas 0 via av1_plane_dc/ac_delta.
+        var qfh = load64(tile + AV1TILE_FH);
+        var ddc = 0;
+        var dac = 0;
+        if (lossless == 0) {
+            ddc = av1_plane_dc_delta(qfh, plane);
+            dac = av1_plane_ac_delta(qfh, plane);
+        }
+        var q_dc = av1_get_dc_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, ddc);
+        var q_ac = av1_get_ac_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, dac);
         return av1_reconstruct(frame, plane, start_x, start_y, tx_sz,
         load64(load64(tile + AV1TILE_OTT)), lossless, quant, q_dc, q_ac);
     }
