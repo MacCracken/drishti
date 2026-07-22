@@ -137,11 +137,17 @@ enum Av1TileOff {
     AV1TILE_CUR_QINDEX = 576; # per-block dequant qindex (set per block; defaults to base_q)
     AV1TILE_SIZE      = 584;
 }
-# BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims (SB4 = 16 for a
-# 64x64 superblock), stored flat with a +1 border, stride AV1_BD_STRIDE.
+# BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims, stored flat with a
+# +1 border, stride AV1_BD_STRIDE. The grid is sized for the LARGEST superblock
+# (128x128 = 32 MI units) so a 128-SB tile fits without a second allocation path.
+# A 64x64 superblock uses the top-left [-1..16] window of that same allocation,
+# which is OUTPUT-NEUTRAL: every read/write goes through av1_bd_get/av1_bd_set with
+# the one stride, av1_bd_clear re-seeds the borders per superblock, and no read ever
+# reaches past the decoded block's own footprint. (0.7.126 E2a foundation.)
 enum Av1BdConst {
     AV1_SB4       = 16;    # 64x64 superblock in 4x4 (MI) units
-    AV1_BD_STRIDE = 18;    # SB4 + 2 (the -1 border on each side)
+    AV1_SB4_128   = 32;    # 128x128 superblock in 4x4 (MI) units
+    AV1_BD_STRIDE = 34;    # AV1_SB4_128 + 2 (the -1 border on each side)
 }
 fn av1_bd_plane(tile, plane): i64 { return load64(tile + AV1TILE_BD + (plane * 8)); }
 fn av1_bd_get(tile, plane, r, c): i64 {

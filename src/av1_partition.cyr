@@ -11,8 +11,10 @@
 # split_or_horz / split_or_vert use a binary CDF SYNTHESIZED from the partition
 # CDF (spec 9.3). MI grids live in the Av1Tile context (av1_residual).
 #
-# SCOPE (intra keyframe baseline): is_inter=0; a 64x64 superblock (no 128x128 →
-# partition W128 / bsl 5 deferred, roadmap.md). Palette and segmentation are
+# SCOPE (intra keyframe baseline): is_inter=0. The partition ENTROPY for a 128x128
+# superblock (W128 CDF + the 8-symbol bsl-5 alphabet) landed in 0.7.126; the SB loop
+# still drives 64x64 only and the frame gate still rejects sb128 (roadmap.md E2a).
+# Palette and segmentation are
 # deferred (roadmap.md). (The intra edge-filter type get_filter_type, 7.11.2.8,
 # is derived in transform_block as of 0.7.26.) Lossless is derived
 # as base_q_idx==0 (no per-plane delta-q in scope). The encode lane covers the
@@ -90,19 +92,30 @@ fn av1_partition_ctx(tile, r, c, bsize, avail_u, avail_l): i64 {
     return (left * 2) + above;
 }
 
-# partition symbol dispatch by bsl (1->W8 4-sym, 2/3/4 -> W16/32/64 10-sym).
+# partition symbol dispatch by bsl (1->W8 4-sym, 2/3/4 -> W16/32/64 10-sym,
+# 5 -> W128 8-sym). BLOCK_128X128 (bsl 5) forbids HORZ_4/VERT_4 (5.11.4), so its
+# alphabet is EIGHT, not ten — reading 10 against the 9-entry W128 row would run off
+# the terminator. Before 0.7.126 bsl 5 silently fell through to the W64 CDF.
 fn av1_partition_cdf(ncc, ctx, bsl): i64 {
     if (bsl == 2) { return av1_ncdf_partition_w16(ncc, ctx); }
     if (bsl == 3) { return av1_ncdf_partition_w32(ncc, ctx); }
+    if (bsl == 5) { return av1_ncdf_partition_w128(ncc, ctx); }
     return av1_ncdf_partition_w64(ncc, ctx);
+}
+# the partition alphabet size for a given bsl.
+fn av1_partition_nsym(bsl): i64 {
+    if (bsl == 1) { return 4; }
+    if (bsl == 5) { return 8; }
+    return 10;
 }
 fn av1_read_partition(sd, ncc, ctx, bsl): i64 {
     if (bsl == 1) { return av1_sym_read_symbol(sd, av1_ncdf_partition_w8(ncc, ctx), 4); }
-    return av1_sym_read_symbol(sd, av1_partition_cdf(ncc, ctx, bsl), 10);
+    return av1_sym_read_symbol(sd, av1_partition_cdf(ncc, ctx, bsl), av1_partition_nsym(bsl));
 }
 fn av1_write_partition(enc, ncc, ctx, bsl, partition): i64 {
     if (bsl == 1) { return av1_sym_encode_symbol(enc, av1_ncdf_partition_w8(ncc, ctx), 4, partition); }
-    return av1_sym_encode_symbol(enc, av1_partition_cdf(ncc, ctx, bsl), 10, partition);
+    return av1_sym_encode_symbol(enc, av1_partition_cdf(ncc, ctx, bsl),
+    av1_partition_nsym(bsl), partition);
 }
 
 # P(symbol x) in the forward-cumulative partition cdf: cdf[x] - cdf[x-1].
@@ -114,19 +127,24 @@ fn av1_part_prob(pcdf, x): i64 {
 # split_or_{horz,vert} synthesized binary cdf (9.3): the not-split probability is
 # 1<<15 minus the summed probabilities of the vertical- / horizontal-splitting
 # partition types. cdf[0]=1<<15-psum, cdf[1]=1<<15, cdf[2]=0 (never adapted).
-fn av1_synth_horz_cdf(pcdf, out): i64 {
+# bsl 5 (BLOCK_128X128) has NO HORZ_4/VERT_4 in its alphabet, so those terms must be
+# dropped from the sum — indices 8/9 on a 9-entry W128 row are the terminator and the
+# adaptation count, and summing them would corrupt the synthesized binary cdf.
+fn av1_synth_horz_cdf(pcdf, bsl, out): i64 {
     var psum = av1_part_prob(pcdf, AV1_PARTITION_VERT) + av1_part_prob(pcdf, AV1_PARTITION_SPLIT)
     + av1_part_prob(pcdf, AV1_PARTITION_HORZ_A) + av1_part_prob(pcdf, AV1_PARTITION_VERT_A)
-    + av1_part_prob(pcdf, AV1_PARTITION_VERT_B) + av1_part_prob(pcdf, AV1_PARTITION_VERT_4);
+    + av1_part_prob(pcdf, AV1_PARTITION_VERT_B);
+    if (bsl != 5) { psum = psum + av1_part_prob(pcdf, AV1_PARTITION_VERT_4); }
     store64(out + 0, 32768 - psum);
     store64(out + 8, 32768);
     store64(out + 16, 0);
     return 0;
 }
-fn av1_synth_vert_cdf(pcdf, out): i64 {
+fn av1_synth_vert_cdf(pcdf, bsl, out): i64 {
     var psum = av1_part_prob(pcdf, AV1_PARTITION_HORZ) + av1_part_prob(pcdf, AV1_PARTITION_SPLIT)
     + av1_part_prob(pcdf, AV1_PARTITION_HORZ_A) + av1_part_prob(pcdf, AV1_PARTITION_HORZ_B)
-    + av1_part_prob(pcdf, AV1_PARTITION_VERT_A) + av1_part_prob(pcdf, AV1_PARTITION_HORZ_4);
+    + av1_part_prob(pcdf, AV1_PARTITION_VERT_A);
+    if (bsl != 5) { psum = psum + av1_part_prob(pcdf, AV1_PARTITION_HORZ_4); }
     store64(out + 0, 32768 - psum);
     store64(out + 8, 32768);
     store64(out + 16, 0);
@@ -134,22 +152,22 @@ fn av1_synth_vert_cdf(pcdf, out): i64 {
 }
 fn av1_read_split_or_horz(sd, ncc, ctx, bsl): i64 {
     var out = alloc(3 * 8);
-    av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_decode(sd, out, 2, 0);
 }
 fn av1_read_split_or_vert(sd, ncc, ctx, bsl): i64 {
     var out = alloc(3 * 8);
-    av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_decode(sd, out, 2, 0);
 }
 fn av1_write_split_or_horz(enc, ncc, ctx, bsl, sym): i64 {
     var out = alloc(3 * 8);
-    av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_encode(enc, out, 2, sym, 0);
 }
 fn av1_write_split_or_vert(enc, ncc, ctx, bsl, sym): i64 {
     var out = alloc(3 * 8);
-    av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), out);
+    av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_encode(enc, out, 2, sym, 0);
 }
 

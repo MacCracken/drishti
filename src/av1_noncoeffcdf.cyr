@@ -37,7 +37,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1841 * 8);   # 1839 entries (+ Default_Segment_Id_Cdf 1812..1838) + pad
+    var t = alloc(1877 * 8);   # 1875 entries (+ Default_Partition_W128_Cdf 1839..1874) + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -323,17 +323,34 @@ fn av1_noncoeff_cdf_blob(): i64 {
     store64(t + (1830 * 8), 27527); store64(t + (1831 * 8), 28487); store64(t + (1832 * 8), 28723);
     store64(t + (1833 * 8), 28890); store64(t + (1834 * 8), 32397); store64(t + (1835 * 8), 32647);
     store64(t + (1836 * 8), 32679); store64(t + (1837 * 8), 32768); store64(t + (1838 * 8), 0);
+    # Default_Partition_W128_Cdf[PARTITION_CONTEXTS=4][9] @ 1839 (4 rows x 9 i64 = 36) — the partition CDF
+    # for a 128x128 superblock. EIGHT symbols, not ten: PARTITION_HORZ_4 / VERT_4 are forbidden at
+    # BLOCK_128X128 (5.11.4), which is why this table cannot reuse the 10-symbol W16/W32/W64 stride. From the
+    # AV1 spec additional-tables annex; extraction validated against the committed Default_Cfl_Sign_Cdf @952
+    # AND Default_Partition_W8_Cdf @0 (both re-fetched byte-identical). 0.7.126 E2a.
+    store64(t + (1839 * 8), 27899); store64(t + (1840 * 8), 28219); store64(t + (1841 * 8), 28529);
+    store64(t + (1842 * 8), 32484); store64(t + (1843 * 8), 32539); store64(t + (1844 * 8), 32619);
+    store64(t + (1845 * 8), 32639); store64(t + (1846 * 8), 32768); store64(t + (1847 * 8), 0);
+    store64(t + (1848 * 8), 6607);  store64(t + (1849 * 8), 6990);  store64(t + (1850 * 8), 8268);
+    store64(t + (1851 * 8), 32060); store64(t + (1852 * 8), 32219); store64(t + (1853 * 8), 32338);
+    store64(t + (1854 * 8), 32371); store64(t + (1855 * 8), 32768); store64(t + (1856 * 8), 0);
+    store64(t + (1857 * 8), 5429);  store64(t + (1858 * 8), 6676);  store64(t + (1859 * 8), 7122);
+    store64(t + (1860 * 8), 32027); store64(t + (1861 * 8), 32227); store64(t + (1862 * 8), 32531);
+    store64(t + (1863 * 8), 32582); store64(t + (1864 * 8), 32768); store64(t + (1865 * 8), 0);
+    store64(t + (1866 * 8), 711);   store64(t + (1867 * 8), 966);   store64(t + (1868 * 8), 1172);
+    store64(t + (1869 * 8), 32448); store64(t + (1870 * 8), 32538); store64(t + (1871 * 8), 32617);
+    store64(t + (1872 * 8), 32664); store64(t + (1873 * 8), 32768); store64(t + (1874 * 8), 0);
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1839 * 8);   # + Default_Segment_Id_Cdf 1812..1838
+    var cc = alloc(1875 * 8);   # + Default_Partition_W128_Cdf 1839..1874
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1839) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < 1875) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -343,6 +360,10 @@ fn av1_ncdf_partition_w8(cc, ctx): i64 { return cc + ((0 + ctx * 5) * 8); }
 fn av1_ncdf_partition_w16(cc, ctx): i64 { return cc + ((20 + ctx * 11) * 8); }
 fn av1_ncdf_partition_w32(cc, ctx): i64 { return cc + ((64 + ctx * 11) * 8); }
 fn av1_ncdf_partition_w64(cc, ctx): i64 { return cc + ((108 + ctx * 11) * 8); }
+# BLOCK_128X128 partition CDF @ 1839 — stride 9 (EIGHT symbols + terminator + count), not 11: HORZ_4 /
+# VERT_4 are forbidden at 128x128 (5.11.4). Appended rather than placed beside the other partition tables
+# because every accessor below is an absolute offset.
+fn av1_ncdf_partition_w128(cc, ctx): i64 { return cc + ((1839 + ctx * 9) * 8); }
 fn av1_ncdf_skip(cc, ctx): i64 { return cc + ((152 + ctx * 3) * 8); }
 fn av1_ncdf_y_mode(cc, above, left): i64 { return cc + ((161 + ((above * 5) + left) * 14) * 8); }
 fn av1_ncdf_uv_mode_ncfl(cc, ymode): i64 { return cc + ((511 + ymode * 14) * 8); }

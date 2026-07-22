@@ -1251,7 +1251,7 @@ fn test_cdf_save_populates_slots() {
     var cceq = 1;
     var wj = 0;
     while (wj < 3999) {
-        if (load64(b + ((1839 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
+        if (load64(b + ((1875 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
         wj = wj + 1;
     }
     assert_eq(cceq, 1, "CDF save: disable_frame_end_update_cdf=1 saves the INITIAL (default) coeff CDFs");

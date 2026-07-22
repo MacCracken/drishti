@@ -559,7 +559,7 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                 serr = av1_cdf_bundle_defaults(cdfb, av1_coeff_cdf_qbucket(load64(tile0 + AV1TILE_BASE_Q)));
             } else {
                 var src = av1_ref_saved_cdf(refs, av1_fh_ref_frame_idx(fh, pr));
-                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7208); }
+                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7244); }
             }
         }
         if (serr != DR_OK) { store64(out_err, serr); return 0; }

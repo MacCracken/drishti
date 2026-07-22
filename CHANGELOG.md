@@ -4,6 +4,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **E2a foundations — the BLOCK_128X128 partition entropy + a 128-capable BlockDecoded grid (still gated).**
+  Groundwork for the single feature blocking every published AV1 test vector: libaom DEFAULTS to
+  `use_128x128_superblock=1`, so drishti's 64×64-only superblock loop rejects the entire standard corpus
+  (found by the E1 conformance harness). This bite lands the three pieces that had *no implementation at all*,
+  without un-gating anything — the frame-level sb128 reject still stands, and decoded output is unchanged.
+  (1) **`Default_Partition_W128_Cdf[4][9]`** appended to the non-coeff blob at 1839 (1839→1875; the C1
+  saved-CDF bundle moves in lockstep 7208→7244, all downstream offsets +36) with an
+  `av1_ncdf_partition_w128` accessor. It could not be placed beside the other partition tables — every
+  accessor there is an absolute offset. Extraction validated against TWO committed tables
+  (`Default_Cfl_Sign_Cdf` and `Default_Partition_W8_Cdf`, both re-fetched byte-identical).
+  (2) **the bsl-5 partition alphabet is EIGHT, not ten** — `PARTITION_HORZ_4`/`VERT_4` are forbidden at
+  BLOCK_128X128 (5.11.4). `av1_partition_cdf` now dispatches bsl 5 to W128 (it silently fell through to the
+  W64 table before), `av1_partition_nsym` gives the per-bsl alphabet, and `av1_synth_horz_cdf`/`_vert_cdf`
+  take `bsl` and drop the `*_4` terms at 128 — on a 9-entry W128 row those indices are the adaptation count
+  and the NEXT row's first value, so summing them corrupted the synthesized binary cdf.
+  (3) **the BlockDecoded grid is sized for a 128×128 superblock** (`AV1_SB4_128 = 32`, stride 18→34).
+  Output-neutral for a 64×64 SB: every access goes through the one stride, `av1_bd_clear` re-seeds borders
+  per superblock, and no read reaches past the decoded block's footprint.
+  WITNESSES (all mutation-verified): the W128 values + well-formedness pinned at the accessor offsets; a
+  bsl-5 round-trip over all 8 legal partition types × 4 contexts; the synth guard proven load-bearing by
+  showing the 10-symbol sum differs; the 128-SB far corner addressable. Critically the DISPATCH is pinned
+  separately — a round-trip cannot catch a wrong CDF selection, since both lanes would pick the same wrong
+  row and still agree (only the dispatch pins redden that mutation). Next: the sbMask + residual 64×64 chunk
+  split, then the un-gate (roadmap.md E2a).
+
 - **Phase E1 — the FIRST external validation in the AV1 arc: a real libaom-encoded keyframe decodes
   BIT-EXACT.** Every prior gate round-trips drishti's own bitstream writer into drishti's own decoder, or
   compares against an oracle transcribed from the same spec reading as the implementation — so a shared

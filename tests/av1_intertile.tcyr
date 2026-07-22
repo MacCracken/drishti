@@ -4025,7 +4025,7 @@ fn test_cdf_inheritance() {
     var adapted = 0;
     var wi = 0;
     while (wi < 3999) {
-        if (load64(bundle + ((1839 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
+        if (load64(bundle + ((1875 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
         if (load64(dt1cc + (wi * 8)) != load64(defcc + (wi * 8))) { adapted = 1; }
         wi = wi + 1;
     }
@@ -4103,7 +4103,7 @@ fn cdfw_eq(a, b, n): i64 {
 fn test_cdf_bundle_roundtrip() {
     var src = alloc(AV1TILE_SIZE);
     memset(src, 0, AV1TILE_SIZE);
-    store64(src + AV1TILE_NCC, cdfw_stamp(1839, 100000));
+    store64(src + AV1TILE_NCC, cdfw_stamp(1875, 100000));
     store64(src + AV1TILE_CC, cdfw_stamp(3999, 200000));
     store64(src + AV1TILE_CCREF, cdfw_stamp(177, 300000));
     store64(src + AV1TILE_CCIM, cdfw_stamp(341, 400000));
@@ -4111,7 +4111,7 @@ fn test_cdf_bundle_roundtrip() {
     store64(src + AV1TILE_CCMV, cdfw_stamp(286, 600000));
     var dst = alloc(AV1TILE_SIZE);
     memset(dst, 0, AV1TILE_SIZE);
-    store64(dst + AV1TILE_NCC, alloc(1839 * 8));
+    store64(dst + AV1TILE_NCC, alloc(1875 * 8));
     store64(dst + AV1TILE_CC, alloc(3999 * 8));
     store64(dst + AV1TILE_CCREF, alloc(177 * 8));
     store64(dst + AV1TILE_CCIM, alloc(341 * 8));
@@ -4120,7 +4120,7 @@ fn test_cdf_bundle_roundtrip() {
     var bundle = av1_cdf_bundle_new();
     assert_eq(av1_cdf_bundle_save(bundle, src), DR_OK, "bundle save ok");
     assert_eq(av1_cdf_bundle_load(bundle, dst), DR_OK, "bundle load ok");
-    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1839), 1, "ncc family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1875), 1, "ncc family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CC), load64(src + AV1TILE_CC), 3999), 1, "cc family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CCREF), load64(src + AV1TILE_CCREF), 177), 1, "ref family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CCIM), load64(src + AV1TILE_CCIM), 341), 1, "im family save+load exact");
