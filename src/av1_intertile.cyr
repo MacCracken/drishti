@@ -634,35 +634,61 @@ fn av1_residual_inter(tile, r, c, sub_size, has_chroma, tx_size, is_vartx): i64 
     store64(ttx + AV1TTC_LUMA_TXTYPE, AV1_DCT_DCT);
     var num_planes = 1;
     if (has_chroma) { num_planes = 3; }
-    var plane = 0;
-    while (plane < num_planes) {
-        var sx = 0;
-        var sy = 0;
-        if (plane > 0) { sx = subx; sy = suby; }
-        var plane_sz = av1_get_plane_residual_size(sub_size, plane, subx, suby);
-        var num4x4w = av1_num_4x4_w(plane_sz);
-        var num4x4h = av1_num_4x4_h(plane_sz);
-        if ((plane == 0) && (is_vartx != 0) && (lossless == 0)) {
-            var e = av1_transform_tree(tile, r, c, sub_size, c * AV1_MI_SIZE, r * AV1_MI_SIZE,
-            num4x4w * 4, num4x4h * 4);
-            if (e != DR_OK) { return e; }
-        } else {
-            var ptx = 0;                                        # Lossless: TX_4X4
-            if (lossless == 0) { ptx = av1_get_tx_size(plane, tx_size, sub_size, subx, suby); }
-            var step_x = av1_tx_width(ptx) >> 2;
-            var step_y = av1_tx_height(ptx) >> 2;
-            var y = 0;
-            while (y < num4x4h) {
-                var xx = 0;
-                while (xx < num4x4w) {
-                    var e = av1_transform_block_inter(tile, r, c, sub_size, plane, ptx, xx, y);
+    # 5.11.34 CHUNKING (mirror of the intra av1_residual): a block wider/taller than 64
+    # luma samples walks as a grid of 64x64 chunks. Both counts are 1 for every block
+    # <= 64, collapsing this to the previous single pass byte for byte.
+    var width_chunks = av1_block_width(sub_size) >> 6;
+    if (width_chunks < 1) { width_chunks = 1; }
+    var height_chunks = av1_block_height(sub_size) >> 6;
+    if (height_chunks < 1) { height_chunks = 1; }
+    var sub_size_chunk = sub_size;
+    if ((width_chunks > 1) || (height_chunks > 1)) { sub_size_chunk = AV1_BLOCK_64X64; }
+    var chunk_y = 0;
+    while (chunk_y < height_chunks) {
+        var chunk_x = 0;
+        while (chunk_x < width_chunks) {
+            var mi_row_chunk = r + (chunk_y << 4);
+            var mi_col_chunk = c + (chunk_x << 4);
+            var plane = 0;
+            while (plane < num_planes) {
+                var sx = 0;
+                var sy = 0;
+                if (plane > 0) { sx = subx; sy = suby; }
+                # the plane residual size uses the CHUNK size; get_tx_size stays keyed on
+                # the FULL block size (the spec's asymmetry, 5.11.34).
+                var plane_sz = av1_get_plane_residual_size(sub_size_chunk, plane, subx, suby);
+                var num4x4w = av1_num_4x4_w(plane_sz);
+                var num4x4h = av1_num_4x4_h(plane_sz);
+                if ((plane == 0) && (is_vartx != 0) && (lossless == 0)) {
+                    # transform_tree takes the CHUNK origin as its base (not block + offset).
+                    var e = av1_transform_tree(tile, r, c, sub_size,
+                    (mi_col_chunk >> sx) * AV1_MI_SIZE, (mi_row_chunk >> sy) * AV1_MI_SIZE,
+                    num4x4w * 4, num4x4h * 4);
                     if (e != DR_OK) { return e; }
-                    xx = xx + step_x;
+                } else {
+                    var ptx = 0;                                # Lossless: TX_4X4
+                    if (lossless == 0) { ptx = av1_get_tx_size(plane, tx_size, sub_size, subx, suby); }
+                    var step_x = av1_tx_width(ptx) >> 2;
+                    var step_y = av1_tx_height(ptx) >> 2;
+                    var off_x = (chunk_x << 4) >> sx;
+                    var off_y = (chunk_y << 4) >> sy;
+                    var y = 0;
+                    while (y < num4x4h) {
+                        var xx = 0;
+                        while (xx < num4x4w) {
+                            var e = av1_transform_block_inter(tile, r, c, sub_size, plane, ptx,
+                            xx + off_x, y + off_y);
+                            if (e != DR_OK) { return e; }
+                            xx = xx + step_x;
+                        }
+                        y = y + step_y;
+                    }
                 }
-                y = y + step_y;
+                plane = plane + 1;
             }
+            chunk_x = chunk_x + 1;
         }
-        plane = plane + 1;
+        chunk_y = chunk_y + 1;
     }
     return DR_OK;
 }
@@ -984,8 +1010,9 @@ fn av1_bd_mark_block(tile, r, c, sub_size, num_planes): i64 {
         var max_ph = (row_end >> sy) - (r >> sy);
         if (p_w4 > max_pw) { p_w4 = max_pw; }
         if (p_h4 > max_ph) { p_h4 = max_ph; }
-        var base_r = (r & 15) >> sy;
-        var base_c = (c & 15) >> sx;
+        var bdmask = av1_tile_sb_mask(tile);   # 31 for a 128x128 SB, else 15 (5.11.34)
+        var base_r = (r & bdmask) >> sy;
+        var base_c = (c & bdmask) >> sx;
         var i = 0;
         while (i < p_h4) {
             var j = 0;

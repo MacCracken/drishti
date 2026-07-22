@@ -35,6 +35,8 @@ enum Av1ModeInfoConst {
     AV1_CFL_SIGN_POS    = 2;
     AV1_BLOCK_4X4       = 0;
     AV1_BLOCK_8X8       = 3;        # MiSize >= BLOCK_8X8 gate for angle_delta
+    AV1_BLOCK_64X64     = 12;       # the residual() chunk size for a >64 block (5.11.34)
+    AV1_BLOCK_128X128   = 15;       # the 128x128 superblock size (bsl 5)
 }
 # Subsampled_Size sentinel for an unrepresentable (invalid) residual size.
 # Stored as the literal 0-1; not an enum member (enum inits must be literals).

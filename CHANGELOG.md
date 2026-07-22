@@ -4,6 +4,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **E2a — the 5.11.34 `sbMask` + the 64×64 residual chunk split (still gated).** Second E2a foundation bite;
+  output is byte-identical today (the sb128 frame gate stands and `AV1TILE_SB128` defaults to 0). New tile
+  field `AV1TILE_SB128` + `av1_tile_sb_mask` implement the spec's
+  `sbMask = use_128x128_superblock ? 31 : 15`, and the two sites that hardcoded `& 15` for an SB-RELATIVE
+  coordinate now read it: `av1_transform_block` (`sub_mi_row`/`sub_mi_col`) and `av1_bd_mark_block`. That
+  aliasing was the sharpest 128 hazard — at 128 the x=0 and x=16 tx columns both give `col & 15 == 0`, so the
+  BlockDecoded writes and the directional-intra availability reads would silently collide. Both
+  `av1_residual` (intra) and `av1_residual_inter` now wrap their plane walk in the spec's
+  `widthChunks`/`heightChunks` loop with `miSizeChunk = BLOCK_64X64`, preserving 5.11.34's asymmetry
+  (`get_tx_size` stays keyed on the FULL MiSize; the plane residual size uses the CHUNK size) and folding
+  `(chunkX << 4) >> subX` into the per-tx x/y — except `transform_tree`, which per spec takes the CHUNK
+  origin as its base. Added `AV1_BLOCK_64X64` / `AV1_BLOCK_128X128` constants.
+  WITNESSED + mutation-verified: the sbMask selection, and that a BLOCK_128X128 block marks BlockDecoded
+  across the whole 32×32-MI superblock (stubbing the mask to 15 reddens 5 asserts; dropping the per-chunk
+  offset reddens 4), plus an output-neutrality pin that a 64×64 block still touches exactly one chunk.
+  **NOT witnessed here, deliberately recorded as such:** the chunk LOOP itself. Forcing the chunk counts to 1
+  leaves the suite green, because an unchunked walk keeps `plane_sz` at BLOCK_128X128 and the TX_64X64 step
+  still visits all four quadrants — coverage is identical either way. The loop's only observable effect is
+  ORDER (Y,U,V interleaved per 64×64 chunk instead of all-Y then all-U then all-V), which changes the
+  coefficient read sequence and is invisible to a skip block or any coverage assertion. It is witnessed by a
+  real 128-SB vector through `make conformance` at the un-gate (roadmap.md E2a).
+
 - **E2a foundations — the BLOCK_128X128 partition entropy + a 128-capable BlockDecoded grid (still gated).**
   Groundwork for the single feature blocking every published AV1 test vector: libaom DEFAULTS to
   `use_128x128_superblock=1`, so drishti's 64×64-only superblock loop rejects the entire standard corpus

@@ -135,8 +135,19 @@ enum Av1TileOff {
     AV1TILE_SEGIDS    = 560;  # SegmentIds grid (frame-addressed; shared)
     AV1TILE_SEG_FH    = 568;  # fh for segmentation lookups (both lanes; not the dispatch key)
     AV1TILE_CUR_QINDEX = 576; # per-block dequant qindex (set per block; defaults to base_q)
-    AV1TILE_SIZE      = 584;
+    # --- 128x128 superblock (0.7.126 E2a). 0 = 64x64 (the only value the SB loop drives
+    #     today; the frame gate still rejects sb128). Selects the spec's
+    #     sbMask = use_128x128_superblock ? 31 : 15 for every SB-RELATIVE coordinate. ---
+    AV1TILE_SB128     = 584;
+    AV1TILE_SIZE      = 592;
 }
+# sbMask (5.11.34 / compute_prediction): the mask that turns an ABSOLUTE MI coord into
+# one relative to the current superblock. 31 for a 128x128 SB, 15 for 64x64.
+fn av1_tile_sb_mask(tile): i64 {
+    if (load64(tile + AV1TILE_SB128) != 0) { return 31; }
+    return 15;
+}
+fn av1_tile_set_sb128(tile, v): i64 { store64(tile + AV1TILE_SB128, v); return 0; }
 # BlockDecoded per-plane grid: indices [-1 .. SB4] in both dims, stored flat with a
 # +1 border, stride AV1_BD_STRIDE. The grid is sized for the LARGEST superblock
 # (128x128 = 32 MI units) so a 128-SB tile fits without a second allocation path.
@@ -177,6 +188,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_CUR_QINDEX, base_q);   # per-block dequant qindex; per-segment override at decode
     store64(tile + AV1TILE_SEG_FH, 0);            # set by the decode driver (both lanes) when fh is available
     store64(tile + AV1TILE_SEGIDS, 0);            # allocated by av1_tile_grids_new
+    store64(tile + AV1TILE_SB128, 0);             # 64x64 superblocks unless the driver says otherwise
     store64(tile + AV1TILE_ENABLE_EF, enable_ef);
     store64(tile + AV1TILE_IS_INTER, 0);
     store64(tile + AV1TILE_REDUCED_TX, reduced_tx);
@@ -550,8 +562,9 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     var start_y = base_y_block + (4 * y);
     var row = (start_y << suby) >> 2;
     var col = (start_x << subx) >> 2;
-    var sub_mi_row = row & 15;                 # sbMask = 15 (64x64 SB)
-    var sub_mi_col = col & 15;
+    var sbmask = av1_tile_sb_mask(tile);       # 31 for a 128x128 SB, else 15 (5.11.34)
+    var sub_mi_row = row & sbmask;
+    var sub_mi_col = col & sbmask;
     var step_x = av1_tx_width(tx_sz) >> 2;
     var step_y = av1_tx_height(tx_sz) >> 2;
     var mi_cols = load64(tile + AV1TILE_MI_COLS);
@@ -697,29 +710,53 @@ fn av1_residual(tile, blk): i64 {
     var suby = load64(tile + AV1TILE_SUBY);
     var num_planes = 1;
     if (has_chroma) { num_planes = 3; }
-    var plane = 0;
-    while (plane < num_planes) {
-        var sx = 0;
-        var sy = 0;
-        if (plane > 0) { sx = subx; sy = suby; }
-        var tx_sz = load64(blk + AV1BLK_TX_SIZE);
-        if (lossless) { tx_sz = 0; }                # TX_4X4
-        else { tx_sz = av1_get_tx_size(plane, tx_sz, mi_size, subx, suby); }
-        var step_x = av1_tx_width(tx_sz) >> 2;
-        var step_y = av1_tx_height(tx_sz) >> 2;
-        var plane_sz = av1_get_plane_residual_size(mi_size, plane, subx, suby);
-        var num4x4w = av1_num_4x4_w(plane_sz);
-        var num4x4h = av1_num_4x4_h(plane_sz);
-        var y = 0;
-        while (y < num4x4h) {
-            var x = 0;
-            while (x < num4x4w) {
-                av1_transform_block(tile, blk, plane, tx_sz, x, y);
-                x = x + step_x;
+    # 5.11.34 CHUNKING: a block WIDER or TALLER than 64 luma samples (only reachable with
+    # 128x128 superblocks) is walked as a grid of 64x64 chunks, each stepping the tx grid
+    # of BLOCK_64X64 rather than of the whole block. For every block <= 64 both counts are
+    # 1 and this collapses to the previous single pass, byte for byte.
+    var width_chunks = av1_block_width(mi_size) >> 6;
+    if (width_chunks < 1) { width_chunks = 1; }
+    var height_chunks = av1_block_height(mi_size) >> 6;
+    if (height_chunks < 1) { height_chunks = 1; }
+    var mi_size_chunk = mi_size;
+    if ((width_chunks > 1) || (height_chunks > 1)) { mi_size_chunk = AV1_BLOCK_64X64; }
+    var chunk_y = 0;
+    while (chunk_y < height_chunks) {
+        var chunk_x = 0;
+        while (chunk_x < width_chunks) {
+            var plane = 0;
+            while (plane < num_planes) {
+                var sx = 0;
+                var sy = 0;
+                if (plane > 0) { sx = subx; sy = suby; }
+                # NOTE the spec's asymmetry (5.11.34): get_tx_size is keyed on the FULL
+                # MiSize, while the plane residual size uses the CHUNK size.
+                var tx_sz = load64(blk + AV1BLK_TX_SIZE);
+                if (lossless) { tx_sz = 0; }                # TX_4X4
+                else { tx_sz = av1_get_tx_size(plane, tx_sz, mi_size, subx, suby); }
+                var step_x = av1_tx_width(tx_sz) >> 2;
+                var step_y = av1_tx_height(tx_sz) >> 2;
+                var plane_sz = av1_get_plane_residual_size(mi_size_chunk, plane, subx, suby);
+                var num4x4w = av1_num_4x4_w(plane_sz);
+                var num4x4h = av1_num_4x4_h(plane_sz);
+                # x/y stay relative to the BLOCK origin (transform_block derives its base
+                # from the block's MiRow/MiCol), so the chunk offset is folded into them.
+                var off_x = (chunk_x << 4) >> sx;
+                var off_y = (chunk_y << 4) >> sy;
+                var y = 0;
+                while (y < num4x4h) {
+                    var x = 0;
+                    while (x < num4x4w) {
+                        av1_transform_block(tile, blk, plane, tx_sz, x + off_x, y + off_y);
+                        x = x + step_x;
+                    }
+                    y = y + step_y;
+                }
+                plane = plane + 1;
             }
-            y = y + step_y;
+            chunk_x = chunk_x + 1;
         }
-        plane = plane + 1;
+        chunk_y = chunk_y + 1;
     }
     return DR_OK;
 }

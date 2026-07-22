@@ -559,6 +559,89 @@ fn test_intra_predict_multitile_ref() {
     return 0;
 }
 
+# ================================================================
+# 0.7.126 E2a: the 5.11.34 sbMask + the 64x64 residual chunk split.
+# Not reachable from a decode yet (the sb128 frame gate stands), so these drive
+# av1_residual directly with a BLOCK_128X128 block on an sb128-flagged tile.
+# ================================================================
+fn test_sb_mask_selects_31() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    assert_eq(av1_tile_sb_mask(t), 15, "default tile is a 64x64 SB -> mask 15");
+    av1_tile_set_sb128(t, 1);
+    assert_eq(av1_tile_sb_mask(t), 31, "sb128 tile -> mask 31");
+    av1_tile_set_sb128(t, 0);
+    assert_eq(av1_tile_sb_mask(t), 15, "cleared -> back to 15");
+    return 0;
+}
+# THE sbMask WITNESS: a BLOCK_128X128 block must mark BlockDecoded across the whole
+# 32x32-MI superblock. With sbMask stuck at 15 the bottom-right quadrant's writes ALIAS
+# onto the top-left (16 & 15 == 0), so (16,16)/(31,31) stay 0 — mutation-verified, as is
+# dropping the per-chunk x/y offset.
+#
+# HONEST SCOPE — this does NOT witness the chunk LOOP. Forcing widthChunks/heightChunks
+# to 1 leaves this green, because an unchunked walk keeps plane_sz at BLOCK_128X128
+# (32x32 MI) and the TX_64X64 step still visits all four quadrants: COVERAGE is identical
+# either way. The chunk loop's only observable effect is ORDER — it interleaves
+# Y,U,V per 64x64 chunk instead of walking all of Y, then all of U, then all of V — which
+# changes the sequence of coefficient reads and is therefore invisible to a skip block and
+# to any coverage-based assertion. That is witnessed by a real 128-SB vector through
+# `make conformance` when the SB loop is un-gated (roadmap.md E2a).
+fn test_residual_128_sbmask_coverage() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(t);
+    av1_tile_set_sb128(t, 1);
+    store64(t + AV1TILE_NCC, av1_noncoeff_cdf_blob());
+    av1_bd_clear(t, 0, 0, AV1_SB4_128, 1);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);          # skip -> prediction + BD marking, no coeff reads
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    var blk = av1_block_new();
+    store64(blk + AV1BLK_MI_ROW, 0);
+    store64(blk + AV1BLK_MI_COL, 0);
+    store64(blk + AV1BLK_MI_SIZE, AV1_BLOCK_128X128);
+    store64(blk + AV1BLK_HAS_CHROMA, 0);
+    store64(blk + AV1BLK_LOSSLESS, 0);
+    store64(blk + AV1BLK_TX_SIZE, 4);     # TX_64X64 -> one tx per 64x64 chunk
+    store64(blk + AV1BLK_MI, mi);
+    assert_eq(av1_residual(t, blk), DR_OK, "128x128 residual walks ok");
+    assert_eq(av1_bd_get(t, 0, 0, 0), 1, "chunk (0,0) decoded");
+    assert_eq(av1_bd_get(t, 0, 0, 16), 1, "chunk (0,1) decoded");
+    assert_eq(av1_bd_get(t, 0, 16, 0), 1, "chunk (1,0) decoded");
+    assert_eq(av1_bd_get(t, 0, 16, 16), 1, "chunk (1,1) decoded");
+    assert_eq(av1_bd_get(t, 0, 31, 31), 1, "far corner of the 128 SB decoded");
+    return 0;
+}
+# OUTPUT-NEUTRALITY pin: a 64x64 block is ONE chunk, so nothing past the 16x16-MI
+# quadrant is touched — the chunk loop must not leak into the 64-SB path.
+fn test_residual_64_single_chunk() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(128, 128, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(frame, 32, 32, 40, 1, 0, 1);
+    av1_tile_grids_new(t);
+    store64(t + AV1TILE_NCC, av1_noncoeff_cdf_blob());
+    av1_bd_clear(t, 0, 0, AV1_SB4_128, 1);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    var blk = av1_block_new();
+    store64(blk + AV1BLK_MI_ROW, 0);
+    store64(blk + AV1BLK_MI_COL, 0);
+    store64(blk + AV1BLK_MI_SIZE, AV1_BLOCK_64X64);
+    store64(blk + AV1BLK_HAS_CHROMA, 0);
+    store64(blk + AV1BLK_LOSSLESS, 0);
+    store64(blk + AV1BLK_TX_SIZE, 4);
+    store64(blk + AV1BLK_MI, mi);
+    assert_eq(av1_residual(t, blk), DR_OK, "64x64 residual walks ok");
+    assert_eq(av1_bd_get(t, 0, 0, 0), 1, "the single chunk is decoded");
+    assert_eq(av1_bd_get(t, 0, 0, 16), 0, "64x64 block does NOT reach the next chunk");
+    assert_eq(av1_bd_get(t, 0, 16, 16), 0, "64x64 block does NOT reach the far quadrant");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("get_tx_size");
@@ -586,6 +669,10 @@ fn main() {
     test_coeff_ctx_tile_relative();
     test_group("intra reference clamp frame-mi (multi-tile)");
     test_intra_predict_multitile_ref();
+    test_group("E2a: sbMask (chunk-loop ORDER is witnessed at un-gate, not here)");
+    test_sb_mask_selects_31();
+    test_residual_128_sbmask_coverage();
+    test_residual_64_single_chunk();
     return assert_summary();
 }
 
