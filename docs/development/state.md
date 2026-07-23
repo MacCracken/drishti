@@ -6,6 +6,27 @@
 
 ## Version
 
+**0.7.126** — cut 2026-07-22, not yet tagged (user's git). **PHASE E — FIRST EXTERNAL CONFORMANCE, AND
+128x128 SUPERBLOCKS DECODE. Six PUBLISHED libaom vectors decode their keyframe BIT-EXACTLY.** E1 built the
+harness (programs/conformance.cyr + vector-probe.cyr, scripts/conformance.sh, `make conformance`): libaom
+encodes and aomdec produces the reference pixels, so the reference cannot collude with drishti's own reading
+of the spec — the blind spot every prior gate had. It immediately found that libaom DEFAULTS to
+use_128x128_superblock, so drishti's 64x64-only SB loop rejected the ENTIRE published corpus. E2a fixed that
+in three bites: (1) Default_Partition_W128_Cdf + the 8-symbol bsl-5 alphabet (HORZ_4/VERT_4 forbidden at 128)
++ a 128-capable BlockDecoded grid (stride 18->34); ncc 1839->1875 and the C1 bundle 7208->7244. (2) the
+5.11.34 sbMask (31 vs 15, via a new AV1TILE_SB128) at the two sites that hardcoded `& 15`, plus the 64x64
+residual chunk split in BOTH residual drivers. (3) the un-gate — the SB loop derives sbSize/sbSize4 from the
+flag and the blanket reject is deleted. RESULT: size-16x16/32x32/64x64, quantizer-32, cdfupdate and mv all
+match their PUBLISHED reference MD5s byte for byte. Also fixed: programs/smoke.cyr had hardcoded
+`drishti_version() != 700` and had been FAILING since the version passed 700 — undetected because `make build`
+never RAN it; it now runs in the gate. STILL OPEN: E2d — a 128-SB decode defect that a controlled sweep
+proved is NOT lossless and NOT loop restoration (both original attributions REFUTED); minimal reproducer now
+in the gate: the same 352x288 source with only `--sb-size` differing matches at 64 and desyncs at 128. Needs
+partial SB coverage in BOTH dimensions but is also content-dependent. E2b (inter reconstruction rounding,
+max|d| 2..4, reproduces with CDEF+deblocking both off) and E2c (inter entropy desync) remain. 38 suites,
+**30,246** suite + **7,410** fuzz, all six gates green; `make conformance` 16 matched / 5 known-gap /
+0 regressed. [[av1-decode-remaining-tracks]]
+
 **0.7.125** — cut 2026-07-21, not yet tagged (user's git). **PHASE D1 — SEGMENTATION decodes end-to-end to
 PIXELS (intra + inter).** The full spatial-config segment-id path: `Default_Segment_Id_Cdf[3][8]` added to the
 ncc blob (1812→1839; the C1 saved-CDF bundle grows in lockstep 7181→7208, all downstream offsets +27);

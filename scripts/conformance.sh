@@ -151,6 +151,41 @@ check_published() { # name expect(match|xfail)
     fi
 }
 
+# ---- THE 128-SB REPRODUCER (E2d) ----
+# Same source, same encoder settings, ONLY --sb-size differs. 64 must match; 128 is the
+# known defect. This is the minimal local handle on it: it needs partial superblock
+# coverage in BOTH dimensions (352x288 with 128-SBs leaves a 96-col x 32-row remainder),
+# and it is CONTENT-dependent — the published 352x288 vectors cdfupdate/quantizer-32 have
+# the same geometry and decode fine. NOT a lossless bug: lossless at 128 SB matches at
+# 256x256, 128x128 and 256x224.
+sbrepro() { # sbsize expect(match|xfail)
+    local sb="$1" expect="$2"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=352x288:rate=30" -frames:v 1 \
+        -pix_fmt yuv420p -f rawvideo "$WORK/r.yuv" 2>/dev/null || return 0
+    aomenc --codec=av1 -w 352 -h 288 --i420 --cpu-used=8 --end-usage=q --cq-level=40 \
+        --sb-size="$sb" --aq-mode=0 --deltaq-mode=0 --enable-restoration=0 \
+        --tune-content=default --enable-palette=0 --enable-intrabc=0 --kf-max-dist=1 \
+        --limit=1 --ivf -o "$WORK/sb$sb.ivf" "$WORK/r.yuv" 2>/dev/null
+    [ -f "$WORK/sb$sb.ivf" ] || return 0
+    cp "$WORK/sb$sb.ivf" build/conformance-input.ivf
+    rm -f build/conformance-out-*.i420
+    ./build/drishti-conformance >"$WORK/sb$sb.log" 2>&1
+    aomdec --rawvideo -o "$WORK/sb$sb.ref" "$WORK/sb$sb.ivf" 2>/dev/null
+    local a b
+    a=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    b=$(md5sum "$WORK/sb$sb.ref" 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$a" ] && [ "$a" = "$b" ]; then
+        echo "  352x288 sb-size=$sb: keyframe BIT-EXACT"; pass=$((pass+1))
+    elif [ "$expect" = "xfail" ]; then
+        echo "  352x288 sb-size=$sb: keyframe differs (known 128-SB defect)"; xfail=$((xfail+1))
+    else
+        echo "  352x288 sb-size=$sb: keyframe REGRESSED"; fail=$((fail+1))
+    fi
+}
+echo "--- 128-SB reproducer (same source, only --sb-size differs) ---"
+sbrepro 64 match
+sbrepro 128 xfail
+
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done
 for v in $PUBLISHED_XFAIL; do check_published "$v" xfail; done

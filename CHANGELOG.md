@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.126] - 2026-07-22
+
+- **E2 diagnosis — the two remaining keyframe gaps are ONE 128-superblock defect, not two feature bugs.**
+  A controlled sweep REFUTED both of the attributions filed at the un-gate. `quantizer-00` was blamed on the
+  lossless (WHT) path: lossless at 128 superblocks is in fact bit-exact at 256×256, 128×128 and 256×224.
+  `mfmv` was blamed on loop restoration; it shares the same 352×288 geometry as the real cause. New minimal
+  reproducer, now a tracked `make conformance` case — the SAME source with **only `--sb-size` differing**
+  matches at 64 and desyncs at 128 (`AV1_ERR_BAD_FRAME`). Narrowing so far: the defect needs PARTIAL
+  superblock coverage in BOTH dimensions (352×256 and 256×288 each match; 352×288 fails), which is exactly
+  the geometry that produces a superblock with `hasRows == false && hasCols == false` — the forced
+  `PARTITION_SPLIT` branch that reads no symbol. It is ALSO content-dependent: the published cdfupdate and
+  quantizer-32 vectors have the identical 352×288 geometry and decode bit-exactly, so that corner geometry is
+  necessary but not sufficient. Because the failure is a symbol DESYNC caught by `av1_sym_dec_exit`, the
+  fault is in what is READ near that corner, not in reconstruction. The gate now pins the 64-SB half as a
+  HARD case, so the reproducer cannot rot (roadmap.md E2d).
+
 - **E2a UN-GATED — 128×128 superblocks decode, and SIX PUBLISHED libaom conformance vectors now decode their
   keyframe BIT-EXACTLY against libaom's own reference MD5s.** libaom DEFAULTS to
   `use_128x128_superblock = 1`, so this single gate was rejecting essentially every real-world AV1 stream —

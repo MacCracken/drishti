@@ -521,13 +521,25 @@ any real stream.
       **SIX published libaom vectors now decode their keyframe BIT-EXACTLY vs the
       published reference MD5s** (`size-16x16/32x32/64x64`, `quantizer-32`, `cdfupdate`,
       `mv`) — wired into `make conformance`.
-    - E2d. **Lossless keyframe mismatch.** `av1-1-b8-00-quantizer-00` (`base_q_idx = 0`,
-      `coded_lossless = 1`) decodes but its keyframe differs from the reference — the WHT
-      lossless reconstruction path. **M.** (xfail in `make conformance`.)
-    - E2e. **Loop-restoration keyframe mismatch.** `av1-1-b8-06-mfmv` (`uses_lr = 1`)
-      decodes but its keyframe differs — LR is active on the keyframe. Note the earlier
-      generated-corpus runs had `--enable-restoration=0`, so this is the first time LR has
-      been exercised against an external reference. **M.** (xfail in `make conformance`.)
+    - E2d. **A 128-SUPERBLOCK decode defect — the cause of BOTH remaining keyframe gaps.**
+      Originally filed as two separate feature bugs ("lossless" for
+      `av1-1-b8-00-quantizer-00` and "loop restoration" for `av1-1-b8-06-mfmv`); a
+      controlled sweep REFUTED both attributions. Minimal reproducer, now a tracked
+      `make conformance` case: the same 352x288 source encoded with **only `--sb-size`
+      differing** matches at 64 and desyncs at 128 (`AV1_ERR_BAD_FRAME`).
+      What the sweep established:
+        * NOT lossless — lossless at 128 SB is bit-exact at 256x256, 128x128 and 256x224.
+        * Needs PARTIAL superblock coverage in BOTH dimensions: 352x256 (partial cols only)
+          and 256x288 (partial rows only) both match; 352x288 (96-col x 32-row remainder)
+          fails. That geometry is the only one producing a superblock with
+          `hasRows == false && hasCols == false` — the forced-PARTITION_SPLIT branch that
+          reads no symbol.
+        * But it is ALSO content-dependent: the published cdfupdate / quantizer-32 vectors
+          have the identical 352x288 geometry and decode bit-exactly, so the corner
+          geometry is necessary, not sufficient.
+      The failure mode is a symbol DESYNC (the surviving pixels before it are correct;
+      `av1_sym_dec_exit`'s SymbolMaxBits bound catches it), so the fault is in what is READ
+      at or near that corner, not in reconstruction. **M–L.** (xfail in `make conformance`.)
     - E2b. **Inter reconstruction rounding.** Inter frames with real coded content
       decode but land within max |delta| 2..4 of the reference (~7% of samples,
       scattered, no structural offset). Reproduces with CDEF *and* deblocking both
