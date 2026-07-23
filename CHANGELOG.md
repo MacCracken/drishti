@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **E2a UN-GATED — 128×128 superblocks decode, and SIX PUBLISHED libaom conformance vectors now decode their
+  keyframe BIT-EXACTLY against libaom's own reference MD5s.** libaom DEFAULTS to
+  `use_128x128_superblock = 1`, so this single gate was rejecting essentially every real-world AV1 stream —
+  all eight published vectors surveyed. With the two foundation bites in place the un-gate itself is small:
+  `av1_decode_tile`/`av1_encode_tile` derive `sbSize`/`sbSize4` from the new `AV1TILE_SB128`
+  (`BLOCK_128X128`/32 vs `BLOCK_64X64`/16) and pass it through to `clear_cdef`'s `use_128`, `av1_bd_clear`,
+  `read_lr`/`write_lr` and `decode_partition`; the decode driver sets the flag from
+  `av1_seq_use_128x128(seq)`; and the blanket reject in `av1_frame_dec_new` is deleted. Everything else the
+  loop feeds was already parameterized (the map found `av1_clear_cdef`'s `use_128` branch, `av1_bd_clear`'s
+  `sb4`, `av1_read_lr`'s bsize, the 22-entry block tables and `Partition_Subsize`'s 128 column all correct
+  and unused).
+  RESULT via `make conformance`, now extended to the published corpus: `av1-1-b8-01-size-{16x16,32x32,64x64}`,
+  `-00-quantizer-32`, `-04-cdfupdate` and `-05-mv` all match their published keyframe MD5 byte for byte.
+  TWO remaining keyframe gaps, each with a named cause and recorded as xfail: `-00-quantizer-00`
+  (`coded_lossless = 1` — the WHT lossless path, roadmap E2d) and `-06-mfmv` (`uses_lr = 1` — loop
+  restoration active, roadmap E2e). Inter frames still hit E2b/E2c.
+  The old "sb128 is rejected" test is repurposed rather than deleted: it now feeds a genuinely 64-SB payload
+  while the sequence header LIES about the superblock size, and asserts the mismatch is DETECTED
+  (`AV1_ERR_BAD_FRAME` from the spec's `SymbolMaxBits >= -14` bound at `exit_symbol`) — no frame, no crash,
+  no silent garbage.
+
 - **E2a — the 5.11.34 `sbMask` + the 64×64 residual chunk split (still gated).** Second E2a foundation bite;
   output is byte-identical today (the sb128 frame gate stands and `AV1TILE_SB128` defaults to 0). New tile
   field `AV1TILE_SB128` + `av1_tile_sb_mask` implement the spec's

@@ -89,23 +89,34 @@ fn av1_decode_tile(tile): i64 {
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }         # RefLrWiener/RefSgrXqd = Mid, per tile
+    # sbSize = use_128x128_superblock ? BLOCK_128X128 : BLOCK_64X64; sbSize4 =
+    # Num_4x4_Blocks_Wide[sbSize] (5.11.2). Everything the loop feeds — the cdef clear,
+    # the BlockDecoded reseed, read_lr and decode_partition — is already parameterized,
+    # so the superblock size is the ONLY thing that changes here.
+    var use128 = load64(tile + AV1TILE_SB128);
+    var sb4 = AV1_SB4;
+    var sb_bsize = AV1_BLOCK_64X64;
+    if (use128 != 0) {
+        sb4 = AV1_SB4_128;
+        sb_bsize = AV1_BLOCK_128X128;
+    }
     var r = row_start;
     while (r < row_end) {
         av1_clear_left_context(tile, num_planes);
         var c = col_start;
         while (c < col_end) {
-            # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. use_128 = 0 (the
-            # SB loop steps by AV1_SB4 = 64x64). Guarded: grid may be unallocated.
-            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, 0); }
-            av1_bd_clear(tile, r, c, AV1_SB4, num_planes);
+            # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. Guarded: grid may be
+            # unallocated. A 128 SB spans FOUR 64x64 cdef units, which use_128 handles.
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, use128); }
+            av1_bd_clear(tile, r, c, sb4, num_planes);
             if (lrp != 0) {                              # read_lr (5.11.2) before decode_partition
-                av1_read_lr(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_NCC), lrp, r, c, 12,
+                av1_read_lr(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
                 av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
             }
-            av1_decode_partition(tile, r, c, 12);        # BLOCK_64X64
-            c = c + AV1_SB4;
+            av1_decode_partition(tile, r, c, sb_bsize);
+            c = c + sb4;
         }
-        r = r + AV1_SB4;
+        r = r + sb4;
     }
     return av1_sym_dec_err(load64(tile + AV1TILE_SD));
 }
@@ -125,20 +136,27 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }
+    var use128 = load64(tile + AV1TILE_SB128);
+    var sb4 = AV1_SB4;
+    var sb_bsize = AV1_BLOCK_64X64;
+    if (use128 != 0) {
+        sb4 = AV1_SB4_128;
+        sb_bsize = AV1_BLOCK_128X128;
+    }
     var r = 0;
     while (r < mi_rows) {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
-            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, 0); }
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, use128); }
             if (lrp != 0) {
-                av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, 12,
+                av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
                 av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
             }
-            av1_encode_partition(tile, r, c, 12, plan_part, pc, plan_mi, plan_tx, bc);
-            c = c + AV1_SB4;
+            av1_encode_partition(tile, r, c, sb_bsize, plan_part, pc, plan_mi, plan_tx, bc);
+            c = c + sb4;
         }
-        r = r + AV1_SB4;
+        r = r + sb4;
     }
     return av1_sym_enc_err(load64(tile + AV1TILE_ENC));
 }

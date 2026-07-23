@@ -59,7 +59,7 @@ fn probe_gate(k, v, bad): i64 {
 
 fn probe_seq(seq): i64 {
     probe_puts(" SEQUENCE HEADER\n");
-    probe_gate("use_128x128_superblock", load64(seq + AV1_SEQ_SB128), 1);
+    probe_kv("use_128x128_superblock", load64(seq + AV1_SEQ_SB128));   # decodes as of 0.7.126 (E2a)
     probe_kv("bit_depth", load64(seq + AV1_SEQ_BITDEPTH));
     probe_kv("num_planes", load64(seq + AV1_SEQ_NUM_PLANES));
     probe_kv("subsampling_x", load64(seq + AV1_SEQ_SUBX));

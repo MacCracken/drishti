@@ -336,14 +336,11 @@ enum Av1FrameDec {
 fn av1_frame_dec_new(seq, fh, out_err): i64 {
     store64(out_err, DR_OK);
     if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
-    # use_128x128_superblock (spec 5.5.1): the tile SB loop (av1_decode_tile) hardcodes
-    # 64x64 SBs — it steps by AV1_SB4 and calls av1_decode_partition with BLOCK_64X64 —
-    # so a 128-SB stream would be silently mis-parsed (only the top-left 64x64 of each
-    # superblock) instead of decoded. Reject it here, at the one chokepoint every decode
-    # path (av1_decode_frame/_ref, av1_decode_obus, av1_decode_stream) shares, so a
-    # valid-but-128-SB seq fails cleanly rather than producing garbage (trust no input
-    # byte, CLAUDE.md; 128-SB superblock decode is out of scope, roadmap.md).
-    if (av1_seq_use_128x128(seq) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    # use_128x128_superblock (spec 5.5.1) DECODES as of 0.7.126 (E2a): the SB loop drives
+    # sbSize/sbSize4 off AV1TILE_SB128, the partition tree has the W128 CDF + its 8-symbol
+    # alphabet, residual() splits a >64 block into 64x64 chunks, and every SB-relative
+    # coordinate uses sbMask (31 vs 15). libaom DEFAULTS to 128x128 superblocks, so this
+    # gate was rejecting essentially every real-world AV1 stream.
     # ---- SILENT-MIS-DECODE REJECTS (0.7.116) ----
     # Each of these is a frame-header feature drishti PARSES but does not IMPLEMENT. Parsing
     # without implementing is the worst of both worlds: the stream is accepted, decoding
@@ -467,6 +464,7 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         store64(tile + AV1TILE_TX_MODE, tx_mode);
         store64(tile + AV1TILE_ENABLE_FI, enable_fi);
         store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
+        av1_tile_set_sb128(tile, av1_seq_use_128x128(seq));   # 128x128 superblocks (0.7.126 E2a)
         av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows);
         var tile0 = load64(fdc + AV1FDEC_TILE0);
         if (tile0 == 0) {

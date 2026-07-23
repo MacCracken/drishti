@@ -513,14 +513,21 @@ any real stream.
     first evidence in this arc that drishti did not produce itself. The keyframe path
     is a HARD gate; inter cases are xfail and tighten as E2 lands.
   - E2. **Fix what the vectors expose.** Three concrete findings, in priority order:
-    - E2a. **128×128 superblocks — THE blocker for the standard corpus.** libaom
-      DEFAULTS to `use_128x128_superblock=1`; all 8 published AV1 test vectors
-      surveyed use it, and drishti's SB loop is 64×64-only (`av1_decode_tile` steps
-      AV1_SB4 and calls decode_partition with BLOCK_64X64), so every stock vector
-      rejects before a single block is decoded. Needs BLOCK_128X128 in the partition
-      tree, the deferred W128 partition CDFs, the 128×128 residual chunk split, and
-      the SB-loop stride. **L.** Nothing else in Phase E can be measured on real
-      vectors until this lands — it outranks the remaining D items for that reason.
+    - E2a. ✅ **128×128 superblocks — DONE (0.7.126).** libaom DEFAULTS to
+      `use_128x128_superblock=1`, so this gate rejected essentially every real stream.
+      Landed in three bites: the W128 partition CDF + its 8-symbol alphabet + a
+      128-capable BlockDecoded grid; the `sbMask` (31 vs 15) + the 64×64 `residual()`
+      chunk split; then the un-gate (SB loop drives sbSize/sbSize4 off `AV1TILE_SB128`).
+      **SIX published libaom vectors now decode their keyframe BIT-EXACTLY vs the
+      published reference MD5s** (`size-16x16/32x32/64x64`, `quantizer-32`, `cdfupdate`,
+      `mv`) — wired into `make conformance`.
+    - E2d. **Lossless keyframe mismatch.** `av1-1-b8-00-quantizer-00` (`base_q_idx = 0`,
+      `coded_lossless = 1`) decodes but its keyframe differs from the reference — the WHT
+      lossless reconstruction path. **M.** (xfail in `make conformance`.)
+    - E2e. **Loop-restoration keyframe mismatch.** `av1-1-b8-06-mfmv` (`uses_lr = 1`)
+      decodes but its keyframe differs — LR is active on the keyframe. Note the earlier
+      generated-corpus runs had `--enable-restoration=0`, so this is the first time LR has
+      been exercised against an external reference. **M.** (xfail in `make conformance`.)
     - E2b. **Inter reconstruction rounding.** Inter frames with real coded content
       decode but land within max |delta| 2..4 of the reference (~7% of samples,
       scattered, no structural offset). Reproduces with CDEF *and* deblocking both

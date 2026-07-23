@@ -112,6 +112,49 @@ check kf_only all
 check seq_filters keyframe
 check seq_nofilt  keyframe
 
+# ---- PUBLISHED conformance vectors (libaom's own corpus + its own reference MD5s) ----
+# These are the real thing: streams drishti never touched, with checksums published by
+# the reference implementation. They ALL use 128x128 superblocks (libaom's default), so
+# every one of them rejected outright until E2a landed. The KEYFRAME (frame 1) is the
+# gate; later frames hit the inter gaps (E2b/E2c) and are not scored here.
+VDIR="${CONFORMANCE_VECTORS:-build/vectors}"
+AOM_BASE=https://storage.googleapis.com/aom-test-data
+PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
+av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv"
+# Known keyframe gaps, each with a named cause (roadmap.md E2d/E2e):
+#   quantizer-00 -> coded_lossless = 1 (the WHT lossless path)
+#   mfmv         -> uses_lr = 1 (loop restoration active on the keyframe)
+PUBLISHED_XFAIL="av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
+
+mkdir -p "$VDIR"
+fetch_vec() { # name -> 0 if available
+    [ -f "$VDIR/$1.ivf" ] && [ -f "$VDIR/$1.ivf.md5" ] && return 0
+    curl -sf --max-time 120 -o "$VDIR/$1.ivf" "$AOM_BASE/$1.ivf" || return 1
+    curl -sf --max-time 60 -o "$VDIR/$1.ivf.md5" "$AOM_BASE/$1.ivf.md5" || return 1
+    return 0
+}
+check_published() { # name expect(match|xfail)
+    local name="$1" expect="$2"
+    if ! fetch_vec "$name"; then echo "  $name: (unavailable — skipped)"; return 0; fi
+    cp "$VDIR/$name.ivf" build/conformance-input.ivf
+    rm -f build/conformance-out-*.i420
+    ./build/drishti-conformance >"$WORK/$name.log" 2>&1
+    local ref got
+    ref=$(head -1 "$VDIR/$name.ivf.md5" | cut -d' ' -f1)
+    got=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$got" ] && [ "$got" = "$ref" ]; then
+        echo "  $name: keyframe BIT-EXACT vs published md5"; pass=$((pass+1))
+    elif [ "$expect" = "xfail" ]; then
+        echo "  $name: keyframe differs (known gap)"; xfail=$((xfail+1))
+    else
+        echo "  $name: keyframe REGRESSED (ref=$ref got=${got:-none})"; fail=$((fail+1))
+    fi
+}
+
+echo "--- published libaom vectors (128x128 superblocks) ---"
+for v in $PUBLISHED; do check_published "$v" match; done
+for v in $PUBLISHED_XFAIL; do check_published "$v" xfail; done
+
 echo "=== matched=$pass  known-gap=$xfail  REGRESSED=$fail ==="
 [ "${CONFORMANCE_KEEP:-0}" = "1" ] || rm -f "$WORK"/*.f[0-9] "$WORK"/*.ref
 if [ "$fail" -gt 0 ]; then
