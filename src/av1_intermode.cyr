@@ -2606,7 +2606,7 @@ fn av1_write_is_inter(enc, cc, nb, fh, skip_mode, segment_id, is_inter): i64 {
 # The inter_frame_mode_info output: the frame-level block fields + the embedded
 # Av1InterBlock (valid when ISINTER).
 enum Av1BlockInfoOff {
-    AV1FB_SEGID    = 0;     # segment_id (0 while segmentation reads are deferred; roadmap.md)
+    AV1FB_SEGID    = 0;     # segment_id, read by inter_segment_id (5.11.10) as of 0.7.125 D1
     AV1FB_SKIPMODE = 8;
     AV1FB_SKIP     = 16;
     AV1FB_ISINTER  = 24;

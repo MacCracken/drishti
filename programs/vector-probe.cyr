@@ -99,6 +99,7 @@ fn probe_fh(fh): i64 {
     probe_kv("segmentation_temporal_update", load64(fh + AV1FH_SEG_TEMPORAL_UPDATE));
     probe_kv("segmentation_update_data", load64(fh + AV1FH_SEG_UPDATE_DATA));
     probe_gate("seg_supported", av1_seg_supported(fh), 0);
+    probe_kv("disable_cdf_update", load64(fh + AV1FH_DISABLE_CDF_UPDATE));   # drives symbol adaptation
     probe_kv("disable_frame_end_update_cdf", load64(fh + AV1FH_DISABLE_FE_UPDATE_CDF));
     probe_kv("context_update_tile_id", load64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID));
     return 0;

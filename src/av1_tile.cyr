@@ -14,8 +14,9 @@
 # round-trips.
 #
 # SCOPE (intra keyframe baseline): a SINGLE tile spanning the frame
-# (MiRowStart/ColStart = 0, MiRowEnd/ColEnd = MiRows/MiCols), 64x64 superblocks
-# (no 128x128). The per-SB clear_cdef + read_lr are wired here (guarded by the
+# (MiRowStart/ColStart = 0, MiRowEnd/ColEnd = MiRows/MiCols). The superblock size
+# is 64x64 OR 128x128, taken from AV1TILE_SB128 (0.7.126 E2a — sbSize/sbSize4 per
+# 5.11.2). The per-SB clear_cdef + read_lr are wired here (guarded by the
 # tile's CdefIdx / LrParams — inert until a frame-level driver attaches them);
 # delta-q per-SB reads, multi-tile, and the frame-end CDF save/average +
 # decode_frame_wrapup are deferred (roadmap.md).

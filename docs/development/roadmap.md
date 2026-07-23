@@ -93,49 +93,57 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 ## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e) — see HONEST STATUS (no completion % — every one ever given here was wrong)
 
-> ### HONEST STATUS as of 0.7.118 — read this before believing any "nearly done"
+> ### HONEST STATUS as of 0.7.126 — read this before believing any "nearly done"
 >
 > **There is no honest single completion number, and this doc will not print one.**
 > The metric used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**
 > — i.e. it went UP as work got done, because it was lowballed the whole time. The
 > low point literally wrote the entire remaining inter effort as "inter ~1 — just
 > scaled-ref MC", when no inter FRAME had ever decoded at all. Any "% done" or
-> "N patches left" in this arc's history (including a "~40%" a prior revision of THIS
-> block briefly carried) was a guess, always optimistic, and is the mechanism by which
-> "nearly done" persisted for ~60 releases. What follows is only what is CHECKABLE
-> against code — decodes / rejects / unhandled — so completeness is judged from facts,
-> not from a number. Ground truth:
+> "N patches left" in this arc's history was a guess, always optimistic, and is the
+> mechanism by which "nearly done" persisted for ~60 releases. What follows is only
+> what is CHECKABLE against code — decodes / rejects / diverges — so completeness is
+> judged from facts, not from a number. Ground truth:
 >
-> **DECODE — what actually works:** profile-0 **KEYFRAME** decode to pixels (intra
-> prediction, transforms, reconstruction, dequant, CDEF, deblock, loop restoration,
-> superres), 8/10/12-bit, multi-tile. That is a real, complete, conformance-shaped
-> keyframe decoder.
+> **DECODE — externally verified:** as of 0.7.126, **six PUBLISHED libaom conformance
+> vectors decode their keyframe BIT-EXACTLY** against libaom's own reference MD5s
+> (`make conformance`). This is the first evidence in the arc that drishti did not
+> produce itself. 128x128 superblocks — libaom's DEFAULT, and previously a blanket
+> reject that excluded the entire published corpus — decode as of 0.7.126.
 >
-> **DECODE — the thing the bite-prose hides:** **NO real AV1 inter FRAME has ever
-> decoded.** The entire inter-prediction arc (0.7.57–0.7.117, ~60 releases: MC, all
-> four warp forms, OBMC, compound, masked, temporal MVs, scaled references, BILINEAR)
-> built PRIMITIVES that have only ever run on synthetic hand-built tile contexts. The
-> one inter-frame test in the real decode-through-bytes path (`av1_decode.tcyr`)
-> asserts the frame is **rejected**. A real `.ivf` from libaom/rav1e/SVT-AV1 does not
-> decode past its first non-key frame — it rejects at cross-frame CDF inheritance, and
-> would then reject at the intra-block fork, segmentation, delta-q, delta-lf. The
-> primitives are Lego; the house has never been built or lived in.
+> **DECODE — what works:** profile-0 keyframe decode to pixels (intra prediction,
+> transforms, reconstruction, dequant, CDEF, deblock, loop restoration, superres),
+> 8/10/12-bit, multi-tile, 64x64 AND 128x128 superblocks. Inter frames decode
+> end-to-end from real bytes (0.7.119–0.7.125): motion, compound/backward refs,
+> cross-frame CDF inheritance, the intra-block fork inside an inter frame, and
+> segmentation (spatial config).
+>
+> **DECODE — what is still WRONG, measured not guessed:** two published vectors'
+> keyframes still differ — ONE 128-superblock defect (E2d; the "lossless" and "loop
+> restoration" attributions were both REFUTED by controlled sweep, and a 1.8 KB
+> minimal reproducer is pinned in the gate). Inter frames DIVERGE from the reference:
+> a reconstruction rounding error of max |delta| 2..4 (E2b) and an entropy desync on
+> busier frames (E2c). delta-q / delta-lf still reject. So: inter frames decode, but
+> no inter frame has yet been shown bit-exact against an external reference.
 >
 > **ENCODE — the thing "encode round-trip-clean" hides:** there is **no encoder**.
-> What exists (`av1_encode_*`, 58 write inverses) is a **bitstream writer** that
-> replays a caller-supplied partition plan + residual. It has no forward transform, no
-> quantiser, no mode decision / RDO, no motion search, no rate control, and cannot
-> even emit its own sequence or frame headers (the tests hand-build every header bit).
-> It cannot produce a file any external decoder could open. A real encoder is
-> **arc-sized**, comparable to the whole decode arc.
+> What exists (`av1_encode_*`) is a **bitstream writer** that replays a caller-supplied
+> partition plan + residual. It has no forward transform, no quantiser, no mode
+> decision / RDO, no motion search, no rate control, and cannot even emit its own
+> sequence or frame headers (the tests hand-build every header bit). It cannot produce
+> a file any external decoder could open. A real encoder is **arc-sized**, comparable
+> to the whole decode arc.
 >
-> **CONFORMANCE:** zero external vectors have ever been run. Every test decodes bytes
-> drishti itself wrote — which cannot catch a bug shared by the encode and decode
-> lanes (`docs/guides/verification.md`).
+> **CONFORMANCE:** the harness exists and is a gate (`make conformance`, Phase E1).
+> libaom encodes the stream and `aomdec` produces the reference pixels, so the
+> reference cannot collude with drishti's own reading of the spec — the blind spot
+> every prior gate had (`docs/guides/verification.md`). Current: 16 matched /
+> 5 known-gap / 0 regressed. The keyframe path is a HARD gate; inter cases are xfail
+> and tighten as E2 lands.
 >
 > The properly-phased, honestly-sized remaining work is at the END of this section
 > ("### The honest remaining work"), not in the optimistic bite-prose that follows.
-> See [[av1-arc-cannot-close-yet]].
+> See [[av1-decode-remaining-tracks]].
 
 Baseline (0.7.0): OBU layer + sequence header.
 
@@ -250,7 +258,7 @@ Baseline (0.7.0): OBU layer + sequence header.
   multi-tile-**group** frames 0.7.51); **superres COMPLETE** (7.16 — 0.7.52–0.7.56, a
   use_superres keyframe decodes end-to-end, reference-confirmed against dav1d). **INTER
   primitives complete** (the last of the four tracks, and the biggest — every warp form, the
-  temporal-MV arc, compound and inter-intra are in; every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); an inter FRAME still does not decode, because segmentation / delta-q / delta-lf / an intra block inside an inter frame all reject the tile — 7.11.3: the Subpel_Filters
+  temporal-MV arc, compound and inter-intra are in; every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); inter FRAMES decode as of the 0.7.119-0.7.125 arc (the intra fork inside an inter frame 0.7.122/123, segmentation 0.7.125); delta-q / delta-lf still reject the tile — 7.11.3: the Subpel_Filters
   table 0.7.57, the `put_8tap` 8-tap MC kernel 0.7.58 (reference-confirmed vs dav1d
   `put_8tap_c`), the `emu_edge` frame-boundary block fetch 0.7.59 (reference-confirmed vs
   dav1d `emu_edge_c`), and the **MC driver** `av1_mc_pred_block` 0.7.60 (spec 7.11.3.1
@@ -433,9 +441,9 @@ each item sized in rough **bites** (one bite ≈ one release; wide uncertainty, 
 conformance will surface more). Sizes: S ≈ 1–2, M ≈ 3–6, L ≈ 6–12, MODULE ≈ 5–10,
 ARC ≈ 40+.
 
-**Phase C — make a real inter FRAME decode (the gating hole).** Until this lands the
-decoder is keyframe-only and the ~60 releases of inter primitives are unexercised by
-any real stream.
+**Phase C — make a real inter FRAME decode (the gating hole). DONE 0.7.119-0.7.124.**
+Inter frames now decode end-to-end from real bytes; the ~60 releases of inter primitives
+are exercised by real streams. (Conformance status for inter frames: roadmap.md E2b/E2c.)
   - C1. **Cross-frame CDF inheritance** (7.20/7.21). **DONE 0.7.121.** Per-slot
     `AV1REF_SAVED_CDF` bundle; `av1_cdf_bundle_save/load` + `av1_tile_inherit_cdfs`
     (both lanes) + the finish-save; the `primary_ref != NONE` reject lifted; witnessed

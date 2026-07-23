@@ -6,6 +6,25 @@
 
 ## Version
 
+**0.7.127** — cut 2026-07-23, not yet tagged (user's git). **E2d DIAGNOSIS + COMMITTED REPRODUCER +
+DOCUMENTATION SWEEP.** No functional decode change. E2d (the last keyframe gap) is now a 1.8 KB
+reproducible case with a long refuted-causes list: committed `tests/repro/e2d-192x160.ivf` (fails) vs
+`e2d-160x160.ivf` (passes) with their aomdec reference MD5s, wired into `make conformance` as a
+hard-gate/xfail pair that RUNS WITHOUT libaom. REFUTED this cut: every partition family, tx64/paeth/
+angle-delta (incidental — max-partition-size=32 precludes TX_64X64 and still fails), CDF-update mode,
+geometry alone (content is the trigger). VERIFIED spec-correct: partition ctx, bsl->CDF selection, the
+8-symbol bsl-5 alphabet, both synth psum sets, av1_cdf_update's rate. `Default_Partition_W128_Cdf`
+cross-checked BYTE-IDENTICAL vs official libaom + dav1d + libgav1 + the spec annex (values, row order,
+alphabet) — eliminated as a cause. TRAP RECORDED: the mozilla/aom GitHub mirror is a stale 2017 research
+fork with entirely different partition CDFs. Doc sweep removed claims 0.7.125/126 falsified: the roadmap's
+HONEST STATUS block still said "NO real AV1 inter FRAME has ever decoded" and "zero external vectors have
+ever been run" (both false; rewritten for 0.7.126), Phase C marked DONE, and this file's "Picking this up
+cold" handoff block was still dated 0.7.106 naming scaled-ref MC (shipped 0.7.110) as next — rewritten with
+the current priority order AND the refuted-hypothesis list. Also corrected av1_noncoeffcdf/av1_tile/
+av1_intermode headers and docs/sources.md. The historical per-version log below is deliberately UNCHANGED.
+38 suites, **30,246** suite + **7,410** fuzz, all six gates green; `make conformance` 17 matched /
+6 known-gap / 0 regressed. [[av1-decode-remaining-tracks]]
+
 **0.7.126** — cut 2026-07-22, not yet tagged (user's git). **PHASE E — FIRST EXTERNAL CONFORMANCE, AND
 128x128 SUPERBLOCKS DECODE. Six PUBLISHED libaom vectors decode their keyframe BIT-EXACTLY.** E1 built the
 harness (programs/conformance.cyr + vector-probe.cyr, scripts/conformance.sh, `make conformance`): libaom
@@ -1323,7 +1342,7 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 | `src/av1_dpb.cyr` | `av1_` | decoded-picture buffer / ref-frame ring (spec 7.20 + 7.21) — **Av1Dpb** 8-slot pixel FrameStore (av1_dpb_new/frame/valid/count); **reference frame update** (7.20): av1_dpb_store (pixel half — stores a decoded frame into every refresh_frame_flags slot) + av1_dpb_update (full process: pixel store + the metadata half av1_frame_update_refs); **reference frame loading** (7.21): av1_dpb_load (serves show_existing_frame from FrameStore[frame_to_show_map_idx]); **av1_dpb_ref_frame** (the inter/MC hook: LAST..ALTREF → ref_frame_idx → the stored DrFrame av1_mc_pred_block reads); **av1_decode_stream** (multi-frame OBU walk — decodes every coded frame into the DPB, serves show_existing, returns the last shown frame; av1_decode_obus stays the single-frame entry). PIXEL ring only; the saved-MV half is IN (AV1REF_SAVED_MF in av1_frame.cyr + the av1_frame_dec_finish save hook, 0.7.102); saved-CDF/segment-id + full 7.21 metadata reload remain later bites |
 | `src/av1_cdef.cyr` | `av1_` | CDEF (7.15) — kernels (direction/variance + constrain + tap filter + tables) **and the driver**: av1_cdef_process (outer loop) / av1_cdef_block (7.15.1 copy + idx/skip gates + var-scaled luma + chroma) + av1_cdef_frame_new + av1_cdef_coverage_ok (MI-grid guard: rejects, never OOBs). Consumes the CdefIdx grid + Skips + fh strengths |
 | `src/av1_superres.cyr` | `av1_` | superres upscaling (7.16) — Upscale_Filter[64][8] (dav1d resize filter negated to spec form; row-sum/integer-pel/mirror + per-phase position-checksum verified) + av1_superres_filter_pixel (one sample: phase/base/edge-clamp + Round2(sum,7) + Clip1) + av1_superres_upscale_row (the row loop, == dav1d resize_c) + av1_superres_step / av1_superres_x0 (dx/mx0 geometry, == dav1d scale_fac + get_upscale_x0) + av1_superres_upscale_frame (per-plane/row upscale into a new frame) + av1_superres_upscale_new (used by the in-loop pipeline to lift a downscaled frame to UpscaledWidth between CDEF and LR) — all reference-confirmed against dav1d; superres decodes end-to-end |
-| `src/av1_mc.cyr` | `av1_` | inter prediction (motion comp) — Subpel_Filters[6][15][8] (dav1d_mc_subpel_filters: REGULAR/SMOOTH/SHARP + 2 w≤4 variants + scaled-bilinear; dav1d convention, rows sum 64; verified by row-sum/mirror-symmetry/independent position-checksum) + av1_subpel_filter accessor + **av1_mc_put_8tap** (2-pass 8-tap MC kernel == dav1d put_8tap_c: integer/H/V/H+V, dav1d intermediate precision, persistent mid scratch, reference-tested) + **av1_mc_emu_edge** (frame-boundary block fetch == dav1d emu_edge_c: out-of-frame reads clamp to the edge, reference-tested) + **av1_mc_pred_block** (the MC driver, spec 7.11.3.1 steps 10+13: unscaled 1/16-pel MV split av1_mc_pos16 → emu_edge gather → put_8tap → Clip1 into a DrFrame; single-ref/translation-only/non-compound/unscaled base case, scaled/BILINEAR MC rejected (compound + warp now in); spec-literal-reference-tested; 5-slice review → 3 defects fixed) + persistent scratch (av1_mc_drv_scratch / av1_mc_mid_scratch). now also ALL compound (AVERAGE/DISTANCE/DIFFWTD/WEDGE) + inter-intra + all four warp forms (av1_warp_affine_8x8/av1_warp_pred_block/_gen + warp-filter table) + OBMC + av1_mc_pred_compound; every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); an inter FRAME still does not decode, because segmentation / delta-q / delta-lf / an intra block inside an inter frame all reject the tile |
+| `src/av1_mc.cyr` | `av1_` | inter prediction (motion comp) — Subpel_Filters[6][15][8] (dav1d_mc_subpel_filters: REGULAR/SMOOTH/SHARP + 2 w≤4 variants + scaled-bilinear; dav1d convention, rows sum 64; verified by row-sum/mirror-symmetry/independent position-checksum) + av1_subpel_filter accessor + **av1_mc_put_8tap** (2-pass 8-tap MC kernel == dav1d put_8tap_c: integer/H/V/H+V, dav1d intermediate precision, persistent mid scratch, reference-tested) + **av1_mc_emu_edge** (frame-boundary block fetch == dav1d emu_edge_c: out-of-frame reads clamp to the edge, reference-tested) + **av1_mc_pred_block** (the MC driver, spec 7.11.3.1 steps 10+13: unscaled 1/16-pel MV split av1_mc_pos16 → emu_edge gather → put_8tap → Clip1 into a DrFrame; single-ref/translation-only/non-compound/unscaled base case, scaled/BILINEAR MC rejected (compound + warp now in); spec-literal-reference-tested; 5-slice review → 3 defects fixed) + persistent scratch (av1_mc_drv_scratch / av1_mc_mid_scratch). now also ALL compound (AVERAGE/DISTANCE/DIFFWTD/WEDGE) + inter-intra + all four warp forms (av1_warp_affine_8x8/av1_warp_pred_block/_gen + warp-filter table) + OBMC + av1_mc_pred_compound; every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); inter FRAMES decode end-to-end as of 0.7.119-0.7.125 (intra fork 0.7.122/123, segmentation 0.7.125); they still DIVERGE from an external reference (recon rounding E2b + entropy desync E2c) and delta-q/delta-lf reject |
 | `src/av1_intertile.cyr` | `av1_` | INTER tile decode (0.7.84+) — **av1_decode_block_inter** (the per-block inter prediction driver: sets up the MV context + inter mode-info, then per plane dispatches translation MC / compound (av1_mc_pred_compound) / inter-intra (av1_mc_pred_interintra_w) / warp — LOCALWARP + GLOBALWARP + inter-intra warp-blend + compound-global warp; the per-plane useWarp gate, the warp-model build LOCALWARP-via-warp_estimation / GLOBALWARP+compound-via-warp_model_from_global) + **av1_residual_inter_encode** (non-skip + var-tx inter residual, given-residual encoder) + **av1_decode_inter_tile** / **av1_encode_inter_tile** (the tile drivers) + **av1_tile_set_inter_ctx** (frame-start setup incl. the use_ref_frame_mvs-gated motion_field_estimation hook, 0.7.103). Only scaled-reference/BILINEAR MC remains for inter frames to decode end-to-end |
 | `src/av1_lr.cyr` | `av1_` | loop restoration (7.17) — filter kernels (Wiener 7.17.5/6/7 + self-guided/SGR 7.17.2/3) **and the driver**: av1_lr_process (7.17.1 copy + stripe loop) / av1_lr_restore_block (7.17.2 stripe geometry + Wiener/SGR dispatch) + count_units + Av1LrParams (per-unit LrType/LrWiener/LrSgrSet/LrSgrXqd) **and the bitstream read** (5.11.57): read_lr_unit (type CDFs + Wiener-coeff / SGR-set-xqd subexp + RefLrWiener/RefSgrXqd predictor) + read_lr (per-SB unit-range geometry) + the decode_tile wiring (AV1TILE_LRPARAMS, 0.7.39). Inert until a frame-level driver attaches the params |
 | `src/h264_nal.cyr` | `h264_` | Annex-B scan, NAL hdr, EPB strip/insert, composer |
@@ -1560,32 +1579,53 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.7.106):** keyframes decode end-to-end, AND inter frames decode NEARLY
-> end-to-end. IN: the inter tile decode (0.7.84+), the full MV-prediction arc including the
-> COMPLETE temporal-MV arc (producer 0.7.102 → `motion_field_estimation` 0.7.103 → the temporal
-> scan 0.7.104), ALL compound prediction (AVERAGE/DISTANCE/DIFFWTD/WEDGE, 0.7.87–90), inter-intra
-> (SMOOTH + WEDGE, 0.7.91–92), and ALL FOUR warp forms — LOCALWARP (0.7.93–98), GLOBALWARP
-> (0.7.100), OBMC (0.7.101), inter-intra warp-blend (0.7.105), compound-global warp (0.7.106).
+> **Where we are (0.7.126).** Keyframes decode end-to-end AND are now EXTERNALLY VERIFIED:
+> six published libaom vectors decode their keyframe bit-exactly vs libaom's own reference
+> MD5s (`make conformance`). Inter frames decode end-to-end from real bytes (0.7.119-0.7.125:
+> motion, compound/backward refs, cross-frame CDF inheritance, the intra fork, segmentation),
+> and 128x128 superblocks — libaom's DEFAULT, previously a blanket reject that excluded the
+> whole published corpus — decode as of 0.7.126.
 >
-> **The next bite** (each is one bite; read
-> [`docs/guides/verification.md`](../guides/verification.md) first): the ONLY remaining
-> inter-prediction track is **scaled-reference / BILINEAR MC** — when a reference plane's dims
-> differ from the current plane's (`av1_is_scaled != 0`), the MV is scaled to the ref grid and a
-> BILINEAR filter is used (spec 7.11.3.3). `av1_mc_pred_block` / `av1_warp_pred_gen` currently
-> handle only the unscaled base case and reject the scaled path; wiring it makes inter frames
-> decode end-to-end. **This is the last inter-prediction milestone.**
+> **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the
+> roadmap's HONEST STATUS block. The single most important habit this arc produced: drishti's
+> own round-trips and hand-written oracles SHARE the implementation's reading of the spec, so
+> they cannot catch a misreading. `make conformance` is the only gate whose reference drishti
+> cannot have colluded with — run it.
 >
-> **Then (non-inter):** the deferred feature-gated reads in inter frames (segmentation map,
-> delta-q/lf), film-grain synthesis (7.18.3), conformance vectors, and the encode lane.
+> **The next bites, in priority order** (each is one bite):
 >
-> **Remaining to AV1 100%:** ~15–30 patches (inter: primitives done; inter FRAMES blocked on segmentation / delta-q / delta-lf / the intra fork · film grain 2–3 · the
-> deferred feature-gated list a few · conformance 3–8 · the encode lane 5–10 · close-out audit 1–2).
-> The conformance and encode numbers are the soft ones — conformance because you cannot
-> know what fails until the vectors run, and encode because *mode decision has no spec
-> answer* (the 37 `av1_write_*` inverses already exist; choosing modes is a design
-> problem the spec does not adjudicate, and the stated 1.0 gate is round-trip-clean,
-> not compression-competitive).
-
+> 1. **E2d — the 128-superblock defect** (blocks the last 2 published keyframes). A minimal
+>    reproducer is committed: `tests/repro/e2d-192x160.ivf` (1.8 KB) FAILS while
+>    `tests/repro/e2d-160x160.ivf` PASSES; both are in the `make conformance` gate as the
+>    `--sb-size` 64-vs-128 pair. ALREADY REFUTED, do not re-chase: lossless (bit-exact at
+>    128 SB for 256x256/128x128/256x224), loop restoration, every partition family
+>    (rect/ab/1to4 each disabled still fails), tx64/paeth/angle-delta (incidental — they only
+>    perturb content), CDF-update mode, and geometry alone. ALREADY VERIFIED spec-correct:
+>    the partition ctx derivation, the bsl->CDF selection, the 8-symbol bsl-5 alphabet, both
+>    synth_horz/vert psum sets, and `av1_cdf_update`'s rate formula. It survives with CDEF off,
+>    LR off and `--max-partition-size=16`, so the fault is in the bsl-5 partition symbol path
+>    or SB-level setup, and it is CONTENT-dependent. ALSO RULED OUT (0.7.127): the
+>    `Default_Partition_W128_Cdf` VALUES — cross-checked byte-identical against the OFFICIAL
+>    libaom (aomedia.googlesource.com), dav1d, libgav1 AND the spec annex, including row order
+>    (`ctx = left*2 + above`) and the 8-symbol alphabet. NOTE: the `mozilla/aom` GitHub mirror
+>    is a stale 2017 pre-freeze research fork whose partition CDFs are entirely different
+>    numbers — do not use it as a source. Next step: instrument the per-superblock partition
+>    decisions on the 1.8 KB repro and find the first symbol that diverges.
+> 2. **E2b — inter reconstruction rounding** (max |delta| 2..4, ~7% of samples). Reproduces
+>    with CDEF *and* deblocking both disabled, so it is NOT the loop filters (the D3 deblocker
+>    theory is refuted). Suspect sub-pel MC / reconstruction rounding. Invisible to the
+>    internal suites because drishti's MC oracle shares the rounding code under test.
+> 3. **E2c — inter entropy desync** on busier inter frames (`SymbolMaxBits >= -14` trips at
+>    `av1_sym_dec_exit`). Caught cleanly; no crash, no OOB.
+> 4. **D2 — per-SB delta-q / delta-lf** (still a hard reject on both lanes).
+> 5. **D1 temporal follow-on** — the DPB-saved segment map (`PrevSegmentIds`) for the
+>    temporal-predicted / copied-map / feature-inheritance segmentation configs.
+>
+> The conformance and encode numbers are the soft ones — conformance because you cannot know
+> what fails until the vectors run (though now they DO run, so each gap is a named, reproducible
+> case rather than a guess), and encode because *mode decision has no spec answer* (the
+> `av1_write_*` inverses exist; choosing modes is a design problem the spec does not adjudicate,
+> and the stated 1.0 gate is round-trip-clean, not compression-competitive).
 The **intra still-picture decode MILESTONE is COMPLETE (0.7.25)** — profile-0
 AV1 keyframes decode end-to-end to pixels. Per-release history is in
 [`CHANGELOG.md`](../../CHANGELOG.md); the current picture:
@@ -1653,7 +1693,7 @@ scope + tables per bite are in the review transcript / CHANGELOG):
    verified by a 2-superblock varied-partition round-trip (both CDF modes).
    **[done 0.7.25 — MILESTONE close.]**
 
-**The AV1 inter layer — NEARLY COMPLETE** (every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); an inter FRAME still does not decode, because segmentation / delta-q / delta-lf / an intra block inside an inter frame all reject the tile; the
+**The AV1 inter layer — NEARLY COMPLETE** (every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); inter FRAMES decode end-to-end as of 0.7.119-0.7.125 (intra fork 0.7.122/123, segmentation 0.7.125); they still DIVERGE from an external reference (recon rounding E2b + entropy desync E2c) and delta-q/delta-lf reject; the
 full list of what is now IN, in build order): the MC leaf kernels
 (`put_8tap` 0.7.58, `emu_edge` 0.7.59), the **MC driver** that composes them
 (`av1_mc_pred_block` 0.7.60 — single-ref/unscaled/translation-only/non-compound),

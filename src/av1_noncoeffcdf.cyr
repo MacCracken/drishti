@@ -11,8 +11,9 @@
 # Extracted from the spec and validated (every cdf non-decreasing, ends
 # 32768, count 0). The mode-info / tx-size / tx-type / partition reads that
 # consume these land in later 0.7.x bites (roadmap.md). FLAT module — wiring
-# in src/main.cyr after av1_coeffs.cyr. Family av1_. Deferred (feature-gated,
-# later): partition W128, segment_id, delta_q/lf, intrabc, palette CDFs.
+# in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a)
+# and segment_id (0.7.125 D1) CDFs are now HERE. Still absent (feature-gated, roadmap.md):
+# delta_q/lf, intrabc, palette CDFs.
 
 var Av1_NCdf = 0;
 fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {

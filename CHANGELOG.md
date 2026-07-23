@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.127] - 2026-07-23
+
+- **E2d diagnosis + a committed minimal reproducer; the W128 CDF cleared by four-source cross-check.**
+  No functional decode change — this is a diagnosis, gate and documentation release that converts the last
+  keyframe gap from a vague "feature X is broken" into a 1.8 KB reproducible case with a long list of
+  eliminated causes. REFUTED this cut, so they are not re-chased: every partition family (disabling
+  rect / ab / 1to4 each still fails), `tx64` / `paeth-intra` / `angle-delta` (these three "fix" it but are
+  incidental — `--max-partition-size=32`, which precludes TX_64X64 entirely, still fails), CDF-update mode,
+  and geometry alone (3x3 superblock grids both pass and fail, so the trigger is CONTENT). VERIFIED
+  spec-correct against the spec text: the partition ctx derivation, the bsl->CDF selection, the 8-symbol
+  bsl-5 alphabet, both `synth_horz`/`synth_vert` psum sets, and `av1_cdf_update`'s rate formula. And
+  `Default_Partition_W128_Cdf` is now cross-checked **byte-identical against the official libaom, dav1d,
+  libgav1 and the spec annex** — values, row order (`ctx = left*2 + above`) and alphabet size — so the table
+  is eliminated as a cause. (Trap recorded: the `mozilla/aom` GitHub mirror is a stale 2017 pre-freeze
+  research fork whose partition CDFs are entirely different numbers.) The defect survives with CDEF off, LR
+  off and `--max-partition-size=16`, so it is in the bsl-5 partition symbol path or SB-level setup.
+  NEW: `tests/repro/e2d-192x160.ivf` (fails) and `e2d-160x160.ivf` (passes) — 1.8 KB libaom streams with
+  their `aomdec` reference MD5s committed, wired into `make conformance` as a hard-gate/xfail pair that
+  **runs without libaom installed**, so CI keeps the control green anywhere. `vector-probe` now also reports
+  `disable_cdf_update`.
+
+- **Documentation sweep — removed claims the 0.7.125/0.7.126 work falsified.** The roadmap's HONEST STATUS
+  block (the "read this first" ground truth) still said "NO real AV1 inter FRAME has ever decoded" and
+  "zero external vectors have ever been run"; both are now false and it is rewritten for 0.7.126 with the
+  measured gaps (E2d/E2b/E2c) instead. Phase C is marked DONE. `state.md`'s "Picking this up cold" handoff
+  block was still dated 0.7.106 and named scaled-reference MC (shipped 0.7.110) as the next bite — rewritten
+  with the current priority order and, importantly, the list of ALREADY-REFUTED hypotheses so the next
+  session does not repeat them. Also corrected: `av1_noncoeffcdf.cyr` ("partition W128 / segment_id
+  deferred" — both landed), `av1_tile.cyr` ("64x64 superblocks (no 128x128)"), `av1_intermode.cyr`
+  (`AV1FB_SEGID` "0 while segmentation reads are deferred"), `docs/sources.md` (residual chunk split,
+  per-plane quantizer deltas, the per-superblock loop, and "inter frames do not yet decode"), and the
+  live-state sections of `state.md`. The historical per-version log in `state.md` is deliberately left
+  intact — it records what was true at each cut.
+
 ## [0.7.126] - 2026-07-22
 
 - **E2 diagnosis — the two remaining keyframe gaps are ONE 128-superblock defect, not two feature bugs.**

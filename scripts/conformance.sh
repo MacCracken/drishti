@@ -9,8 +9,9 @@
 # encodes the stream and libaom decodes the reference, so drishti has to match a
 # bitstream and an output it had no hand in creating.
 #
-# Requires: aomenc + aomdec (libaom) on PATH. Skips cleanly (exit 0) when absent so
-# CI without libaom is not blocked; set CONFORMANCE_STRICT=1 to fail instead.
+# The committed tests/repro/*.ivf cases (with their reference MD5s) run ANYWHERE. The
+# generated + published corpus additionally needs aomenc/aomdec/ffmpeg on PATH and is
+# skipped cleanly when absent; set CONFORMANCE_STRICT=1 to fail instead.
 #
 # Usage: scripts/conformance.sh            (generate corpus + run)
 #        CONFORMANCE_KEEP=1 scripts/...    (keep the generated corpus for inspection)
@@ -21,15 +22,49 @@ cd "$ROOT"
 WORK="${CONFORMANCE_WORK:-build/conformance}"
 FRAME_LIMIT=5
 
+pass=0; fail=0; xfail=0
+
+# ---- COMMITTED REPRODUCERS (no libaom needed) ----
+# tests/repro/*.ivf are tiny libaom-encoded streams with their aomdec reference MD5
+# committed alongside, so this half of the gate runs anywhere — including CI without
+# libaom. e2d-160x160 is the PASSING control (hard gate); e2d-192x160 is the E2d
+# defect (xfail). They differ only in width, and both are 128-superblock streams.
+repro_case() { # name expect(match|xfail)
+    local n="$1" expect="$2"
+    local ivf="tests/repro/$n.ivf" md5f="tests/repro/$n.md5"
+    [ -f "$ivf" ] && [ -f "$md5f" ] || return 0
+    mkdir -p build
+    cp "$ivf" build/conformance-input.ivf
+    rm -f build/conformance-out-*.i420
+    ./build/drishti-conformance >/dev/null 2>&1
+    local got want
+    got=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    want=$(cat "$md5f")
+    if [ -n "$got" ] && [ "$got" = "$want" ]; then
+        echo "  repro $n: keyframe BIT-EXACT vs committed reference"; pass=$((pass+1))
+    elif [ "$expect" = "xfail" ]; then
+        echo "  repro $n: keyframe differs (known 128-SB defect E2d)"; xfail=$((xfail+1))
+    else
+        echo "  repro $n: keyframe REGRESSED"; fail=$((fail+1))
+    fi
+}
+
+cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 || {
+    echo "conformance: harness build FAILED"; exit 1; }
+echo "=== drishti conformance ==="
+echo "--- committed reproducers (no libaom required) ---"
+repro_case e2d-160x160 match
+repro_case e2d-192x160 xfail
+
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
-    echo "conformance: libaom (aomenc/aomdec) not found — SKIPPED"
+    echo "  libaom (aomenc/aomdec) not found — skipping the generated + published corpus"
+    echo "=== matched=$pass  known-gap=$xfail  REGRESSED=$fail ==="
+    [ "$fail" -gt 0 ] && exit 1
     [ "${CONFORMANCE_STRICT:-0}" = "1" ] && exit 1
     exit 0
 fi
 
 mkdir -p "$WORK"
-cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 || {
-    echo "conformance: harness build FAILED"; exit 1; }
 
 # A continuous-tone source: libaom's screen-content detector flags synthetic test
 # patterns and turns on palette/intrabc, which drishti rejects by design.
@@ -39,10 +74,9 @@ if [ ! -f "$WORK/src.yuv" ]; then
         echo "conformance: ffmpeg not found — SKIPPED"; exit 0; }
 fi
 
-# --sb-size=64 is REQUIRED: libaom defaults to 128x128 superblocks and drishti's SB
-# loop is 64x64-only, so every stock libaom stream (and every published AV1 test
-# vector we surveyed) rejects up front. 128x128 support is the single gate blocking
-# the standard vector corpus (roadmap.md E2).
+# This generated corpus pins --sb-size=64 deliberately: it is the 64-superblock control
+# path, kept green independently of the 128 path that E2a un-gated in 0.7.126. The 128
+# coverage comes from the published vectors below (all of which use 128 by default).
 enc() { # name kf_only extra...
     local name="$1"; shift
     local kfonly="$1"; shift
@@ -55,7 +89,6 @@ enc() { # name kf_only extra...
         --ivf -o "$WORK/$name.ivf" "$WORK/src.yuv" 2>/dev/null
 }
 
-pass=0; fail=0; xfail=0
 # The KEYFRAME (frame 1) of every corpus entry is a HARD gate: it is bit-exact today
 # and must stay so. Inter frames are known gaps (roadmap.md E2) recorded as xfail —
 # two distinct defects, both surfaced by this harness and neither reachable from
@@ -98,7 +131,7 @@ check() { # name expect(all|keyframe)
     echo "$line"
 }
 
-echo "=== drishti conformance (libaom-encoded streams, libaom reference pixels) ==="
+echo "--- generated corpus (libaom-encoded, libaom reference pixels) ---"
 enc kf_only     1
 enc seq_filters 0
 enc seq_nofilt  0 --enable-cdef=0 --loopfilter-control=0
