@@ -396,15 +396,137 @@ fn test_clear_cdef() {
     var stride = 32;
     var g = alloc(stride * 32 * 8);
     cdef_gfill(g, stride * 32, 7);
-    av1_clear_cdef(g, stride, 5, 5, 0);
+    av1_clear_cdef(g, stride, 32, 5, 5, 0);
     assert_eq(load64(g + ((5 * stride + 5) * 8)), 0 - 1, "64x64 clear anchor -> -1");
     assert_eq(load64(g + ((5 * stride + 6) * 8)), 7, "64x64 clear leaves neighbor");
     cdef_gfill(g, stride * 32, 7);
-    av1_clear_cdef(g, stride, 0, 0, 1);
+    av1_clear_cdef(g, stride, 32, 0, 0, 1);
     assert_eq(load64(g + ((0 * stride + 0) * 8)), 0 - 1, "128 clear (0,0)");
     assert_eq(load64(g + ((0 * stride + 16) * 8)), 0 - 1, "128 clear (0,16)");
     assert_eq(load64(g + ((16 * stride + 0) * 8)), 0 - 1, "128 clear (16,0)");
     assert_eq(load64(g + ((16 * stride + 16) * 8)), 0 - 1, "128 clear (16,16)");
+    return 0;
+}
+# count the grid cells equal to v (the bounds witness reads "how many cells were written",
+# which is what discriminates an over-clamp from an unbounded store).
+fn cdef_gcount(g, n, v): i64 {
+    var i = 0;
+    var k = 0;
+    while (i < n) {
+        if (load64(g + (i * 8)) == v) { k = k + 1; }
+        i = i + 1;
+    }
+    return k;
+}
+# THE BOUNDS WITNESS (E2d). av1_clear_cdef's three extra 128-SB writes ran UNBOUNDED
+# against a CdefIdx grid flattened to exactly rows*stride i64, so on any frame with
+# MiRows % 32 in 1..16 the last SB row stored -1 PAST THE END OF THE OBJECT — landing in
+# av1_ncdf_new's mutable CDF blob (the next bump allocation), making a CDF row
+# non-monotone and desyncing the symbol decoder. Geometry here is the committed
+# reproducer's: 192x160 -> MiCols 48, MiRows 40. A 128 SB is 32 MI, so the four SB
+# origins (0,0) (0,32) (32,0) (32,32) cover ALL FOUR (have_r, have_c) combinations —
+# which is what stops a clamp that simply skips everything from passing.
+fn test_clear_cdef_bounds() {
+    var stride = 48;                  # MiCols for a 192-wide frame
+    var rows = 40;                    # MiRows for a 160-tall frame
+    var n = stride * rows;
+    var g = alloc(n * 8);
+    # The canary stands in for av1_ncdf_new's CDF blob: the NEXT bump allocation. It must
+    # SPAN the whole blast radius or it witnesses nothing — the unbounded store reaches
+    # (r+16)*stride + (c+16) = 48*48 + 48 = 2352, which is 433 words past this grid's
+    # 1920, so a short canary sits entirely BELOW the overflow and stays clean. 512 covers
+    # it. (Found by mutation: at 16 words the row-overflow cases passed while broken.)
+    var cn = 512;
+    var canary = alloc(cn * 8);
+    # The witness is only live while the canary really does abut the grid, so assert the
+    # ADJACENCY ITSELF — this test then fails loudly rather than quietly stopping
+    # witnessing if the allocator ever changes (the 0.7.114 canary discipline).
+    assert_eq(canary, g + (n * 8), "canary abuts the grid -> witness is live");
+    assert_eq(cn >= (((32 + 16) * stride) + (32 + 16)) - n + 1, 1, "canary spans the blast radius");
+
+    # (32,32): both sub-units outside. c+16 == 48 == stride would ALIAS into row 33 col 0;
+    # r+16 == 48 >= 40 would store past the object. Only the anchor may be written.
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 32, 32, 1);
+    assert_eq(load64(g + (((32 * stride) + 32) * 8)), 0 - 1, "(32,32) anchor cleared");
+    assert_eq(cdef_gcount(g, n, 0 - 1), 1, "(32,32) writes ONLY the anchor");
+    assert_eq(load64(g + (((33 * stride) + 0) * 8)), 7, "(32,32) c+16 does not alias row 33");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "(32,32) nothing stored past the grid");
+
+    # (32,0): column fits, row does not -> anchor + [32][16].
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 32, 0, 1);
+    assert_eq(load64(g + (((32 * stride) + 16) * 8)), 0 - 1, "(32,0) c+16 sub-unit cleared");
+    assert_eq(cdef_gcount(g, n, 0 - 1), 2, "(32,0) writes anchor + c+16 only");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "(32,0) nothing stored past the grid");
+
+    # (0,32): row fits, column does not -> anchor + [16][32].
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 0, 32, 1);
+    assert_eq(load64(g + (((16 * stride) + 32) * 8)), 0 - 1, "(0,32) r+16 sub-unit cleared");
+    assert_eq(cdef_gcount(g, n, 0 - 1), 2, "(0,32) writes anchor + r+16 only");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "(0,32) nothing stored past the grid");
+
+    # (0,0): both fit -> all four, unchanged from before the clamp. Without this the
+    # clamp could skip every sub-unit and still pass the three cases above.
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 0, 0, 1);
+    assert_eq(load64(g + (((16 * stride) + 16) * 8)), 0 - 1, "(0,0) far corner cleared");
+    assert_eq(cdef_gcount(g, n, 0 - 1), 4, "(0,0) writes all four sub-units");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "(0,0) nothing stored past the grid");
+    return 0;
+}
+# The reproducer geometry above pins the BUG but cannot pin the BOUNDS, for two reasons a
+# review caught by mutation: at stride 48 / rows 40 no origin evaluates either predicate at
+# EXACT EQUALITY (r+16 is 48 vs rows 40 — strictly greater), so `<` vs `<=` survives; and
+# swapping the two axes is invisible because every origin happens to agree. This geometry
+# fixes both: stride 80 / rows 48 puts the two bounds on OPPOSITE sides of an SB boundary,
+# and the origins (32,*) and (*,64) hit r+16 == rows and c+16 == stride exactly.
+fn test_clear_cdef_axes() {
+    var stride = 80;
+    var rows = 48;
+    var n = stride * rows;
+    var g = alloc(n * 8);
+    # Furthest unbounded write is (32+16)*80 + (64+16) = 3920, i.e. 81 words past n=3840.
+    var cn = 128;
+    var canary = alloc(cn * 8);
+    assert_eq(canary, g + (n * 8), "axes: canary abuts the grid -> witness is live");
+    assert_eq(cn >= (((32 + 16) * stride) + (64 + 16)) - n + 1, 1, "axes: canary spans the blast radius");
+
+    # (32,0): r+16 == rows EXACTLY (48) -> row skipped; column fits. An axis swap reads
+    # r+16 < stride (48 < 80) and stores into row 48 — the first word past the grid.
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 32, 0, 1);
+    assert_eq(cdef_gcount(g, n, 0 - 1), 2, "axes (32,0): anchor + c+16, row at exact equality skipped");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "axes (32,0): nothing past the grid");
+
+    # (0,64): c+16 == stride EXACTLY (80) -> column skipped; row fits. `<=` here would
+    # alias into the next row's column 0.
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 0, 64, 1);
+    assert_eq(load64(g + (((16 * stride) + 64) * 8)), 0 - 1, "axes (0,64): r+16 sub-unit cleared");
+    assert_eq(cdef_gcount(g, n, 0 - 1), 2, "axes (0,64): anchor + r+16, col at exact equality skipped");
+    assert_eq(load64(g + (((1 * stride) + 0) * 8)), 7, "axes (0,64): c+16 does not alias row 1");
+
+    # (32,64): both at exact equality -> anchor only. The swap writes rows 48 (OOB) here.
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 32, 64, 1);
+    assert_eq(cdef_gcount(g, n, 0 - 1), 1, "axes (32,64): anchor only");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "axes (32,64): nothing past the grid");
+
+    # (0,32): both fit comfortably -> all four. Stops an over-clamp passing the above.
+    cdef_gfill(g, n, 7);
+    cdef_gfill(canary, cn, 7);
+    av1_clear_cdef(g, stride, rows, 0, 32, 1);
+    assert_eq(cdef_gcount(g, n, 0 - 1), 4, "axes (0,32): all four sub-units");
+    assert_eq(cdef_gcount(canary, cn, 7), cn, "axes (0,32): nothing past the grid");
     return 0;
 }
 
@@ -675,6 +797,8 @@ fn main() {
     test_cdef_wired_skip();
     test_cdef_gates();
     test_clear_cdef();
+    test_clear_cdef_bounds();
+    test_clear_cdef_axes();
     return assert_summary();
 }
 

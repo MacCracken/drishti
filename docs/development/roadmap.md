@@ -93,7 +93,7 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 ## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e) — see HONEST STATUS (no completion % — every one ever given here was wrong)
 
-> ### HONEST STATUS as of 0.7.126 — read this before believing any "nearly done"
+> ### HONEST STATUS as of 0.7.127 + the E2d fix — read this before believing any "nearly done"
 >
 > **There is no honest single completion number, and this doc will not print one.**
 > The metric used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**
@@ -105,11 +105,13 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > what is CHECKABLE against code — decodes / rejects / diverges — so completeness is
 > judged from facts, not from a number. Ground truth:
 >
-> **DECODE — externally verified:** as of 0.7.126, **six PUBLISHED libaom conformance
-> vectors decode their keyframe BIT-EXACTLY** against libaom's own reference MD5s
-> (`make conformance`). This is the first evidence in the arc that drishti did not
-> produce itself. 128x128 superblocks — libaom's DEFAULT, and previously a blanket
-> reject that excluded the entire published corpus — decode as of 0.7.126.
+> **DECODE — externally verified:** **ALL EIGHT PUBLISHED libaom conformance vectors in
+> the gate decode their keyframe BIT-EXACTLY** against libaom's own reference MD5s
+> (`make conformance`). This is the only evidence in the arc that drishti did not produce
+> itself. 128x128 superblocks — libaom's DEFAULT, and previously a blanket reject that
+> excluded the entire published corpus — decode as of 0.7.126; the last two gaps closed
+> with the E2d fix, which turned out to be a heap overflow of the CDF blob rather than any
+> misreading of the spec.
 >
 > **DECODE — what works:** profile-0 keyframe decode to pixels (intra prediction,
 > transforms, reconstruction, dequant, CDEF, deblock, loop restoration, superres),
@@ -118,13 +120,18 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > cross-frame CDF inheritance, the intra-block fork inside an inter frame, and
 > segmentation (spatial config).
 >
-> **DECODE — what is still WRONG, measured not guessed:** two published vectors'
-> keyframes still differ — ONE 128-superblock defect (E2d; the "lossless" and "loop
-> restoration" attributions were both REFUTED by controlled sweep, and a 1.8 KB
-> minimal reproducer is pinned in the gate). Inter frames DIVERGE from the reference:
-> a reconstruction rounding error of max |delta| 2..4 (E2b) and an entropy desync on
-> busier frames (E2c). delta-q / delta-lf still reject. So: inter frames decode, but
-> no inter frame has yet been shown bit-exact against an external reference.
+> **DECODE — what is still WRONG, measured not guessed:** no PUBLISHED keyframe gap remains,
+> but that is a statement about the published corpus, not about keyframes. **E2e: a keyframe
+> whose luma height/8 is odd (136, 152, 168, 184 ... i.e. `MiRows % 4 == 2`) decodes with
+> WRONG CHROMA** — measured on a 40-geometry aomenc sweep, ~31 of 80 streams diverge,
+> chroma-only, max |delta| 2, confined to the bottom rows, and bit-exact with
+> `--enable-cfl-intra=0`. The published corpus simply does not cover those heights. Inter
+> frames DIVERGE too: a reconstruction rounding error of max |delta| 2..4 (E2b) and an
+> entropy desync on busier frames (E2c); both figures predate the E2d fix and have not been
+> re-taken. The deblocker also filters every inter block at the wrong level (D3), which is
+> silently-wrong-pixels rather than a reject. delta-q / delta-lf still reject. So: inter
+> frames decode, but no inter frame has yet been shown bit-exact against an external
+> reference.
 >
 > **ENCODE — the thing "encode round-trip-clean" hides:** there is **no encoder**.
 > What exists (`av1_encode_*`) is a **bitstream writer** that replays a caller-supplied
@@ -137,9 +144,9 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > **CONFORMANCE:** the harness exists and is a gate (`make conformance`, Phase E1).
 > libaom encodes the stream and `aomdec` produces the reference pixels, so the
 > reference cannot collude with drishti's own reading of the spec — the blind spot
-> every prior gate had (`docs/guides/verification.md`). Current: 16 matched /
-> 5 known-gap / 0 regressed. The keyframe path is a HARD gate; inter cases are xfail
-> and tighten as E2 lands.
+> every prior gate had (`docs/guides/verification.md`). Current: **21 matched /
+> 2 known-gap / 0 regressed**; the 2 remaining are the inter frames (E2b/E2c). Every
+> keyframe case is a HARD gate — `PUBLISHED_XFAIL` is empty.
 >
 > The properly-phased, honestly-sized remaining work is at the END of this section
 > ("### The honest remaining work"), not in the optimistic bite-prose that follows.
@@ -529,25 +536,45 @@ are exercised by real streams. (Conformance status for inter frames: roadmap.md 
       **SIX published libaom vectors now decode their keyframe BIT-EXACTLY vs the
       published reference MD5s** (`size-16x16/32x32/64x64`, `quantizer-32`, `cdfupdate`,
       `mv`) — wired into `make conformance`.
-    - E2d. **A 128-SUPERBLOCK decode defect — the cause of BOTH remaining keyframe gaps.**
-      Originally filed as two separate feature bugs ("lossless" for
-      `av1-1-b8-00-quantizer-00` and "loop restoration" for `av1-1-b8-06-mfmv`); a
-      controlled sweep REFUTED both attributions. Minimal reproducer, now a tracked
-      `make conformance` case: the same 352x288 source encoded with **only `--sb-size`
-      differing** matches at 64 and desyncs at 128 (`AV1_ERR_BAD_FRAME`).
-      What the sweep established:
-        * NOT lossless — lossless at 128 SB is bit-exact at 256x256, 128x128 and 256x224.
-        * Needs PARTIAL superblock coverage in BOTH dimensions: 352x256 (partial cols only)
-          and 256x288 (partial rows only) both match; 352x288 (96-col x 32-row remainder)
-          fails. That geometry is the only one producing a superblock with
-          `hasRows == false && hasCols == false` — the forced-PARTITION_SPLIT branch that
-          reads no symbol.
-        * But it is ALSO content-dependent: the published cdfupdate / quantizer-32 vectors
-          have the identical 352x288 geometry and decode bit-exactly, so the corner
-          geometry is necessary, not sufficient.
-      The failure mode is a symbol DESYNC (the surviving pixels before it are correct;
-      `av1_sym_dec_exit`'s SymbolMaxBits bound catches it), so the fault is in what is READ
-      at or near that corner, not in reconstruction. **M–L.** (xfail in `make conformance`.)
+    - E2d. ✅ **DONE — and it was a HEAP BUFFER OVERFLOW, not a spec misreading.**
+      `av1_clear_cdef`'s `use_128` branch issued three UNBOUNDED stores at `[r][c+16]`,
+      `[r+16][c]`, `[r+16][c+16]`. The spec's `cdef_idx` is a conceptual 2-D array where an
+      out-of-frame sub-unit write is harmless; drishti flattens CdefIdx to exactly
+      `rows*stride` i64 and it is the LAST allocation in `av1_tile_grids_new`, so with a
+      headerless bump allocator whatever is allocated next takes the write: the CDF blob
+      directly on the CDEF-off reproducers, `av1_tile_set_cdef_ctx`'s 56-byte read context
+      then the blob on a CDEF-enabled stream, the MV grid on an inter frame. On any frame
+      with `MiRows % 32` in 1..16 the last SB row stored `-1` into live CDF words, the row
+      went non-monotone, and the decoder desynced reading a table it had corrupted itself.
+      Fixed by bounding both axes and threading `AV1TILE_FMI_ROWS` through both lanes.
+      **ALL EIGHT published vectors now decode their keyframe BIT-EXACTLY; `make conformance`
+      is 21 matched / 2 known-gap / 0 regressed, and no published keyframe gap remains.**
+      Both original attributions (`coded_lossless` for `quantizer-00`, `uses_lr` for `mfmv`)
+      were wrong, as the 0.7.126 sweep had already shown; so was every parse-side hypothesis
+      the hunt generated. Refuted along the way and not worth re-chasing: tile geometry at
+      128 (both reproducers are single-tile), `lr_params`/`read_lr`/`cdef_params` at 128, the
+      partition tree at 128, the BlockDecoded stride-34 grid, and the 64x64 residual chunk
+      split. The durable lesson is in `docs/guides/verification.md`: when a desync's
+      *preceding* pixels are correct the fault is in what is read — **which includes the
+      tables being read from** — so check buffer adjacency before re-deriving a spec table.
+    - E2e. **CfL bottom-edge chroma — a KEYFRAME defect the published corpus cannot see.**
+      On a 4:2:0 keyframe whose `MiRows % 4 == 2` (luma height/8 odd: 136, 152, 168, 184 ...)
+      a bottom-edge block overhangs the frame, so `MaxLumaH` (5.11.35) exceeds the cropped
+      luma plane. `av1_predict_chroma_from_luma` clamps it to the visible plane
+      (`src/av1_intra.cyr:869`, commented as an "OOB backstop"), so spec 7.11.5 averages the
+      invisible rows from the last VISIBLE luma row instead of the reconstructed overhang.
+      That shifts `lumaAvg`, which shifts every sample of the CfL block including the visible
+      ones. Measured on a 40-geometry aomenc sweep vs `aomdec`: 15/40 diverge at
+      `--sb-size=128` and 16/40 at 64 — chroma-only (luma bit-exact), max |delta| 2, bottom
+      rows only, and 0 differing bytes with `--enable-cfl-intra=0`. Independently reproduced
+      at 160x136 (106 differing chroma bytes, Y=0). Every published vector's height happens
+      to be a multiple of 16, which is why eight of eight pass while ordinary video does not.
+      THE FIX is not to move the clamp: the luma overhang must be RETAINED (allocate/keep the
+      rows an overhanging transform block writes — 0.7.114 already made the allocation cover
+      the nominal extent) and `MaxLumaW/H` bounded against the ALLOCATED extent rather than
+      the visible plane. Keep the clamp as a backstop; only its bound is wrong. Gate it with
+      an `MiRows % 4 == 2` case — `scripts/conformance.sh`'s `enc()` is hardcoded 64x64 and
+      the sbrepro 352x288, so the harness has no such geometry today. **M.**
     - E2b. **Inter reconstruction rounding.** Inter frames with real coded content
       decode but land within max |delta| 2..4 of the reference (~7% of samples,
       scattered, no structural offset). Reproduces with CDEF *and* deblocking both
@@ -568,6 +595,28 @@ writers so it can emit a standalone stream (**M**); motion estimation / search
 cross-decoder gates. **Realistically 40+ bites on its own.**
 
 **Phase G — robustness follow-ups (any time).**
+  - G0. **The encode lane has NO 128-superblock coverage of any kind.** `av1_tile_set_sb128` is
+    never called on an encode tile — `AV1TILE_SB128` is set only by the decode tile-group driver
+    (`src/av1_decode.cyr:467`) and `av1_tile_new` defaults it to 0 — so `av1_encode_tile`'s
+    `use_128` branch, `av1_encode_partition` at BLOCK_128X128 and the whole W128 write path are
+    UNEXECUTED by any test. Surfaced while reviewing the E2d fix: the CHANGELOG's first draft
+    claimed the round-trip was blind because both lanes were wrong in the same direction, and the
+    truth is worse and simpler — the encode lane never ran at 128 at all. A 128-SB
+    encode/decode round-trip is the missing witness. **S–M.**
+  - G0b. **`av1_read_cdef` / `av1_write_cdef` fill loops are unbounded on both axes**
+    (`src/av1_modeinfo.cyr` ~:556, ~:580), safe today only by the forced-partition invariant —
+    an argument, not a guard, and exactly the shape of the E2d defect. Bounding them is not a
+    one-liner: `rows` must be threaded through the cdef context record, which is built in FOUR
+    places (`src/av1_residual.cyr` `av1_tile_set_cdef_ctx`, `src/av1_intertile.cyr` the
+    `AV1TILE_ICDEF` copy, and two test fixtures) and Cyrius will not complain about a missed one.
+    **S**, but re-read all four sites by hand.
+  - G0c. **Conformance-harness hardening.** Several paths score a non-run as a pass:
+    a missing committed fixture in `repro_case` skips silently; `sbrepro`'s ffmpeg/aomenc failures
+    `return 0`; `check()` scores nothing when zero frames demux; and a failed published-vector
+    fetch quietly unscores up to eight now-HARD cases without touching `CONFORMANCE_STRICT`. Add a
+    `skipped=` counter to the summary line and make an absent committed fixture a hard failure.
+    **S.** (The one path that could discard a real failure — `exit 0` on the ffmpeg bail — is
+    fixed with the E2d bite.)
   - G1. **OOM fault injection** — route `src` allocations through an injectable
     allocator, then mutation-cover at least one of the ~140 `DR_ERR_OOM` branches per
     module (none is covered today). **S–M.**

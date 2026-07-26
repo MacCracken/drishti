@@ -1579,12 +1579,18 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.7.126).** Keyframes decode end-to-end AND are now EXTERNALLY VERIFIED:
-> six published libaom vectors decode their keyframe bit-exactly vs libaom's own reference
-> MD5s (`make conformance`). Inter frames decode end-to-end from real bytes (0.7.119-0.7.125:
-> motion, compound/backward refs, cross-frame CDF inheritance, the intra fork, segmentation),
-> and 128x128 superblocks — libaom's DEFAULT, previously a blanket reject that excluded the
-> whole published corpus — decode as of 0.7.126.
+> **Where we are (0.7.127 + the E2d fix).** Keyframes are EXTERNALLY VERIFIED against the whole
+> published corpus: **all EIGHT published libaom vectors in the gate decode their keyframe
+> bit-exactly** vs libaom's own reference MD5s (`make conformance` = 21 matched / 2 known-gap /
+> 0 regressed; the 2 are inter frames). Inter frames decode end-to-end from real bytes
+> (0.7.119-0.7.125: motion, compound/backward refs, cross-frame CDF inheritance, the intra fork,
+> segmentation), and 128x128 superblocks decode as of 0.7.126.
+>
+> **THAT IS NOT THE SAME AS "keyframes are correct" — and the distinction is now measured, not
+> theoretical.** An adversarial review of the E2d bite swept 40 aomenc geometries the published
+> corpus does not cover and found **~31 of 80 streams decode with WRONG CHROMA** (E2e, below):
+> every published vector's height is a multiple of 16, and the defect needs `MiRows % 4 == 2`.
+> Eight-of-eight green says the corpus is exhausted, not that the decoder is.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the
 > roadmap's HONEST STATUS block. The single most important habit this arc produced: drishti's
@@ -1592,34 +1598,66 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > they cannot catch a misreading. `make conformance` is the only gate whose reference drishti
 > cannot have colluded with — run it.
 >
+> **E2d is CLOSED, and how it closed should change how the next desync is approached.** It was
+> not a spec misreading: `av1_clear_cdef` stored `-1` past the end of the flattened CdefIdx grid,
+> straight into the CDF blob that is the next bump allocation. Two sessions were spent
+> re-deriving partition tables that were correct all along. When a desync's *preceding* pixels
+> are correct, the fault is in what is read — **including the tables being read from**.
+>
 > **The next bites, in priority order** (each is one bite):
 >
-> 1. **E2d — the 128-superblock defect** (blocks the last 2 published keyframes). A minimal
->    reproducer is committed: `tests/repro/e2d-192x160.ivf` (1.8 KB) FAILS while
->    `tests/repro/e2d-160x160.ivf` PASSES; both are in the `make conformance` gate as the
->    `--sb-size` 64-vs-128 pair. ALREADY REFUTED, do not re-chase: lossless (bit-exact at
->    128 SB for 256x256/128x128/256x224), loop restoration, every partition family
->    (rect/ab/1to4 each disabled still fails), tx64/paeth/angle-delta (incidental — they only
->    perturb content), CDF-update mode, and geometry alone. ALREADY VERIFIED spec-correct:
->    the partition ctx derivation, the bsl->CDF selection, the 8-symbol bsl-5 alphabet, both
->    synth_horz/vert psum sets, and `av1_cdf_update`'s rate formula. It survives with CDEF off,
->    LR off and `--max-partition-size=16`, so the fault is in the bsl-5 partition symbol path
->    or SB-level setup, and it is CONTENT-dependent. ALSO RULED OUT (0.7.127): the
->    `Default_Partition_W128_Cdf` VALUES — cross-checked byte-identical against the OFFICIAL
->    libaom (aomedia.googlesource.com), dav1d, libgav1 AND the spec annex, including row order
->    (`ctx = left*2 + above`) and the 8-symbol alphabet. NOTE: the `mozilla/aom` GitHub mirror
->    is a stale 2017 pre-freeze research fork whose partition CDFs are entirely different
->    numbers — do not use it as a source. Next step: instrument the per-superblock partition
->    decisions on the 1.8 KB repro and find the first symbol that diverges.
-> 2. **E2b — inter reconstruction rounding** (max |delta| 2..4, ~7% of samples). Reproduces
->    with CDEF *and* deblocking both disabled, so it is NOT the loop filters (the D3 deblocker
->    theory is refuted). Suspect sub-pel MC / reconstruction rounding. Invisible to the
->    internal suites because drishti's MC oracle shares the rounding code under test.
-> 3. **E2c — inter entropy desync** on busier inter frames (`SymbolMaxBits >= -14` trips at
->    `av1_sym_dec_exit`). Caught cleanly; no crash, no OOB.
-> 4. **D2 — per-SB delta-q / delta-lf** (still a hard reject on both lanes).
-> 5. **D1 temporal follow-on** — the DPB-saved segment map (`PrevSegmentIds`) for the
->    temporal-predicted / copied-map / feature-inheritance segmentation configs.
+> 0. **E2e — CfL bottom-edge chroma.** NEW, found reviewing the E2d bite, and it outranks the
+>    inter work because it is a KEYFRAME defect on ordinary video. On a 4:2:0 keyframe whose
+>    `MiRows % 4 == 2` (luma height/8 odd: 136, 152, 168, 184 ...) a bottom-edge block overhangs
+>    the frame, so `MaxLumaH` (5.11.35) exceeds the cropped luma plane;
+>    `src/av1_intra.cyr:869` clamps it to the visible plane, so spec 7.11.5 averages the invisible
+>    rows from the last VISIBLE luma row instead of the reconstructed overhang. `lumaAvg` shifts,
+>    and with it every sample of the CfL block — including the visible ones. Chroma-only (luma
+>    bit-exact), max |delta| 2, bottom rows, 0 differing bytes with `--enable-cfl-intra=0`.
+>    Reproduce: encode 160x136 with the `enc()` settings from `scripts/conformance.sh` and diff
+>    against `aomdec` — 106 differing chroma bytes, Y=0. THE FIX is not to move the clamp: retain
+>    the luma overhang (0.7.114 already made the allocation cover the nominal extent) and bound
+>    `MaxLumaW/H` against the ALLOCATED extent, keeping the clamp as a backstop. The harness has
+>    NO `MiRows % 4 == 2` geometry — `enc()` is hardcoded 64x64, sbrepro 352x288 — so the gate
+>    needs one before the fix can be witnessed. **M.**
+>
+> 1. **E2c — inter entropy desync** on busier inter frames (`SymbolMaxBits >= -14` trips at
+>    `av1_sym_dec_exit`). Caught cleanly; no crash, no OOB. STRONGEST CANDIDATE, found during
+>    the E2d hunt and not yet acted on: `av1_reset_block_context` is called UNCONDITIONALLY on
+>    the inter lane (`src/av1_intertile.cyr:1128`), where spec 5.11.5 gates it on `skip` — and
+>    drishti's own intra lane gets this right (`src/av1_partition.cyr:363`). It zeroes the
+>    coeff above/left contexts feeding `all_zero`/`dc_sign`; luma short-circuits to ctx 0 when
+>    tx==block but CHROMA never does, so quiet frames coincidentally agree and dense ones
+>    desync. NOTE this contradicts the old framing ("consumed symbols the encoder never wrote")
+>    — the symbol COUNT is right, the CONTEXT is wrong. The encode mirror (`:1596`) replays the
+>    same bug, so no round-trip can witness it; needs an external witness or a `scripts/refs/`
+>    port of `get_txb_skip_ctx`.
+> 2. **D3 — loop-filter ref/mode deltas.** The deblocker hardcodes `is_intra = 1`
+>    (`src/av1_deblock.cyr:267`) and `ref = AV1_INTRA_FRAME` (`:273`) for every block of every
+>    frame. `loop_filter_delta_enabled` is 1 on every non-lossless frame of every corpus vector
+>    and the defaults are INTRA +1 / LAST family 0 / GOLDEN,ALTREF -1, so every inter block is
+>    filtered at the wrong level TODAY. This is the only open item that is silently-wrong-pixels
+>    on ordinary content rather than a clean reject. The "D3 refuted" note that used to sit in
+>    E2b is over-stated: that experiment ran `--loopfilter-control=0`, so `av1_deblock` returned
+>    without executing an instruction — D3 was refuted for the *nofilt* case only and has never
+>    been measured with filters on. Needs an `AV1TILE_REF0S` grid (do NOT reorder `main.cyr`:
+>    `av1_deblock` is wired before `av1_mv`).
+> 3. **E2b — inter reconstruction rounding.** Re-MEASURE before treating it as a fix bite. The
+>    "max |delta| 2..4, ~7% of samples" figure predates the E2d fix and has never been
+>    reproduced from `make conformance`, which md5s only — there is no per-frame delta
+>    instrument. Two claims attached to it are false: the rounding sites in `av1_mc.cyr` were
+>    audited spec-exact at 8/10/12-bit in both compound lanes, and "the MC oracle shares the
+>    code under test" does not hold for scaled MC (`scripts/refs/scaled_mc_ref.py` is an
+>    independent spec-literal port). Build the differ first; expect any delta measured today to
+>    be a SUM of at least two errors while D3 is live.
+> 4. **D2 — per-SB delta-q / delta-lf** (still a hard reject on both lanes). Re-sized **M-L**,
+>    not S-M: there are six reject sites (`src/av1_decode.cyr:370-371`,
+>    `src/av1_intermode.cyr:2653/2654/2721/2722`). Buys nothing externally — no corpus vector
+>    and no default aomenc configuration sets `delta_q_present`.
+> 5. **D1 temporal follow-on** — the DPB-saved segment map (`PrevSegmentIds`). Only the
+>    `!update_data` (feature-inheritance) sub-case is independently witnessable and it is S;
+>    the temporal / `!update_map` halves are unreachable on a keyframe by construction, so
+>    their only witness is an inter frame — circular until inter frames are bit-exact.
 >
 > The conformance and encode numbers are the soft ones — conformance because you cannot know
 > what fails until the vectors run (though now they DO run, so each gap is a named, reproducible

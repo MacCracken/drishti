@@ -27,8 +27,9 @@ pass=0; fail=0; xfail=0
 # ---- COMMITTED REPRODUCERS (no libaom needed) ----
 # tests/repro/*.ivf are tiny libaom-encoded streams with their aomdec reference MD5
 # committed alongside, so this half of the gate runs anywhere — including CI without
-# libaom. e2d-160x160 is the PASSING control (hard gate); e2d-192x160 is the E2d
-# defect (xfail). They differ only in width, and both are 128-superblock streams.
+# libaom. BOTH are hard gates now: e2d-160x160 was always the passing control, and
+# e2d-192x160 was the E2d xfail until av1_clear_cdef was bounded (src/av1_modeinfo.cyr).
+# They differ only in width, and both are 128-superblock streams.
 repro_case() { # name expect(match|xfail)
     local n="$1" expect="$2"
     local ivf="tests/repro/$n.ivf" md5f="tests/repro/$n.md5"
@@ -43,7 +44,7 @@ repro_case() { # name expect(match|xfail)
     if [ -n "$got" ] && [ "$got" = "$want" ]; then
         echo "  repro $n: keyframe BIT-EXACT vs committed reference"; pass=$((pass+1))
     elif [ "$expect" = "xfail" ]; then
-        echo "  repro $n: keyframe differs (known 128-SB defect E2d)"; xfail=$((xfail+1))
+        echo "  repro $n: keyframe differs (known gap)"; xfail=$((xfail+1))
     else
         echo "  repro $n: keyframe REGRESSED"; fail=$((fail+1))
     fi
@@ -54,7 +55,7 @@ cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 
 echo "=== drishti conformance ==="
 echo "--- committed reproducers (no libaom required) ---"
 repro_case e2d-160x160 match
-repro_case e2d-192x160 xfail
+repro_case e2d-192x160 match   # E2d: was xfail until av1_clear_cdef was bounded
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "  libaom (aomenc/aomdec) not found — skipping the generated + published corpus"
@@ -69,9 +70,17 @@ mkdir -p "$WORK"
 # A continuous-tone source: libaom's screen-content detector flags synthetic test
 # patterns and turns on palette/intrabc, which drishti rejects by design.
 if [ ! -f "$WORK/src.yuv" ]; then
+    # This bail must mirror the aomenc/aomdec one above: the committed reproducers already
+    # ran and are HARD cases, so exiting straight to 0 here would DISCARD a real regression
+    # (and ignore CONFORMANCE_STRICT). It fires on any ffmpeg failure, not just a missing
+    # binary — no lavfi mandelbrot source, full disk, and so on.
     ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=64x64:rate=30" \
         -frames:v $FRAME_LIMIT -pix_fmt yuv420p -f rawvideo "$WORK/src.yuv" 2>/dev/null || {
-        echo "conformance: ffmpeg not found — SKIPPED"; exit 0; }
+        echo "  ffmpeg unavailable — skipping the generated + published corpus"
+        echo "=== matched=$pass  known-gap=$xfail  REGRESSED=$fail ==="
+        [ "$fail" -gt 0 ] && exit 1
+        [ "${CONFORMANCE_STRICT:-0}" = "1" ] && exit 1
+        exit 0; }
 fi
 
 # This generated corpus pins --sb-size=64 deliberately: it is the 64-superblock control
@@ -153,11 +162,15 @@ check seq_nofilt  keyframe
 VDIR="${CONFORMANCE_VECTORS:-build/vectors}"
 AOM_BASE=https://storage.googleapis.com/aom-test-data
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
-av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv"
-# Known keyframe gaps, each with a named cause (roadmap.md E2d/E2e):
-#   quantizer-00 -> coded_lossless = 1 (the WHT lossless path)
-#   mfmv         -> uses_lr = 1 (loop restoration active on the keyframe)
-PUBLISHED_XFAIL="av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
+av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
+av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
+# NO published keyframe gaps remain. quantizer-00 and mfmv were the last two, and both
+# were filed here with a WRONG named cause — "coded_lossless = 1 (the WHT lossless path)"
+# and "uses_lr = 1 (loop restoration)" respectively. A controlled sweep refuted both
+# attributions (0.7.126), and the real cause turned out to be neither feature: a single
+# unbounded store in av1_clear_cdef overwriting the CDF blob (E2d). The lesson is worth
+# keeping: a named cause on an xfail is a HYPOTHESIS, not a diagnosis — label it as one.
+PUBLISHED_XFAIL=""
 
 mkdir -p "$VDIR"
 fetch_vec() { # name -> 0 if available
@@ -184,13 +197,14 @@ check_published() { # name expect(match|xfail)
     fi
 }
 
-# ---- THE 128-SB REPRODUCER (E2d) ----
-# Same source, same encoder settings, ONLY --sb-size differs. 64 must match; 128 is the
-# known defect. This is the minimal local handle on it: it needs partial superblock
-# coverage in BOTH dimensions (352x288 with 128-SBs leaves a 96-col x 32-row remainder),
-# and it is CONTENT-dependent — the published 352x288 vectors cdfupdate/quantizer-32 have
-# the same geometry and decode fine. NOT a lossless bug: lossless at 128 SB matches at
-# 256x256, 128x128 and 256x224.
+# ---- THE 128-SB REPRODUCER (E2d — FIXED, kept as the regression guard) ----
+# Same source, same encoder settings, ONLY --sb-size differs. BOTH must match now; 128 was
+# the E2d xfail until av1_clear_cdef was bounded (src/av1_modeinfo.cyr). It stays a hard
+# case because it was the minimal local trigger: it needs partial superblock coverage in
+# BOTH dimensions (352x288 with 128-SBs leaves a 96-col x 32-row remainder), and it was
+# CONTENT-dependent — the published 352x288 vectors cdfupdate/quantizer-32 have the same
+# geometry and decoded fine even while the bug was live, because the out-of-bounds -1 only
+# sometimes landed on a CDF word that frame actually read.
 sbrepro() { # sbsize expect(match|xfail)
     local sb="$1" expect="$2"
     ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=352x288:rate=30" -frames:v 1 \
@@ -210,14 +224,14 @@ sbrepro() { # sbsize expect(match|xfail)
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
         echo "  352x288 sb-size=$sb: keyframe BIT-EXACT"; pass=$((pass+1))
     elif [ "$expect" = "xfail" ]; then
-        echo "  352x288 sb-size=$sb: keyframe differs (known 128-SB defect)"; xfail=$((xfail+1))
+        echo "  352x288 sb-size=$sb: keyframe differs (known gap)"; xfail=$((xfail+1))
     else
         echo "  352x288 sb-size=$sb: keyframe REGRESSED"; fail=$((fail+1))
     fi
 }
 echo "--- 128-SB reproducer (same source, only --sb-size differs) ---"
 sbrepro 64 match
-sbrepro 128 xfail
+sbrepro 128 match   # E2d: was xfail until av1_clear_cdef was bounded
 
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done

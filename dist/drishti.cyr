@@ -10819,12 +10819,23 @@ enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
 }
 # clear_cdef: reset a superblock's cdef_idx to -1 at the start of each SB (5.11.2).
 # For a 128x128 SB (use_128), the three other 64x64 sub-units are cleared too.
-fn av1_clear_cdef(grid, stride, r, c, use_128): i64 {
+# `rows` BOUNDS the grid: the spec writes cdef_idx as a conceptual 2-D array, so an
+# SB overhanging the frame writes harmlessly off the end of a row. drishti FLATTENS
+# CdefIdx to exactly rows*stride i64 (av1_tile_grids_new), so the same three writes
+# are memory-unsafe on a frame whose MI grid does not cover the last SB: [r+16][*]
+# stores PAST THE OBJECT, and [*][c+16] silently aliases into the NEXT row. Skipping
+# them is output-equivalent because av1_read_cdef only ever indexes 16-aligned anchors
+# inside the frame, so a skipped sub-unit is write-only.
+fn av1_clear_cdef(grid, stride, rows, r, c, use_128): i64 {
     store64(grid + (((r * stride) + c) * 8), 0 - 1);
     if (use_128) {
-        store64(grid + (((r * stride) + (c + 16)) * 8), 0 - 1);
-        store64(grid + ((((r + 16) * stride) + c) * 8), 0 - 1);
-        store64(grid + ((((r + 16) * stride) + (c + 16)) * 8), 0 - 1);
+        var have_c = (c + 16) < stride;
+        var have_r = (r + 16) < rows;
+        if (have_c) { store64(grid + (((r * stride) + (c + 16)) * 8), 0 - 1); }
+        if (have_r) { store64(grid + ((((r + 16) * stride) + c) * 8), 0 - 1); }
+        if (have_r && have_c) {
+            store64(grid + ((((r + 16) * stride) + (c + 16)) * 8), 0 - 1);
+        }
     }
     return 0;
 }
@@ -14149,6 +14160,7 @@ fn av1_decode_tile(tile): i64 {
     var col_start = load64(tile + AV1TILE_COL_START);
     var col_end = load64(tile + AV1TILE_COL_END);
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
+    var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);   # frame row bound for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
@@ -14170,8 +14182,9 @@ fn av1_decode_tile(tile): i64 {
         var c = col_start;
         while (c < col_end) {
             # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. Guarded: grid may be
-            # unallocated. A 128 SB spans FOUR 64x64 cdef units, which use_128 handles.
-            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, use128); }
+            # unallocated. A 128 SB spans FOUR 64x64 cdef units, which use_128 handles;
+            # fmi_rows bounds the three extra writes when the SB overhangs the MI grid.
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
             av1_bd_clear(tile, r, c, sb4, num_planes);
             if (lrp != 0) {                              # read_lr (5.11.2) before decode_partition
                 av1_read_lr(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
@@ -14192,6 +14205,7 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);
     var mi_cols = load64(tile + AV1TILE_MI_COLS);
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
+    var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);   # frame row bound for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
     var pc = alloc(8);
     var bc = alloc(8);
@@ -14212,7 +14226,7 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
-            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, r, c, use128); }
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
             if (lrp != 0) {
                 av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
                 av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));

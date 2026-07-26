@@ -111,6 +111,59 @@ error. Convention: **leaf = `_sym` suffix, driver = plain name**
 grep -hoE '^fn [a-z0-9_]+' src/*.cyr | sort | uniq -d     # must be empty
 ```
 
+### A symbol desync is not always a misparse — check buffer adjacency first
+
+E2d cost two sessions. A 128-superblock keyframe desynced at `av1_sym_dec_exit`, so the
+search went where a desync usually lives: the partition CDF, the bsl-5 alphabet, the
+context derivations, the tile geometry. `Default_Partition_W128_Cdf` was cross-checked
+byte-identical against four independent sources. All of it was correct. The actual cause
+was `av1_clear_cdef` storing `-1` **past the end of the CdefIdx grid**, into whatever the
+bump allocator had handed out next — the CDF blob directly on the CDEF-off reproducers, the
+CDEF read context then the blob on a CDEF-enabled stream, the MV grid on an inter frame. A
+CDF row went non-monotone and the decoder desynced reading a table it had corrupted itself.
+
+Two properties made it invisible. The allocator is a **headerless bump allocator**, so
+everything past the bump pointer *is* the blast radius and there is no guard page or header
+to trip — and which object gets hit varies with the stream, so the symptom moves. And the
+overflow's landing offset is a pure function of the frame's `MiCols * MiRows`, so whether it
+desynced depended on whether that stream ever read the poisoned context — which reads as
+"content-dependent" and sends you hunting for a content-dependent *parse* bug. The passing
+control frame was overflowing too.
+
+> **Do:** when a desync's *preceding* pixels are correct, the fault is in what is read —
+> which includes the tables being read from. Before re-deriving a spec table, check whether
+> anything writes near the buffer that holds it: `grep` the module's `alloc(` sites, and
+> confirm every store into a flattened 2-D grid is bounded on **both** axes. A spec that
+> writes a conceptual 2-D array tolerates an out-of-frame write; a flattened one does not.
+
+### A canary must span the blast radius
+
+The bounds witness for the above first used a 16-word canary after the grid. It caught the
+in-bounds *row aliasing* and reported green for the actual heap overflow — which reaches 433
+words past the grid and so flew clean over a 16-word canary. Found by mutation, not by
+review.
+
+> **Do:** compute the maximum out-of-bounds index the defect can reach, size the canary to
+> cover it, and **assert that arithmetic in the test** alongside the adjacency assert. Then
+> mutate each bound separately — a mutant that breaks only the row bound must redden a
+> different assertion than one that breaks only the column bound, or you have one witness
+> wearing two hats.
+
+### One geometry cannot pin a two-axis bound
+
+The same witness then passed three more mutants: `<=` on either bound, and the two axes
+**swapped**. Its geometry (stride 48, rows 40) was the reproducer's, which felt like the
+authoritative choice — but no origin in it evaluates either predicate at exact equality
+(`r+16` is 48 against rows 40, strictly greater), so off-by-one survives; and the two bounds
+never disagree at any origin, so swapping them changes nothing. A second geometry (stride 80,
+rows 48) fixes both: origins exist where `r+16 == rows` and `c+16 == stride` exactly, and the
+bounds sit on opposite sides of a superblock boundary so a swap writes out of bounds.
+
+> **Do:** for a bound on two axes, pick the geometry to make the axes **disagree**, and
+> include an origin that lands exactly ON each boundary. The geometry that reproduces the bug
+> is documentation; it is not automatically the geometry that pins the fix. Mutate `<`→`<=`
+> and swap the axes — if either survives, the witness is measuring one axis twice.
+
 ## Running an adversarial review
 
 Spawn a `Workflow` whose slices attack different dimensions (spec fidelity / memory

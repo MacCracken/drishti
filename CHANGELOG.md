@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **E2d SOLVED — a heap buffer overflow in `av1_clear_cdef`, not a spec misreading. ALL EIGHT published
+  libaom conformance vectors now decode their keyframe BIT-EXACTLY; `make conformance` goes 17 matched /
+  6 known-gap to 21 matched / 2 known-gap / 0 regressed.** The last two published keyframe gaps
+  (`av1-1-b8-00-quantizer-00`, `av1-1-b8-06-mfmv`), the committed `e2d-192x160` reproducer and the
+  `352x288 --sb-size=128` case all close on one fix. THE DEFECT: `av1_clear_cdef`'s `use_128` branch issued
+  three UNBOUNDED `store64(..., -1)` at `[r][c+16]`, `[r+16][c]` and `[r+16][c+16]`. The spec writes
+  `cdef_idx` as a conceptual 2-D array, where an out-of-frame sub-unit write is harmless; drishti FLATTENS
+  CdefIdx to exactly `rows*stride` i64 (`av1_tile_grids_new`), and it is the LAST allocation there. The
+  allocator is a headerless bump allocator, so **whatever is allocated next** begins at the first byte past
+  the grid, and WHICH object that is depends on the configuration: on the committed reproducers
+  (`enable_cdef=0`) it is `av1_ncdf_new`'s 15,000-byte **mutable** non-coefficient CDF blob directly; on a
+  CDEF-enabled stream `av1_tile_set_cdef_ctx`'s 56-byte read context takes the slot and the blob follows it;
+  on an inter frame the MV grid takes the slot and the blob is far beyond. Either way the deeper `[r+16][*]`
+  stores reach live CDF words. On any frame with `MiRows % 32` in 1..16 the last superblock row stored `-1`
+  into them; `f = 32768 - (-1)` makes the row non-monotone and the symbol decoder desyncs at
+  `av1_sym_dec_exit`'s `SymbolMaxBits >= -14` bound. At 64x64 superblocks the branch never executes — which
+  is the entire `--sb-size` A/B on one unchanged source. Reachable from ordinary video, not crafted input.
+  The unbounded store sat in `av1_clear_cdef`, which BOTH lanes call, so both call sites now thread the
+  bound. NOTE WHAT DID NOT HAPPEN, because the first draft of this entry got it wrong: the ENCODE lane's
+  `use_128` branch has never executed — `AV1TILE_SB128` is set only by the decode tile-group driver
+  (`src/av1_decode.cyr:467`) and `av1_tile_new` defaults it to 0, so no round-trip has ever run at 128
+  superblocks. The round-trip was blind for want of COVERAGE, not because both lanes were wrong in the same
+  direction. That coverage gap is now recorded in the roadmap. THE FIX: `av1_clear_cdef` takes `rows` and
+  guards each extra store on `(c+16) < stride` / `(r+16) < rows`; both call sites thread
+  `AV1TILE_FMI_ROWS`. Output-equivalent because `av1_read_cdef` only ever indexes 16-aligned anchors inside
+  the frame, so a skipped sub-unit is write-only.
+  **WHY IT LOOKED LIKE A PARSE BUG, AND WHY THE CONTENT-DEPENDENCE WAS A RED HERRING:** the landing offset
+  is a pure function of `MiCols*MiRows`, so `e2d-160x160` — the *passing control* — was overflowing too; it
+  poisoned intra Y-mode rows at `above=2` where `192x160` hit `above=3`. Whether a stream desynced depended
+  only on whether it ever read the poisoned context. "Corner geometry necessary but not sufficient" was an
+  address calculation, not a geometry mystery. Newly refuted along the way, so they are not re-chased: tile
+  geometry at 128 (both reproducers are single-tile), `lr_params`/`read_lr`/`cdef_params` at 128, the whole
+  partition tree at 128, the BlockDecoded stride-34 grid, and the 64x64 residual chunk split.
+  **WITNESS — two geometries, because one cannot do it.** `test_clear_cdef_bounds` uses the reproducer's own
+  geometry (MiCols 48, MiRows 40), whose four SB origins cover all four `(have_r, have_c)` combinations, with
+  a canary allocated immediately after the grid — the adjacency itself asserted, per the 0.7.114 discipline.
+  `test_clear_cdef_axes` adds stride 80 / rows 48, which the reproducer geometry cannot substitute for: at
+  48/40 NO origin evaluates either predicate at exact equality, and the two axes happen to agree at every
+  origin, so `<` vs `<=` and an axis SWAP both survive. At 80/48 the origins `(32,0)`, `(0,64)` and `(32,64)`
+  hit `r+16 == rows` and `c+16 == stride` exactly, and the bounds sit on opposite sides of a superblock
+  boundary. MUTATIONS: **7 run, 7 red** — both bounds dropped, row only (caught ONLY by the canary), column
+  only (caught by the aliasing/count asserts), an over-clamp skipping every sub-unit (caught by the positive
+  case), `<=` on each bound, and the axis swap. The gate promotion was verified the same way: restoring the
+  unbounded store turns `make conformance` red with 4 REGRESSED and exit 2.
+  **TWO WITNESS BUGS WORTH RECORDING, both found by mutation and neither by review.** (1) The canary was
+  first sized 16 words and reported GREEN for the actual heap overflow — which reaches 433 words past the
+  grid and flew clean over it; only the in-bounds row aliasing was being witnessed. It now asserts its own
+  span. (2) The single-geometry witness passed all three of `<=`-row, `<=`-col and axis-swap. Both lessons
+  are in `docs/guides/verification.md`.
+  **GATE RE-BASELINED** (`scripts/conformance.sh`): `e2d-192x160` and `sb-size=128` promoted from xfail to
+  hard cases, `quantizer-00` and `mfmv` moved into `PUBLISHED`, and `PUBLISHED_XFAIL` is now empty — no
+  published keyframe gap remains. Both of those vectors had been filed with a WRONG named cause
+  (`coded_lossless` and `uses_lr`); the note that replaces them records that a named cause on an xfail is a
+  hypothesis, not a diagnosis.
+
 ## [0.7.127] - 2026-07-23
 
 - **E2d diagnosis + a committed minimal reproducer; the W128 CDF cleared by four-source cross-check.**
