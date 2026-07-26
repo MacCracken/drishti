@@ -132,13 +132,14 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > frames decode, but no inter frame has yet been shown bit-exact against an external
 > reference.
 >
-> **ENCODE — the thing "encode round-trip-clean" hides:** there is **no encoder**.
+> **ENCODE — planned as releases 0.7.136-0.7.141, not deferred:** there is **no encoder** yet.
 > What exists (`av1_encode_*`) is a **bitstream writer** that replays a caller-supplied
 > partition plan + residual. It has no forward transform, no quantiser, no mode
 > decision / RDO, no motion search, no rate control, and cannot even emit its own
 > sequence or frame headers (the tests hand-build every header bit). It cannot produce
-> a file any external decoder could open. A real encoder is **arc-sized**, comparable
-> to the whole decode arc.
+> a file any external decoder could open. It is the largest work left in this arc, and it is
+> scheduled: 0.7.136 emits the first standalone `aomdec`-readable file, 0.7.141 is round-trip
+> clean on both lanes. See the release table below.
 >
 > **CONFORMANCE:** the harness exists and is a gate (`make conformance`, Phase E1).
 > libaom encodes the stream and `aomdec` produces the reference pixels, so the
@@ -439,209 +440,71 @@ Baseline (0.7.0): OBU layer + sequence header.
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.
 
-### The honest remaining work
+### THE GOAL: AV1 COMPLETE — decode AND encode — in 14 releases, 0.7.129 through 0.7.142
 
-**AV1 100% = decode conformance-clean + encode round-trip-clean.** NOT MET, and not
-close (see the HONEST STATUS block at the top of this section). Grouped into phases,
-each item sized in rough **bites** (one bite ≈ one release; wide uncertainty, and
-conformance will surface more). Sizes: S ≈ 1–2, M ≈ 3–6, L ≈ 6–12, MODULE ≈ 5–10,
-ARC ≈ 40+.
+**This is the plan of record. It replaces the phase-by-phase item list that ran this arc to 128
+releases.** That list was not wrong about the work; it was wrong about the UNIT. One item per
+release turned a large-but-finite job into an unbounded stream of patches.
 
-**Phase C — make a real inter FRAME decode (the gating hole). DONE 0.7.119-0.7.124.**
-Inter frames now decode end-to-end from real bytes; the ~60 releases of inter primitives
-are exercised by real streams. (Conformance status for inter frames: roadmap.md E2b/E2c.)
-  - C1. **Cross-frame CDF inheritance** (7.20/7.21). **DONE 0.7.121.** Per-slot
-    `AV1REF_SAVED_CDF` bundle; `av1_cdf_bundle_save/load` + `av1_tile_inherit_cdfs`
-    (both lanes) + the finish-save; the `primary_ref != NONE` reject lifted; witnessed
-    load-bearing (`test_cdf_inheritance`) + per-family (`test_cdf_bundle_roundtrip`),
-    and adversarially reviewed (16 agents, 8 real issues fixed). REMAINING follow-on:
-    saving the named `context_update_tile_id` tile for multi-tile adaptive frames
-    (currently rejected, not mis-saved), and the `disable_frame_end_update_cdf=1`-with-
-    adaptation initial-CDF snapshot (currently reconstructed tile-independently).
-  - C2. **`intra_block_mode_info`** — the intra-block fork inside an inter frame
-    (5.11.24). **DONE 0.7.122–0.7.123.** Mode-info half (0.7.122): the neighbour-free
-    Size-Group Y-mode CDF + the intra reads/writes on both lanes. RECONSTRUCTION
-    (0.7.123): an intra block decodes to PIXELS — `av1_decode_block_inter` builds an
-    `Av1Block` and runs `av1_residual` (intra predict + coeff + reconstruct);
-    `av1_encode_block_inter` writes the residual via a new `av1_residual_intra_encode`;
-    the intra MI-grid stores (`is_inter=0`/`RefFrame[0]=INTRA`). Round-trip witnessed
-    (decode == DC-predict + reconstruct oracle), teeth-verified, adversarially reviewed
-    (0 confirmed). Mixed-tile follow-on **DONE 0.7.124**: `av1_bd_mark_block` marks an
-    inter block's footprint in `BlockDecoded`, so a DIRECTIONAL intra block now reads a
-    prior INTER neighbour's above-right/below-left correctly (witnessed with a D45 block
-    reading an inter neighbour, teeth-verified).
-  - C3. **Real inter-frame integration** through `av1_decode_stream`: a genuine
-    multi-frame GOP (KEY then INTER referencing it), DPB reference management,
-    order-hint plumbing, `show_existing_frame` / switch frames. **M–L.** PARTLY
-    DONE 0.7.119–0.7.120. Landed: the first MOTION-WITNESSING inter decode
-    (KEY→content→motion vs an MC oracle, 0.7.119, degenerate header); the realistic
-    order-hint-enabled header (explicit primary_ref_frame, per-frame order_hint,
-    get_relative_dist non-zero on decoded data, 0.7.120); `RefFrameSignBias`
-    derived + wired (0.7.120 — `av1_mvctx_set_signbias` had no callers); and a
-    **COMPOUND / backward-ref frame decoding through `av1_decode_stream`** (0.7.120,
-    `test_inter_stream_compound_oh` — a 4-frame GOP with a real backward ref in the
-    DPB, AVERAGE-blended, verified vs an independent compound oracle and vs either
-    single ref); and the **sign-bias MV negation witnessed through a real decode**
-    (`test_inter_tile_signbias_negation` — a 4-SB tile where a NEARESTMV block's
-    predictor is the negated MV of a cross-bias ALTREF neighbour; decoded MI-grid MV +
-    reconstructed pixels flip with ALTREF's order hint, mutation-verified necessary and
-    sufficient). STILL TODO: multi-frame GOPs beyond 4 frames / `show_existing_frame` /
-    switch frames.
+**The charter does not change and nothing is deferred out of this line.** `0.7.x` = AV1 decode
+conformance-clean **and** encode round-trip-clean. The encoder is the back half of this table,
+batched like everything else. It is the largest work in the arc and it is planned, not punted.
 
-**Phase D — full decode feature coverage (what real `.ivf`s use).**
-  - D1. **Segmentation** — segment-id read (intra + inter), feature data, per-segment
-    qindex / `LosslessArray`. **MODULE.** ✅ 0.7.125: the SPATIAL config decodes end-to-end to
-    pixels on both lanes (5.11.9/10/11 `read_segment_id` + `neg_deinterleave`; per-segment
-    `SEG_LVL_ALT_Q` → dequant; `SegmentIds` map grid; witnessed 2-segment inter + keyframe frames).
-    FOLLOW-ON: the temporal-predicted map (`segmentation_temporal_update`), the whole-map copy
-    (`!update_map`), feature-data inheritance (`!update_data`), and a lossless-boundary-crossing
-    segment need a DPB-saved seg map + `PrevSegmentIds` — `av1_seg_supported` rejects them cleanly.
-  - D2. **Per-SB delta-q / delta-lf** (5.11.18/5.11.19), both paths. **S–M.** Silent
-    desync on keyframes today (rejected at frame level since 0.7.116).
-  - D3. **Loop-filter ref/mode deltas** — the deblocker hardcodes `is_intra = 1` /
-    `ref = INTRA_FRAME` for every block of every frame; thread per-MI RefFrame + mode
-    out of the MV grid, and load deltas from the primary ref instead of the blanket
-    `setup_past_independence` reset. **M.** WRONG PIXELS today, not a reject.
-  - D4. **Block-level lossless** from `CodedLossless` / `LosslessArray[segment_id]`
-    not `base_q == 0`. **S.** Entropy desync when it bites.
-  - D5. **Film-grain synthesis** (7.18.3) — parsed and discarded today. **MODULE.**
-  - D6. **Palette** (5.11.46). **MODULE.** Rejected since 0.7.116.
-  - D7. **Intra block copy** (5.11.6). **MODULE.** Rejected since 0.7.116.
-  - D8. **128×128 superblocks** (5.5.1) — invasive: the SB loop, partition tree
-    (bsl 5), residual chunking and CDEF grid all assume 64×64. **MODULE (invasive).**
-    Rejected today.
-  - D9. **Scalability** — operating-point select + 6.2.1 `drop_obu` by temporal/
-    spatial id. **S** for a clean reject, **M** for real support. Rejected since 0.7.116.
-  - D10. **Large-scale-tile / `OBU_TILE_LIST`** — **S** (a named reject + scope line).
-  - D11. **4:2:2 / 4:4:4 / monochrome END-TO-END decode tests** — the code is
-    subsampling-generic and parses right, but is untested at those subsamplings.
-    **S–M.** Untested code, not verified code.
+**Rules for this stretch, and they are not optional:**
 
-**Phase E — conformance (the gate on any close claim).**
-  - E1. ✅ **Conformance-vector harness — DONE.** `programs/conformance.cyr` (IVF →
-    per-frame raw I420), `programs/vector-probe.cyr` (name the gating header field
-    instead of a bare `DR_ERR_UNSUPPORTED`), `scripts/conformance.sh`, `make
-    conformance`. libaom encodes the stream and `aomdec` produces the reference
-    pixels, so the reference cannot collude with drishti's own reading of the spec.
-    **A 64×64 keyframe decodes BIT-EXACT (byte-identical I420 vs aomdec)** — the
-    first evidence in this arc that drishti did not produce itself. The keyframe path
-    is a HARD gate; inter cases are xfail and tighten as E2 lands.
-  - E2. **Fix what the vectors expose.** Three concrete findings, in priority order:
-    - E2a. ✅ **128×128 superblocks — DONE (0.7.126).** libaom DEFAULTS to
-      `use_128x128_superblock=1`, so this gate rejected essentially every real stream.
-      Landed in three bites: the W128 partition CDF + its 8-symbol alphabet + a
-      128-capable BlockDecoded grid; the `sbMask` (31 vs 15) + the 64×64 `residual()`
-      chunk split; then the un-gate (SB loop drives sbSize/sbSize4 off `AV1TILE_SB128`).
-      **SIX published libaom vectors now decode their keyframe BIT-EXACTLY vs the
-      published reference MD5s** (`size-16x16/32x32/64x64`, `quantizer-32`, `cdfupdate`,
-      `mv`) — wired into `make conformance`.
-    - E2d. ✅ **DONE — and it was a HEAP BUFFER OVERFLOW, not a spec misreading.**
-      `av1_clear_cdef`'s `use_128` branch issued three UNBOUNDED stores at `[r][c+16]`,
-      `[r+16][c]`, `[r+16][c+16]`. The spec's `cdef_idx` is a conceptual 2-D array where an
-      out-of-frame sub-unit write is harmless; drishti flattens CdefIdx to exactly
-      `rows*stride` i64 and it is the LAST allocation in `av1_tile_grids_new`, so with a
-      headerless bump allocator whatever is allocated next takes the write: the CDF blob
-      directly on the CDEF-off reproducers, `av1_tile_set_cdef_ctx`'s 56-byte read context
-      then the blob on a CDEF-enabled stream, the MV grid on an inter frame. On any frame
-      with `MiRows % 32` in 1..16 the last SB row stored `-1` into live CDF words, the row
-      went non-monotone, and the decoder desynced reading a table it had corrupted itself.
-      Fixed by bounding both axes and threading `AV1TILE_FMI_ROWS` through both lanes.
-      **ALL EIGHT published vectors now decode their keyframe BIT-EXACTLY; `make conformance`
-      is 21 matched / 2 known-gap / 0 regressed, and no published keyframe gap remains.**
-      Both original attributions (`coded_lossless` for `quantizer-00`, `uses_lr` for `mfmv`)
-      were wrong, as the 0.7.126 sweep had already shown; so was every parse-side hypothesis
-      the hunt generated. Refuted along the way and not worth re-chasing: tile geometry at
-      128 (both reproducers are single-tile), `lr_params`/`read_lr`/`cdef_params` at 128, the
-      partition tree at 128, the BlockDecoded stride-34 grid, and the 64x64 residual chunk
-      split. The durable lesson is in `docs/guides/verification.md`: when a desync's
-      *preceding* pixels are correct the fault is in what is read — **which includes the
-      tables being read from** — so check buffer adjacency before re-deriving a spec table.
-    - E2e. ✅ **DONE — CfL bottom-edge chroma; the KEYFRAME defect the published corpus could not see.**
-      On a 4:2:0 keyframe whose `MiRows % 4 == 2` (luma height/8 odd: 136, 152, 168, 184 ...)
-      a bottom-edge block overhangs the frame, so `MaxLumaH` (5.11.35) exceeds the cropped
-      luma plane. `av1_predict_chroma_from_luma` clamps it to the visible plane
-      (`src/av1_intra.cyr:869`, commented as an "OOB backstop"), so spec 7.11.5 averages the
-      invisible rows from the last VISIBLE luma row instead of the reconstructed overhang.
-      That shifts `lumaAvg`, which shifts every sample of the CfL block including the visible
-      ones. Measured on a 40-geometry aomenc sweep vs `aomdec`: 15/40 diverge at
-      `--sb-size=128` and 16/40 at 64 — chroma-only (luma bit-exact), max |delta| 2, bottom
-      rows only, and 0 differing bytes with `--enable-cfl-intra=0`. Independently reproduced
-      at 160x136 (106 differing chroma bytes, Y=0). Every published vector's height happens
-      to be a multiple of 16, which is why eight of eight pass while ordinary video does not.
-      FIXED by one bound: `MaxLumaW/H` now clamp to the plane's true ALLOCATED extent,
-      `alloc + border`, not the visible plane. The overhang rows are real reconstructed
-      pixels (predict and reconstruct both write the nominal extent; 0.7.114 sized the
-      allocation to hold them). NOTE `alloc == visible` whenever the height is already a
-      multiple of 8 — which is the affected class — so the border term is load-bearing, not
-      belt-and-braces: measured 20 divergent with the visible bound, 20 with alloc alone,
-      **0 with alloc+border**. `make conformance` gained an `oddmi` section (160x136 and
-      288x152, both superblock sizes) so the harness finally covers the geometry class;
-      witnessed libaom-free by three hand-computed CfL tests, 5 mutations all red.
-    - E2b. **Inter reconstruction rounding.** Inter frames with real coded content
-      decode but land within max |delta| 2..4 of the reference (~7% of samples,
-      scattered, no structural offset). Reproduces with CDEF *and* deblocking both
-      disabled — so it is NOT the loop filters; the D3 deblocker hypothesis is
-      refuted by controlled experiment. Suspect sub-pel MC / reconstruction rounding.
-      Invisible to the internal suites: drishti's MC oracle shares the rounding code
-      under test. **M.**
-    - E2c. **Inter entropy desync.** Busier inter frames trip the spec's
-      `SymbolMaxBits >= -14` bound at `av1_sym_dec_exit` (`AV1_ERR_BAD_FRAME`) —
-      drishti consumed symbols the encoder never wrote. Caught cleanly (no crash,
-      no OOB, no silent garbage), but it is a genuine mis-parse. **M–L.**
+1. **A release is a BATCH.** Every release below bundles multiple items behind ONE stated
+   outcome. No release ships a single item.
+2. **A bite is committed when it is finished and green** — gates run, witness in place — and
+   work continues immediately on the next bite in the same release. Bites do not wait.
+3. **The outcome is the acceptance test.** A release is done when its stated outcome is
+   demonstrable against a gate, not when its bullet list is ticked.
+4. **No new labels.** Findings are described by what breaks. The E-numbers below are the last
+   ones; they exist only because they are already wired into `make conformance`.
+5. **If a release overruns its outcome, the overflow goes to a LATER release.** The release
+   count is fixed at 14; scope moves between releases, the count does not grow silently.
 
-**Phase F — a real AV1 encoder (for "encode round-trip-clean").** What exists is a
-plan-replay bitstream writer, not an encoder. **ARC-SIZED**, comparable to the whole
-decode arc. Forward transform + quantiser (**M**); sequence/frame-header + OBU + IVF
-writers so it can emit a standalone stream (**M**); motion estimation / search
-(**L**); mode decision / RDO (**L+**); rate control (**M–L**); then round-trip and
-cross-decoder gates. **Realistically 40+ bites on its own.**
+#### Decode — 0.7.129 to 0.7.135
 
-**Phase G — robustness follow-ups (any time).**
-  - G0. **The encode lane has NO 128-superblock coverage of any kind.** `av1_tile_set_sb128` is
-    never called on an encode tile — `AV1TILE_SB128` is set only by the decode tile-group driver
-    (`src/av1_decode.cyr:467`) and `av1_tile_new` defaults it to 0 — so `av1_encode_tile`'s
-    `use_128` branch, `av1_encode_partition` at BLOCK_128X128 and the whole W128 write path are
-    UNEXECUTED by any test. Surfaced while reviewing the E2d fix: the CHANGELOG's first draft
-    claimed the round-trip was blind because both lanes were wrong in the same direction, and the
-    truth is worse and simpler — the encode lane never ran at 128 at all. A 128-SB
-    encode/decode round-trip is the missing witness. **S–M.**
-  - G0b. **`av1_read_cdef` / `av1_write_cdef` fill loops are unbounded on both axes**
-    (`src/av1_modeinfo.cyr` ~:556, ~:580), safe today only by the forced-partition invariant —
-    an argument, not a guard, and exactly the shape of the E2d defect. Bounding them is not a
-    one-liner: `rows` must be threaded through the cdef context record, which is built in FOUR
-    places (`src/av1_residual.cyr` `av1_tile_set_cdef_ctx`, `src/av1_intertile.cyr` the
-    `AV1TILE_ICDEF` copy, and two test fixtures) and Cyrius will not complain about a missed one.
-    **S**, but re-read all four sites by hand.
-  - G0c. **Conformance-harness hardening.** Several paths score a non-run as a pass:
-    a missing committed fixture in `repro_case` skips silently; `sbrepro`'s ffmpeg/aomenc failures
-    `return 0`; `check()` scores nothing when zero frames demux; and a failed published-vector
-    fetch quietly unscores up to eight now-HARD cases without touching `CONFORMANCE_STRICT`. Add a
-    `skipped=` counter to the summary line and make an absent committed fixture a hard failure.
-    **S.** (The one path that could discard a real failure — `exit 0` on the ffmpeg bail — is
-    fixed with the E2d bite.)
-  - G1. **OOM fault injection** — route `src` allocations through an injectable
-    allocator, then mutation-cover at least one of the ~140 `DR_ERR_OOM` branches per
-    module (none is covered today). **S–M.**
-  - G2. **Coverage-guided decode fuzzing over a real corpus** (the 0.7.118 harness is
-    seed-mutation only). **M.**
-  - G3. **Remaining test-fixture hardening** (the `it_ref_frame` linear-ramp sweep,
-    etc.). **S, per-test.**
+| Release | Outcome (the acceptance test) | Batched work |
+|---|---|---|
+| **0.7.129** | **An INTER frame decodes BIT-EXACT vs `aomdec`.** The two inter xfails become hard cases. | E2b inter reconstruction rounding; E2c inter entropy desync (prime suspect: `av1_reset_block_context` unconditional on the inter lane, `src/av1_intertile.cyr`); D3 loop-filter ref/mode deltas (the deblocker hardcodes `is_intra=1`/`ref=INTRA_FRAME` — silently wrong pixels today); a per-frame delta instrument in `scripts/conformance.sh` so divergence is measured, not md5-guessed |
+| **0.7.130** | **No `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset.** | D2 per-SB delta-q / delta-lf, both lanes; D4 block-level lossless from `LosslessArray[segment_id]`; D1 temporal segmentation (`PrevSegmentIds` + the DPB-saved map); C1 follow-ons (`context_update_tile_id` multi-tile save, the `disable_frame_end_update_cdf` witness) |
+| **0.7.131** | **A real multi-frame GOP decodes end-to-end**, not a 4-frame fixture. | C3 remainder: GOPs beyond 4 frames, `show_existing_frame`, switch frames, full 7.21 reference reload; multi-tile inter frames; the DPB under real refresh patterns |
+| **0.7.132** | **The geometry and format matrix is CLEAN** — E2e's lesson turned into a standing gate. | D11 4:2:2 / 4:4:4 / monochrome end-to-end; 10/12-bit vs `aomdec`; a dimension sweep (odd MI, non-multiple-of-8, superres, scaled refs) wired into `make conformance` as a matrix, not hand-run |
+| **0.7.133** | **Screen content decodes** — palette and intra block copy. | D6 palette (5.11.46); D7 intra block copy (5.11.6); `--tune-content=screen` rejects wholesale today |
+| **0.7.134** | **Film grain renders; every remaining reject is deliberate and documented.** | D5 film-grain synthesis (7.18.3, parsed and discarded today); D9 scalability / operating-point select + `drop_obu`; D10 large-scale-tile / `OBU_TILE_LIST` |
+| **0.7.135** | **DECODE IS CONFORMANCE-CLEAN: the FULL published `aom-test-data` corpus decodes every frame bit-exactly**, plus safety and harness integrity. | The complete published corpus gated, every frame not just keyframes; G0 encode-lane 128-SB coverage; G0b bound the `av1_read_cdef`/`av1_write_cdef` fill loops; G0c harness hardening (a missing fixture must FAIL, `skipped=` counter, no non-run scoring as a pass); the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; G1 OOM injection; G2 corpus fuzzing; restore the missing `scripts/refs/` MC generators |
 
-**On the total:** the per-item S/M/L sizes above are honest engineering guesses; the
-SUM is not a number to trust — every aggregate estimate this arc has ever printed was
-3–5× too low. What is certain and checkable: two of the five phases (E conformance, F
-encoder) have not been STARTED, and Phase F is an arc in its own right. If a range is
-needed for planning, treat "dozens of releases per phase, encoder+conformance
-dominating" as the shape — and expect it to grow, not shrink, as conformance vectors
-run. We are at 0.7.118; Phases A/B done, C–G not started.
+#### Encode — 0.7.136 to 0.7.142
 
-**Re-scoping is the maintainer's call.** Options, if 90–130 is not the intended shape:
-(a) keep the charter as-is; (b) split — declare 0.7.x = *decode* conformance-clean and
-move the encoder to its own later minor line (this is the honest large fault line);
-(c) narrow to profile-0/1 and defer film-grain / palette / intrabc / 128×128 / scalability
-to a later pass; (d) define "close" as *keyframe*-conformance-clean + the encoder as a
-separate charter. Until a decision is made, Phase C is the highest-value next work —
-it is what turns "inter primitives exist" into "an inter frame decodes."
+The `av1_encode_*` surface today is a plan-replay bitstream WRITER: every syntax element has a
+working inverse, and every one is round-trip tested. That is the foundation and it is real. What
+is missing is everything that DECIDES: no forward transform, no quantiser, no mode decision, no
+motion search, no rate control, and no header emission. These are the biggest releases in the
+table and they are sized that way on purpose.
+
+| Release | Outcome (the acceptance test) | Batched work |
+|---|---|---|
+| **0.7.136** | **drishti emits a standalone `.ivf` that `aomdec` DECODES.** Ugly, intra-only, fixed-QP — but a real file, from drishti alone. | Forward transform (DCT/ADST/identity/WHT, the 7.13 inverses transposed); quantiser + `Qlookup` forward path; sequence-header / frame-header / OBU / IVF WRITERS so nothing is hand-built; a fixed partition + DC-mode intra encoder driving them |
+| **0.7.137** | **Intra mode decision: drishti picks modes and the output is measurably better than fixed-DC** (PSNR at matched rate), still `aomdec`-clean. | Intra mode search over the 13 Y modes + UV + CfL + angle deltas; tx-size and tx-type decision; a real partition search (RD-driven, not fixed); the distortion + rate estimators both need |
+| **0.7.138** | **An INTER frame drishti encoded decodes correctly** — motion estimation produces MVs that reconstruct. | Motion estimation (diamond/hex search, sub-pel refinement); reference selection; MV prediction reuse from the decode side; the inter residual + skip decision |
+| **0.7.139** | **Full RDO across intra/inter, compound and motion modes.** Output is competitive enough to compare against `aomenc --cpu-used=8`. | Rate-distortion optimisation over the whole mode space; compound / masked / OBMC / warp mode decision; interpolation-filter selection; the loop-filter level search (deblock / CDEF / LR parameter choice) |
+| **0.7.140** | **Rate control: a target bitrate is HIT** across CBR/VBR/CQ within tolerance, over a multi-frame clip. | Rate control (CQ, VBR, CBR); GOP structure and keyframe placement; the frame-level qindex ladder; `--lag-in-frames` style lookahead if RC needs it |
+| **0.7.141** | **ROUND-TRIP CLEAN: drishti encode → drishti decode is bit-exact, AND drishti encode → `aomdec` is bit-exact**, across the full geometry/format matrix. | The encode-lane conformance gate; encode-side fuzzing; the 128-SB encode path exercised for real; every geometry from 0.7.132 driven through the encoder |
+| **0.7.142** | **THE 0.7.x LINE CLOSES — AV1 decode + encode at charter.** | Final sweep green on both lanes; `docs/api.md` for the AV1 surface; benchmarks (decode vs dav1d, encode vs rav1e/aomenc); CHANGELOG and state.md reconciled; the arc-end audit run once against the closed line |
+
+**What "complete" means here, so it cannot drift again.** DECODE: every vector in the full
+published corpus decodes every frame bit-exactly against `aomdec`; the geometry/format matrix is
+green; the decode path is fuzzed; no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream. ENCODE:
+drishti emits standalone streams that `aomdec` decodes bit-exactly, round-trips through its own
+decoder bit-exactly, and hits a target bitrate. Both lanes, or the line does not close.
+
+**Honesty about the back half.** The encode releases are each larger than any decode release in
+this arc, and 0.7.139 (RDO) is the largest single release in the table. They are batched this way
+because the alternative — one mode-decision heuristic per release — is exactly what produced 128
+patches. If one of them overruns, it takes scope from a neighbour or the count moves from 14 to
+15, stated in the CHANGELOG. It does not silently absorb another twenty bites.
+
 
 ## 0.8.x — H.264/AVC → 100% (decode + encode; replaces openh264)
 
