@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
+
+- **`make conformance` now reports PER-FRAME DIVERGENCE DETAIL, not just a differing md5.** The inter gap
+  has been carried since Phase E as a guessed "max |delta| 2..4, ~7% of samples" that no gate could
+  reproduce — the harness md5s frames and an md5 says only "not equal". New `frame_delta` splits a
+  differing frame by plane and reports count and max |delta| per plane, which is the actual diagnosis:
+  a scattered 1-2 LSB spread is a ROUNDING bug, a large count with a big max is a DESYNC, and clean luma
+  with dirty chroma is a chroma-path bug (exactly how E2e was caught). FIRST MEASUREMENT, replacing the
+  guess: `seq_filters` f5 = `Y=299/4 U=77/2 V=99/5`, `seq_nofilt` f5 = `Y=264/2 U=72/2 V=85/4` — so 475
+  of 6144 samples (7.7%, the "~7%" was right) but max |delta| reaches **5**, not 4, and the divergence
+  is present with CDEF and deblocking BOTH disabled. Also removed the magic `6144` frame size from
+  `check()`: the corpus geometry is derived once into `CORPUS_W/H/Y/C/FRAME` and `enc()` and the ffmpeg
+  source read it, so changing the corpus dims can no longer leave the frame slicer reading wrong offsets.
+
+
 ## [0.7.128] - 2026-07-26
 
 - **Toolchain pin 6.4.46 -> 6.4.78, and `lib/` re-synced to match.** The pin had sat at 6.4.46 since 0.7.7,

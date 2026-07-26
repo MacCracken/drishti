@@ -21,6 +21,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 WORK="${CONFORMANCE_WORK:-build/conformance}"
 FRAME_LIMIT=5
+# The generated corpus geometry, derived ONCE. The per-frame raw I420 size used to be a
+# magic 6144 in check(); it is CORPUS_FRAME now, so changing the corpus dims cannot leave
+# the frame slicer silently reading the wrong offsets.
+CORPUS_W=64; CORPUS_H=64
+CORPUS_Y=$(( CORPUS_W * CORPUS_H ))
+CORPUS_C=$(( (CORPUS_W / 2) * (CORPUS_H / 2) ))
+CORPUS_FRAME=$(( CORPUS_Y + (2 * CORPUS_C) ))
 
 pass=0; fail=0; xfail=0
 
@@ -74,7 +81,7 @@ if [ ! -f "$WORK/src.yuv" ]; then
     # ran and are HARD cases, so exiting straight to 0 here would DISCARD a real regression
     # (and ignore CONFORMANCE_STRICT). It fires on any ffmpeg failure, not just a missing
     # binary — no lavfi mandelbrot source, full disk, and so on.
-    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=64x64:rate=30" \
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${CORPUS_W}x${CORPUS_H}:rate=30" \
         -frames:v $FRAME_LIMIT -pix_fmt yuv420p -f rawvideo "$WORK/src.yuv" 2>/dev/null || {
         echo "  ffmpeg unavailable — skipping the generated + published corpus"
         echo "=== matched=$pass  known-gap=$xfail  REGRESSED=$fail ==="
@@ -92,7 +99,7 @@ enc() { # name kf_only extra...
     local kf=""
     [ "$kfonly" = "1" ] && kf="--kf-max-dist=1 --limit=1"
     [ "$kfonly" = "1" ] || kf="--lag-in-frames=0 --limit=$FRAME_LIMIT"
-    aomenc --codec=av1 -w 64 -h 64 --i420 --sb-size=64 --cpu-used=8 --end-usage=q \
+    aomenc --codec=av1 -w $CORPUS_W -h $CORPUS_H --i420 --sb-size=64 --cpu-used=8 --end-usage=q \
         --cq-level=40 --aq-mode=0 --deltaq-mode=0 --enable-restoration=0 \
         --tune-content=default --enable-palette=0 --enable-intrabc=0 $kf "$@" \
         --ivf -o "$WORK/$name.ivf" "$WORK/src.yuv" 2>/dev/null
@@ -108,6 +115,20 @@ enc() { # name kf_only extra...
 #   (b) entropy desync — busier inter frames trip the spec's SymbolMaxBits >= -14
 #       bound at av1_sym_dec_exit (AV1_ERR_BAD_FRAME), i.e. drishti consumed symbols
 #       the encoder never wrote. Caught cleanly; no crash, no OOB.
+# PER-FRAME DIVERGENCE DETAIL. A differing md5 says only "not equal", which is why the inter
+# gap has been carried as a guessed "max |delta| 2..4, ~7% of samples" that no gate could
+# reproduce. These numbers say HOW a frame differs: which plane, how many samples, and by how
+# much. That distinction is the whole diagnosis — a scattered 1-2 LSB spread across all planes
+# is a ROUNDING bug, a large count with a big max is a DESYNC, and a clean Y with dirty chroma
+# is a chroma-path bug (which is exactly how E2e was caught).
+frame_delta() { # got ref -> "Y=count/max U=count/max V=count/max"
+    cmp -l "$1" "$2" 2>/dev/null | awk -v y="$CORPUS_Y" -v c="$CORPUS_C" '
+    { o = $1; a = strtonum("0" $2); b = strtonum("0" $3); d = (a > b ? a - b : b - a)
+      if (o <= y)         { yn++; if (d > ym) ym = d }
+      else if (o <= y + c) { un++; if (d > um) um = d }
+      else                { vn++; if (d > vm) vm = d } }
+    END { printf "Y=%d/%d U=%d/%d V=%d/%d", yn+0, ym+0, un+0, um+0, vn+0, vm+0 }'
+}
 check() { # name expect(all|keyframe)
     local name="$1" expect="$2"
     cp "$WORK/$name.ivf" build/conformance-input.ivf
@@ -120,13 +141,15 @@ check() { # name expect(all|keyframe)
     local line="  $name:"
     local k=1
     while [ "$k" -le "$n" ]; do
-        local off=$(( (k-1) * 6144 ))
-        dd if="$WORK/$name.ref" bs=1 skip=$off count=6144 of="$WORK/$name.f$k" status=none 2>/dev/null
+        local off=$(( (k-1) * CORPUS_FRAME ))
+        dd if="$WORK/$name.ref" bs=1 skip=$off count=$CORPUS_FRAME of="$WORK/$name.f$k" status=none 2>/dev/null
         local a b st
         a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
         b=$(md5sum "$WORK/$name.f$k" 2>/dev/null | cut -d' ' -f1)
         if [ -z "$a" ]; then st="reject"; else
-            if [ "$a" = "$b" ]; then st="OK"; else st="differs"; fi
+            if [ "$a" = "$b" ]; then st="OK"; else
+                st="differs $(frame_delta "build/conformance-out-$k.i420" "$WORK/$name.f$k")"
+            fi
         fi
         if [ "$st" = "OK" ]; then
             line="$line f$k=OK"; pass=$((pass+1))
