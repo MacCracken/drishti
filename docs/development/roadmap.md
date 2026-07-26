@@ -93,7 +93,7 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 ## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e) — see HONEST STATUS (no completion % — every one ever given here was wrong)
 
-> ### HONEST STATUS as of 0.7.127 + the E2d fix — read this before believing any "nearly done"
+> ### HONEST STATUS as of 0.7.128 — read this before believing any "nearly done"
 >
 > **There is no honest single completion number, and this doc will not print one.**
 > The metric used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**
