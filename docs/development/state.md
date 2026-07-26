@@ -6,6 +6,45 @@
 
 ## Version
 
+**0.7.128** — cut 2026-07-26, not yet tagged (user's git). **TWO KEYFRAME DEFECTS CLOSED, BOTH MEMORY-SHAPED
+RATHER THAN SPEC-SHAPED; ALL EIGHT PUBLISHED VECTORS BIT-EXACT. Toolchain pin 6.4.46 -> 6.4.78.**
+`make conformance` 17 matched / 6 known-gap -> **25 matched / 2 known-gap / 0 regressed** (the 2 are inter
+frames, E2b/E2c). **E2d** — the last two published keyframe gaps and the committed 192x160 reproducer — was a
+HEAP BUFFER OVERFLOW, not a spec misreading: `av1_clear_cdef`'s `use_128` branch stored `-1` at `[r][c+16]`,
+`[r+16][c]`, `[r+16][c+16]` UNBOUNDED against a CdefIdx grid flattened to exactly `rows*stride` i64 and
+allocated LAST in `av1_tile_grids_new`. With a headerless bump allocator the overflow lands in whatever came
+next — the mutable CDF blob directly on the CDEF-off reproducers, the 56-byte CDEF read context then the blob
+on a CDEF-enabled stream, the MV grid on an inter frame — so a CDF row went non-monotone and the decoder
+desynced reading a table it had corrupted itself. Two prior sessions were spent re-deriving
+`Default_Partition_W128_Cdf` and the partition machinery, all of which was correct. The "content-dependence"
+was an ADDRESS CALCULATION: the landing offset is a pure function of `MiCols*MiRows`, so the PASSING control
+(e2d-160x160) was overflowing too — it merely poisoned a context that stream never read. Fixed by bounding
+both axes and threading `AV1TILE_FMI_ROWS` through both lanes. **E2e** — found by the adversarial review OF
+that fix, and the more important of the two — a keyframe whose luma height/8 is odd (`MiRows % 4 == 2`: 136,
+152, 168, 184 ...) decoded WRONG CHROMA on ordinary video. `av1_predict_chroma_from_luma` bounded `MaxLumaW/H`
+against the VISIBLE luma plane, but those come from the last luma transform block (5.11.35) and a bottom/right
+edge block legitimately OVERHANGS, so 7.11.5 averaged the last visible row in place of the reconstructed
+overhang — shifting `lumaAvg` and therefore every sample of the block including the visible ones. Chroma-only,
+max |delta| 2. Fixed to bound against the true ALLOCATED extent, `alloc + border`; note `alloc == visible`
+whenever the height is already a multiple of 8, which is exactly the affected class, so the border term is
+load-bearing (48 aomenc geometries: visible bound 20 divergent, alloc alone 20, alloc+border **0**).
+**WHY EIGHT-OF-EIGHT COULD NOT SEE IT: every published libaom height is a multiple of 16, and the generated
+corpus was hardcoded 64x64.** `make conformance` gained an `oddmi` section (160x136, 288x152, both SB sizes).
+WITNESSES, all libaom-free and against hand-computed oracles: `test_clear_cdef_bounds` +
+`test_clear_cdef_axes` (7 mutants, 7 red) and `test_cfl_overhang_extent` / `_w` / `test_cfl_maxluma_hostile`
+(5 mutants, 5 red). **BOTH witnesses were initially too weak and mutation caught it both times** — a 16-word
+canary flew under a 433-word overflow; a single geometry could not distinguish `<` from `<=` or an axis swap;
+the CfL witness drove only the height axis and only the legitimate path. Three new failure modes are in
+`docs/guides/verification.md` (check buffer adjacency before re-deriving a spec table; a canary must span the
+blast radius; one geometry cannot pin a two-axis bound) plus the corpus lesson — **an exhausted corpus is not
+a correct decoder**. Also: the harness's ffmpeg bail `exit 0`'d past a nonzero `$fail`, which would have made
+the xfail->hard promotions hollow. 38 suites, **30,288** suite + **7,410** fuzz, all six gates green.
+TOOLCHAIN: pin 6.4.46 -> 6.4.78 (unmoved since 0.7.7) with `lib/` re-synced — note `cyrius lib sync --full`
+leaves `niyama`/`yantra` behind despite reporting them synced, so those two were copied by hand; both the
+pin-drift and lib-shadow build warnings are now gone. STILL OPEN: E2b/E2c (inter), D3 (silently-wrong-pixels
+on inter deblocking), D2, D1 temporal, and the encode lane has never run at 128 superblocks (roadmap G0).
+[[av1-decode-remaining-tracks]]
+
 **0.7.127** — cut 2026-07-23, not yet tagged (user's git). **E2d DIAGNOSIS + COMMITTED REPRODUCER +
 DOCUMENTATION SWEEP.** No functional decode change. E2d (the last keyframe gap) is now a 1.8 KB
 reproducible case with a long refuted-causes list: committed `tests/repro/e2d-192x160.ivf` (fails) vs
@@ -1296,7 +1335,7 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.46` (in `cyrius.cyml [package].cyrius`) — min
+- **Cyrius pin**: `6.4.78` (in `cyrius.cyml [package].cyrius`) — bumped from 6.4.46 at the 0.7.128 cut (it had sat there since 0.7.7, when `>>>` landed; nothing since required a newer toolchain, so this is hygiene). Min
   version for the arithmetic-shift operator `>>>`. The pin is the
   *minimum*; any newer installed `cycc` (**6.4.64** at the 0.7.79 cut, and it
   moves) compiles clean and only emits a harmless drift note — do not chase
@@ -1579,18 +1618,19 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.7.127 + the E2d fix).** Keyframes are EXTERNALLY VERIFIED against the whole
-> published corpus: **all EIGHT published libaom vectors in the gate decode their keyframe
-> bit-exactly** vs libaom's own reference MD5s (`make conformance` = 21 matched / 2 known-gap /
-> 0 regressed; the 2 are inter frames). Inter frames decode end-to-end from real bytes
-> (0.7.119-0.7.125: motion, compound/backward refs, cross-frame CDF inheritance, the intra fork,
-> segmentation), and 128x128 superblocks decode as of 0.7.126.
+> **Where we are (0.7.128).** Keyframes are EXTERNALLY VERIFIED: **all EIGHT published libaom
+> vectors in the gate decode their keyframe bit-exactly** vs libaom's own reference MD5s, and so
+> do the odd-MI geometries the published corpus never covered (`make conformance` = 25 matched /
+> 2 known-gap / 0 regressed; the 2 are inter frames). Inter frames decode end-to-end from real
+> bytes (0.7.119-0.7.125: motion, compound/backward refs, cross-frame CDF inheritance, the intra
+> fork, segmentation), and 128x128 superblocks decode as of 0.7.126.
 >
-> **THAT IS NOT THE SAME AS "keyframes are correct" — and the distinction is now measured, not
-> theoretical.** An adversarial review of the E2d bite swept 40 aomenc geometries the published
-> corpus does not cover and found **~31 of 80 streams decode with WRONG CHROMA** (E2e, below):
-> every published vector's height is a multiple of 16, and the defect needs `MiRows % 4 == 2`.
-> Eight-of-eight green says the corpus is exhausted, not that the decoder is.
+> **AND THAT IS NOT THE SAME AS "keyframes are correct" — a lesson this cut paid for.** An
+> adversarial review of the E2d bite swept 40 aomenc geometries the published corpus does not
+> cover and found ~31 of 80 decoding with WRONG CHROMA (E2e): every published height is a
+> multiple of 16, and the defect needed `MiRows % 4 == 2`. It is fixed, and `make conformance`
+> now carries an `oddmi` section so the geometry class is gated — but the general point stands
+> for whatever is next. **Eight-of-eight green measured the corpus, not the decoder.**
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the
 > roadmap's HONEST STATUS block. The single most important habit this arc produced: drishti's
@@ -1605,21 +1645,6 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > are correct, the fault is in what is read — **including the tables being read from**.
 >
 > **The next bites, in priority order** (each is one bite):
->
-> 0. **E2e — CfL bottom-edge chroma.** NEW, found reviewing the E2d bite, and it outranks the
->    inter work because it is a KEYFRAME defect on ordinary video. On a 4:2:0 keyframe whose
->    `MiRows % 4 == 2` (luma height/8 odd: 136, 152, 168, 184 ...) a bottom-edge block overhangs
->    the frame, so `MaxLumaH` (5.11.35) exceeds the cropped luma plane;
->    `src/av1_intra.cyr:869` clamps it to the visible plane, so spec 7.11.5 averages the invisible
->    rows from the last VISIBLE luma row instead of the reconstructed overhang. `lumaAvg` shifts,
->    and with it every sample of the CfL block — including the visible ones. Chroma-only (luma
->    bit-exact), max |delta| 2, bottom rows, 0 differing bytes with `--enable-cfl-intra=0`.
->    Reproduce: encode 160x136 with the `enc()` settings from `scripts/conformance.sh` and diff
->    against `aomdec` — 106 differing chroma bytes, Y=0. THE FIX is not to move the clamp: retain
->    the luma overhang (0.7.114 already made the allocation cover the nominal extent) and bound
->    `MaxLumaW/H` against the ALLOCATED extent, keeping the clamp as a backstop. The harness has
->    NO `MiRows % 4 == 2` geometry — `enc()` is hardcoded 64x64, sbrepro 352x288 — so the gate
->    needs one before the fix can be witnessed. **M.**
 >
 > 1. **E2c — inter entropy desync** on busier inter frames (`SymbolMaxBits >= -14` trips at
 >    `av1_sym_dec_exit`). Caught cleanly; no crash, no OOB. STRONGEST CANDIDATE, found during

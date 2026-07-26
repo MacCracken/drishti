@@ -862,9 +862,24 @@ alpha, max_luma_w, max_luma_h): i64 {
     var sub_x = dr_frame_subx(frame);
     var sub_y = dr_frame_suby(frame);
     var bit_depth = dr_frame_bit_depth(frame);
-    # OOB backstop: the valid luma extent can never exceed the luma plane.
-    var luma_pw = dr_frame_plane_width(frame, 0);
-    var luma_ph = dr_frame_plane_height(frame, 0);
+    # OOB backstop (E2e). This bound MUST be the plane's true ALLOCATED extent — the
+    # allocation PLUS its border — and NOT the visible plane. MaxLumaW/H come from the last
+    # luma transform block (5.11.35 `startX + stepX*4`), and a bottom/right-edge block
+    # legitimately overhangs: past the cropped frame, and past the MI grid too, by up to
+    # AV1_DECODE_BORDER's worst case. 7.11.5 averages the FULL w x h chroma block via
+    # `Min(lumaY, MaxLumaH - (1<<subY))`, so a bound that is too tight substitutes the last
+    # in-bound luma row for the reconstructed overhang — which shifts lumaAvg and therefore
+    # EVERY sample of the block, including the visible ones. Those overhang rows are real
+    # reconstructed pixels living in the border (predict_intra and av1_reconstruct both
+    # write the nominal extent through the unchecked dr_frame_set, and 0.7.114 sized the
+    # allocation to hold them), so reading them is correct rather than a lucky OOB.
+    # WHY NEITHER PLANE-DIM ACCESSOR IS ENOUGH ON ITS OWN: the reported dims are VISIBLE,
+    # and alloc == visible whenever the frame dims are already a multiple of 8
+    # (MiRows*MI_SIZE == FrameHeight) — which is exactly the E2e geometry class. The
+    # overhang is in the BORDER either way. Measured over 48 aomenc geometries vs aomdec:
+    # visible bound 20 divergent, alloc-without-border 20, alloc+border 0.
+    var luma_pw = dr_frame_plane_alloc_w(frame, 0) + dr_frame_border(frame);
+    var luma_ph = dr_frame_plane_alloc_h(frame, 0) + dr_frame_border(frame);
     if (max_luma_w > luma_pw) { max_luma_w = luma_pw; }
     if (max_luma_h > luma_ph) { max_luma_h = luma_ph; }
     # L[i][j]: subsampled luma with 3 fractional bits (w*h i64, <= 32*32).

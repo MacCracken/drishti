@@ -348,6 +348,33 @@ fn async_connect(rt, addr, port): i64 {
     return async_spawn(rt, &_async_connect_task, ctx);
 }
 
+# Reactor accept task (Linux, v6.4.44 R3): park on the LISTEN fd's read-readiness (EPOLLIN),
+# then accept the pending connection. ctx = { step, rt, listen_fd }. The Linux/epoll parity
+# for async_win.cyr's AcceptEx server — the readiness model instead of a posted overlap.
+fn _async_accept_task(ctx): i64 {
+    if (load64(ctx) == 0) {
+        store64(ctx, 1);
+        async_wait_fd(load64(ctx + 8), load64(ctx + 16));   # park on the listen fd (EPOLLIN)
+        return 0;
+    }
+    # woken (a connection is pending): accept it. x86 accept=43; aarch64 202 via ESYSXLAT.
+    var afd = syscall(43, load64(ctx + 16), 0, 0);          # accept(lfd, NULL, NULL)
+    if (afd >= 0) { syscall(SYS_FCNTL, afd, 2, 1); }        # F_SETFD FD_CLOEXEC (v6.4.43 hygiene)
+    return afd;
+}
+
+# Async accept on the reactor: the caller sets up + listens `listen_fd`; this parks the task
+# on its readiness and accepts one connection. Returns a task handle whose result — via
+# task_join — is the accepted fd (or a negative errno). Target-agnostic mirror of
+# async_win.cyr's `async_accept` (AcceptEx). v6.4.44 R3 (async "W"-arc server step).
+fn async_accept(rt, listen_fd): i64 {
+    var ctx = alloc_via(load64(rt + 32), 24);
+    store64(ctx, 0);
+    store64(ctx + 8, rt);
+    store64(ctx + 16, listen_fd);
+    return async_spawn(rt, &_async_accept_task, ctx);
+}
+
 # Reactor socket recv task: park on the fd's read-readiness, then read once into buf.
 # ctx = { step, fd, buf, len, rt }.
 fn _async_recv_task(ctx): i64 {

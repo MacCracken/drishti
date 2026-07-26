@@ -476,6 +476,89 @@ fn test_cfl_maxluma_clamp() {
     return 0;
 }
 
+# E2e — THE OVERHANG WITNESS. MaxLumaW/H come from the last luma transform block
+# (5.11.35 startX + stepX*4), and a bottom-edge block legitimately overhangs the frame, so
+# the true extent EXCEEDS the visible plane. The backstop clamp used to bound against the
+# VISIBLE plane, which silently substituted the last visible luma row for the reconstructed
+# overhang — shifting lumaAvg and therefore EVERY sample of the block. Bound is now the
+# ALLOCATED extent plus the border, where those rows actually live.
+#
+# 4:2:0, visible luma 8x8 (chroma 4x4), border 32, so luma rows 8..39 are allocated border.
+# Luma rows 0..7 = 50; rows 8..15 (overhang) = 200. The chroma block is 4 wide x 8 TALL at
+# (0,0), so its rows 4..7 map to luma rows 8,10,12,14 — the overhang. max_luma_h = 16.
+#   shift = 3-1-1 = 1. Rows 0,2,4,6 -> 2x2 of 50 -> t=200, v=400.
+#                      Rows 8,10,12,14 -> 2x2 of 200 -> t=800, v=1600.
+#   lumaAvg = Round2(16*400 + 16*1600, 5) = Round2(32000, 5) = 1000.
+#   alpha 4: v=400  -> Round2Signed(4*(400-1000), 6) = -Round2(2400,6) = -38 -> 128-38 = 90
+#            v=1600 -> Round2Signed(4*(1600-1000), 6) =  Round2(2400,6) =  38 -> 128+38 = 166
+# WITH THE OLD VISIBLE BOUND every row would read the 50s (v=400 throughout), lumaAvg would
+# be 400, every scaled value 0, and the whole block would stay at the DC 128.
+fn test_cfl_overhang_extent() {
+    var e = 0;
+    var f = dr_frame_new_ext(8, 8, 8, 8, 3, 1, 1, 8, 32, &e);
+    assert_eq(e, DR_OK, "overhang frame alloc ok");
+    cfl_fill(f, 0, 0, 0, 8, 8, 50);          # visible luma
+    cfl_fill(f, 0, 0, 8, 8, 8, 200);         # the OVERHANG rows, in the border
+    cfl_fill(f, 1, 0, 0, 4, 8, 128);         # DC prediction over the full 4x8 chroma block
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 2, 3, 4, 8, 16), DR_OK, "cfl overhang ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 90, "overhang: visible row -> 90");
+    assert_eq(dr_frame_get(f, 1, 3, 3), 90, "overhang: last visible row -> 90");
+    assert_eq(dr_frame_get(f, 1, 0, 4), 166, "overhang: first overhang row -> 166");
+    assert_eq(dr_frame_get(f, 1, 3, 7), 166, "overhang: last overhang row -> 166");
+    # The block must not collapse to the DC — that is exactly the old behaviour.
+    assert_eq(dr_frame_get(f, 1, 0, 0) != 128, 1, "overhang: block did NOT collapse to DC");
+    return 0;
+}
+# The SAME defect on the WIDTH axis, which the height case above cannot witness (reverting
+# only luma_pw survives it). Mirror geometry: luma columns 0..7 = 50, overhang columns
+# 8..15 = 200, and an 8-WIDE x 4-tall chroma block whose columns 4..7 map to luma columns
+# 8,10,12,14. Same arithmetic transposed, so the same 90 / 166.
+fn test_cfl_overhang_extent_w() {
+    var e = 0;
+    var f = dr_frame_new_ext(8, 8, 8, 8, 3, 1, 1, 8, 32, &e);
+    assert_eq(e, DR_OK, "overhang-w frame alloc ok");
+    cfl_fill(f, 0, 0, 0, 8, 8, 50);          # visible luma columns
+    cfl_fill(f, 0, 8, 0, 8, 8, 200);         # the OVERHANG columns, in the border
+    cfl_fill(f, 1, 0, 0, 8, 4, 128);         # DC over the full 8x4 chroma block
+    assert_eq(av1_predict_chroma_from_luma(f, 1, 0, 0, 3, 2, 4, 16, 8), DR_OK, "cfl overhang-w ok");
+    assert_eq(dr_frame_get(f, 1, 0, 0), 90, "overhang-w: visible col -> 90");
+    assert_eq(dr_frame_get(f, 1, 3, 3), 90, "overhang-w: last visible col -> 90");
+    assert_eq(dr_frame_get(f, 1, 4, 0), 166, "overhang-w: first overhang col -> 166");
+    assert_eq(dr_frame_get(f, 1, 7, 3), 166, "overhang-w: last overhang col -> 166");
+    return 0;
+}
+# The clamp is still a real BACKSTOP, and this pins that it bites at the allocation bound.
+# A 4x32 chroma block reaches luma row 62; the bound is alloc(8) + border(32) = 40, so reads
+# stop at lim_y = 38 — the last row inside the allocated border. Driving the same block with
+# a LYING MaxLumaH must therefore give byte-identical output to driving it with the true
+# bound; without the clamp the lie would read past the plane buffer entirely.
+fn test_cfl_maxluma_hostile() {
+    var e = 0;
+    var a = dr_frame_new_ext(8, 8, 8, 8, 3, 1, 1, 8, 32, &e);
+    cfl_fill(a, 0, 0, 0, 8, 8, 50);
+    cfl_fill(a, 0, 0, 8, 8, 32, 200);
+    cfl_fill(a, 1, 0, 0, 4, 32, 128);
+    assert_eq(av1_predict_chroma_from_luma(a, 1, 0, 0, 2, 5, 4, 40, 40), DR_OK, "cfl bound ok");
+    var b = dr_frame_new_ext(8, 8, 8, 8, 3, 1, 1, 8, 32, &e);
+    cfl_fill(b, 0, 0, 0, 8, 8, 50);
+    cfl_fill(b, 0, 0, 8, 8, 32, 200);
+    cfl_fill(b, 1, 0, 0, 4, 32, 128);
+    assert_eq(av1_predict_chroma_from_luma(b, 1, 0, 0, 2, 5, 4, 1000000, 1000000), DR_OK,
+    "cfl hostile maxluma still ok");
+    var i = 0;
+    var diff = 0;
+    while (i < 32) {
+        var j = 0;
+        while (j < 4) {
+            if (dr_frame_get(a, 1, j, i) != dr_frame_get(b, 1, j, i)) { diff = diff + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, "a lying MaxLumaH clamps to the allocation bound, changing nothing");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("intra helpers / tables");
@@ -506,6 +589,9 @@ fn main() {
     test_cfl_known_420();
     test_cfl_clip();
     test_cfl_maxluma_clamp();
+    test_cfl_overhang_extent();
+    test_cfl_overhang_extent_w();
+    test_cfl_maxluma_hostile();
     return assert_summary();
 }
 

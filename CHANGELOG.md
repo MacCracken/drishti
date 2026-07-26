@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.128] - 2026-07-26
+
+- **Toolchain pin 6.4.46 -> 6.4.78, and `lib/` re-synced to match.** The pin had sat at 6.4.46 since 0.7.7,
+  when the native arithmetic shift `>>>` landed; nothing since required a newer toolchain, so this is
+  hygiene, not an unblock. `cyrius lib sync --full` refreshed the vendored stdlib (33 files), and
+  `niyama` 1.0.5 -> 1.0.6 / `yantra` 1.0.0 -> 1.0.1 were copied across separately — `lib sync` reports them
+  as synced but leaves them untouched, so a full sync alone does NOT clear the shadow warning. Both the
+  pin-drift and lib-shadow warnings that printed on every build are now gone. All six gates re-run green on
+  the new toolchain: no formatter, linter or codegen change surfaced.
+
+- **E2e FIXED — a keyframe whose height/8 is odd decoded WRONG CHROMA, on ordinary video, and eight-of-eight
+  published vectors could not see it.** `av1_predict_chroma_from_luma`'s OOB backstop bounded `MaxLumaW/H`
+  against the **VISIBLE** luma plane (`src/av1_intra.cyr`). But MaxLumaW/H come from the last luma transform
+  block (5.11.35 `startX + stepX*4`), and a bottom/right-edge block legitimately OVERHANGS — past the cropped
+  frame, and past the MI grid too. 7.11.5 averages the FULL w x h chroma block via
+  `Min(lumaY, MaxLumaH - (1<<subY))`, so a bound that is too tight substitutes the last in-bound luma row for
+  the reconstructed overhang. That shifts `lumaAvg`, and `lumaAvg` shifts **every sample of the block,
+  including the visible ones**. Chroma-only (luma stayed bit-exact), max |delta| 2, confined to the bottom /
+  right blocks. THE FIX is one bound: the plane's true allocated extent, `alloc + border`. Those overhang
+  rows are real reconstructed pixels — `av1_intra_predict` and `av1_reconstruct` both write the nominal
+  extent through the unchecked `dr_frame_set`, and 0.7.114 sized the allocation to hold them — so reading
+  them is correct rather than a lucky OOB. **Neither plane-dim accessor is sufficient alone**: the reported
+  dims are visible, and `alloc == visible` whenever the height is already a multiple of 8
+  (`MiRows*MI_SIZE == FrameHeight`), which is exactly the affected geometry class — the overhang is in the
+  BORDER either way. Measured over 48 aomenc geometries vs `aomdec`: visible bound **20 divergent**,
+  alloc-without-border **20**, alloc+border **0**.
+  **WHY THE CORPUS WAS BLIND, which is the part worth keeping:** every published libaom vector's height is a
+  multiple of 16, and `scripts/conformance.sh`'s `enc()` is hardcoded 64x64. The defect needs
+  `MiRows % 4 == 2` (luma height/8 odd — 136, 152, 168, 184 ...). Eight-of-eight bit-exact said the corpus
+  was exhausted, not that the decoder was correct. `make conformance` now carries a dedicated
+  `oddmi` section (160x136 and 288x152, both superblock sizes) so the gate has a geometry class it never had;
+  **25 matched / 2 known-gap / 0 regressed.**
+  **WITNESS** (`test_cfl_overhang_extent`, `test_cfl_overhang_extent_w`, `test_cfl_maxluma_hostile`) — all
+  libaom-free, all against hand-computed oracles: a 4:2:0 frame with distinct luma in the border, a chroma
+  block that reaches into it, and the exact expected 90 / 166 either side of the boundary (the old bound
+  collapses the whole block to the DC 128). MUTATIONS: **5 run, 5 red** — the visible bound, alloc-without-
+  border, and each axis reverted independently, plus removing the clamp entirely.
+  **A WITNESS GAP CAUGHT BY MUTATION, again:** the first version tested only the HEIGHT axis and only the
+  legitimate path, so reverting `luma_pw` alone and deleting the backstop outright both survived. Fixed by a
+  transposed width case and by pinning that a lying `MaxLumaH` produces byte-identical output to the true
+  bound. Same lesson as the E2d witness one bite earlier — a bound on two axes needs both axes driven.
+
 - **E2d SOLVED — a heap buffer overflow in `av1_clear_cdef`, not a spec misreading. ALL EIGHT published
   libaom conformance vectors now decode their keyframe BIT-EXACTLY; `make conformance` goes 17 matched /
   6 known-gap to 21 matched / 2 known-gap / 0 regressed.** The last two published keyframe gaps

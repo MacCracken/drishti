@@ -164,6 +164,24 @@ bounds sit on opposite sides of a superblock boundary so a swap writes out of bo
 > is documentation; it is not automatically the geometry that pins the fix. Mutate `<`→`<=`
 > and swap the axes — if either survives, the witness is measuring one axis twice.
 
+### An exhausted corpus is not a correct decoder
+
+The eight published libaom vectors all decoded their keyframe bit-exactly, and the natural
+reading was "the keyframe path is externally verified." It wasn't. **Every published height
+is a multiple of 16**, and `scripts/conformance.sh`'s generated corpus was hardcoded to
+64x64 — so no case in the gate had a bottom block that overhangs the frame. A sweep of 48
+ordinary `aomenc` geometries found 20 of them decoding with wrong chroma (E2e), a defect
+present the whole time in a code path the corpus structurally could not reach.
+
+This is [[fixture-alignment-monoculture]] again, one level out: the habit of assuming an
+*external* corpus is unbiased. libaom's vectors were chosen to exercise *features*, not
+geometries.
+
+> **Do:** when a gate goes all-green, ask what its inputs have in COMMON rather than what
+> they cover. Vary the axis nobody chose deliberately — dimensions, alignment, subsampling,
+> bit depth — and sweep it against the external reference before believing the green. A
+> conformance pass bounds the corpus; only a sweep bounds the decoder.
+
 ## Running an adversarial review
 
 Spawn a `Workflow` whose slices attack different dimensions (spec fidelity / memory

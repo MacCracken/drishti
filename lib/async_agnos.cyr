@@ -194,6 +194,12 @@ fn async_connect(rt, addr, port): i64 {
     return 0;
 }
 
+# Async accept (agnos): no reactor / no server-accept on the serial client model —
+# unsupported, returns 0 (no handle). Present so consumers stay target-agnostic. v6.4.44 R3.
+fn async_accept(rt, listen_fd): i64 {
+    return 0;
+}
+
 # recv task (agnos): a plain blocking read inline — no epoll. v6.4.39.
 fn _async_recv_task(ctx): i64 {
     return sys_read(load64(ctx + 8), load64(ctx + 16), load64(ctx + 24));

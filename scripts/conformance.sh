@@ -229,6 +229,45 @@ sbrepro() { # sbsize expect(match|xfail)
         echo "  352x288 sb-size=$sb: keyframe REGRESSED"; fail=$((fail+1))
     fi
 }
+# ---- ODD-MI GEOMETRY (E2e — the CfL bottom-edge overhang) ----
+# EVERY published vector's height is a multiple of 16 and enc()'s source is 64x64, so until
+# this case existed the whole gate was blind to a frame whose bottom block OVERHANGS: a
+# 4:2:0 keyframe with MiRows % 4 == 2 (luma height/8 odd) drove predict_chroma_from_luma to
+# read the last VISIBLE luma row in place of the reconstructed overhang, shifting lumaAvg
+# and every sample of the CfL block. Chroma-only, max |delta| 2, and invisible to an
+# aligned corpus. 160x136 and 288x152 both reproduce; both superblock sizes are covered
+# because the defect is independent of E2d. Keep at least one MiRows % 4 == 2 case here.
+oddmi() { # w h sbsize
+    local w="$1" h="$2" sb="$3" n="oddmi_${1}x${2}_sb${3}"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v 1 \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    rm -f "$WORK/$n.ivf"
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --sb-size="$sb" --cpu-used=8 --end-usage=q \
+        --cq-level=40 --aq-mode=0 --deltaq-mode=0 --enable-restoration=0 \
+        --tune-content=default --enable-palette=0 --enable-intrabc=0 --kf-max-dist=1 \
+        --limit=1 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -f "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"
+        fail=$((fail+1)); return; }
+    cp "$WORK/$n.ivf" build/conformance-input.ivf
+    rm -f build/conformance-out-*.i420
+    ./build/drishti-conformance >"$WORK/$n.log" 2>&1
+    aomdec --rawvideo -o "$WORK/$n.ref" "$WORK/$n.ivf" 2>/dev/null
+    local a b
+    a=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    b=$(md5sum "$WORK/$n.ref" 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$a" ] && [ "$a" = "$b" ]; then
+        echo "  ${w}x${h} sb-size=$sb (MiRows%4==2): keyframe BIT-EXACT"; pass=$((pass+1))
+    else
+        echo "  ${w}x${h} sb-size=$sb (MiRows%4==2): keyframe REGRESSED"; fail=$((fail+1))
+    fi
+}
+echo "--- odd-MI geometry (E2e — CfL bottom-edge overhang) ---"
+oddmi 160 136 64
+oddmi 160 136 128
+oddmi 288 152 64
+oddmi 288 152 128
+
 echo "--- 128-SB reproducer (same source, only --sb-size differs) ---"
 sbrepro 64 match
 sbrepro 128 match   # E2d: was xfail until av1_clear_cdef was bounded

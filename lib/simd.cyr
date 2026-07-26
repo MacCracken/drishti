@@ -487,6 +487,9 @@ fn i64v2_splat(x): i64v2 { return i64v2_make(x, x); }
 fn i64v2_add_ptr(a_ptr, b_ptr): i64v2 { var r: i64v2; iv_add(&r, a_ptr, b_ptr, 2, 8); return r; }
 # Packed sub (pointer form) — psubq.
 fn i64v2_sub_ptr(a_ptr, b_ptr): i64v2 { var r: i64v2; iv_sub(&r, a_ptr, b_ptr, 2, 8); return r; }
+# Packed multiply (pointer form) — low 64 bits/lane via the pmuludq sequence (SSE
+# has no pmullq). CHANGELOG [6.4.53]: closes the integer-SIMD arc's last unbuilt op.
+fn i64v2_mul_ptr(a_ptr, b_ptr): i64v2 { var r: i64v2; iv_mul(&r, a_ptr, b_ptr, 2, 8); return r; }
 
 # --- Value-form typed wrappers (non-PE targets only) ---
 # Gated on CYRIUS_HAS_VAL_SIMD_PARAMS, predefined by every main_*.cyr
@@ -720,4 +723,6 @@ fn i8v16_sub(a: i8v16, b: i8v16): i8v16 { var r: i8v16; iv_sub(&r, &a, &b, 16, 1
 fn i64v2_add(a: i64v2, b: i64v2): i64v2 { var r: i64v2; iv_add(&r, &a, &b, 2, 8); return r; }
 # Packed i64 sub (value form).
 fn i64v2_sub(a: i64v2, b: i64v2): i64v2 { var r: i64v2; iv_sub(&r, &a, &b, 2, 8); return r; }
+# Packed i64 multiply (value form) — low 64 bits/lane via pmuludq sequencing.
+fn i64v2_mul(a: i64v2, b: i64v2): i64v2 { var r: i64v2; iv_mul(&r, &a, &b, 2, 8); return r; }
 #endif

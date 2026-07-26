@@ -120,13 +120,12 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > cross-frame CDF inheritance, the intra-block fork inside an inter frame, and
 > segmentation (spatial config).
 >
-> **DECODE — what is still WRONG, measured not guessed:** no PUBLISHED keyframe gap remains,
-> but that is a statement about the published corpus, not about keyframes. **E2e: a keyframe
-> whose luma height/8 is odd (136, 152, 168, 184 ... i.e. `MiRows % 4 == 2`) decodes with
-> WRONG CHROMA** — measured on a 40-geometry aomenc sweep, ~31 of 80 streams diverge,
-> chroma-only, max |delta| 2, confined to the bottom rows, and bit-exact with
-> `--enable-cfl-intra=0`. The published corpus simply does not cover those heights. Inter
-> frames DIVERGE too: a reconstruction rounding error of max |delta| 2..4 (E2b) and an
+> **DECODE — what is still WRONG, measured not guessed:** no keyframe gap is currently known.
+> Both remaining published-vector gaps (E2d) and the odd-height chroma defect the published
+> corpus could not see (E2e) are fixed, and a 48-geometry aomenc sweep spanning
+> `MiRows % 4 == 2` is clean. That is a stronger statement than "eight of eight pass" — but
+> it is still bounded by the geometries and features that have been SWEPT, and E2e is the
+> proof that an exhausted corpus is not a correct decoder. Inter frames DIVERGE: a reconstruction rounding error of max |delta| 2..4 (E2b) and an
 > entropy desync on busier frames (E2c); both figures predate the E2d fix and have not been
 > re-taken. The deblocker also filters every inter block at the wrong level (D3), which is
 > silently-wrong-pixels rather than a reject. delta-q / delta-lf still reject. So: inter
@@ -557,7 +556,7 @@ are exercised by real streams. (Conformance status for inter frames: roadmap.md 
       split. The durable lesson is in `docs/guides/verification.md`: when a desync's
       *preceding* pixels are correct the fault is in what is read — **which includes the
       tables being read from** — so check buffer adjacency before re-deriving a spec table.
-    - E2e. **CfL bottom-edge chroma — a KEYFRAME defect the published corpus cannot see.**
+    - E2e. ✅ **DONE — CfL bottom-edge chroma; the KEYFRAME defect the published corpus could not see.**
       On a 4:2:0 keyframe whose `MiRows % 4 == 2` (luma height/8 odd: 136, 152, 168, 184 ...)
       a bottom-edge block overhangs the frame, so `MaxLumaH` (5.11.35) exceeds the cropped
       luma plane. `av1_predict_chroma_from_luma` clamps it to the visible plane
@@ -569,12 +568,15 @@ are exercised by real streams. (Conformance status for inter frames: roadmap.md 
       rows only, and 0 differing bytes with `--enable-cfl-intra=0`. Independently reproduced
       at 160x136 (106 differing chroma bytes, Y=0). Every published vector's height happens
       to be a multiple of 16, which is why eight of eight pass while ordinary video does not.
-      THE FIX is not to move the clamp: the luma overhang must be RETAINED (allocate/keep the
-      rows an overhanging transform block writes — 0.7.114 already made the allocation cover
-      the nominal extent) and `MaxLumaW/H` bounded against the ALLOCATED extent rather than
-      the visible plane. Keep the clamp as a backstop; only its bound is wrong. Gate it with
-      an `MiRows % 4 == 2` case — `scripts/conformance.sh`'s `enc()` is hardcoded 64x64 and
-      the sbrepro 352x288, so the harness has no such geometry today. **M.**
+      FIXED by one bound: `MaxLumaW/H` now clamp to the plane's true ALLOCATED extent,
+      `alloc + border`, not the visible plane. The overhang rows are real reconstructed
+      pixels (predict and reconstruct both write the nominal extent; 0.7.114 sized the
+      allocation to hold them). NOTE `alloc == visible` whenever the height is already a
+      multiple of 8 — which is the affected class — so the border term is load-bearing, not
+      belt-and-braces: measured 20 divergent with the visible bound, 20 with alloc alone,
+      **0 with alloc+border**. `make conformance` gained an `oddmi` section (160x136 and
+      288x152, both superblock sizes) so the harness finally covers the geometry class;
+      witnessed libaom-free by three hand-computed CfL tests, 5 mutations all red.
     - E2b. **Inter reconstruction rounding.** Inter frames with real coded content
       decode but land within max |delta| 2..4 of the reference (~7% of samples,
       scattered, no structural offset). Reproduces with CDEF *and* deblocking both

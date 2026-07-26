@@ -78,6 +78,9 @@ fn _async_win_retire(rt, t): i64 {
     if (fp == &_async_connect_task) {
         syscall(0xF023, load64(ctx + 48));           # closesocket(the connect socket)
     }
+    if (fp == &_async_accept_task) {
+        syscall(0xF023, load64(ctx + 48));           # closesocket(the accept socket it created; NOT the listener)
+    }
     if (fp == &_async_recv_task) {
         syscall(0xF031, load64(ctx + 48), ctx);      # CancelIoEx(socket, &overlapped=ctx)
     }
@@ -302,6 +305,59 @@ fn async_connect(rt, addr, port): i64 {
     return async_spawn(rt, &_async_connect_task, ctx);
 }
 
+# Reactor accept task (the AcceptEx SERVER, v6.4.44 R3): create an overlapped ACCEPT socket,
+# associate it with the IOCP, fetch AcceptEx via WSAIoctl (like ConnectEx), post an overlapped
+# AcceptEx on the caller's LISTEN socket, park. On completion the accept socket is connected —
+# SO_UPDATE_ACCEPT_CONTEXT and return it. ctx =
+#   +0 OVERLAPPED(32) +32 task +40 step +48 accept +56 listen +64 rt +72 bytes +80 addrbuf(64) = 144.
+fn _async_accept_task(ctx): i64 {
+    if (load64(ctx + 40) == 0) {
+        var rt = load64(ctx + 64);
+        var acc = syscall(0xF022, 2, 1, 0, 0, 0, 1);         # WSASocketW (overlapped accept socket)
+        if (acc == 0 - 1) { return 0 - 1; }
+        store64(ctx + 48, acc);
+        syscall(0xF01F, acc, load64(rt), 0, 0);              # associate the accept socket with the IOCP
+        # fetch AcceptEx — WSAID_ACCEPTEX {b5367df1-cbac-11cf-95ca-00805f48a192} via WSAIoctl.
+        var guid[16]; store64(&guid, 0x11CFCBACB5367DF1); store64(&guid + 8, 0x92A1485F8000CA95);
+        var axp[8]; store64(&axp, 0);
+        var nbf[8]; store32(&nbf, 0);
+        if (syscall(0xF027, load64(ctx + 56), 0xC8000006, &guid, 16, &axp, 8, &nbf, 0, 0) != 0) {
+            syscall(0xF023, acc); return 0 - 1;
+        }
+        var acceptex = load64(&axp);
+        store64(ctx, 0); store64(ctx + 8, 0); store64(ctx + 16, 0); store64(ctx + 24, 0);   # zero OVERLAPPED
+        store64(ctx + 32, load64(rt + 40));                  # task ptr (for completion recovery)
+        store64(ctx + 40, 1);
+        # AcceptEx(listen, accept, outbuf, dwRecvLen=0, localAddrLen=32, remoteAddrLen=32, &bytes,
+        # overlapped=ctx). localAddrLen/remoteAddrLen = sizeof(sockaddr_in)+16 = 32; outbuf holds both.
+        var ar = callptr(acceptex, load64(ctx + 56), acc, ctx + 80, 0, 32, 32, ctx + 72, ctx);
+        if (ar == 0) {
+            if (syscall(0xF024) != 997) { syscall(0xF023, acc); return 0 - 1; }   # not WSA_IO_PENDING
+        }
+        _async_win_park(rt);
+        return 0;
+    }
+    var acc = load64(ctx + 48);
+    if (load64(ctx) != 0) { syscall(0xF023, acc); return 0 - 1; }   # OVERLAPPED.Internal (NTSTATUS)
+    var ls[8]; store64(&ls, load64(ctx + 56));
+    # setsockopt(SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, &listen, 8) — makes getpeername/shutdown work.
+    syscall(0xF032, acc, 0xFFFF, 0x700B, &ls, 8);
+    return acc;
+}
+
+# Async accept on the reactor: post an overlapped AcceptEx on the (already-listening, IOCP-
+# associated) `listen_sock`; returns a task handle whose result — via task_join — is the accepted
+# socket, or -1. The caller sets the listener up (WSASocketW → bind → listen) and associates it
+# with the IOCP (`syscall(0xF01F, listen_sock, load64(rt), 0, 0)`). v6.4.44 R3 (async "W"-arc server).
+fn async_accept(rt, listen_sock): i64 {
+    var ctx = alloc_via(load64(rt + 32), 144);
+    store64(ctx + 40, 0);
+    store64(ctx + 48, 0);
+    store64(ctx + 56, listen_sock);
+    store64(ctx + 64, rt);
+    return async_spawn(rt, &_async_accept_task, ctx);
+}
+
 # Reactor recv task: issue an overlapped WSARecv on the (IOCP-associated) socket, park;
 # on completion return the byte count (0 = EOF, <0 = error).
 fn _async_recv_task(ctx): i64 {
@@ -509,16 +565,16 @@ fn _async_interval_task(ctx): i64 {
         return 0;
     }
     if (tok != 0) { if (load64(tok) != 0) {           # cancelled before this tick
-        syscall(0xF030, load64(ctx + 88), 0 - 1);     # UnregisterWaitEx (drains callback)
-        syscall(3, load64(ctx + 56));                 # CloseHandle(timer)
-        return 0;
-    } }
+            syscall(0xF030, load64(ctx + 88), 0 - 1);     # UnregisterWaitEx (drains callback)
+            syscall(3, load64(ctx + 56));                 # CloseHandle(timer)
+            return 0;
+        } }
     fncall1(load64(ctx + 64), load64(ctx + 72));      # fp(arg)
     if (tok != 0) { if (load64(tok) != 0) {           # callback may have signalled cancel
-        syscall(0xF030, load64(ctx + 88), 0 - 1);
-        syscall(3, load64(ctx + 56));
-        return 0;
-    } }
+            syscall(0xF030, load64(ctx + 88), 0 - 1);
+            syscall(3, load64(ctx + 56));
+            return 0;
+        } }
     # Re-park THIS task (ctx+32), not _async_win_park's rt+40 "current task": fp() above may
     # have re-entered the reactor and left rt+40 pointing at some other task.
     store64(load64(ctx + 32) + 16, TASK_WAITING);     # re-park for the next tick
@@ -662,8 +718,8 @@ fn _async_process_task(ctx): i64 {
     var hProcess = load64(ctx + 72);
     syscall(0xF030, load64(ctx + 88), 0 - 1);       # UnregisterWaitEx (drain the exit callback)
     var code[8]; store64(&code, 0);
-    # DIAGNOSTIC: GetExitCodeProcess disabled
-    var ec = 21;
+    syscall(61442, hProcess, &code);                # GetExitCodeProcess
+    var ec = load32(&code);
     syscall(3, load64(ctx + 80));                   # CloseHandle(hThread)
     syscall(3, hProcess);                           # CloseHandle(hProcess)
     return ec;
