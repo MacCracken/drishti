@@ -110,7 +110,7 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > (`make conformance`). This is the only evidence in the arc that drishti did not produce
 > itself. 128x128 superblocks — libaom's DEFAULT, and previously a blanket reject that
 > excluded the entire published corpus — decode as of 0.7.126; the last two gaps closed
-> with the E2d fix, which turned out to be a heap overflow of the CDF blob rather than any
+> with the the CDEF-grid heap overflow fix, which turned out to be a heap overflow of the CDF blob rather than any
 > misreading of the spec.
 >
 > **DECODE — what works:** profile-0 keyframe decode to pixels (intra prediction,
@@ -121,13 +121,13 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > segmentation (spatial config).
 >
 > **DECODE — what is still WRONG, measured not guessed:** no keyframe gap is currently known.
-> Both remaining published-vector gaps (E2d) and the odd-height chroma defect the published
-> corpus could not see (E2e) are fixed, and a 48-geometry aomenc sweep spanning
+> Both remaining published-vector gaps (the CDEF-grid heap overflow) and the odd-height chroma defect the published
+> corpus could not see (the CfL edge-chroma bug) are fixed, and a 48-geometry aomenc sweep spanning
 > `MiRows % 4 == 2` is clean. That is a stronger statement than "eight of eight pass" — but
-> it is still bounded by the geometries and features that have been SWEPT, and E2e is the
-> proof that an exhausted corpus is not a correct decoder. Inter frames DIVERGE: a reconstruction rounding error of max |delta| 2..4 (E2b) and an
-> entropy desync on busier frames (E2c); both figures predate the E2d fix and have not been
-> re-taken. The deblocker also filters every inter block at the wrong level (D3), which is
+> it is still bounded by the geometries and features that have been SWEPT, and the CfL edge-chroma bug is the
+> proof that an exhausted corpus is not a correct decoder. Inter frames DIVERGE: a reconstruction rounding error of max |delta| 2..4 (INTER-FRAME PIXEL DRIFT) and an
+> entropy desync on busier frames (INTER-FRAME SYMBOL DESYNC); both figures predate the the CDEF-grid heap overflow fix and have not been
+> re-taken. The deblocker also filters every inter block at the wrong level (loop-filter ref/mode deltas), which is
 > silently-wrong-pixels rather than a reject. delta-q / delta-lf still reject. So: inter
 > frames decode, but no inter frame has yet been shown bit-exact against an external
 > reference.
@@ -145,7 +145,7 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > libaom encodes the stream and `aomdec` produces the reference pixels, so the
 > reference cannot collude with drishti's own reading of the spec — the blind spot
 > every prior gate had (`docs/guides/verification.md`). Current: **21 matched /
-> 2 known-gap / 0 regressed**; the 2 remaining are the inter frames (E2b/E2c). Every
+> 2 known-gap / 0 regressed**; the 2 remaining are the inter frames (INTER-FRAME PIXEL DRIFT/INTER-FRAME SYMBOL DESYNC). Every
 > keyframe case is a HARD gate — `PUBLISHED_XFAIL` is empty.
 >
 > The properly-phased, honestly-sized remaining work is at the END of this section
@@ -450,6 +450,12 @@ release turned a large-but-finite job into an unbounded stream of patches.
 conformance-clean **and** encode round-trip-clean. The encoder is the back half of this table,
 batched like everything else. It is the largest work in the arc and it is planned, not punted.
 
+**NAMING.** Findings are named for what BREAKS. The old alphanumeric codes (E2a-E2e, D1-D11,
+G0-G3, C1-C3) are retired — they were unreadable and hid what the work actually was. The
+historical CHANGELOG and the per-version log in `state.md` still carry them because they
+record what was written at the time; a legend is at the bottom of this section. Do not coin
+new codes.
+
 **Rules for this stretch, and they are not optional:**
 
 1. **A release is a BATCH.** Every release below bundles multiple items behind ONE stated
@@ -458,22 +464,31 @@ batched like everything else. It is the largest work in the arc and it is planne
    work continues immediately on the next bite in the same release. Bites do not wait.
 3. **The outcome is the acceptance test.** A release is done when its stated outcome is
    demonstrable against a gate, not when its bullet list is ticked.
-4. **No new labels.** Findings are described by what breaks. The E-numbers below are the last
-   ones; they exist only because they are already wired into `make conformance`.
+4. **No new labels.** Findings are described by what BREAKS — "inter-frame symbol desync",
+   not "E2c". The old codes are retired; see the legend below.
 5. **If a release overruns its outcome, the overflow goes to a LATER release.** The release
    count is fixed at 14; scope moves between releases, the count does not grow silently.
+
+**Legend for the retired codes, so the historical log stays readable:** the 128x128-superblock
+gate (E2a), inter-frame pixel drift (E2b), inter-frame symbol desync (E2c), the CDEF-grid heap
+overflow (E2d), the CfL edge-chroma bug (E2e), segmentation (D1), per-superblock delta-q /
+delta-lf (D2), loop-filter ref/mode deltas (D3), block-level lossless (D4), film-grain
+synthesis (D5), palette (D6), intra block copy (D7), scalability (D9), large-scale tile (D10),
+subsampling coverage (D11), encoder 128-SB coverage (G0), cdef fill-loop bounds (G0b),
+conformance-harness hardening (G0c), OOM fault injection (G1), corpus-guided fuzzing (G2),
+fixture hardening (G3), cross-frame CDF inheritance (C1), GOP integration (C3).
 
 #### Decode — 0.7.129 to 0.7.135
 
 | Release | Outcome (the acceptance test) | Batched work |
 |---|---|---|
-| **0.7.129** | **An INTER frame decodes BIT-EXACT vs `aomdec`.** The two inter xfails become hard cases. | E2b inter reconstruction rounding; E2c inter entropy desync (prime suspect: `av1_reset_block_context` unconditional on the inter lane, `src/av1_intertile.cyr`); D3 loop-filter ref/mode deltas (the deblocker hardcodes `is_intra=1`/`ref=INTRA_FRAME` — silently wrong pixels today); a per-frame delta instrument in `scripts/conformance.sh` so divergence is measured, not md5-guessed |
-| **0.7.130** | **No `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset.** | D2 per-SB delta-q / delta-lf, both lanes; D4 block-level lossless from `LosslessArray[segment_id]`; D1 temporal segmentation (`PrevSegmentIds` + the DPB-saved map); C1 follow-ons (`context_update_tile_id` multi-tile save, the `disable_frame_end_update_cdf` witness) |
+| **0.7.129** | **An INTER frame decodes BIT-EXACT vs `aomdec`.** The two inter xfails become hard cases. | INTER-FRAME PIXEL DRIFT inter reconstruction rounding; INTER-FRAME SYMBOL DESYNC inter entropy desync (prime suspect: `av1_reset_block_context` unconditional on the inter lane, `src/av1_intertile.cyr`); loop-filter ref/mode deltas loop-filter ref/mode deltas (the deblocker hardcodes `is_intra=1`/`ref=INTRA_FRAME` — silently wrong pixels today); a per-frame delta instrument in `scripts/conformance.sh` so divergence is measured, not md5-guessed |
+| **0.7.130** | **No `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset.** | per-superblock delta-q / delta-lf per-SB delta-q / delta-lf, both lanes; block-level lossless block-level lossless from `LosslessArray[segment_id]`; temporal segmentation segmentation (`PrevSegmentIds` + the DPB-saved map); C1 follow-ons (`context_update_tile_id` multi-tile save, the `disable_frame_end_update_cdf` witness) |
 | **0.7.131** | **A real multi-frame GOP decodes end-to-end**, not a 4-frame fixture. | C3 remainder: GOPs beyond 4 frames, `show_existing_frame`, switch frames, full 7.21 reference reload; multi-tile inter frames; the DPB under real refresh patterns |
-| **0.7.132** | **The geometry and format matrix is CLEAN** — E2e's lesson turned into a standing gate. | D11 4:2:2 / 4:4:4 / monochrome end-to-end; 10/12-bit vs `aomdec`; a dimension sweep (odd MI, non-multiple-of-8, superres, scaled refs) wired into `make conformance` as a matrix, not hand-run |
-| **0.7.133** | **Screen content decodes** — palette and intra block copy. | D6 palette (5.11.46); D7 intra block copy (5.11.6); `--tune-content=screen` rejects wholesale today |
-| **0.7.134** | **Film grain renders; every remaining reject is deliberate and documented.** | D5 film-grain synthesis (7.18.3, parsed and discarded today); D9 scalability / operating-point select + `drop_obu`; D10 large-scale-tile / `OBU_TILE_LIST` |
-| **0.7.135** | **DECODE IS CONFORMANCE-CLEAN: the FULL published `aom-test-data` corpus decodes every frame bit-exactly**, plus safety and harness integrity. | The complete published corpus gated, every frame not just keyframes; G0 encode-lane 128-SB coverage; G0b bound the `av1_read_cdef`/`av1_write_cdef` fill loops; G0c harness hardening (a missing fixture must FAIL, `skipped=` counter, no non-run scoring as a pass); the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; G1 OOM injection; G2 corpus fuzzing; restore the missing `scripts/refs/` MC generators |
+| **0.7.132** | **The geometry and format matrix is CLEAN** — the CfL edge-chroma bug's lesson turned into a standing gate. | subsampling coverage 4:2:2 / 4:4:4 / monochrome end-to-end; 10/12-bit vs `aomdec`; a dimension sweep (odd MI, non-multiple-of-8, superres, scaled refs) wired into `make conformance` as a matrix, not hand-run |
+| **0.7.133** | **Screen content decodes** — palette and intra block copy. | palette palette (5.11.46); intra block copy intra block copy (5.11.6); `--tune-content=screen` rejects wholesale today |
+| **0.7.134** | **Film grain renders; every remaining reject is deliberate and documented.** | film-grain synthesis film-grain synthesis (7.18.3, parsed and discarded today); scalability scalability / operating-point select + `drop_obu`; large-scale tile large-scale-tile / `OBU_TILE_LIST` |
+| **0.7.135** | **DECODE IS CONFORMANCE-CLEAN: the FULL published `aom-test-data` corpus decodes every frame bit-exactly**, plus safety and harness integrity. | The complete published corpus gated, every frame not just keyframes; encoder 128-SB coverage encode-lane 128-SB coverage; the cdef fill-loop bounds bound the `av1_read_cdef`/`av1_write_cdef` fill loops; conformance-harness hardening harness hardening (a missing fixture must FAIL, `skipped=` counter, no non-run scoring as a pass); the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection OOM injection; corpus-guided fuzzing corpus fuzzing; restore the missing `scripts/refs/` MC generators |
 
 #### Encode — 0.7.136 to 0.7.142
 

@@ -35,7 +35,7 @@ pass=0; fail=0; xfail=0
 # tests/repro/*.ivf are tiny libaom-encoded streams with their aomdec reference MD5
 # committed alongside, so this half of the gate runs anywhere — including CI without
 # libaom. BOTH are hard gates now: e2d-160x160 was always the passing control, and
-# e2d-192x160 was the E2d xfail until av1_clear_cdef was bounded (src/av1_modeinfo.cyr).
+# e2d-192x160 was the the CDEF-grid heap overflow xfail until av1_clear_cdef was bounded (src/av1_modeinfo.cyr).
 # They differ only in width, and both are 128-superblock streams.
 repro_case() { # name expect(match|xfail)
     local n="$1" expect="$2"
@@ -62,7 +62,7 @@ cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 
 echo "=== drishti conformance ==="
 echo "--- committed reproducers (no libaom required) ---"
 repro_case e2d-160x160 match
-repro_case e2d-192x160 match   # E2d: was xfail until av1_clear_cdef was bounded
+repro_case e2d-192x160 match   # the CDEF-grid heap overflow: was xfail until av1_clear_cdef was bounded
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "  libaom (aomenc/aomdec) not found — skipping the generated + published corpus"
@@ -91,7 +91,7 @@ if [ ! -f "$WORK/src.yuv" ]; then
 fi
 
 # This generated corpus pins --sb-size=64 deliberately: it is the 64-superblock control
-# path, kept green independently of the 128 path that E2a un-gated in 0.7.126. The 128
+# path, kept green independently of the 128 path that the 128x128-superblock gate un-gated in 0.7.126. The 128
 # coverage comes from the published vectors below (all of which use 128 by default).
 enc() { # name kf_only extra...
     local name="$1"; shift
@@ -120,7 +120,7 @@ enc() { # name kf_only extra...
 # reproduce. These numbers say HOW a frame differs: which plane, how many samples, and by how
 # much. That distinction is the whole diagnosis — a scattered 1-2 LSB spread across all planes
 # is a ROUNDING bug, a large count with a big max is a DESYNC, and a clean Y with dirty chroma
-# is a chroma-path bug (which is exactly how E2e was caught).
+# is a chroma-path bug (which is exactly how the CfL edge-chroma bug was caught).
 frame_delta() { # got ref -> "Y=count/max U=count/max V=count/max"
     cmp -l "$1" "$2" 2>/dev/null | awk -v y="$CORPUS_Y" -v c="$CORPUS_C" '
     { o = $1; a = strtonum("0" $2); b = strtonum("0" $3); d = (a > b ? a - b : b - a)
@@ -180,8 +180,8 @@ check seq_nofilt  keyframe
 # ---- PUBLISHED conformance vectors (libaom's own corpus + its own reference MD5s) ----
 # These are the real thing: streams drishti never touched, with checksums published by
 # the reference implementation. They ALL use 128x128 superblocks (libaom's default), so
-# every one of them rejected outright until E2a landed. The KEYFRAME (frame 1) is the
-# gate; later frames hit the inter gaps (E2b/E2c) and are not scored here.
+# every one of them rejected outright until the 128x128-superblock gate landed. The KEYFRAME (frame 1) is the
+# gate; later frames hit the inter gaps (INTER-FRAME PIXEL DRIFT/INTER-FRAME SYMBOL DESYNC) and are not scored here.
 VDIR="${CONFORMANCE_VECTORS:-build/vectors}"
 AOM_BASE=https://storage.googleapis.com/aom-test-data
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
@@ -191,7 +191,7 @@ av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
 # were filed here with a WRONG named cause — "coded_lossless = 1 (the WHT lossless path)"
 # and "uses_lr = 1 (loop restoration)" respectively. A controlled sweep refuted both
 # attributions (0.7.126), and the real cause turned out to be neither feature: a single
-# unbounded store in av1_clear_cdef overwriting the CDF blob (E2d). The lesson is worth
+# unbounded store in av1_clear_cdef overwriting the CDF blob (the CDEF-grid heap overflow). The lesson is worth
 # keeping: a named cause on an xfail is a HYPOTHESIS, not a diagnosis — label it as one.
 PUBLISHED_XFAIL=""
 
@@ -220,9 +220,9 @@ check_published() { # name expect(match|xfail)
     fi
 }
 
-# ---- THE 128-SB REPRODUCER (E2d — FIXED, kept as the regression guard) ----
+# ---- THE 128-SB REPRODUCER (the CDEF-grid heap overflow — FIXED, kept as the regression guard) ----
 # Same source, same encoder settings, ONLY --sb-size differs. BOTH must match now; 128 was
-# the E2d xfail until av1_clear_cdef was bounded (src/av1_modeinfo.cyr). It stays a hard
+# the the CDEF-grid heap overflow xfail until av1_clear_cdef was bounded (src/av1_modeinfo.cyr). It stays a hard
 # case because it was the minimal local trigger: it needs partial superblock coverage in
 # BOTH dimensions (352x288 with 128-SBs leaves a 96-col x 32-row remainder), and it was
 # CONTENT-dependent — the published 352x288 vectors cdfupdate/quantizer-32 have the same
@@ -252,14 +252,14 @@ sbrepro() { # sbsize expect(match|xfail)
         echo "  352x288 sb-size=$sb: keyframe REGRESSED"; fail=$((fail+1))
     fi
 }
-# ---- ODD-MI GEOMETRY (E2e — the CfL bottom-edge overhang) ----
+# ---- ODD-MI GEOMETRY (the CfL edge-chroma bug — the CfL bottom-edge overhang) ----
 # EVERY published vector's height is a multiple of 16 and enc()'s source is 64x64, so until
 # this case existed the whole gate was blind to a frame whose bottom block OVERHANGS: a
 # 4:2:0 keyframe with MiRows % 4 == 2 (luma height/8 odd) drove predict_chroma_from_luma to
 # read the last VISIBLE luma row in place of the reconstructed overhang, shifting lumaAvg
 # and every sample of the CfL block. Chroma-only, max |delta| 2, and invisible to an
 # aligned corpus. 160x136 and 288x152 both reproduce; both superblock sizes are covered
-# because the defect is independent of E2d. Keep at least one MiRows % 4 == 2 case here.
+# because the defect is independent of the CDEF-grid heap overflow. Keep at least one MiRows % 4 == 2 case here.
 oddmi() { # w h sbsize
     local w="$1" h="$2" sb="$3" n="oddmi_${1}x${2}_sb${3}"
     ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v 1 \
@@ -285,7 +285,7 @@ oddmi() { # w h sbsize
         echo "  ${w}x${h} sb-size=$sb (MiRows%4==2): keyframe REGRESSED"; fail=$((fail+1))
     fi
 }
-echo "--- odd-MI geometry (E2e — CfL bottom-edge overhang) ---"
+echo "--- odd-MI geometry (the CfL edge-chroma bug — CfL bottom-edge overhang) ---"
 oddmi 160 136 64
 oddmi 160 136 128
 oddmi 288 152 64
@@ -293,7 +293,7 @@ oddmi 288 152 128
 
 echo "--- 128-SB reproducer (same source, only --sb-size differs) ---"
 sbrepro 64 match
-sbrepro 128 match   # E2d: was xfail until av1_clear_cdef was bounded
+sbrepro 128 match   # the CDEF-grid heap overflow: was xfail until av1_clear_cdef was bounded
 
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done

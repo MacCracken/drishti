@@ -9,7 +9,7 @@
 **0.7.128** — cut 2026-07-26, not yet tagged (user's git). **TWO KEYFRAME DEFECTS CLOSED, BOTH MEMORY-SHAPED
 RATHER THAN SPEC-SHAPED; ALL EIGHT PUBLISHED VECTORS BIT-EXACT. Toolchain pin 6.4.46 -> 6.4.78.**
 `make conformance` 17 matched / 6 known-gap -> **25 matched / 2 known-gap / 0 regressed** (the 2 are inter
-frames, E2b/E2c). **E2d** — the last two published keyframe gaps and the committed 192x160 reproducer — was a
+frames, INTER-FRAME PIXEL DRIFT/INTER-FRAME SYMBOL DESYNC). **the CDEF-grid heap overflow** — the last two published keyframe gaps and the committed 192x160 reproducer — was a
 HEAP BUFFER OVERFLOW, not a spec misreading: `av1_clear_cdef`'s `use_128` branch stored `-1` at `[r][c+16]`,
 `[r+16][c]`, `[r+16][c+16]` UNBOUNDED against a CdefIdx grid flattened to exactly `rows*stride` i64 and
 allocated LAST in `av1_tile_grids_new`. With a headerless bump allocator the overflow lands in whatever came
@@ -19,7 +19,7 @@ desynced reading a table it had corrupted itself. Two prior sessions were spent 
 `Default_Partition_W128_Cdf` and the partition machinery, all of which was correct. The "content-dependence"
 was an ADDRESS CALCULATION: the landing offset is a pure function of `MiCols*MiRows`, so the PASSING control
 (e2d-160x160) was overflowing too — it merely poisoned a context that stream never read. Fixed by bounding
-both axes and threading `AV1TILE_FMI_ROWS` through both lanes. **E2e** — found by the adversarial review OF
+both axes and threading `AV1TILE_FMI_ROWS` through both lanes. **the CfL edge-chroma bug** — found by the adversarial review OF
 that fix, and the more important of the two — a keyframe whose luma height/8 is odd (`MiRows % 4 == 2`: 136,
 152, 168, 184 ...) decoded WRONG CHROMA on ordinary video. `av1_predict_chroma_from_luma` bounded `MaxLumaW/H`
 against the VISIBLE luma plane, but those come from the last luma transform block (5.11.35) and a bottom/right
@@ -41,8 +41,8 @@ a correct decoder**. Also: the harness's ffmpeg bail `exit 0`'d past a nonzero `
 the xfail->hard promotions hollow. 38 suites, **30,288** suite + **7,410** fuzz, all six gates green.
 TOOLCHAIN: pin 6.4.46 -> 6.4.78 (unmoved since 0.7.7) with `lib/` re-synced — note `cyrius lib sync --full`
 leaves `niyama`/`yantra` behind despite reporting them synced, so those two were copied by hand; both the
-pin-drift and lib-shadow build warnings are now gone. STILL OPEN: E2b/E2c (inter), D3 (silently-wrong-pixels
-on inter deblocking), D2, D1 temporal, and the encode lane has never run at 128 superblocks (roadmap G0).
+pin-drift and lib-shadow build warnings are now gone. STILL OPEN: INTER-FRAME PIXEL DRIFT/INTER-FRAME SYMBOL DESYNC (inter), loop-filter ref/mode deltas (silently-wrong-pixels
+on inter deblocking), per-superblock delta-q / delta-lf, temporal segmentation, and the encode lane has never run at 128 superblocks (roadmap encoder 128-SB coverage).
 [[av1-decode-remaining-tracks]]
 
 **0.7.127** — cut 2026-07-23, not yet tagged (user's git). **E2d DIAGNOSIS + COMMITTED REPRODUCER +
