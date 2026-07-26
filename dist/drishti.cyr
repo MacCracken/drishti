@@ -23167,6 +23167,16 @@ fn av1_inter_block_setup(tile, r, c, sub_size, out): i64 {
     av1_mvctx_set_block(ctx, r, c, sub_size);
     av1_mvctx_set_precision(ctx, av1_fh_allow_high_precision_mv(fh), av1_fh_force_integer_mv(fh));
     av1_mvctx_set_signbias(ctx, load64(tile + AV1TILE_SIGNBIAS));   # 7.20 RefFrameSignBias
+    # use_ref_frame_mvs — the 7.10.2.5 temporal-scan gate. av1_mvctx_set_use_ref_frame_mvs had
+    # ZERO CALLERS, so AV1MVC_USE_RFMV was always 0 and the temporal scan NEVER RAN on a decoded
+    # frame, even though the header was parsed and av1_motion_field_estimation had already built
+    # MotionFieldMvs for it. Two consequences, both silent: temporal MV candidates never entered
+    # the stack, and ZeroMvContext stayed 0 where the scan sets it to 1 whenever the origin
+    # sample yields no candidate. A wrong ZeroMvContext selects the wrong zero_mv CDF ROW — the
+    # symbol still decodes to the same VALUE (both rows are heavily skewed) but consumes a
+    # different arithmetic range, so the decoder state silently drifts and the first
+    # near-balanced symbol after it flips. That is the inter-frame symbol desync.
+    av1_mvctx_set_use_ref_frame_mvs(ctx, av1_fh_use_ref_frame_mvs(fh));
     store64(out + 0, avail_u);
     store64(out + 8, avail_l);
     store64(out + 16, above_skip);

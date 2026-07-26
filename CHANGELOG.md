@@ -6,6 +6,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **THE TEMPORAL MV SCAN NEVER RAN. `av1_mvctx_set_use_ref_frame_mvs` had ZERO CALLERS.** The frame header
+  parsed `use_ref_frame_mvs`, and `av1_motion_field_estimation` dutifully built `MotionFieldMvs` for every
+  frame that set it — but the per-block MV context never received the flag, so `AV1MVC_USE_RFMV` was always
+  0 and `av1_temporal_scan` (7.10.2.5, landed 0.7.104) was dead code on every decoded frame. Same class of
+  defect as the `av1_mvctx_set_signbias` zero-caller bug found in 0.7.120, in the same record.
+  TWO SILENT CONSEQUENCES: temporal MV candidates never entered the candidate stack, and **ZeroMvContext
+  stayed 0** where the scan sets it to 1 whenever the origin sample yields no candidate. The second one is
+  what desynced the bitstream: a wrong ZeroMvContext selects the wrong `zero_mv` CDF ROW, the symbol still
+  decodes to the same VALUE (both rows are heavily skewed toward 1), but it consumes a different arithmetic
+  range — so the decoder state drifts silently and the first near-balanced symbol afterwards flips.
+  MEASURED, with the per-frame instrument added earlier in this release:
+  `seq_filters` f5 `Y=299/4 U=77/2 V=99/5` -> `Y=100/4 U=34/2 V=55/5`, `seq_nofilt` f5
+  `Y=264/2 U=72/2 V=85/4` -> `Y=73/2 U=28/2 V=44/2` — 475 differing samples down to 189, and 421 down to
+  145 with max |delta| 4 -> 2. On a 6-frame `--max-partition-size=16` reproducer the decode goes from 1/6
+  frames to 2/6 (the first previously-desyncing frame now decodes).
+  HOW IT WAS FOUND, because the method is the transferable part: libaom was built from source into `ref/`
+  with `CONFIG_INSPECTION=1 -DCONFIG_ACCOUNTING=1` and then PATCHED to print the context and CDF it uses at
+  each `read_inter_mode`. Diffing that against drishti's showed `newmv_ctx` and the CDF agreeing exactly
+  (libaom stores the inverse form — 32768 - 24035 = 8733 — which is not a discrepancy) while `zero_ctx`
+  read 1 in libaom and 0 in drishti. No amount of reading drishti's own output could have shown that; every
+  hypothesis derived from drishti-only traces this session was wrong.
+  STILL OPEN: the remaining divergence (189/145 samples) and the frames that still desync later in the
+  reproducer — the temporal candidates now enter the stack, so the next question is whether their VALUES
+  are right, not whether they exist.
+
 - **`av1_reset_block_context` gated on `skip` on the inter lane (5.11.5) — spec alignment, and the standing
   E2c hypothesis is REFUTED.** Both inter-lane call sites (`av1_decode_block_inter` and its encode mirror)
   called it UNCONDITIONALLY where the spec says `if (skip) reset_block_context(bw4, bh4)`. The intra lane
