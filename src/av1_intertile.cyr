@@ -1125,7 +1125,15 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     # Lossless (base_q 0) forces TX_4X4.
     var tx_size = av1_max_tx_size_rect(sub_size);
     if (load64(tile + AV1TILE_BASE_Q) == 0) { tx_size = 0; }
-    av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma);
+    # 5.11.5 decode_block: `if (skip) reset_block_context(bw4, bh4)`. This lane called it
+    # UNCONDITIONALLY, which zeroes the above/left coefficient contexts (ALVL/ADC/LLVL/LDC)
+    # across the block footprint for a NON-skip block too. Those contexts select the
+    # `all_zero` and `dc_sign` CDFs for the NEXT block, so the error is a wrong PROBABILITY,
+    # not a wrong symbol count — a quiet frame coincidentally agrees, two adjacent coded
+    # blocks drift. Luma short-circuits to ctx 0 when the tx covers the whole block, which is
+    # why it hid; chroma never does. The intra lane (av1_partition.cyr) always had the gate,
+    # and so does the intra fork above at av1_decode_block_inter's is_inter==0 branch.
+    if (skip) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
     var ib = av1_fb_ib(fb);
     var is_comp = av1_ib_is_comp(ib);
     # COMPOUND (0.7.90): AVERAGE + DISTANCE (comp_group_idx==0) and BOTH masked modes —
@@ -1593,7 +1601,11 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
             vr = vr + txh4;
         }
     }
-    av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma);
+    # 5.11.5's `if (skip)` gate — see the decode lane. The encoder replayed the same
+    # unconditional reset, so the two lanes agreed with each other and DISAGREED with the
+    # spec: every round-trip test passed while a real libaom stream drifted. A shared
+    # derivation is invisible to a round-trip in exactly the way a shared fixture is.
+    if (av1_fb_skip(fb)) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
     # Mirror the decode lane's split so the two cannot drift: storage loop 1 here, loop 2 at
     # the end. Ordering is unobservable on this lane — the encoder is handed a residual and
     # never predicts, so nothing between here and the end reads the MI grid — but keeping the

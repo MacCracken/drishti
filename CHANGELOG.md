@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **`av1_reset_block_context` gated on `skip` on the inter lane (5.11.5) — spec alignment, and the standing
+  E2c hypothesis is REFUTED.** Both inter-lane call sites (`av1_decode_block_inter` and its encode mirror)
+  called it UNCONDITIONALLY where the spec says `if (skip) reset_block_context(bw4, bh4)`. The intra lane
+  always had the gate. It was filed by review as the prime suspect for the inter entropy desync, on the
+  reasoning that zeroing the above/left coefficient contexts for a NON-skip block would feed the next
+  block's `all_zero`/`dc_sign` CDFs the wrong context. **That reasoning is wrong, and measuring it is what
+  showed why:** the reset runs BEFORE the residual, and for a non-skip block `av1_coeffs_decode` rewrites
+  every context cell the reset zeroed — so the unconditional call was redundant, not harmful. Evidence:
+  conformance deltas are BYTE-IDENTICAL either way (`seq_filters` f5 stays `Y=299/4 U=77/2 V=99/5`), and
+  reverting the gate leaves all 30,288 suite assertions green. Kept anyway — the spec has it, the intra
+  lane has it, and it stops a future reader assuming the lanes differ — but recorded plainly as
+  **output-neutral and unwitnessed**, not as a fix. Do not re-file it as an E2c candidate.
+
 - **`make conformance` now reports PER-FRAME DIVERGENCE DETAIL, not just a differing md5.** The inter gap
   has been carried since Phase E as a guessed "max |delta| 2..4, ~7% of samples" that no gate could
   reproduce — the harness md5s frames and an md5 says only "not equal". New `frame_delta` splits a
