@@ -6,6 +6,45 @@
 
 ## Version
 
+**0.7.129** — cut 2026-07-26, not yet tagged (user's git). **AV1 DECODE IS CONFORMANCE-CLEAN ON THE GATE:
+`make conformance` = 33 matched / 0 KNOWN-GAP / 0 regressed. Every case — all eight published libaom
+vectors, the generated corpus WITH and WITHOUT loop filters, and the committed reproducers — is BIT-EXACT
+against `aomdec`, keyframes and INTER frames alike.** The release's acceptance test ("an inter frame decodes
+bit-exact; the inter xfails become hard cases") is met in full.
+FIVE DEFECTS, all previously mis-filed under two invented names ("inter reconstruction rounding" and "inter
+entropy desync"), and NONE of them was what its name suggested:
+(1) **the temporal-MV scan had never run** — `av1_mvctx_set_use_ref_frame_mvs` had ZERO CALLERS, so
+`av1_temporal_scan` (written 0.7.104) was dead code on every frame ever decoded; ZeroMvContext stayed 0
+where the scan sets it to 1, selecting the wrong `zero_mv` CDF row — same decoded value, different
+arithmetic range, silent drift. (2) **the deblocker filtered every block at the INTRA level** — `is_intra`
+was hardcoded 1 and `av1_lf_strength` was called with `AV1_INTRA_FRAME, 0, 0`, so 7.14.5's reference and
+mode deltas never reached the filter; a new `AV1TILE_REF0S` grid carries `RefFrame[0]` across the
+`main.cyr` module boundary. (3) **saved CDF bundles carried their adaptation counters** across a frame
+boundary, so an inheriting frame adapted at rate 5 where libaom uses 3. (4) **`warpEstimation`'s
+least-squares constants were wrong** — `LS_STEP` 2 instead of 8 and the downshift 2 instead of 4 — so every
+warped block built a different affine fit from the SAME samples. (5) **`LoopfilterTxSizes` was stamped with
+the block's uniform tx size on VAR-TX blocks**, giving the deblocker the wrong width at internal transform
+edges.
+**THE METHOD IS THE TRANSFERABLE PART.** Every hypothesis formed from drishti's own output was WRONG —
+motion-mode gating, sub-8x8 chroma, the partition context, `order_hint`/`ref_frame_idx` parsing, tile
+geometry. All five real defects came from diffing against an INSTRUMENTED libaom built into `ref/`
+(`CONFIG_INSPECTION=1 -DCONFIG_ACCOUNTING=1`), patched to log what it actually uses: every
+`aom_read_symbol` as `(nsymbs, cdf0, value)`, the contexts at `read_inter_mode`, and `wmmat` per warp
+block. Diffing symbol streams took the search from "a frame fails somewhere" to "symbol #4969, same value,
+different CDF". `ref/inspect-ctx.patch` is kept for reuse. **A trap worth remembering: libaom's own
+`--accounting` is PARTIAL instrumentation** (it logs 15 partition symbols for a tree that needs 21, and
+zero `read_skip_txfm` on an all-skip frame) — its per-block VALUE dumps are reliable, its symbol counts are
+not. And `av1_warp_affine_c` never runs on x86 unless `AOM_SIMD_CAPS_MASK=0` forces the scalar path.
+**A SHARED-DERIVATION FAILURE, exactly as `docs/guides/verification.md` warns:**
+`scripts/refs/warp_estimation_ref.py` carried the SAME `LS_STEP` misreading as the Cyrius, so the
+known-answers it generated agreed with a wrong decoder and 43 assertions passed against wrong values for
+the whole warp arc. The port was corrected FIRST, the KATs regenerated from it, and libaom broke the tie.
+A spec-literal port is necessary and NOT sufficient. NEW GATE CASE: `tests/repro/inter-6frame.ivf` with
+per-frame `aomdec` MD5s, all six frames hard, running WITHOUT libaom. 38 suites, **30,300** suite +
+**7,410** fuzz, all six gates green. STILL OPEN: the encode lane has never run at 128 superblocks
+(roadmap G0-equivalent), `av1_read_cdef`/`av1_write_cdef` fill loops are unbounded, and conformance-harness
+hardening — plus everything in 0.7.130 onward. [[av1-decode-remaining-tracks]]
+
 **0.7.128** — cut 2026-07-26, not yet tagged (user's git). **TWO KEYFRAME DEFECTS CLOSED, BOTH MEMORY-SHAPED
 RATHER THAN SPEC-SHAPED; ALL EIGHT PUBLISHED VECTORS BIT-EXACT. Toolchain pin 6.4.46 -> 6.4.78.**
 `make conformance` 17 matched / 6 known-gap -> **25 matched / 2 known-gap / 0 regressed** (the 2 are inter

@@ -93,7 +93,7 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 ## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e) — see HONEST STATUS (no completion % — every one ever given here was wrong)
 
-> ### HONEST STATUS as of 0.7.128 — read this before believing any "nearly done"
+> ### HONEST STATUS as of 0.7.129 — read this before believing any "nearly done"
 >
 > **There is no honest single completion number, and this doc will not print one.**
 > The metric used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**
@@ -105,13 +105,12 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > what is CHECKABLE against code — decodes / rejects / diverges — so completeness is
 > judged from facts, not from a number. Ground truth:
 >
-> **DECODE — externally verified:** **ALL EIGHT PUBLISHED libaom conformance vectors in
-> the gate decode their keyframe BIT-EXACTLY** against libaom's own reference MD5s
-> (`make conformance`). This is the only evidence in the arc that drishti did not produce
-> itself. 128x128 superblocks — libaom's DEFAULT, and previously a blanket reject that
-> excluded the entire published corpus — decode as of 0.7.126; the last two gaps closed
-> with the the CDEF-grid heap overflow fix, which turned out to be a heap overflow of the CDF blob rather than any
-> misreading of the spec.
+> **DECODE — externally verified:** **`make conformance` is 33 matched / 0 KNOWN-GAP / 0
+> regressed as of 0.7.129.** Every case — all eight published libaom vectors, the generated
+> corpus with AND without loop filters, and the committed reproducers — is BIT-EXACT against
+> `aomdec`, keyframes and INTER frames alike. This is the only evidence in the arc that
+> drishti did not produce itself. 128x128 superblocks decode as of 0.7.126; the inter frames
+> became bit-exact in 0.7.129.
 >
 > **DECODE — what works:** profile-0 keyframe decode to pixels (intra prediction,
 > transforms, reconstruction, dequant, CDEF, deblock, loop restoration, superres),
@@ -120,17 +119,15 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > cross-frame CDF inheritance, the intra-block fork inside an inter frame, and
 > segmentation (spatial config).
 >
-> **DECODE — what is still WRONG, measured not guessed:** no keyframe gap is currently known.
-> Both remaining published-vector gaps (the CDEF-grid heap overflow) and the odd-height chroma defect the published
-> corpus could not see (the CfL edge-chroma bug) are fixed, and a 48-geometry aomenc sweep spanning
-> `MiRows % 4 == 2` is clean. That is a stronger statement than "eight of eight pass" — but
-> it is still bounded by the geometries and features that have been SWEPT, and the CfL edge-chroma bug is the
-> proof that an exhausted corpus is not a correct decoder. Inter frames DIVERGE: a reconstruction rounding error of max |delta| 2..4 (INTER-FRAME PIXEL DRIFT) and an
-> entropy desync on busier frames (INTER-FRAME SYMBOL DESYNC); both figures predate the the CDEF-grid heap overflow fix and have not been
-> re-taken. The deblocker also filters every inter block at the wrong level (loop-filter ref/mode deltas), which is
-> silently-wrong-pixels rather than a reject. delta-q / delta-lf still reject. So: inter
-> frames decode, but no inter frame has yet been shown bit-exact against an external
-> reference.
+> **DECODE — what is still WRONG, measured not guessed:** on the conformance gate, NOTHING —
+> as of 0.7.129 it is 33 matched / 0 known-gap / 0 regressed, every case bit-exact against
+> `aomdec`, keyframes and inter frames alike. That is the strongest statement this arc has
+> ever been able to make, and it is still bounded by what the gate COVERS: profile-0, 8-bit,
+> 4:2:0, the geometries and tools these streams exercise. 10/12-bit and 4:2:2/4:4:4 are
+> parsed and untested end-to-end; palette, intra block copy, film grain, scalability and
+> large-scale-tile still reject; delta-q / delta-lf still reject. The 0.7.130-0.7.135
+> releases below close those, and the CfL edge-chroma bug found in 0.7.128 is the standing
+> proof that a green gate measures the corpus, not the decoder.
 >
 > **ENCODE — planned as releases 0.7.136-0.7.141, not deferred:** there is **no encoder** yet.
 > What exists (`av1_encode_*`) is a **bitstream writer** that replays a caller-supplied
@@ -482,7 +479,7 @@ fixture hardening (G3), cross-frame CDF inheritance (C1), GOP integration (C3).
 
 | Release | Outcome (the acceptance test) | Batched work |
 |---|---|---|
-| **0.7.129** | **An INTER frame decodes BIT-EXACT vs `aomdec`.** The two inter xfails become hard cases. | INTER-FRAME PIXEL DRIFT inter reconstruction rounding; INTER-FRAME SYMBOL DESYNC inter entropy desync (prime suspect: `av1_reset_block_context` unconditional on the inter lane, `src/av1_intertile.cyr`); loop-filter ref/mode deltas loop-filter ref/mode deltas (the deblocker hardcodes `is_intra=1`/`ref=INTRA_FRAME` — silently wrong pixels today); a per-frame delta instrument in `scripts/conformance.sh` so divergence is measured, not md5-guessed |
+| **0.7.129** | ✅ **DONE — `make conformance` 33 matched / 0 KNOWN-GAP / 0 regressed.** Every gate case is bit-exact vs `aomdec`, keyframes and inter frames alike. | Five defects, none matching the name it had been filed under: the temporal-MV scan had never run (zero callers); the deblocker filtered every block at the INTRA level; saved CDF bundles carried adaptation counters across frames; `warpEstimation`'s `LS_STEP` was 2 not 8 (and so was the reference port that generated its KATs); `LoopfilterTxSizes` was uniform on var-tx blocks. Found by diffing against an instrumented libaom in `ref/`. |
 | **0.7.130** | **No `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset.** | per-superblock delta-q / delta-lf per-SB delta-q / delta-lf, both lanes; block-level lossless block-level lossless from `LosslessArray[segment_id]`; temporal segmentation segmentation (`PrevSegmentIds` + the DPB-saved map); C1 follow-ons (`context_update_tile_id` multi-tile save, the `disable_frame_end_update_cdf` witness) |
 | **0.7.131** | **A real multi-frame GOP decodes end-to-end**, not a 4-frame fixture. | C3 remainder: GOPs beyond 4 frames, `show_existing_frame`, switch frames, full 7.21 reference reload; multi-tile inter frames; the DPB under real refresh patterns |
 | **0.7.132** | **The geometry and format matrix is CLEAN** — the CfL edge-chroma bug's lesson turned into a standing gate. | subsampling coverage 4:2:2 / 4:4:4 / monochrome end-to-end; 10/12-bit vs `aomdec`; a dimension sweep (odd MI, non-multiple-of-8, superres, scaled refs) wired into `make conformance` as a matrix, not hand-run |

@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.129] - 2026-07-26
+
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
 - **`LoopfilterTxSizes` was stamped with the BLOCK's uniform transform size on a VAR-TX block.** A
