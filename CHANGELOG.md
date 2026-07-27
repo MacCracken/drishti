@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **`LoopfilterTxSizes` was stamped with the BLOCK's uniform transform size on a VAR-TX block.** A
+  TX_MODE_SELECT inter block splits luma into transform leaves of DIFFERENT sizes, recorded per-4x4 in
+  `InterTxSizes` by `read_var_tx_size` (5.11.37) — but `av1_inter_store_block` wrote a single
+  `av1_get_tx_size(...)` across the whole footprint. 7.14.4 derives the filter width from
+  `Min(tx of both sides)`, so at every INTERNAL transform edge drishti picked a WIDER filter than the
+  reference and flattened pixels libaom left alone (the signature was a run of identical luma values where
+  aomdec kept detail). Luma on a var-tx block now reads the per-leaf grid; chroma keeps the uniform size,
+  since var-tx splits luma only.
+  **THIS CLOSES THE LAST CONFORMANCE GAP: `make conformance` is 33 matched / 0 KNOWN-GAP / 0 regressed.**
+  Every case in the gate — every published vector, every generated corpus frame, every committed
+  reproducer, keyframes and inter frames alike — is bit-exact against libaom. `seq_filters` and
+  `seq_nofilt` are promoted from keyframe-only to `all`.
+
 - **THE WARP MODEL WAS BUILT WITH THE WRONG LEAST-SQUARES CONSTANTS — `LS_STEP` was 2 where the reference
   uses 8, and the accumulator downshift was 2 where it is 4.** `warpEstimation` (7.11.3.8) fits an affine
   model from the neighbour samples; with both constants wrong (and wrong TOGETHER, which is why the result

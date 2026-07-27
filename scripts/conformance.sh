@@ -139,16 +139,12 @@ enc() { # name kf_only extra...
         --ivf -o "$WORK/$name.ivf" "$WORK/src.yuv" 2>/dev/null
 }
 
-# The KEYFRAME (frame 1) of every corpus entry is a HARD gate: it is bit-exact today
-# and must stay so. Inter frames are known gaps (roadmap.md E2) recorded as xfail —
-# two distinct defects, both surfaced by this harness and neither reachable from
-# drishti's own round-trip tests:
-#   (a) reconstruction rounding — frames carrying real coded content decode but land
-#       within max |delta| 2..4 of the reference; reproduces with CDEF *and*
-#       deblocking disabled, so it is not the loop filters.
-#   (b) entropy desync — busier inter frames trip the spec's SymbolMaxBits >= -14
-#       bound at av1_sym_dec_exit (AV1_ERR_BAD_FRAME), i.e. drishti consumed symbols
-#       the encoder never wrote. Caught cleanly; no crash, no OOB.
+# EVERY frame of every corpus entry is a HARD gate as of 0.7.129 — keyframes and inter
+# frames alike. The two defects this comment used to describe as permanent xfails (a
+# "reconstruction rounding" drift of max |delta| 2..4, and an entropy desync tripping
+# SymbolMaxBits) are both FIXED; neither was what its name suggested. The drift was
+# warpEstimation's least-squares constants plus per-leaf LoopfilterTxSizes; the desync was
+# the temporal-MV scan never running plus CDF counters surviving a frame boundary.
 # PER-FRAME DIVERGENCE DETAIL. A differing md5 says only "not equal", which is why the inter
 # gap has been carried as a guessed "max |delta| 2..4, ~7% of samples" that no gate could
 # reproduce. These numbers say HOW a frame differs: which plane, how many samples, and by how
@@ -208,7 +204,10 @@ check kf_only all
 # (max |d| = 2..4) in inter reconstruction — NOT the loop filters (it reproduces with
 # CDEF and deblocking both disabled). Tracked as roadmap.md E2; xfail so the gate
 # still guards the keyframe path and the all-skip inter path from regressing.
-check seq_filters keyframe
+# HARD on every frame, filters included. Reaching this took the temporal-MV scan gate, the
+# deblocker's ref/mode deltas, the CDF counter reset, warpEstimation's LS constants and
+# per-leaf LoopfilterTxSizes -- see the 0.7.129 CHANGELOG.
+check seq_filters all
 # HARD on every frame: with the loop filters off, all five frames are bit-exact. This is the
 # inter-decode path with no filtering in the way, so it pins MC, the warp model, the residual
 # and the entropy decode together.

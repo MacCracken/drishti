@@ -278,11 +278,24 @@ fn av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx
                 if (pw4 < 1) { pw4 = 1; }
                 var pre = row_end >> sy;
                 var pce = col_end >> sx;
+                # LUMA on a VAR-TX block has a DIFFERENT transform size per leaf, recorded
+                # per-4x4 in InterTxSizes by read_var_tx_size (5.11.37). Stamping the block's
+                # uniform tx size across the footprint (what this did) hands the deblocker the
+                # wrong size at every INTERNAL transform edge, and 7.14.4's filter width is
+                # Min(tx of both sides) — so drishti picked a WIDER filter than the reference
+                # and flattened pixels the reference left alone. Chroma keeps ptx: var-tx
+                # splits luma only.
+                var use_grid = 0;
+                if ((plane == 0) && (is_vartx != 0)) { use_grid = 1; }
                 var i = 0;
                 while ((i < ph4) && ((pr + i) < pre)) {
                     var j = 0;
                     while ((j < pw4) && ((pcol + j) < pce)) {
-                        av1_lftx_set(tile, plane, pr + i, pcol + j, ptx);
+                        var vtx = ptx;
+                        if (use_grid != 0) {
+                            vtx = av1_grid_get(tile, AV1TILE_INTERTX, pr + i, pcol + j);
+                        }
+                        av1_lftx_set(tile, plane, pr + i, pcol + j, vtx);
                         j = j + 1;
                     }
                     i = i + 1;
