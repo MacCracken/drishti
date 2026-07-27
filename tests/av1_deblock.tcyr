@@ -33,6 +33,7 @@ fn test_limits() {
     return 0;
 }
 # ---- strength selection (7.14.5) ----
+enum Av1LfTestRef { AV1_LF_TEST_LAST = 1; }
 fn mk_fh(lvl0, lvl1, lvl2, lvl3, sharp, delta_en, intra_ref_delta): i64 {
     var fh = alloc(1024);
     store64(fh + AV1FH_LF_LEVEL + 0, lvl0);
@@ -192,6 +193,160 @@ fn test_whole_frame() {
     return 0;
 }
 # level 0 -> no filtering at all.
+# THE REF/MODE DELTA WITNESS. av1_lf_edge hardcoded `is_intra = 1` and called
+# av1_lf_strength with (INTRA_FRAME, 0, 0), so EVERY block of EVERY frame filtered at the
+# INTRA level and 7.14.5's per-reference deltas never reached the deblocker.
+# Two identical halves differ ONLY in RefFrame[0]: left is INTRA, right is inter/LAST with a
+# NEARESTMV mode. Header: base level 20, INTRA ref delta 0, LAST ref delta -6 -> the halves
+# resolve to level 20 and level 14.
+# THE STEP IS SIZED SO THE LEVELS DISAGREE ABOUT WHETHER TO FILTER AT ALL, because a narrow
+# filter's OUTPUT does not depend on the level -- only its MASK does. 7.14.6.2 passes when
+# 2*|p0-q0| + |p1-q1|/2 <= blimit, and blimit = 2*(lvl+2) + limit: 64 at level 20, 46 at
+# level 14. A flat step of 22 gives 2.5*22 = 55 -> the intra half FILTERS, the inter half
+# does NOT. With the old hardcode both read INTRA_FRAME, both filter, and the inter-side
+# assertion goes red.
+fn test_deblock_ref_mode_deltas() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(32, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 8, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 8) {
+            av1_grid_set(tile, AV1TILE_MISIZES, r, c, 3);
+            av1_lftx_set(tile, 0, r, c, 1);
+            if (c >= 4) {                                   # right half: inter, ref LAST
+                av1_grid_set(tile, AV1TILE_REF0S, r, c, AV1_LF_TEST_LAST);
+                av1_grid_set(tile, AV1TILE_YMODES, r, c, AV1_LF_NEARESTMV);
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 32) {
+            var v = 100;
+            if (((x >> 3) & 1) != 0) { v = 122; }           # flat step of 22 at every 8px edge
+            dr_frame_set(frame, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 1, 0);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LF_TEST_LAST * 8), 0 - 6);
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 7, 4) != 100, 1, "intra half (level 20) FILTERS the edge");
+    assert_eq(dr_frame_get(frame, 0, 23, 4), 100, "inter half (level 14 via ref delta) does NOT");
+    assert_eq(dr_frame_get(frame, 0, 24, 4), 122, "inter half q side untouched too");
+    return 0;
+}
+# Shared setup for the delta witnesses: a 32x16 luma frame with a flat step of 22 at every
+# 8-px vertical edge, MISIZES/lftx per caller. Step 22 is chosen so 7.14.6.2's mask
+# (2*|p0-q0| + |p1-q1|/2 = 55) passes at level 20 (blimit 64) and fails at level 14
+# (blimit 46) -- a narrow filter's OUTPUT is level-independent, so only the MASK can
+# witness a level difference.
+fn lf_mk_step_tile(mi_size, tx_sz): i64 {
+    var oe = alloc(8);
+    var frame = dr_frame_new(32, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 8, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 8) {
+            av1_grid_set(tile, AV1TILE_MISIZES, r, c, mi_size);
+            av1_lftx_set(tile, 0, r, c, tx_sz);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 32) {
+            var v = 100;
+            if (((x >> 3) & 1) != 0) { v = 122; }
+            dr_frame_set(frame, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return tile;
+}
+# MODE delta: both halves are inter/LAST, so only modeType differs -- NEARESTMV gives 1,
+# GLOBALMV gives 0. mode_deltas[1] = -6 drops the NEARESTMV half to level 14.
+fn test_deblock_mode_delta() {
+    var tile = lf_mk_step_tile(3, 1);
+    var frame = load64(tile + AV1TILE_FRAME);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 8) {
+            av1_grid_set(tile, AV1TILE_REF0S, r, c, AV1_LF_TEST_LAST);
+            var m = AV1_LF_GLOBALMV;                   # modeType 0 -> level 20
+            if (c >= 4) { m = AV1_LF_NEARESTMV; }      # modeType 1 -> level 14
+            av1_grid_set(tile, AV1TILE_YMODES, r, c, m);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 1, 0);
+    store64(fh + AV1FH_LF_MODE_DELTAS + 8, 0 - 6);     # mode_deltas[1]
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 7, 4) != 100, 1, "GLOBALMV half (modeType 0) filters");
+    assert_eq(dr_frame_get(frame, 0, 23, 4), 100, "NEARESTMV half (modeType 1) does not");
+    return 0;
+}
+# applyFilter (7.14.2): a SKIPPED INTER block interior is not a block edge and must NOT be
+# filtered. BLOCK_16X16 with TX_8X8 puts a tx edge at x=8 that is not a block edge. With
+# is_intra hardcoded to 1 -- or with prevSkip/prevIsIntra missing -- the disjunction is
+# always true and this edge filters when it must not.
+fn test_deblock_skip_inter_interior() {
+    var tile = lf_mk_step_tile(6, 1);
+    var frame = load64(tile + AV1TILE_FRAME);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 8) {
+            av1_grid_set(tile, AV1TILE_REF0S, r, c, AV1_LF_TEST_LAST);
+            av1_grid_set(tile, AV1TILE_YMODES, r, c, AV1_LF_NEARESTMV);
+            av1_grid_set(tile, AV1TILE_SKIPS, r, c, 1);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 0, 0);
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 7, 4), 100, "skipped inter interior tx edge NOT filtered (p)");
+    assert_eq(dr_frame_get(frame, 0, 8, 4), 122, "skipped inter interior tx edge NOT filtered (q)");
+    return 0;
+}
+# 7.14.5 lvl==0 fallback: when THIS block resolves to level 0 the spec re-derives at the
+# PREVIOUS block, so an edge between a zero-level and a non-zero-level block still filters.
+# LAST ref delta -20 zeroes the inter half; the intra half stays at 20. The edge at x=16 has
+# an inter current block and an intra previous one.
+fn test_deblock_level0_prev_fallback() {
+    var tile = lf_mk_step_tile(3, 1);
+    var frame = load64(tile + AV1TILE_FRAME);
+    var r = 0;
+    while (r < 4) {
+        var c = 4;
+        while (c < 8) {
+            av1_grid_set(tile, AV1TILE_REF0S, r, c, AV1_LF_TEST_LAST);
+            av1_grid_set(tile, AV1TILE_YMODES, r, c, AV1_LF_NEARESTMV);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 1, 0);
+    store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LF_TEST_LAST * 8), 0 - 20);
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 15, 4) != 122, 1, "level-0 block falls back to prev level");
+    return 0;
+}
 fn test_deblock_level0() {
     var oe = alloc(8);
     var frame = dr_frame_new(16, 16, 1, 0, 0, 8, 8, oe);
@@ -273,6 +428,10 @@ fn main() {
     test_sample_dispatch();
     test_group("deblock edge loop + whole-frame driver");
     test_whole_frame();
+    test_deblock_ref_mode_deltas();
+    test_deblock_mode_delta();
+    test_deblock_skip_inter_interior();
+    test_deblock_level0_prev_fallback();
     test_deblock_level0();
     test_deblock_level0_delta();
     return assert_summary();

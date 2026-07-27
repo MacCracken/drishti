@@ -6,6 +6,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **THE DEBLOCKER FILTERED EVERY BLOCK OF EVERY FRAME AT THE INTRA LEVEL.** `av1_lf_edge`
+  hardcoded `is_intra = 1` and called `av1_lf_strength(fh, plane, pass, AV1_INTRA_FRAME, 0, 0)`, so
+  7.14.5's per-reference and per-mode filter-level deltas never reached the loop filter. `av1_lf_strength`
+  had implemented them correctly since 0.7.28 — it was simply never handed a real reference or mode type.
+  Empirically `loop_filter_delta_enabled` is 1 on every non-lossless frame of every corpus vector, and
+  `setup_past_independence` defaults INTRA to +1 with GOLDEN/ALTREF at -1, so this was **wrong pixels on
+  every inter block of ordinary video**, not a latent gap. Also fixed in the same edge: 7.14.2's
+  `applyFilter` was missing its `prevSkip` / `prevIsIntra` terms, and 7.14.5's rule that a block resolving
+  to level 0 re-derives its level at the PREVIOUS block (so an edge between a zero-level and a non-zero
+  block still filters) was absent entirely.
+  THE WIRING: `av1_deblock.cyr` is included BEFORE `av1_mv.cyr` in `main.cyr`, so it cannot reach the MV
+  grid's `Av1MiRec` — a new frame-addressed `AV1TILE_REF0S` grid carries `RefFrame[0]` across that
+  boundary. Only the inter store writes it: `INTRA_FRAME == 0 ==` the zero-init, so every intra block,
+  including the intra fork inside an inter frame, is correct by default. `YModes` was already populated on
+  both lanes, so `modeType` needed no new storage.
+  MEASURED: `seq_filters` f5 `Y=100/4 U=34/2 V=55/5` -> `Y=90/2 U=30/2 V=43/2` — 189 differing samples to
+  163, and **max |delta| 4/5 -> 2**. `seq_nofilt` f5 is BYTE-IDENTICAL, which is the built-in control: that
+  case runs with the deblocker disabled, so a deblocker fix must not move it, and it doesn't.
+  WITNESSES (four, all libaom-free): the reference delta reaching the level, the MODE delta reaching it,
+  a skipped-inter block interior correctly NOT filtered, and the level-0 fallback to the previous block.
+  The step height is chosen so the two levels DISAGREE ABOUT WHETHER TO FILTER AT ALL — a narrow filter's
+  OUTPUT is level-independent, so only 7.14.6.2's mask can witness a level difference, and the first
+  version of this witness was green against the old hardcode for exactly that reason.
+  MUTATIONS: 5 run, **4 red**. The survivor is `prevSkip`/`prevIsIntra`, and it survives for a STRUCTURAL
+  reason rather than a missing fixture: those terms are only consulted when `is_block_edge == 0`, which
+  means the edge lies inside one block, so prev and current ARE the same block and the terms duplicate
+  `skip`/`isIntra`. Transcribed for spec fidelity and documented as redundant at the site.
+
 - **THE TEMPORAL MV SCAN NEVER RAN. `av1_mvctx_set_use_ref_frame_mvs` had ZERO CALLERS.** The frame header
   parsed `use_ref_frame_mvs`, and `av1_motion_field_estimation` dutifully built `MotionFieldMvs` for every
   frame that set it — but the per-block MV context never received the flag, so `AV1MVC_USE_RFMV` was always

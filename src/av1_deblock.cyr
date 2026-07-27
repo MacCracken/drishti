@@ -26,6 +26,26 @@ fn av1_lf_filter_size(tx_sz, prev_tx_sz, pass, plane): i64 {
     return av1_min(8, base);
 }
 
+# The three YMode values 7.14.5's modeType test needs. av1_mv.cyr defines the full enum but is
+# wired AFTER this module in main.cyr, so these are re-stated here rather than reached for.
+# They must track av1_mv.cyr's AV1_NEARESTMV / AV1_GLOBALMV / AV1_GLOBAL_GLOBALMV.
+enum Av1LfMode {
+    AV1_LF_NEARESTMV        = 14;
+    AV1_LF_GLOBALMV         = 16;
+    AV1_LF_GLOBAL_GLOBALMV  = 24;
+}
+# modeType (7.14.5): 1 for an inter block whose mode carries a NON-global motion vector,
+# 0 otherwise. The spec's test is `mode >= NEARESTMV && mode != GLOBALMV &&
+# mode != GLOBAL_GLOBALMV`; drishti's YMode enum numbers the inter modes from NEARESTMV, so
+# an intra mode falls below NEARESTMV and correctly yields 0. loop_filter_mode_deltas[] is
+# indexed by this, so getting it wrong shifts every inter edge's filter level.
+fn av1_lf_mode_type(y_mode): i64 {
+    if (y_mode < AV1_LF_NEARESTMV) { return 0; }
+    if (y_mode == AV1_LF_GLOBALMV) { return 0; }
+    if (y_mode == AV1_LF_GLOBAL_GLOBALMV) { return 0; }
+    return 1;
+}
+
 # adaptive filter strength selection (7.14.5): the filter level for this edge.
 # For the intra keyframe baseline ref = INTRA_FRAME, mode_type = 0, delta_lf = 0,
 # and segmentation is inactive; the ref/mode deltas apply when delta_enabled.
@@ -261,16 +281,35 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
         if ((yp % av1_block_height(plane_size)) == 0) { is_block_edge = 1; }
         if ((yp % av1_tx_height(tx_sz)) == 0) { is_tx_edge = 1; }
     }
-    # applyFilter = isTxEdge && (isBlockEdge || skip==0 || isIntra). For an intra
-    # keyframe isIntra is always 1 (RefFrames <= INTRA_FRAME), so this reduces to
-    # isTxEdge; is_block_edge / skip matter once inter blocks (isIntra 0) land.
-    var is_intra = 1;
+    # 7.14.2 applyFilter = isTxEdge && (isBlockEdge || !skip || !prevSkip || isIntra ||
+    # prevIsIntra). isIntra is RefFrames[row][col][0] <= INTRA_FRAME, read per MI from the
+    # REF0S grid the inter store fills. THIS WAS HARDCODED is_intra = 1, which made the whole
+    # disjunction collapse to isTxEdge — correct for an intra keyframe (every block IS intra)
+    # and WRONG for every inter frame, where a skipped inter block interior must NOT be
+    # filtered. The prevSkip / prevIsIntra terms were missing outright.
+    var prev_skip = av1_grid_get(tile, AV1TILE_SKIPS, prev_row, prev_col);
+    var ref0 = av1_grid_get(tile, AV1TILE_REF0S, arow, acol);
+    var prev_ref0 = av1_grid_get(tile, AV1TILE_REF0S, prev_row, prev_col);
+    var is_intra = (ref0 <= AV1_INTRA_FRAME);
+    var prev_is_intra = (prev_ref0 <= AV1_INTRA_FRAME);
     var apply = 0;
-    if ((is_tx_edge != 0) && (is_block_edge || (skip == 0) || is_intra)) { apply = 1; }
+    # NOTE the prevSkip / prevIsIntra terms are TRANSCRIBED, not witnessed: they are only
+    # consulted when is_block_edge == 0, and an edge that is not a block edge lies INSIDE one
+    # block, so prev and current are the same block and the two terms duplicate skip /
+    # is_intra. Dropping them survives the suite for that reason, not for want of a fixture.
+    if ((is_tx_edge != 0) && (is_block_edge || (skip == 0) || (prev_skip == 0)
+    || is_intra || prev_is_intra)) { apply = 1; }
     var filter_size = av1_lf_filter_size(tx_sz, prev_tx_sz, pass, plane);
-    # adaptive strength: intra keyframe -> uniform ref=INTRA/mode_type=0; if lvl
-    # were 0 the spec recomputes with the prev block, identical here.
-    var lvl = av1_lf_strength(fh, plane, pass, AV1_INTRA_FRAME, 0, 0);
+    # 7.14.5 adaptive strength for THIS block; if it comes out 0 the spec re-derives it at the
+    # PREVIOUS block (an edge between a zero-level and a non-zero-level block is still
+    # filtered, at the neighbour's level). av1_lf_strength already implemented the ref/mode
+    # deltas — it was simply never handed a real ref or mode_type.
+    var lvl = av1_lf_strength(fh, plane, pass, ref0,
+    av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)), 0);
+    if (lvl == 0) {
+        lvl = av1_lf_strength(fh, plane, pass, prev_ref0,
+        av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)), 0);
+    }
     var lim = alloc(3 * 8);
     av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);
     if ((apply != 0) && (lvl > 0)) {

@@ -139,7 +139,15 @@ enum Av1TileOff {
     #     today; the frame gate still rejects sb128). Selects the spec's
     #     sbMask = use_128x128_superblock ? 31 : 15 for every SB-RELATIVE coordinate. ---
     AV1TILE_SB128     = 584;
-    AV1TILE_SIZE      = 592;
+    # --- RefFrames[row][col][0] per MI (frame-addressed; shared). The DEBLOCKER needs it:
+    #     7.14.5's filter level adds loop_filter_ref_deltas[RefFrame[0]] and, for an inter
+    #     block, loop_filter_mode_deltas[modeType]. av1_deblock.cyr is wired BEFORE av1_mv.cyr
+    #     in main.cyr, so it cannot reach the MV grid's Av1MiRec — this grid is how the ref
+    #     crosses that boundary. INTRA_FRAME == 0 == the zero-init, so only the inter store
+    #     writes it; every intra block (including the intra fork inside an inter frame) is
+    #     correct by default. ---
+    AV1TILE_REF0S     = 592;  # RefFrame[0] per MI (0 = INTRA_FRAME)
+    AV1TILE_SIZE      = 600;
 }
 # sbMask (5.11.34 / compute_prediction): the mask that turns an ABSOLUTE MI coord into
 # one relative to the current superblock. 31 for a 128x128 SB, 15 for 64x64.
@@ -334,7 +342,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(10 * 8);
+    var offs = alloc(11 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -344,8 +352,9 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 56, AV1TILE_LFTX + 16);
     store64(offs + 64, AV1TILE_TXTYPES);
     store64(offs + 72, AV1TILE_SEGIDS);   # SegmentIds map (0.7.125 D1); zeroed like the others
+    store64(offs + 80, AV1TILE_REF0S);    # RefFrame[0] per MI for the deblocker; 0 = INTRA_FRAME
     var g = 0;
-    while (g < 10) {
+    while (g < 11) {
         var arr = alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;
