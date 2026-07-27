@@ -1652,6 +1652,26 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
 # im 6051, ii 6392, mv 6958. (ncc grew 1839->1875 for Default_Partition_W128_Cdf, 0.7.126 E2a.)
 # ================================================================
 fn av1_cdf_bundle_new(): i64 { return alloc(7244 * 8); }
+# Reset the per-row ADAPTATION COUNTERS in a saved bundle (libaom av1_reset_cdf_symbol_counters,
+# av1/decoder/decodeframe.c, called immediately after the frame context is captured). Every CDF
+# row is [c0 .. c(n-2), 32768, count]; av1_cdf_update reads count at cdf[n] to pick its rate
+# (+1 past 15, +1 past 31). A saved bundle otherwise carries the SATURATED counters of the frame
+# that produced it, so an inheriting frame adapts at rate 5 where a conformant decoder uses 3 --
+# the CDFs then drift apart while every decoded VALUE still agrees, until a near-balanced symbol
+# flips. AV1_CDF_PROB_TOP (32768) is the row terminator and can be neither a probability (they
+# are strictly below the top) nor a counter (they saturate at 32), so the word after every 32768
+# is exactly a counter; that makes the layout self-describing and avoids duplicating ~30 row
+# groups of offset arithmetic from the six families' accessors.
+fn av1_cdf_reset_counters(bundle, n): i64 {
+    var i = 0;
+    while (i < (n - 1)) {
+        if (load64(bundle + (i * 8)) == AV1_CDF_PROB_TOP) {
+            store64(bundle + ((i + 1) * 8), 0);
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
 fn av1_cdf_copy_words(dst, src, n): i64 {
     var i = 0;
     while (i < n) { store64(dst + (i * 8), load64(src + (i * 8))); i = i + 1; }
@@ -1681,6 +1701,7 @@ fn av1_cdf_bundle_save(bundle, tile): i64 {
     av1_cdf_copy_words(bundle + (6051 * 8), im, 341);
     av1_cdf_copy_words(bundle + (6392 * 8), ii, 566);
     av1_cdf_copy_words(bundle + (6958 * 8), mv, 286);
+    av1_cdf_reset_counters(bundle, 7244);
     return DR_OK;
 }
 # fill `bundle` with the DEFAULT CDFs (q-bucketed coeff defaults + the read-only family blobs) — the
@@ -1700,6 +1721,7 @@ fn av1_cdf_bundle_defaults(bundle, q): i64 {
     av1_cdf_copy_words(bundle + (6051 * 8), im, 341);
     av1_cdf_copy_words(bundle + (6392 * 8), ii, 566);
     av1_cdf_copy_words(bundle + (6958 * 8), mv, 286);
+    av1_cdf_reset_counters(bundle, 7244);
     return DR_OK;
 }
 # LOAD (7.21): copy `bundle` INTO an inter tile's six freshly-allocated families (all present on inter).

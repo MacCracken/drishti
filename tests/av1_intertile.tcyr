@@ -4021,15 +4021,49 @@ fn test_cdf_inheritance() {
     # was captured — else there is nothing to inherit). This pins the 7.20 copy so a broken save reddens.
     var dt1cc = load64(dt1 + AV1TILE_CC);
     var defcc = av1_ccdf_new(av1_coeff_cdf_qbucket(40));
+    # The save copies the PROBABILITIES verbatim but ZEROES every row's adaptation counter
+    # (libaom av1_reset_cdf_symbol_counters, run right after the frame context is captured), so
+    # an inheriting frame starts adapting at the same rate a conformant decoder does. A row is
+    # [c0 .. c(n-2), 32768, count], so the word after each 32768 terminator is the counter and
+    # is expected to be 0 in the bundle while the source tile still holds its live count.
     var save_copied = 1;
     var adapted = 0;
+    var counters_zeroed = 1;
+    var counters_live = 0;
     var wi = 0;
     while (wi < 3999) {
-        if (load64(bundle + ((1875 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
+        var is_counter = 0;
+        if (wi > 0) {
+            if (load64(dt1cc + ((wi - 1) * 8)) == AV1_CDF_PROB_TOP) { is_counter = 1; }
+        }
+        if (is_counter == 1) {
+            if (load64(bundle + ((1875 + wi) * 8)) != 0) { counters_zeroed = 0; }
+            if (load64(dt1cc + (wi * 8)) != 0) { counters_live = 1; }
+        } else {
+            if (load64(bundle + ((1875 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
+        }
         if (load64(dt1cc + (wi * 8)) != load64(defcc + (wi * 8))) { adapted = 1; }
         wi = wi + 1;
     }
-    assert_eq(save_copied, 1, "C1 save (7.20): bundle coeff region == frame1's adapted coeff CDFs");
+    assert_eq(save_copied, 1, "C1 save (7.20): bundle coeff PROBABILITIES == frame1's adapted CDFs");
+    assert_eq(counters_zeroed, 1, "C1 save (7.20): bundle adaptation counters are RESET to 0");
+    assert_eq(counters_live, 1, "the source tile really had non-zero counters (the reset is load-bearing)");
+    # Sweep the WHOLE bundle, not just the coeff region: every word following a 32768 row
+    # terminator must be a zeroed counter. This also pins the reset loop's upper bound — the
+    # final family (mv) ends at the last word, so a loop that stops one short leaves the very
+    # last counter live and only this sweep can see it.
+    var all_zeroed = 1;
+    var last_seen = 0;
+    var bi = 0;
+    while (bi < 7243) {
+        if (load64(bundle + (bi * 8)) == AV1_CDF_PROB_TOP) {
+            if (load64(bundle + ((bi + 1) * 8)) != 0) { all_zeroed = 0; }
+            last_seen = bi + 1;
+        }
+        bi = bi + 1;
+    }
+    assert_eq(all_zeroed, 1, "every counter in the WHOLE bundle is reset, to the last word");
+    assert_eq(last_seen > 7000, 1, "the sweep actually reached the final family (not a vacuous pass)");
     assert_eq(adapted, 1, "C1 frame1 actually adapted its coeff CDFs (else nothing to inherit)");
 
     # frame 2: its own residual block.

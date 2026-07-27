@@ -6,6 +6,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **A SAVED CDF BUNDLE CARRIED ITS ADAPTATION COUNTERS ACROSS FRAMES.** Every CDF row is
+  `[c0 .. c(n-2), 32768, count]`, and `av1_cdf_update` reads `count` at `cdf[n]` to pick its adaptation
+  rate (+1 past 15, +1 past 31). libaom zeroes every counter the instant it captures a frame context
+  (`av1_reset_cdf_symbol_counters`, `av1/decoder/decodeframe.c`); drishti's 7.20 save copied them verbatim,
+  so an inheriting frame began adapting at rate 5 where a conformant decoder uses 3. The CDFs then drift
+  apart while every decoded VALUE still agrees — until a near-balanced symbol flips.
+  MEASURED with a full symbol-stream diff against an instrumented libaom (every `aom_read_symbol` logged as
+  `nsymbs, cdf0, value` on both sides): the first divergence moves from symbol **#4969 to #5308**, and
+  drishti's symbol count for the reproducer goes **5460 -> 5792** against libaom's 5791. `make conformance`
+  is unchanged at 25/2/0 — the corpus's inter cases are already xfail, so this shows up in the symbol
+  stream rather than the gate.
+  THE IMPLEMENTATION avoids duplicating ~30 row groups of offset arithmetic from the six families'
+  accessors: `AV1_CDF_PROB_TOP` (32768) is the row terminator and can be neither a probability (strictly
+  below the top) nor a counter (they saturate at 32), so the word after every 32768 is exactly a counter
+  and the layout is self-describing.
+  THE CONTRACT CHANGED, and `test_cdf_bundle_roundtrip`'s coeff-region check was asserting the old one —
+  a bundle is no longer a verbatim copy. It now asserts the PROBABILITIES match verbatim, the counters are
+  0, and (so the check cannot go vacuous) that the source tile really did hold non-zero counters. A second
+  sweep covers the WHOLE bundle rather than the coeff region alone.
+  MUTATIONS: 3 run, 2 red. The survivor shortens the reset loop by one word; it is inert because the
+  bundle's final words are unused padding, so no counter sits at that boundary — recorded rather than
+  papered over. **NOTE this was found, reverted, and re-landed:** it was first tried a few turns earlier,
+  did not fix the then-current desync, and reddened the round-trip test, so it was reverted rather than
+  landed unverified. The symbol-stream diff is what turned it from a plausible reading of libaom into a
+  measured 339-symbol improvement.
+
 - **THE DEBLOCKER FILTERED EVERY BLOCK OF EVERY FRAME AT THE INTRA LEVEL.** `av1_lf_edge`
   hardcoded `is_intra = 1` and called `av1_lf_strength(fh, plane, pass, AV1_INTRA_FRAME, 0, 0)`, so
   7.14.5's per-reference and per-mode filter-level deltas never reached the loop filter. `av1_lf_strength`
