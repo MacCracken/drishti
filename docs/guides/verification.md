@@ -113,7 +113,8 @@ grep -hoE '^fn [a-z0-9_]+' src/*.cyr | sort | uniq -d     # must be empty
 
 ### A symbol desync is not always a misparse — check buffer adjacency first
 
-E2d cost two sessions. A 128-superblock keyframe desynced at `av1_sym_dec_exit`, so the
+The CDEF-grid heap overflow cost two sessions. A 128-superblock keyframe desynced at
+`av1_sym_dec_exit`, so the
 search went where a desync usually lives: the partition CDF, the bsl-5 alphabet, the
 context derivations, the tile geometry. `Default_Partition_W128_Cdf` was cross-checked
 byte-identical against four independent sources. All of it was correct. The actual cause
@@ -170,7 +171,8 @@ The eight published libaom vectors all decoded their keyframe bit-exactly, and t
 reading was "the keyframe path is externally verified." It wasn't. **Every published height
 is a multiple of 16**, and `scripts/conformance.sh`'s generated corpus was hardcoded to
 64x64 — so no case in the gate had a bottom block that overhangs the frame. A sweep of 48
-ordinary `aomenc` geometries found 20 of them decoding with wrong chroma (E2e), a defect
+ordinary `aomenc` geometries found 20 of them decoding with wrong chroma (the CfL
+edge-chroma bug), a defect
 present the whole time in a code path the corpus structurally could not reach.
 
 This is [[fixture-alignment-monoculture]] again, one level out: the habit of assuming an
@@ -181,6 +183,47 @@ geometries.
 > they cover. Vary the axis nobody chose deliberately — dimensions, alignment, subsampling,
 > bit depth — and sweep it against the external reference before believing the green. A
 > conformance pass bounds the corpus; only a sweep bounds the decoder.
+
+### A spec-literal reference port is necessary and NOT sufficient
+
+The loop above says known answers come from a port in `scripts/refs/`, never from the Cyrius.
+That is right, and it is not enough. `scripts/refs/warp_estimation_ref.py` and the Cyrius were
+written from the same reading of 7.11.3.8, and both used `LS_STEP = 2` where the reference
+implementation uses 8. The port generated known-answers that a wrong decoder reproduced exactly,
+so **43 assertions passed against wrong values for the entire warp arc** — through multiple
+adversarial reviews. Found in 0.7.129 only by diffing `wmmat` against an instrumented libaom.
+
+The port removes the *implementation* from the loop. It does not remove **you** — and you are
+the shared component between the port and the code.
+
+> **Do:** for any table, constant or rounding rule, check it against an INDEPENDENT
+> implementation, not only against your own reading of the spec. When a KAT and the code
+> disagree with an external decoder, **fix the port first**, regenerate the KATs from it, and
+> say in the commit which source broke the tie.
+
+### Instrument the reference, not just your own decoder
+
+Every hypothesis formed from drishti's own output in 0.7.129 was wrong — motion-mode gating,
+sub-8x8 chroma, the partition context, `order_hint` parsing, tile geometry. All five real
+defects came from diffing against a libaom built with `-DCONFIG_INSPECTION=1
+-DCONFIG_ACCOUNTING=1` and patched to log what it actually uses. `ref/inspect-ctx.patch` keeps
+those probes; the highest-value one logs every `aom_read_symbol` as `(nsymbs, cdf0, value)`, so
+a stream diff names the exact symbol index where two decoders part company.
+
+Four traps, each of which cost real time:
+
+- **libaom's `--accounting` is partial.** It logged 15 partition symbols for a tree that needs
+  21, and zero `read_skip_txfm` on an all-skip frame. Per-block VALUE dumps are reliable; symbol
+  counts are not. Patch the reader instead.
+- **`av1_warp_affine_c` never runs on x86** — libaom dispatches to SIMD. `AOM_SIMD_CAPS_MASK=0`
+  forces the scalar path, or your probe silently never fires.
+- **A decoder trace past a desync is fiction.** Only the FIRST divergence is evidence. Block
+  sizes printed after it are garbage, and they will happily support a whole false theory.
+- **A flag that changes the bitstream is not a controlled experiment.** `--enable-X=0` re-encodes
+  the stream; check the stream md5 before concluding anything from it.
+
+> **Do:** when an external gate says "wrong" and your own tests say "right", stop reasoning about
+> your code and go make the reference tell you what it did.
 
 ## Running an adversarial review
 

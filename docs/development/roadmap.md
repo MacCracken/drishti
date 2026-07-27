@@ -141,9 +141,9 @@ Not its own arc; these land inside whichever codec arc first needs them:
 > **CONFORMANCE:** the harness exists and is a gate (`make conformance`, Phase E1).
 > libaom encodes the stream and `aomdec` produces the reference pixels, so the
 > reference cannot collude with drishti's own reading of the spec — the blind spot
-> every prior gate had (`docs/guides/verification.md`). Current: **21 matched /
-> 2 known-gap / 0 regressed**; the 2 remaining are the inter frames (INTER-FRAME PIXEL DRIFT/INTER-FRAME SYMBOL DESYNC). Every
-> keyframe case is a HARD gate — `PUBLISHED_XFAIL` is empty.
+> every prior gate had (`docs/guides/verification.md`). Current: **33 matched /
+> 0 KNOWN-GAP / 0 regressed** — EVERY case is a hard gate, keyframes and inter frames
+> alike, and there are no xfails left anywhere in the harness.
 >
 > The properly-phased, honestly-sized remaining work is at the END of this section
 > ("### The honest remaining work"), not in the optimistic bite-prose that follows.
@@ -429,10 +429,11 @@ Baseline (0.7.0): OBU layer + sequence header.
   **Inter-intra overhanging the frame edge landed 0.7.115** (the intra half is staged into `Av1_McIntra`
   via `av1_intra_predict_gen` and only the blended region is committed), on top of the **0.7.114 security
   fix** (the intra path wrote past the plane allocation on any frame whose dimensions were not a multiple
-  of the superblock size — MI-aligned allocation + a 32-sample border). One known gap remains, tracked
-  rather than latent: **inter prediction clamps to the visible plane**, so the band
-  `[FrameWidth, MiCols*4)` is left stale, while the spec, dav1d and libaom all predict over the nominal
-  extent into padded storage — and deblocking and CDEF read that band back into visible output. Formerly the LAST
+  of the superblock size — MI-aligned allocation + a 32-sample border). That overhang gap — **inter prediction
+  clamping to the visible plane, leaving the band `[FrameWidth, MiCols*4)` stale for deblocking and CDEF to
+  read back** — was itself closed in **0.7.116**: `DrFrame` carries its allocated extent and the prediction
+  writers bound against it (`dr_frame_plane_alloc_w/h`), matching spec/dav1d/libaom, which all predict over
+  the nominal extent into padded storage. Formerly the LAST
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.

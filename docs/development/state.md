@@ -1657,77 +1657,60 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.7.128).** Keyframes are EXTERNALLY VERIFIED: **all EIGHT published libaom
-> vectors in the gate decode their keyframe bit-exactly** vs libaom's own reference MD5s, and so
-> do the odd-MI geometries the published corpus never covered (`make conformance` = 25 matched /
-> 2 known-gap / 0 regressed; the 2 are inter frames). Inter frames decode end-to-end from real
-> bytes (0.7.119-0.7.125: motion, compound/backward refs, cross-frame CDF inheritance, the intra
-> fork, segmentation), and 128x128 superblocks decode as of 0.7.126.
+> **Where we are (0.7.129).** **`make conformance` is 33 matched / 0 KNOWN-GAP / 0 regressed.**
+> Every case in the gate — all eight published libaom vectors, the generated corpus WITH and
+> WITHOUT loop filters, the odd-MI geometries, the 128-superblock reproducers and a committed
+> 6-frame inter stream — is BIT-EXACT against `aomdec`, keyframes and INTER frames alike. There
+> are no xfails left in the harness.
 >
-> **AND THAT IS NOT THE SAME AS "keyframes are correct" — a lesson this cut paid for.** An
-> adversarial review of the E2d bite swept 40 aomenc geometries the published corpus does not
-> cover and found ~31 of 80 decoding with WRONG CHROMA (E2e): every published height is a
-> multiple of 16, and the defect needed `MiRows % 4 == 2`. It is fixed, and `make conformance`
-> now carries an `oddmi` section so the geometry class is gated — but the general point stands
-> for whatever is next. **Eight-of-eight green measured the corpus, not the decoder.**
+> **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
+> HONEST STATUS block and the batched release plan (0.7.130 → 0.7.142).
 >
-> **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the
-> roadmap's HONEST STATUS block. The single most important habit this arc produced: drishti's
-> own round-trips and hand-written oracles SHARE the implementation's reading of the spec, so
-> they cannot catch a misreading. `make conformance` is the only gate whose reference drishti
-> cannot have colluded with — run it.
+> **THE ONE HABIT THAT MATTERS, and 0.7.129 is the proof.** drishti's own round-trips and
+> hand-written oracles SHARE the implementation's reading of the spec, so they cannot catch a
+> misreading. In 0.7.129 EVERY hypothesis formed from drishti's own output was wrong — motion-mode
+> gating, sub-8x8 chroma, the partition context, `order_hint`/`ref_frame_idx` parsing, tile
+> geometry. All five real defects came from diffing against an INSTRUMENTED libaom. And
+> `scripts/refs/warp_estimation_ref.py` carried the SAME misreading as the Cyrius, so 43
+> assertions passed against a wrong decoder for the whole warp arc: **a spec-literal port is
+> necessary and not sufficient.**
 >
-> **E2d is CLOSED, and how it closed should change how the next desync is approached.** It was
-> not a spec misreading: `av1_clear_cdef` stored `-1` past the end of the flattened CdefIdx grid,
-> straight into the CDF blob that is the next bump allocation. Two sessions were spent
-> re-deriving partition tables that were correct all along. When a desync's *preceding* pixels
-> are correct, the fault is in what is read — **including the tables being read from**.
+> **THE TOOL, kept in `ref/` (gitignored, survives a reboot):** libaom built from source with
+> `-DCONFIG_INSPECTION=1 -DCONFIG_ACCOUNTING=1`, plus `ref/inspect-ctx.patch`, which makes it log
+> what it ACTUALLY uses. Re-apply and rebuild (`make -C ref/aom-build -j$(nproc) inspect`) whenever
+> something diverges. The three probes that did the work:
+>   * every `aom_read_symbol` as `(nsymbs, cdf0, value)` — diff the streams and you get the exact
+>     symbol index where two decoders part company. This is the single highest-value instrument.
+>   * the contexts at `read_inter_mode` — separates "wrong context" from "wrong CDF".
+>   * `wmmat` + shear params per 8x8 warp block — separates the warp model from the warp kernel.
 >
-> **The next bites, in priority order** (each is one bite):
+> **TRAPS THAT COST TIME IN 0.7.129 — do not re-learn these:**
+>   * libaom's `--accounting` is PARTIAL instrumentation. It logged 15 partition symbols for a tree
+>     that provably needs 21, and ZERO `read_skip_txfm` on an all-skip frame. Its per-block VALUE
+>     dumps (`--blockSize`, `--skip`, `--mode`, `--motion_mode`) are reliable; its symbol counts are
+>     not. Patch `aom_read_symbol` instead.
+>   * `av1_warp_affine_c` never executes on x86 — libaom dispatches to SIMD. Force the scalar path
+>     with `AOM_SIMD_CAPS_MASK=0` or your probe silently never fires.
+>   * A decoder trace PAST a desync is fiction. Only the FIRST divergence is evidence; block sizes
+>     printed after it are garbage (this produced a whole dead-end sub-8x8-chroma theory).
+>   * `programs/conformance.cyr` decodes each PREFIX separately, so drishti's symbol log contains
+>     repeated passes. Compare only the final pass or the indices misalign.
+>   * An encoder flag that changes the BITSTREAM is not a controlled experiment. Check the stream
+>     md5 before concluding anything from `--enable-X=0`.
 >
-> 1. **E2c — inter entropy desync** on busier inter frames (`SymbolMaxBits >= -14` trips at
->    `av1_sym_dec_exit`). Caught cleanly; no crash, no OOB. STRONGEST CANDIDATE, found during
->    the E2d hunt and not yet acted on: `av1_reset_block_context` is called UNCONDITIONALLY on
->    the inter lane (`src/av1_intertile.cyr:1128`), where spec 5.11.5 gates it on `skip` — and
->    drishti's own intra lane gets this right (`src/av1_partition.cyr:363`). It zeroes the
->    coeff above/left contexts feeding `all_zero`/`dc_sign`; luma short-circuits to ctx 0 when
->    tx==block but CHROMA never does, so quiet frames coincidentally agree and dense ones
->    desync. NOTE this contradicts the old framing ("consumed symbols the encoder never wrote")
->    — the symbol COUNT is right, the CONTEXT is wrong. The encode mirror (`:1596`) replays the
->    same bug, so no round-trip can witness it; needs an external witness or a `scripts/refs/`
->    port of `get_txb_skip_ctx`.
-> 2. **D3 — loop-filter ref/mode deltas.** The deblocker hardcodes `is_intra = 1`
->    (`src/av1_deblock.cyr:267`) and `ref = AV1_INTRA_FRAME` (`:273`) for every block of every
->    frame. `loop_filter_delta_enabled` is 1 on every non-lossless frame of every corpus vector
->    and the defaults are INTRA +1 / LAST family 0 / GOLDEN,ALTREF -1, so every inter block is
->    filtered at the wrong level TODAY. This is the only open item that is silently-wrong-pixels
->    on ordinary content rather than a clean reject. The "D3 refuted" note that used to sit in
->    E2b is over-stated: that experiment ran `--loopfilter-control=0`, so `av1_deblock` returned
->    without executing an instruction — D3 was refuted for the *nofilt* case only and has never
->    been measured with filters on. Needs an `AV1TILE_REF0S` grid (do NOT reorder `main.cyr`:
->    `av1_deblock` is wired before `av1_mv`).
-> 3. **E2b — inter reconstruction rounding.** Re-MEASURE before treating it as a fix bite. The
->    "max |delta| 2..4, ~7% of samples" figure predates the E2d fix and has never been
->    reproduced from `make conformance`, which md5s only — there is no per-frame delta
->    instrument. Two claims attached to it are false: the rounding sites in `av1_mc.cyr` were
->    audited spec-exact at 8/10/12-bit in both compound lanes, and "the MC oracle shares the
->    code under test" does not hold for scaled MC (`scripts/refs/scaled_mc_ref.py` is an
->    independent spec-literal port). Build the differ first; expect any delta measured today to
->    be a SUM of at least two errors while D3 is live.
-> 4. **D2 — per-SB delta-q / delta-lf** (still a hard reject on both lanes). Re-sized **M-L**,
->    not S-M: there are six reject sites (`src/av1_decode.cyr:370-371`,
->    `src/av1_intermode.cyr:2653/2654/2721/2722`). Buys nothing externally — no corpus vector
->    and no default aomenc configuration sets `delta_q_present`.
-> 5. **D1 temporal follow-on** — the DPB-saved segment map (`PrevSegmentIds`). Only the
->    `!update_data` (feature-inheritance) sub-case is independently witnessable and it is S;
->    the temporal / `!update_map` halves are unreachable on a keyframe by construction, so
->    their only witness is an inter frame — circular until inter frames are bit-exact.
+> **The next release is 0.7.130 — "no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any
+> preset"** (see the roadmap table for the full batch): per-superblock delta-q / delta-lf on both
+> lanes, block-level lossless from `LosslessArray[segment_id]`, temporal segmentation
+> (`PrevSegmentIds` + the DPB-saved map), and the cross-frame CDF-inheritance follow-ons
+> (`context_update_tile_id` for multi-tile). None of these needs diagnosis — they are all
+> implementation against a clean gate, which is the best position this arc has been in.
 >
-> The conformance and encode numbers are the soft ones — conformance because you cannot know
-> what fails until the vectors run (though now they DO run, so each gap is a named, reproducible
-> case rather than a guess), and encode because *mode decision has no spec answer* (the
-> `av1_write_*` inverses exist; choosing modes is a design problem the spec does not adjudicate,
-> and the stated 1.0 gate is round-trip-clean, not compression-competitive).
+> **Known-and-tracked, not blocking 0.7.130:** the encode lane has NEVER run at 128 superblocks
+> (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted);
+> `av1_read_cdef` / `av1_write_cdef` fill loops are unbounded on both axes, safe today only by the
+> forced-partition invariant; and the conformance harness still scores several non-runs as passes
+> (a missing fixture, a failed vector fetch). All three are in the roadmap's Phase G.
+
 The **intra still-picture decode MILESTONE is COMPLETE (0.7.25)** — profile-0
 AV1 keyframes decode end-to-end to pixels. Per-release history is in
 [`CHANGELOG.md`](../../CHANGELOG.md); the current picture:

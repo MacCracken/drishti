@@ -1424,7 +1424,8 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 
 # ================================================================
 # THE TEMPORAL SCAN (0.7.104, spec 7.10.2.5 temporal_scan + 7.10.2.6 add_tpl_ref_mv) — the LAST find_mv_stack
-# deferral, and the first temporal-MV bite that CHANGES decode output. Reads MotionFieldMvs (the per-8x8
+# deferral. NOTE it did not actually RUN until 0.7.129: av1_mvctx_set_use_ref_frame_mvs had zero callers, so
+# AV1MVC_USE_RFMV was always 0 and this was dead code on every decoded frame for 25 releases. Reads MotionFieldMvs (the per-8x8
 # pre-scaled field built by av1_motion_field_estimation, 0.7.103) at sampled positions and folds the
 # projected MVs into the candidate stack, plus derives ZeroMvContext. Gated on use_ref_frame_mvs. 3-source
 # reconciled (spec 7.10.2.5/6 + dav1d refmvs.c + libaom mvref_common.c). drishti reads an ALREADY-projected MV

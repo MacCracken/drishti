@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — keyframes decode to pixels; every inter-prediction PRIMITIVE is in (all four warp forms, OBMC, compound and masked modes, the temporal-MV arc, every interpolation filter, scaled references) — SIX published libaom conformance vectors decode their keyframe bit-exactly (0.7.126); segmentation decodes (0.7.125); inter FRAMES still diverge (reconstruction rounding + an entropy desync), and delta-q/delta-lf still reject |
+| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — **`make conformance` 33 matched / 0 known-gap / 0 regressed**: every gated case is BIT-EXACT vs `aomdec`, keyframes and INTER frames alike (0.7.129). All eight published libaom vectors, the generated corpus with and without loop filters, and the committed reproducers. 8/10/12-bit, multi-tile, 64x64 + 128x128 superblocks, superres, segmentation, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. Still rejecting: delta-q/delta-lf, palette, intra block copy, film grain, scalability |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -113,7 +113,7 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   **multi-tile** frames (frame-addressed MI grids + tile-group accumulation) +
   **8/10/12-bit** + **inter prediction** primitives complete (the MC kernels + driver, the DPB,
   the full MV-prediction + temporal-MV arc, all compound + inter-intra prediction, and all
-  four warp forms + OBMC — every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); inter FRAMES decode as of the 0.7.119-0.7.125 arc (the intra fork inside an inter frame 0.7.122/123, segmentation 0.7.125); delta-q / delta-lf still reject the tile)
+  four warp forms + OBMC — every MC geometry, motion mode, compound/masked form, interpolation filter and reference geometry is in (scaled-reference MC wired 0.7.110, BILINEAR 0.7.108); inter FRAMES decode as of the 0.7.119-0.7.125 arc (the intra fork inside an inter frame 0.7.122/123, segmentation 0.7.125) and are BIT-EXACT vs `aomdec` as of 0.7.129; delta-q / delta-lf still reject the tile)
 - **H.264** — Annex-B scan, NAL headers, emulation-prevention both
   directions, full SPS (incl. High-profile branch + crop math), PPS
 - **H.265** — Annex-B scan, two-byte NAL headers, profile_tier_level,

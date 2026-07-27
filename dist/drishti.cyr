@@ -14547,8 +14547,10 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
 # ================================================================
 # edge loop filter process (7.14.2) — filter one 4x4 boundary at MI (row, col)
 # for a plane/pass. tile carries the frame + the MI grids + LoopfilterTxSizes;
-# fh the loop-filter params. Intra keyframe: RefFrames <= INTRA_FRAME (isIntra=1),
-# ref=INTRA_FRAME, mode_type=0 (per-block delta_lf / inter mode-type deferred, roadmap.md).
+# fh the loop-filter params. isIntra / the 7.14.5 reference and mode deltas are read PER MI
+# (REF0S + YModes) as of 0.7.129 — this used to hardcode isIntra = 1 and ref = INTRA_FRAME,
+# which filtered every block of every frame at the intra level. Per-block delta_lf is still
+# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.7.130).
 # ================================================================
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
@@ -18616,7 +18618,8 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 
 # ================================================================
 # THE TEMPORAL SCAN (0.7.104, spec 7.10.2.5 temporal_scan + 7.10.2.6 add_tpl_ref_mv) — the LAST find_mv_stack
-# deferral, and the first temporal-MV bite that CHANGES decode output. Reads MotionFieldMvs (the per-8x8
+# deferral. NOTE it did not actually RUN until 0.7.129: av1_mvctx_set_use_ref_frame_mvs had zero callers, so
+# AV1MVC_USE_RFMV was always 0 and this was dead code on every decoded frame for 25 releases. Reads MotionFieldMvs (the per-8x8
 # pre-scaled field built by av1_motion_field_estimation, 0.7.103) at sampled positions and folds the
 # projected MVs into the candidate stack, plus derives ZeroMvContext. Gated on use_ref_frame_mvs. 3-source
 # reconciled (spec 7.10.2.5/6 + dav1d refmvs.c + libaom mvref_common.c). drishti reads an ALREADY-projected MV

@@ -239,8 +239,10 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
 # ================================================================
 # edge loop filter process (7.14.2) — filter one 4x4 boundary at MI (row, col)
 # for a plane/pass. tile carries the frame + the MI grids + LoopfilterTxSizes;
-# fh the loop-filter params. Intra keyframe: RefFrames <= INTRA_FRAME (isIntra=1),
-# ref=INTRA_FRAME, mode_type=0 (per-block delta_lf / inter mode-type deferred, roadmap.md).
+# fh the loop-filter params. isIntra / the 7.14.5 reference and mode deltas are read PER MI
+# (REF0S + YModes) as of 0.7.129 — this used to hardcode isIntra = 1 and ref = INTRA_FRAME,
+# which filtered every block of every frame at the intra level. Per-block delta_lf is still
+# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.7.130).
 # ================================================================
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
