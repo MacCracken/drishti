@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **AN INTER FRAME NOW DECODES BIT-EXACT AGAINST `aomdec`, and the reproducer is committed.** With the
+  temporal-scan gate, the deblocker reference/mode deltas and the CDF-counter reset all in, drishti's
+  symbol stream for a 6-frame libaom encode is **IDENTICAL to libaom's for all 5,792 symbols** — verified
+  by logging every `aom_read_symbol` on both sides and diffing (nsymbs, cdf0, value). The same stream went
+  from **1 of 6 frames decoded to 6 of 6**, with frames 1-4 BIT-EXACT.
+  STATED PRECISELY, because the headline is easy to overclaim: frames 1-3 of this stream are
+  PIXEL-IDENTICAL — they are skip-only inter copies of the keyframe, so matching them proves only that a
+  zero-MV copy works. **FRAME 4 is the one carrying distinct content, and it is bit-exact.** That is the
+  real evidence. Frames 5 and 6 still differ (140 and 173 bytes, max |delta| 2 and 4).
+  NEW GATE CASE: `tests/repro/inter-6frame.ivf` + per-frame `aomdec` MD5s, wired as `repro_seq` with
+  frames 1-4 HARD and 5-6 xfail. Like the other committed reproducers it runs WITHOUT libaom, so the
+  three fixes above cannot silently regress in a CI without the encoder. `make conformance` 25 matched /
+  2 known-gap -> **29 matched / 4 known-gap / 0 regressed**.
+
 - **A SAVED CDF BUNDLE CARRIED ITS ADAPTATION COUNTERS ACROSS FRAMES.** Every CDF row is
   `[c0 .. c(n-2), 32768, count]`, and `av1_cdf_update` reads `count` at `cdf[n]` to pick its adaptation
   rate (+1 past 15, +1 past 31). libaom zeroes every counter the instant it captures a frame context

@@ -60,9 +60,43 @@ repro_case() { # name expect(match|xfail)
 cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 || {
     echo "conformance: harness build FAILED"; exit 1; }
 echo "=== drishti conformance ==="
+# A committed MULTI-FRAME reproducer: 6 frames with their per-frame aomdec MD5s, one per
+# line. Runs anywhere. hard_n = how many leading frames are HARD gates; the rest are xfail.
+# NOTE frames 1-3 of this stream are PIXEL-IDENTICAL (skip-only inter copies of the
+# keyframe), so matching them proves only that a zero-MV copy works. FRAME 4 is the one that
+# carries distinct content -- it is the real "an inter frame decodes bit-exact" evidence, and
+# the reason the hard bound is 4 rather than 2.
+repro_seq() { # name hard_n total_n
+    local n="$1" hard="$2" tot="$3"
+    local ivf="tests/repro/$n.ivf" md5f="tests/repro/$n.md5"
+    if [ ! -f "$ivf" ] || [ ! -f "$md5f" ]; then
+        echo "  repro $n: FIXTURE MISSING ($ivf / $md5f)"; fail=$((fail+1)); return
+    fi
+    mkdir -p build
+    cp "$ivf" build/conformance-input.ivf
+    rm -f build/conformance-out-*.i420
+    ./build/drishti-conformance >/dev/null 2>&1
+    local line="  repro $n:"
+    local k=1
+    while [ "$k" -le "$tot" ]; do
+        local got want
+        got=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        want=$(sed -n "${k}p" "$md5f")
+        if [ -n "$got" ] && [ "$got" = "$want" ]; then
+            line="$line f$k=OK"; pass=$((pass+1))
+        elif [ "$k" -gt "$hard" ]; then
+            line="$line f$k=xfail"; xfail=$((xfail+1))
+        else
+            line="$line f$k=REGRESSED"; fail=$((fail+1))
+        fi
+        k=$((k+1))
+    done
+    echo "$line"
+}
 echo "--- committed reproducers (no libaom required) ---"
 repro_case e2d-160x160 match
 repro_case e2d-192x160 match   # the CDEF-grid heap overflow: was xfail until av1_clear_cdef was bounded
+repro_seq  inter-6frame 4 6   # INTER frames vs aomdec; f4 carries the distinct content
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "  libaom (aomenc/aomdec) not found — skipping the generated + published corpus"
