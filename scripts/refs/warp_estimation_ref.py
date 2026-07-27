@@ -13,7 +13,9 @@
 #   * The find_warp_samples CandList is ALREADY in 1/8-pel: each entry is
 #     [midY*8, midX*8, midY*8+mv[0], midX*8+mv[1]] (see warp_samples_ref.py).
 #     So NO extra *8 is applied inside warp_estimation.
-#   * LS macros (LS_STEP=2, down-shift 2): LS_SQUARE(a)=(a+1)^2+1,
+#   * LS macros (LS_STEP=8, down-shift 2+2=4, per libaom warped_motion.c LS_STEP /
+#     LS_MAT_DOWN_BITS -- this port originally had LS_STEP=2 and shift 2, the same
+#     misreading as the Cyrius, so the KATs it produced agreed with a wrong decoder),
 #     LS_PRODUCT1(a,b)=(a+1)(b+1), LS_PRODUCT2(a,b)=(a+1)(b+1)+1. The +1
 #     Tikhonov regularization is NORMATIVE (keeps A PSD / invertible).
 #   * Bx[1]/By[0] use PRODUCT1 (unbiased); Bx[0]/By[1] use PRODUCT2 (biased) —
@@ -33,7 +35,8 @@ WARPEDMODEL_PREC_BITS = 16
 WARPEDMODEL_TRANS_CLAMP = 1 << 23
 WARPEDMODEL_NONDIAG_CLAMP = 1 << 13  # 8192; the clamp half-window is CLAMP-1 = 8191
 LS_MV_MAX = 256
-LS_STEP = 2
+LS_STEP = 8
+LS_MAT_DOWN_BITS = 2
 MI_SIZE = 4
 
 
@@ -91,15 +94,15 @@ def resolve_divisor(d):
 
 
 def ls_square(a):
-    return (a * a * 4 + a * 4 * LS_STEP + LS_STEP * LS_STEP * 2) >> 2
+    return (a * a * 4 + a * 4 * LS_STEP + LS_STEP * LS_STEP * 2) >> (2 + LS_MAT_DOWN_BITS)
 
 
 def ls_product1(a, b):
-    return (a * b * 4 + (a + b) * 2 * LS_STEP + LS_STEP * LS_STEP) >> 2
+    return (a * b * 4 + (a + b) * 2 * LS_STEP + LS_STEP * LS_STEP) >> (2 + LS_MAT_DOWN_BITS)
 
 
 def ls_product2(a, b):
-    return (a * b * 4 + (a + b) * 2 * LS_STEP + LS_STEP * LS_STEP * 2) >> 2
+    return (a * b * 4 + (a + b) * 2 * LS_STEP + LS_STEP * LS_STEP * 2) >> (2 + LS_MAT_DOWN_BITS)
 
 
 def clip3(lo, hi, v):

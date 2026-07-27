@@ -96,7 +96,7 @@ repro_seq() { # name hard_n total_n
 echo "--- committed reproducers (no libaom required) ---"
 repro_case e2d-160x160 match
 repro_case e2d-192x160 match   # the CDEF-grid heap overflow: was xfail until av1_clear_cdef was bounded
-repro_seq  inter-6frame 4 6   # INTER frames vs aomdec; f4 carries the distinct content
+repro_seq  inter-6frame 6 6   # ALL SIX frames bit-exact vs aomdec (hard)
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "  libaom (aomenc/aomdec) not found — skipping the generated + published corpus"
@@ -209,7 +209,10 @@ check kf_only all
 # CDEF and deblocking both disabled). Tracked as roadmap.md E2; xfail so the gate
 # still guards the keyframe path and the all-skip inter path from regressing.
 check seq_filters keyframe
-check seq_nofilt  keyframe
+# HARD on every frame: with the loop filters off, all five frames are bit-exact. This is the
+# inter-decode path with no filtering in the way, so it pins MC, the warp model, the residual
+# and the entropy decode together.
+check seq_nofilt  all
 
 # ---- PUBLISHED conformance vectors (libaom's own corpus + its own reference MD5s) ----
 # These are the real thing: streams drishti never touched, with checksums published by

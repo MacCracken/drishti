@@ -1859,7 +1859,15 @@ enum Av1WarpEstConst {
     AV1_DIV_LUT_PREC_BITS = 14;
     AV1_DIV_LUT_NUM       = 256;        # Div_Lut has NUM+1 = 257 entries (indices 0..256)
     AV1_LS_MV_MAX         = 256;        # per-sample |delta-mv| rejection bound (1/8-pel)
-    AV1_LS_STEP           = 2;
+    # LS_STEP / the accumulator downshift for warpEstimation's least-squares fit
+    # (7.11.3.8; libaom warped_motion.c LS_STEP and LS_MAT_DOWN_BITS). LS_STEP WAS 2 AND THE
+    # SHIFT WAS 2 -- both wrong, and wrong together, which is why the resulting model looked
+    # plausible: every 8x8 warp block built a slightly different affine fit from the SAME
+    # samples, so warped blocks decoded within a pixel or two of the reference instead of
+    # bit-exact. Verified by dumping wmmat from an instrumented libaom next to drishti's on
+    # the same stream: with these values the two models are now identical, field for field.
+    AV1_LS_STEP           = 8;
+    AV1_LS_MAT_DOWN_BITS  = 2;
     AV1_WM_TRANS_CLAMP    = 8388608;    # 1 << 23
     AV1_WM_NONDIAG_CLAMP  = 8192;       # 1 << 13 (clamp half-window is CLAMP-1 = 8191)
     AV1_WARP_PARAM_REDUCE_BITS = 6;     # shear params reduced to multiples of 1 << 6 = 64
@@ -1938,13 +1946,13 @@ fn av1_resolve_divisor(d, out2): i64 {
 # (>>>) because the PRODUCT numerators are signed. Factored: SQUARE=(a+1)^2+1,
 # PRODUCT1=(a+1)(b+1), PRODUCT2=(a+1)(b+1)+1 — the +1 Tikhonov terms are NORMATIVE.
 fn av1_ls_square(a): i64 {
-    return (((a * a) * 4) + ((a * 4) * AV1_LS_STEP) + ((AV1_LS_STEP * AV1_LS_STEP) * 2)) >>> 2;
+    return (((a * a) * 4) + ((a * 4) * AV1_LS_STEP) + ((AV1_LS_STEP * AV1_LS_STEP) * 2)) >>> (2 + AV1_LS_MAT_DOWN_BITS);
 }
 fn av1_ls_product1(a, b): i64 {
-    return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) + (AV1_LS_STEP * AV1_LS_STEP)) >>> 2;
+    return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) + (AV1_LS_STEP * AV1_LS_STEP)) >>> (2 + AV1_LS_MAT_DOWN_BITS);
 }
 fn av1_ls_product2(a, b): i64 {
-    return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) + ((AV1_LS_STEP * AV1_LS_STEP) * 2)) >>> 2;
+    return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) + ((AV1_LS_STEP * AV1_LS_STEP) * 2)) >>> (2 + AV1_LS_MAT_DOWN_BITS);
 }
 
 # mult-and-clip: Round2Signed(v * divFactor, divShift) (round-half-away-from-zero),

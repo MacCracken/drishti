@@ -6,6 +6,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
 
+- **THE WARP MODEL WAS BUILT WITH THE WRONG LEAST-SQUARES CONSTANTS — `LS_STEP` was 2 where the reference
+  uses 8, and the accumulator downshift was 2 where it is 4.** `warpEstimation` (7.11.3.8) fits an affine
+  model from the neighbour samples; with both constants wrong (and wrong TOGETHER, which is why the result
+  stayed plausible) every warped block built a slightly different model from the SAME samples, so LOCALWARP
+  blocks decoded within a pixel or two of the reference instead of bit-exact. libaom: `LS_STEP 8`,
+  `LS_MAT_DOWN_BITS 2` -> shift `2 + 2` (`av1/common/warped_motion.c`).
+  HOW IT WAS PINNED: an instrumented libaom printed `wmmat` and the shear params per 8x8 warp block next to
+  drishti's on the same stream. `ix4`, `iy4`, the sample set, `np` and the block MV all matched exactly;
+  only the model differed (`m2=63492 m3=-2067 m5=65560` vs libaom's `63440 / -2124 / 65564`), which located
+  the fault in the fit rather than the samples or the kernel. With the constants corrected the two models
+  are IDENTICAL field for field.
+  **`scripts/refs/warp_estimation_ref.py` HAD THE SAME MISREADING.** The known-answers it generated agreed
+  with the wrong decoder, so 43 assertions passed against wrong values for the whole warp arc — precisely
+  the shared-derivation failure `docs/guides/verification.md` warns about, and the reason a spec-literal
+  port is not sufficient on its own. The port is corrected first, the KATs regenerated FROM it, and libaom
+  is what broke the tie.
+  RESULT — `make conformance` 29 matched / 4 known-gap -> **32 matched / 1 known-gap / 0 regressed**:
+    * `repro inter-6frame` — **ALL SIX frames bit-exact**, promoted to a hard gate (was 4 hard / 2 xfail).
+    * `seq_nofilt` — **ALL FIVE frames bit-exact**, promoted from keyframe-only to `all`. With the loop
+      filters out of the way this pins MC, the warp model, the residual and the entropy decode together.
+    * `seq_filters` f5 — the last xfail, and it shrank from `Y=90/2 U=30/2 V=43/2` to `Y=16/2 U=0/0 V=0/0`:
+      16 luma samples, chroma entirely clean. Since the same frame is bit-exact with the filters off, what
+      remains is in CDEF or the deblocker, not in inter decode.
+
 - **AN INTER FRAME NOW DECODES BIT-EXACT AGAINST `aomdec`, and the reproducer is committed.** With the
   temporal-scan gate, the deblocker reference/mode deltas and the CDF-counter reset all in, drishti's
   symbol stream for a 6-frame libaom encode is **IDENTICAL to libaom's for all 5,792 symbols** — verified

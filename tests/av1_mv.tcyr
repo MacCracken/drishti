@@ -1923,7 +1923,7 @@ fn test_warp_estimation() {
     we_add(wa, 2, 39, 23, 16, 24);
     store64(wa + AV1WS_NUM, 3);
     assert_eq(av1_warp_estimation(wa, 8, 8, 6, 16, 24, out), DR_OK, "warp A ok");
-    we_check(out, 1, 200079, 134543, 65447, 0, 0, 65447, "warp A translation (identity 2x2)");
+    we_check(out, 1, 197076, 131540, 65524, 0, 0, 65524, "warp A translation (identity 2x2)");
     # F: a clean affine — four DISTINCT un-clamped params (transposition witness).
     var wf = av1_warp_new();
     we_add(wf, 0, 20, 20, 0 - 8, 0 - 12);
@@ -1932,7 +1932,7 @@ fn test_warp_estimation() {
     we_add(wf, 3, 58, 58, 4, 10);
     store64(wf + AV1WS_NUM, 4);
     assert_eq(av1_warp_estimation(wf, 8, 8, 6, 0, 0, out), DR_OK, "warp F ok");
-    we_check(out, 1, 0 - 185328, 0 - 101166, 70077, 211, 0 - 868, 68998, "warp F clean affine");
+    we_check(out, 1, 0 - 185757, 0 - 101361, 70104, 195, 0 - 887, 69022, "warp F clean affine");
     # C: sample 2 has a delta-MV >= LS_MV_MAX -> dropped by the guard; equals the 2-prefix.
     var wc = av1_warp_new();
     we_add(wc, 0, 23, 31, 16, 24);
@@ -1940,7 +1940,7 @@ fn test_warp_estimation() {
     we_add(wc, 2, 55, 31, 16, 324);
     store64(wc + AV1WS_NUM, 3);
     assert_eq(av1_warp_estimation(wc, 8, 8, 6, 16, 24, out), DR_OK, "warp C ok");
-    we_check(out, 1, 200430, 0 - 25825, 65438, 0, 8179, 61380, "warp C LS_MV_MAX guard");
+    we_check(out, 1, 195945, 0 - 34054, 65553, 0, 8182, 61588, "warp C LS_MV_MAX guard");
     # E: strong expansion -> diag UPPER clamp (73727) + nondiag UPPER clamp (8191).
     var we = av1_warp_new();
     we_add(we, 0, 20, 20, 0, 0 - 96);
@@ -1949,7 +1949,7 @@ fn test_warp_estimation() {
     we_add(we, 3, 60, 60, 96, 0);
     store64(we + AV1WS_NUM, 4);
     assert_eq(av1_warp_estimation(we, 8, 8, 6, 0, 0, out), DR_OK, "warp E ok");
-    we_check(out, 1, 0 - 317031, 0 - 312936, 73727, 0 - 62, 8191, 65369, "warp E diag+nondiag UPPER clamp");
+    we_check(out, 1, 0 - 315198, 0 - 318474, 73727, 0 - 109, 8191, 65511, "warp E diag+nondiag UPPER clamp");
     # G: strong contraction -> diag LOWER clamp (57345) + nondiag LOWER clamp (-8191).
     var wg = av1_warp_new();
     we_add(wg, 0, 20, 20, 0, 96);
@@ -1958,7 +1958,7 @@ fn test_warp_estimation() {
     we_add(wg, 3, 60, 60, 0 - 96, 0);
     store64(wg + AV1WS_NUM, 4);
     assert_eq(av1_warp_estimation(wg, 8, 8, 6, 0, 0, out), DR_OK, "warp G ok");
-    we_check(out, 1, 317031, 321126, 57345, 62, 0 - 8191, 65493, "warp G diag+nondiag LOWER clamp");
+    we_check(out, 1, 315198, 311883, 57345, 109, 0 - 8191, 65730, "warp G diag+nondiag LOWER clamp");
     # H: reversed shear -> clean NEGATIVE un-clamped nondiag (transposition witness).
     var wh = av1_warp_new();
     we_add(wh, 0, 20, 20, 12, 8);
@@ -1967,7 +1967,7 @@ fn test_warp_estimation() {
     we_add(wh, 3, 60, 60, 0 - 12, 0 - 8);
     store64(wh + AV1WS_NUM, 4);
     assert_eq(av1_warp_estimation(wh, 8, 8, 6, 0, 0, out), DR_OK, "warp H ok");
-    we_check(out, 1, 130884, 194259, 65441, 0 - 3261, 0 - 4892, 65447, "warp H reversed shear");
+    we_check(out, 1, 123201, 186381, 65638, 0 - 3261, 0 - 4891, 65648, "warp H reversed shear");
     # J1: a SINGLE sample (NumSamples==1, a real find_warp_samples outcome) — the KEY
     # witness that the LS shift is ARITHMETIC (by0 = ls_product1(8,-45) < 0, so a logical
     # >> corrupts it) AND that mult uses SIGNED rounding (wm[3]=-6317, floor would give -6316).
@@ -1975,7 +1975,7 @@ fn test_warp_estimation() {
     we_add(wj, 0, 39, 40, 0 - 38, 0 - 7);
     store64(wj + AV1WS_NUM, 1);
     assert_eq(av1_warp_estimation(wj, 8, 8, 6, 7, 1, out), DR_OK, "warp J1 ok");
-    we_check(out, 1, 574004, 696242, 57345, 0 - 6317, 0 - 8191, 57345, "warp J1 single (arith-shift + signed-round)");
+    we_check(out, 1, 647090, 696242, 57345, 0 - 8191, 0 - 8191, 57345, "warp J1 single (arith-shift + signed-round)");
     # J2: a clean 2-sample case with a small negative product1 term (no overflow) — a
     # second, independent witness that the LS product1 shift is arithmetic, not logical.
     var wj2 = av1_warp_new();
@@ -1983,7 +1983,7 @@ fn test_warp_estimation() {
     we_add(wj2, 1, 48, 44, 6, 3);
     store64(wj2 + AV1WS_NUM, 2);
     assert_eq(av1_warp_estimation(wj2, 8, 8, 6, 0, 0, out), DR_OK, "warp J2 ok");
-    we_check(out, 1, 0 - 93951, 0 - 276354, 64945, 3000, 3981, 68641, "warp J2 negative product1 term");
+    we_check(out, 1, 0 - 88257, 0 - 259467, 64843, 2956, 3659, 68530, "warp J2 negative product1 term");
     # K: a single sample with sx=sy=dx=dy=-1 -> det=1 -> resolve divShift=14, minus 16 = -2
     # < 0, witnessing the divFactor<<(-divShift) rescale branch. Raw cand (311 not /8).
     var wk = av1_warp_new();
@@ -2002,7 +2002,7 @@ fn test_warp_estimation() {
     we_add(wcv, 2, 55, 31, 316, 24);
     store64(wcv + AV1WS_NUM, 3);
     assert_eq(av1_warp_estimation(wcv, 8, 8, 6, 16, 24, out), DR_OK, "warp CV ok");
-    we_check(out, 1, 200430, 0 - 25825, 65438, 0, 8179, 61380, "warp CV vertical LS_MV_MAX guard");
+    we_check(out, 1, 195945, 0 - 34054, 65553, 0, 8182, 61588, "warp CV vertical LS_MV_MAX guard");
     # TC: a large MV (col +1100, row -1100) drives the translation past +-2^23 -> witnesses
     # BOTH translation clamp bounds: wm[0]=2^23-1=8388607 (hi), wm[1]=-2^23=-8388608 (lo).
     var wtc = av1_warp_new();
@@ -2011,7 +2011,7 @@ fn test_warp_estimation() {
     we_add(wtc, 2, 39, 23, 0 - 1100, 1100);
     store64(wtc + AV1WS_NUM, 3);
     assert_eq(av1_warp_estimation(wtc, 8, 8, 6, 0 - 1100, 1100, out), DR_OK, "warp TC ok");
-    we_check(out, 1, 8388607, 0 - 8388608, 65447, 0, 0, 65447, "warp TC translation clamp both bounds");
+    we_check(out, 1, 8388607, 0 - 8388608, 65524, 0, 0, 65524, "warp TC translation clamp both bounds");
     # D: no samples -> det == 0 -> invalid, identity default left in place.
     var wd = av1_warp_new();
     store64(wd + AV1WS_NUM, 0);
