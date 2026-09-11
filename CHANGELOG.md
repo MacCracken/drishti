@@ -4,6 +4,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.130] - 2026-09-10
+
+Toolchain patch: **cyrius 6.4.78 → 6.6.2**. No decoder logic changed — all
+**30,300 assertions** across 38 harnesses pass, both fuzz harnesses and the
+benchmark are clean, and `programs/smoke.cyr` builds byte-identical at
+1,227,584 bytes before and after.
+
+### Changed — cyrius 6.4.78 → 6.6.2
+
+Spans the `Result` / `Option` / `Either` **value form** (6.6.0), which returns
+those types as a two-register `(tag, payload)` pair and deletes the `payload()`
+accessor. drishti needed no source change: it calls neither `payload()` nor
+`tagged_new()`, carries no `Result` propagation chains, and uses no `callptr`.
+`cyrius deps` refreshed the 17 declared stdlib modules in `lib/` — `result.cyr`
+among them.
+
+### Note — 12 stale undeclared bundles in `lib/`
+
+`cyrius build` reports twelve bundled libs older than the 6.6.2 snapshot:
+bayan, ganita, sakshi, niyama, sigil, sandhi, yukti, patra, vani, mabda,
+sankoch, yantra. drishti declares none of them and reaches none of them — the
+smoke binary is byte-identical whether `lib/` holds all 99 committed files or
+only the 22 the manifest declares — so this is dead weight, not a build input.
+They are exactly the twelve folded stdlibs held back for the coordinated cyrius
+6.6.3 pass; left alone deliberately so they move once, together. Do **not**
+"fix" this with `cyrius lib sync --full`: that dumps the entire stdlib snapshot
+into `lib/`, inflating it far past the manifest.
+
+
 ## [0.7.129] - 2026-07-26
 
 ### 0.7.129 — an inter frame decodes bit-exact vs aomdec (in progress)
