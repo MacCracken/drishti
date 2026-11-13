@@ -114,7 +114,7 @@ fn av1_decode_tile(tile): i64 {
             av1_bd_clear(tile, r, c, sb4, num_planes);
             if (lrp != 0) {                              # read_lr (5.11.2) before decode_partition
                 av1_read_lr(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
-                av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
+                  av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
             }
             av1_decode_partition(tile, r, c, sb_bsize);
             c = c + sb4;
@@ -155,7 +155,7 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
             if (lrp != 0) {
                 av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
-                av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
+                  av1_lr_intrabc(lrp), av1_lr_superres(lrp), av1_lr_srdenom(lrp));
             }
             av1_encode_partition(tile, r, c, sb_bsize, plan_part, pc, plan_mi, plan_tx, bc);
             c = c + sb4;

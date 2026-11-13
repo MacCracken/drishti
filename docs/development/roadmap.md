@@ -12,6 +12,36 @@
 > cross-family **audit** arc and a **freeze/documentation** arc before
 > the 1.0.0 close-out.
 
+## Moving the cyrius pin to 6.6.5
+
+⛔ Before bumping the pin to 6.6.5: cross-reference the four deferral
+notes that turn `make lint` (`Makefile:76`) red. 6.6.5's cyrlint folds
+case, so `Deferred` and `DEFERRED` now count.
+
+cyrius 6.6.5 is not tagged yet. Nothing below can land against the pin
+until it is, except items marked **(can land now)**. The pin is 6.6.2
+today, and this section lists only what 6.6.5 itself changes.
+
+- [ ] ⛔ Put a tracking pointer (`roadmap.md`, CHANGELOG, an issue) on a
+      line the phrase itself touches, or mark prose that is not a
+      deferral `#skip-lint`. A `(roadmap.md)` on the next line does not
+      track it. **(can land now)** — a same-line pointer or `#skip-lint`
+      does not depend on the toolchain.
+  - `src/av1_intermode.cyr:2642` — "Deferred features gate hard"; its
+    `(roadmap.md)` is on `:2644`.
+  - `src/av1_intermode.cyr:2663` — "the read is DEFERRED to the
+    inter_segment_id(0) call". Prose about read order.
+  - `src/av1_modeinfo.cyr:615` — "Deferred features
+    (segment/cdef/deltas/intrabc/palette) are elided".
+  - `src/av1_mv.cyr:1156` — "The TEMPORAL scan … is DEFERRED"; its
+    `(roadmap.md)` is on `:1157`.
+
+  See the cyrius CHANGELOG [6.6.5] entry "cyrlint read every rule ONE
+  PHYSICAL LINE at a time".
+- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved
+      SYS_UNLINKAT 35 → 263, so an un-re-vendored peer's sys_unlink would
+      run nanosleep.
+
 ## The path to 1.0 — minor arc per codec
 
 | Arc | Owner | Target | Charter |
@@ -624,3 +654,41 @@ to the applications libs registry.
 - Hardware acceleration — drishti is the CPU reference; a GPU path is a
   post-1.0 lever behind mabda.
 - Audio — that's shravan.
+
+---
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first;
+this is a pin bump and a rebuild.
+
+**What was checked** (41 `.cyr` under `src/`, plus `programs/`; vendored `lib/` excluded):
+
+- **Windows write corruption: not a drishti exposure.** `O_APPEND` / `O_TRUNC` appear **42
+  times, every one inside the vendored `lib/` fold, zero in `src/` or `programs/`**.
+  drishti's only file I/O is two read-only `file_read_all("build/conformance-input.ivf", …)`
+  calls in `programs/vector-probe.cyr:111` and `programs/conformance.cyr:110`. 6.6.6 also
+  stops `file_exists`/`file_read_all` requesting write access so they succeed on read-only
+  files and volumes — but that is the **PE** access-mode decode, so it is not a change for
+  drishti's Linux-only build either.
+- **No struct/vector shape to trip the new refusals.** drishti declares **zero** `struct`s
+  in `src/`; there are no by-value struct params, no struct-typed returns, no
+  `var x: T = q;` copies, no `async fn`, no `operator` fn, no SIMD-returning fn, and no fn
+  mixing pair and scalar returns. The codec kernels work on raw pointers and `i64`.
+- **Also clean:** no `var` inside a top-level block (zero top-level `{` / `if (` / `while (`
+  at column 0), no raw `SYS_STATFS`, no `lib/regression.cyr` consumer, no `vec_*` of
+  drishti's own, no duplicate top-level global, no symlink in `lib/`.
+- **Platform:** CI is `ubuntu-latest` only, `src/` has no `CYRIUS_TARGET_*` branch. No
+  Windows build.
+
+**What it gains:** 6.6.3's `#inline`-disarms-`#derive` fix, 6.6.5's aggregate-layout fix
+(silently wrong since 5.8.17 — for a codec repo built on dense struct-shaped buffers, this
+is the one to want) and the corrected ENTRY stack bases, and 6.6.6's nine new refusals.
+**Not** a gain here: 6.6.4's ≥64 KB string-literal fix — drishti's longest literal is 99
+bytes (`src/vpx_bool.cyr`), measured, so that defect was never reachable.
+
+**Verify after bumping:** `cyrius deps` → `cyrius build` → `cyrius test` → the codec
+conformance runs in `programs/`, then **regenerate `dist/drishti.cyr`**, which consumers
+compile with their own toolchain. drishti has no `cyrius.lock`, so note that 6.6.6 makes
+`cyrius deps` **fail** rather than warn if the lockfile cannot be written — if a lock is
+introduced later, make sure the CI checkout can write it.

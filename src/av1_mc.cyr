@@ -154,7 +154,7 @@ fn av1_subpel_filters_blob(): i64 {
 # Subpel_Filters[set][phase][tap] — set 0..5, phase 0..14, tap 0..7 (dav1d convention).
 fn av1_subpel_filter(set, phase, tap): i64 {
     return load64(av1_subpel_filters_blob() +
-    ((((set * AV1_SUBPEL_PHASES) + phase) * AV1_SUBPEL_TAPS) + tap) * 8);
+      ((((set * AV1_SUBPEL_PHASES) + phase) * AV1_SUBPEL_TAPS) + tap) * 8);
 }
 
 # byte address of one 8-tap filter row (set, phase) in the blob.
@@ -617,7 +617,7 @@ fn av1_mc_8tap_clipped(ref, plane, sy, sx0, lastx, f): i64 {
 # Round2(64*px, 6-ib) == px << ib and the V dot Round2(64*m, 6+ib) == av1_round2(m, ib), and
 # the sample used is the CENTRE tap (t == 3).
 fn av1_mc_put_8tap_scaled(out, doff, dstride, ref, plane, startx, starty, stepx, stepy,
-w, h, filt_x, filt_y, bit_depth, compound): i64 {
+  w, h, filt_x, filt_y, bit_depth, compound): i64 {
     if ((out == 0) || (ref == 0)) { return DR_ERR_BOUNDS; }
     if ((plane < 0) || (plane >= dr_frame_num_planes(ref))) { return DR_ERR_BOUNDS; }
     # These caps are NOT redundant with the caller's. (h - 1) * stepy is an i64 multiply that
@@ -658,7 +658,7 @@ w, h, filt_x, filt_y, bit_depth, compound): i64 {
                 v = dr_frame_get(ref, plane, av1_clip3(0, lastx, sx0), sy) << ib;
             } else {
                 v = av1_round2(av1_mc_8tap_clipped(ref, plane, sy, sx0, lastx,
-                av1_mc_subpel_row(hset, ph - 1)), 6 - ib);
+                    av1_mc_subpel_row(hset, ph - 1)), 6 - ib);
             }
             store64(mid + (((r * w) + c) * 8), v);
             c = c + 1;
@@ -709,7 +709,7 @@ w, h, filt_x, filt_y, bit_depth, compound): i64 {
 # mx/my derivation + the 8x8 sub-block loop + the emu_edge gather + the LOCALWARP un-gate are the
 # next bite. Returns DR_OK / DR_ERR_OOM (the shared mid scratch).
 fn av1_warp_affine_8x8(dst, doff, dstride, src, soff, sstride,
-alpha, beta, gamma, delta, mx, my, bit_depth, compound): i64 {
+  alpha, beta, gamma, delta, mx, my, bit_depth, compound): i64 {
     var ib = 4;
     if (bit_depth == 12) { ib = 2; }
     var mid = av1_mc_mid_scratch();         # 15*8 signed intermediates fit easily
@@ -886,7 +886,7 @@ fn av1_mc_drv_scratch(): i64 {
     Av1_McIntra = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # inter-intra intra half
     Av1_McWarp8 = alloc(8 * 8 * 8);                           # per-8x8 warp kernel output
     if ((Av1_McRect == 0) || (Av1_McGather == 0) || (Av1_McOut == 0) || (Av1_McTmp == 0)
-    || (Av1_McMask == 0) || (Av1_McWarp8 == 0) || (Av1_McIntra == 0)) {
+      || (Av1_McMask == 0) || (Av1_McWarp8 == 0) || (Av1_McIntra == 0)) {
         Av1_McOut = 0;
         return DR_ERR_OOM;
     }
@@ -994,7 +994,7 @@ fn av1_mc_scaled_start(x, mv, sub, scale): i64 {
     var orig = av1_mc_pos16(x, mv, sub) + AV1_MC_HALF_SAMPLE;
     var base = (orig * scale) - (AV1_MC_HALF_SAMPLE << AV1_REF_SCALE_SHIFT);
     return av1_round2_signed(base,
-    (AV1_REF_SCALE_SHIFT + AV1_SUBPEL_BITS) - AV1_SCALE_SUBPEL_BITS) + AV1_MC_SCALE_OFF;
+      (AV1_REF_SCALE_SHIFT + AV1_SUBPEL_BITS) - AV1_SCALE_SUBPEL_BITS) + AV1_MC_SCALE_OFF;
 }
 
 # lastX = ((RefUpscaledWidth + subX) >> subX) - 1  (7.11.3.4) — the bottom-right sample of
@@ -1083,14 +1083,14 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
     # — exactly the pair the spec names.
     if (av1_mc_ref_unscaled(ref, dst, plane) == 0) {
         if (av1_mc_scale_valid(dr_frame_width(ref), dr_frame_height(ref),
-        dr_frame_width(dst), dr_frame_height(dst)) == 0) {
+            dr_frame_width(dst), dr_frame_height(dst)) == 0) {
             return DR_ERR_BAD_HEADER;   # ratio outside the 7.11.3.3 conformance bounds
         }
         var xs = av1_scale_factor(dr_frame_width(ref), dr_frame_width(dst));
         var ys = av1_scale_factor(dr_frame_height(ref), dr_frame_height(dst));
         return av1_mc_put_8tap_scaled(out, 0, w, ref, plane,
-        av1_mc_scaled_start(x, mv_col, sx, xs), av1_mc_scaled_start(y, mv_row, sy, ys),
-        av1_mc_scaled_step(xs), av1_mc_scaled_step(ys), w, h, filt_x, filt_y, bd, compound);
+          av1_mc_scaled_start(x, mv_col, sx, xs), av1_mc_scaled_start(y, mv_row, sy, ys),
+          av1_mc_scaled_step(xs), av1_mc_scaled_step(ys), w, h, filt_x, filt_y, bd, compound);
     }
     # ---- 7.11.3.3 (unscaled): integer top-left + 1/16-pel phase per axis ----
     var p16x = av1_mc_pos16(x, mv_col, sx);
@@ -1126,14 +1126,14 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
     av1_mc_emu_edge(gw, gh, rw, rh, gx - rx0, gy - ry0, Av1_McGather, 0, gw, Av1_McRect, 0, rw);
     # ---- put_8tap: block top-left sits (3*nv, 3*nh) into the padded gather ----
     return av1_mc_put_8tap(out, 0, w, Av1_McGather, ((3 * nv) * gw) + (3 * nh), gw,
-    w, h, fx, fy, filt_x | (filt_y << 2), bd, compound);
+      w, h, fx, fy, filt_x | (filt_y << 2), bd, compound);
 }
 # single-ref MC (7.11.3.1 non-compound): produce the final prediction and write it
 # into the frame. Returns DR_OK / DR_ERR_* (see av1_mc_pred_core).
 fn av1_mc_pred_block(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y): i64 {
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
     var e = av1_mc_pred_core(Av1_McOut, dst, ref, plane, x, y, w, h, mv_row, mv_col,
-    filt_x, filt_y, 0);
+      filt_x, filt_y, 0);
     if (e != DR_OK) { return e; }
     var r = 0;
     while (r < h) {
@@ -1191,7 +1191,7 @@ fn av1_warp_pred_gen(dst, ref, plane, x, y, w, h, wm, out_buf, out_stride, compo
     }
     # bounded by the ALLOCATED extent (see av1_mc_pred_core) — a warped block may overhang too.
     if ((x < 0) || (y < 0) || (x > (dr_frame_plane_alloc_w(dst, plane) - w))
-    || (y > (dr_frame_plane_alloc_h(dst, plane) - h))) {
+      || (y > (dr_frame_plane_alloc_h(dst, plane) - h))) {
         return DR_ERR_BOUNDS;
     }
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
@@ -1242,14 +1242,14 @@ fn av1_warp_pred_gen(dst, ref, plane, x, y, w, h, wm, out_buf, out_stride, compo
                 var rc = 0;
                 while (rc < rw) {
                     store64(Av1_McRect + (((rr * rw) + rc) * 8),
-                    dr_frame_get(ref, plane, rx0 + rc, ry0 + rr));
+                      dr_frame_get(ref, plane, rx0 + rc, ry0 + rr));
                     rc = rc + 1;
                 }
                 rr = rr + 1;
             }
             av1_mc_emu_edge(15, 15, rw, rh, gx - rx0, gy - ry0, Av1_McGather, 0, 15, Av1_McRect, 0, rw);
             var e = av1_warp_affine_8x8(Av1_McWarp8, 0, 8, Av1_McGather, (3 * 15) + 3, 15,
-            alpha, beta, gamma, delta, mx, my, bd, compound);
+              alpha, beta, gamma, delta, mx, my, bd, compound);
             if (e != DR_OK) { return e; }
             # ---- write-back, cropped to the block (4x4 chroma / non-multiple-of-8) ----
             var r2 = 0;
@@ -1715,7 +1715,7 @@ fn av1_ii_smooth_mask_build(nom_w, nom_h, fill_w, fill_h, ii_mode): i64 {
 # reads intra back. sub_size = NOMINAL luma block size; w/h = the (equal, in-scope) fill extent.
 # ii_mode 0/1/2/3; intra mode = ii_mode for 0/1/2, 9 (SMOOTH_PRED) for 3. angle_delta/filter = 0.
 fn av1_mc_pred_interintra_w(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y,
-ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, use_warp): i64 {
+  ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, use_warp): i64 {
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
     # Inter part -> Av1_McOut at FINAL precision. Warp it (GLOBALWARP inter-intra, spec 7.11.3.1 step 12: the
     # useWarp derivation has no inter-intra exception, so a >TRANSLATION global model warps the inter part;
@@ -1746,7 +1746,7 @@ ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, us
     # indexing (which is nominal, per 7.11.3.11/14) and the blend loop independent.
     var nomw = 1 << log2w;
     e = av1_intra_predict_gen(dst, plane, x, y, have_l, have_u, 0, 0, imode, 0, 0, 0, 0, 0,
-    log2w, log2h, mi_cols, mi_rows, Av1_McIntra, nomw);
+      log2w, log2h, mi_cols, mi_rows, Av1_McIntra, nomw);
     if (e != DR_OK) { return e; }
     # mask: WEDGE interintra (wedge_sign forced 0) builds the codebook mask on LUMA (plane 0) at
     # the NOMINAL block size and chroma SUBSAMPLES it (av1_diffwtd_mask_at, exactly like compound
@@ -1773,7 +1773,7 @@ ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, us
             var intra = load64(Av1_McIntra + (((r * nomw) + c) * 8));
             var inter = load64(Av1_McOut + (((r * w) + c) * 8));
             dr_frame_set(dst, plane, x + c, y + r,
-            av1_round2((m * intra) + ((64 - m) * inter), 6));
+              av1_round2((m * intra) + ((64 - m) * inter), 6));
             c = c + 1;
         }
         r = r + 1;
@@ -1782,9 +1782,9 @@ ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, wm, us
 }
 # av1_mc_pred_interintra — the translation-inter form (no warp), the common case.
 fn av1_mc_pred_interintra(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y,
-ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows): i64 {
+  ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows): i64 {
     return av1_mc_pred_interintra_w(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y,
-    ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, 0, 0);
+      ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows, 0, 0);
 }
 
 # COMPOUND MC (7.11.3.1 isCompound): MC from BOTH references at intermediate precision, then a
@@ -1794,7 +1794,8 @@ ii_mode, is_wedge, wedge_idx, sub_size, have_l, have_u, mi_cols, mi_rows): i64 {
 # chroma -> Clip1(Round2(t0*m + t1*(64-m), ib+6)); the 6 is AOM_BLEND_A64_ROUND_BITS (log2 of
 # the mask-sum 64). dav1d w_avg/w_mask, PREP_BIAS=0. 3-source verified (compound_*.md).
 fn av1_mc_pred_compound(dst, ref0, ref1, plane, x, y, w, h, mv0_row, mv0_col, mv1_row, mv1_col,
-filt_x, filt_y, fwd, bck, comp_mode, mask_type, sub_size, wedge_idx, wedge_sign, wm0, wm1, use_warp0, use_warp1): i64 {
+  filt_x, filt_y, fwd, bck, comp_mode, mask_type, sub_size, wedge_idx, wedge_sign, wm0, wm1,
+  use_warp0, use_warp1): i64 {
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
     # Each reference -> its INTERMEDIATE buffer at bit_depth+ib: a GLOBAL_GLOBALMV warp (spec 7.11.3.5
     # isCompound=1, into McTmp/McOut via the dedicated McWarp8 kernel scratch) when that ref warps (use_warp*

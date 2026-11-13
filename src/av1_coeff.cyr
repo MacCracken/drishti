@@ -276,7 +276,7 @@ fn av1_get_br_ctx(tx_size, tx_type, pos, quant): i64 {
         var ref_col = col + av1_mag_ref_off(tx_class, idx, 1);
         if ((ref_row >= 0) && (ref_col >= 0) && (ref_row < txh) && (ref_col < txw)) {
             mag = mag + av1_min(load64(quant + (((ref_row * txw) + ref_col) * 8)),
-            AV1_COEFF_BASE_RANGE + AV1_NUM_BASE_LEVELS + 1);
+              AV1_COEFF_BASE_RANGE + AV1_NUM_BASE_LEVELS + 1);
         }
         idx = idx + 1;
     }

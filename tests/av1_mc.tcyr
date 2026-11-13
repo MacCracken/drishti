@@ -142,7 +142,7 @@ fn test_scaled_geometry() {
     # 1:1 — every scaling term must cancel; startX collapses to (pos16 << 6) + 32.
     mcs_case("g01 unscaled 1:1", 32, 32, 32, 32, 0, 4, 3, 0, 0, 16384, 16384, 1024, 1024, 4128, 3104);
     mcs_case("g02 unscaled neg-mv", 32, 32, 32, 32, 0, 0, 0, 0 - 9, 0 - 7, 16384, 16384, 1024, 1024,
-    0 - 864, 0 - 1120);
+      0 - 864, 0 - 1120);
     mcs_case("g03 unscaled chroma", 32, 32, 32, 32, 1, 3, 2, 7, 0 - 5, 16384, 16384, 1024, 1024, 2784, 2528);
     # 2x DOWN / 2x UP at the exact conformance boundaries.
     mcs_case("g04 2x-down", 16, 16, 32, 32, 0, 4, 3, 5, 0 - 3, 8192, 8192, 512, 512, 1632, 1632);
@@ -154,9 +154,9 @@ fn test_scaled_geometry() {
     mcs_case("g09 asymmetric chroma", 40, 24, 20, 18, 1, 1, 1, 0 - 6, 10, 32768, 21845, 2048, 1365, 3872, 1056);
     # NEGATIVE baseX/baseY — the ONLY place Round2Signed's away-from-zero branch fires.
     mcs_case("g10 negative base", 48, 48, 32, 32, 0, 0, 0, 0 - 40, 0 - 40, 24576, 24576, 1536, 1536,
-    0 - 7392, 0 - 7392);
+      0 - 7392, 0 - 7392);
     mcs_case("g11 negative base chroma", 48, 48, 32, 32, 1, 0, 0, 0 - 40, 0 - 40, 24576, 24576, 1536, 1536,
-    0 - 3552, 0 - 3552);
+      0 - 3552, 0 - 3552);
     # ODD ratios -> a scale factor that is NOT a multiple of 16, so the step's ROUNDING bias
     # (Round2Signed vs a bare arithmetic shift) is visible: 8440 >> 4 = 527 but Round2 = 528.
     mcs_case("g12 odd 17->33", 17, 17, 33, 33, 0, 2, 2, 1, 1, 8440, 8440, 528, 528, 905, 905);
@@ -170,7 +170,7 @@ fn test_scaled_geometry() {
     # the mutation — the 0.7.103 half-boundary lesson). Here baseX is exactly
     # -408704 = -1597*256 + 128, so startX is -1565 signed and would be -1564 unsigned.
     mcs_case("g15 Round2Signed tie", 2, 2, 17, 17, 0, 0, 0, 0 - 76, 0 - 76, 1928, 1928, 121, 121,
-    0 - 1565, 0 - 1565);
+      0 - 1565, 0 - 1565);
     return 0;
 }
 
@@ -313,7 +313,7 @@ fn test_warp_filter_invariants() {
     # the same accessor that could hide a consistent index bug).
     assert_eq(load64(av1_warp_filter_tbl() + (((96 * 8) + 3) * 8)), 79, "warp raw[96][3]=79 (absolute)");
     assert_eq(av1_warp_filter_row(96) + (3 * 8), av1_warp_filter_tbl() + (((96 * 8) + 3) * 8),
-    "warp_filter_row aligns with the accessor offset");
+      "warp_filter_row aligns with the accessor offset");
     return 0;
 }
 fn test_warp_filter_checksum() {

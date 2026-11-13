@@ -106,7 +106,7 @@ fn test_ivf_read_frames() {
     assert(r != 0, "reader inits");
     assert_eq(dr_ivf_reader_pos(r), 32, "cursor after header");
     assert_eq(dr_ivf_hdr_fourcc(dr_ivf_reader_hdr(r)), DR_FOURCC_VP80,
-    "hdr reachable from reader");
+      "hdr reachable from reader");
     var p = 0; var sz = 0; var pts = 0;
     # Frame 0.
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "frame 0 reads");
@@ -140,29 +140,29 @@ fn test_ivf_read_reject() {
     var r = dr_ivf_reader_init(b, 37, &e);
     assert(r != 0, "37-byte file inits (header ok)");
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
-    "5 trailing bytes < 12 -> truncated");
+      "5 trailing bytes < 12 -> truncated");
     assert_eq(dr_ivf_reader_err(r), DR_ERR_TRUNCATED, "reader fault sticky");
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
-    "sticky on repeat");
+      "sticky on repeat");
     # Lying size: frame 0 claims 100 bytes, only 16 remain after its header.
     b = fx_ivf_two_frames(&len);
     dr_wr_le32(b + 32, 100);
     r = dr_ivf_reader_init(b, len, &e);
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
-    "lying size -> truncated");
+      "lying size -> truncated");
     # Exact-fit boundary: frame 1 claims 2 bytes, 1 remains.
     b = fx_ivf_two_frames(&len);
     dr_wr_le32(b + 47, 2);
     r = dr_ivf_reader_init(b, len, &e);
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_OK, "frame 0 still fine");
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_TRUNCATED,
-    "one-over size -> truncated");
+      "one-over size -> truncated");
     # Bomb: size field 0x20000000 (512 MiB) > DR_IVF_MAX_FRAME.
     b = fx_ivf_two_frames(&len);
     dr_wr_le32(b + 32, 0x20000000);
     r = dr_ivf_reader_init(b, len, &e);
     assert_eq(dr_ivf_next_frame(r, &p, &sz, &pts), DR_ERR_OVERSIZE,
-    "512 MiB frame -> oversize");
+      "512 MiB frame -> oversize");
     # Zero-size frame is legal (e.g. dropped frame): still iterates.
     b = fx_ivf_two_frames(&len);
     dr_wr_le32(b + 47, 0);
@@ -229,11 +229,11 @@ fn test_ivf_write_read_roundtrip() {
 fn test_ivf_writer_edges() {
     # Field validation at init: width > u16.
     assert_eq(dr_ivf_writer_init(DR_FOURCC_VP90, 70000, 100, 1, 30), 0,
-    "width > 65535 rejected");
+      "width > 65535 rejected");
     assert_eq(dr_ivf_writer_init(DR_FOURCC_VP90, 100, -1, 1, 30), 0,
-    "negative height rejected");
+      "negative height rejected");
     assert_eq(dr_ivf_writer_init(DR_FOURCC_VP90, 100, 100, 0x100000000, 30), 0,
-    "tb_num > u32 rejected");
+      "tb_num > u32 rejected");
     # Growth: 200 frames of 64 bytes blows well past the 1 KiB initial cap.
     var w = dr_ivf_writer_init(DR_FOURCC_VP90, 320, 240, 1, 25);
     var payload = alloc(64);
@@ -264,7 +264,7 @@ fn test_ivf_writer_edges() {
     # Oversize frame rejected by the writer.
     w = dr_ivf_writer_init(DR_FOURCC_VP90, 320, 240, 1, 25);
     assert_eq(dr_ivf_write_frame(w, payload, 0x20000000, 0), DR_ERR_OVERSIZE,
-    "512 MiB write rejected");
+      "512 MiB write rejected");
     assert_eq(dr_ivf_writer_err(w), DR_ERR_OVERSIZE, "writer fault sticky");
     var flen2 = 0;
     assert_eq(dr_ivf_writer_finish(w, &flen2), 0, "finish on faulted -> 0");

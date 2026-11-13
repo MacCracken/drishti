@@ -30,7 +30,7 @@
 # left_dc the *DcContext), indexed by the 4x4 col/row. w/h are the tx pixel
 # dims; bw/bh the residual-block pixel dims (caller-provided).
 fn av1_txb_skip_ctx(plane, x4, y4, w4, h4, w, h, max_x4, max_y4, bw, bh,
-above_lvl, left_lvl, above_dc, left_dc): i64 {
+  above_lvl, left_lvl, above_dc, left_dc): i64 {
     if (plane == 0) {
         var top = 0;
         var lft = 0;
@@ -200,7 +200,7 @@ fn av1_coeffs_write_eob_pt(enc, cc, ptype, tx_type, eob_multi, eob_pt): i64 {
 # ttx = Av1TxTypeCtx (block mode + frame params). The computed PlaneTxType is
 # stored to *out_tx_type (DCT_DCT when all_zero). Neighbour arrays read+updated.
 fn av1_coeffs_decode(sd, cc, ncc, plane, tx_size, ttx, x4, y4, max_x4, max_y4,
-bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, out_tx_type): i64 {
+  bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, out_tx_type): i64 {
     var log2w = av1_tx_width_log2(tx_size);
     var log2h = av1_tx_height_log2(tx_size);
     var w = 1 << log2w;
@@ -220,7 +220,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, out_tx_type): i64 {
     var tx_type = AV1_DCT_DCT;
 
     var skip_ctx = av1_txb_skip_ctx(plane, x4, y4, w4, h4, w, h, max_x4, max_y4,
-    bw, bh, above_lvl, left_lvl, above_dc, left_dc);
+      bw, bh, above_lvl, left_lvl, above_dc, left_dc);
     var all_zero = av1_sym_read_symbol(sd, av1_ccdf_txb_skip(cc, txsz_ctx, skip_ctx), 2);
     if (all_zero == 0) {
         # transform_type: a luma block reads intra_tx_type here (between all_zero
@@ -336,7 +336,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, out_tx_type): i64 {
 # derived from ttx and must match compute_tx_type). Writes intra_tx_type for a
 # luma block so the decoder recovers the same PlaneTxType.
 fn av1_coeffs_encode(enc, cc, ncc, plane, tx_size, ttx, tx_type, x4, y4, max_x4, max_y4,
-bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
+  bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
     var log2w = av1_tx_width_log2(tx_size);
     var log2h = av1_tx_height_log2(tx_size);
     var w = 1 << log2w;
@@ -352,7 +352,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
     var dc_category = 0;
 
     var skip_ctx = av1_txb_skip_ctx(plane, x4, y4, w4, h4, w, h, max_x4, max_y4,
-    bw, bh, above_lvl, left_lvl, above_dc, left_dc);
+      bw, bh, above_lvl, left_lvl, above_dc, left_dc);
     var all_zero = 0;
     if (eob == 0) { all_zero = 1; }
     av1_sym_encode_symbol(enc, av1_ccdf_txb_skip(cc, txsz_ctx, skip_ctx), 2, all_zero);
@@ -371,7 +371,7 @@ bw, bh, above_lvl, left_lvl, above_dc, left_dc, quant, eob): i64 {
             var extra_val = eob - base;
             var nb = eob_pt - 2;
             av1_sym_encode_symbol(enc, av1_ccdf_eob_extra(cc, txsz_ctx, ptype, eob_pt - 3), 2,
-            (extra_val >> (nb - 1)) & 1);
+              (extra_val >> (nb - 1)) & 1);
             var i = 1;
             while (i < nb) {
                 av1_sym_encode_bool(enc, (extra_val >> (nb - 1 - i)) & 1);

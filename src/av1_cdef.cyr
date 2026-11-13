@@ -288,8 +288,8 @@ fn av1_cdef_frame_new(curr, out_err): i64 {
     var b = dr_frame_border(curr);
     if (b < 8) { b = 8; }
     return dr_frame_new(dr_frame_width(curr), dr_frame_height(curr),
-    dr_frame_num_planes(curr), dr_frame_subx(curr), dr_frame_suby(curr),
-    dr_frame_bit_depth(curr), b, out_err);
+      dr_frame_num_planes(curr), dr_frame_subx(curr), dr_frame_suby(curr),
+      dr_frame_bit_depth(curr), b, out_err);
 }
 
 # CDEF block process (7.15.1) for the 8x8 luma block at MI (r, c) with parameter

@@ -127,14 +127,14 @@ fn mi_rt(mi, mi_size, has_chroma, au, aym, al, lym, ask, lsk, lossless, subx, su
     if (disable == 0) { nce = av1_ncdf_new(); ncd = av1_ncdf_new(); }
     var enc = av1_sym_enc_init(64, disable);
     av1_intra_frame_mode_info_encode(enc, nce, mi, mi_size, has_chroma,
-    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0, 0);
+      au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, disable);
     av1_intra_frame_mode_info_decode(sd, ncd, dmi, mi_size, has_chroma,
-    au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0, 0);
+      au, aym, al, lym, ask, lsk, lossless, subx, suby, efi, 0, 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
     mi_assert(mi, dmi, tag);
     return 0;
@@ -331,7 +331,7 @@ fn test_cdef_wired_rt() {
     store64(mi + AV1MI_YMODE, 0);                    # DC_PRED
     var enc = av1_sym_enc_init(64, 1);
     av1_intra_frame_mode_info_encode(enc, av1_noncoeff_cdf_blob(), mi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0, 0);
+      0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "enc ok");
     assert_eq(load64(eg + 0), 5, "encode filled the tracking grid anchor");
     var olen = 0;
@@ -341,7 +341,7 @@ fn test_cdef_wired_rt() {
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, 1);
     av1_intra_frame_mode_info_decode(sd, av1_noncoeff_cdf_blob(), dmi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0, 0);
+      0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "dec ok");
     assert_eq(load64(dmi + AV1MI_YMODE), 0, "y_mode round-trips (cdef bits aligned)");
     assert_eq(load64(dg + 0), 5, "cdef_idx read into the grid at the right position");
@@ -359,7 +359,7 @@ fn test_cdef_wired_skip() {
     store64(mi + AV1MI_YMODE, 0);
     var enc = av1_sym_enc_init(64, 1);
     av1_intra_frame_mode_info_encode(enc, av1_noncoeff_cdf_blob(), mi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0, 0);
+      0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, eg, stride, plan), 0, 0, 0);
     assert_eq(load64(eg + 0), 0 - 1, "skip -> no cdef emitted, grid stays -1");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -368,7 +368,7 @@ fn test_cdef_wired_skip() {
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, 1);
     av1_intra_frame_mode_info_decode(sd, av1_noncoeff_cdf_blob(), dmi, 3, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0, 0);
+      0, 0, 0, 0, 0, 0, mk_cdef_ctx(1, 3, dg, stride, 0), 0, 0, 0);
     assert_eq(load64(dmi + AV1MI_SKIP), 1, "skip round-trips");
     assert_eq(load64(dg + 0), 0 - 1, "skip -> no cdef read, grid stays -1");
     return 0;
@@ -713,7 +713,7 @@ fn test_read_segment_id_rt() {
     while (s2 <= 4) { seg_rt(fh, g, 1, 1, 1, 0, s2, "rt above=2"); s2 = s2 + 1; }
     # skip=1 short-circuits to pred (no symbol) — read == pred regardless of the coder.
     var got = av1_read_segment_id(av1_sym_dec_init(alloc(8), 8, 1), av1_noncoeff_cdf_blob(),
-    fh, g, 4, 1, 1, 1, 0, 1);
+      fh, g, 4, 1, 1, 1, 0, 1);
     assert_eq(got, 2, "skip -> pred (above=2)");
     return 0;
 }
@@ -750,12 +750,12 @@ fn test_write_segment_id_skip_mirror() {
     # no neighbours -> pred 0: a skip block with segid 0 writes nothing; segid 1 is unrepresentable.
     assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 1, 0), DR_OK, "skip segid==pred(0) -> ok");
     assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 1, 1), DR_ERR_BOUNDS,
-    "skip segid=1 != pred=0 -> bounds (would desync the map)");
+      "skip segid=1 != pred=0 -> bounds (would desync the map)");
     # above neighbour = 1 -> pred 1: now segid 1 is representable, segid 0 is not.
     store64(g + ((0 * 4 + 1) * 8), 1);
     assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 1, 0, 1, 1), DR_OK, "skip segid==pred(1) -> ok");
     assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 1, 0, 1, 0), DR_ERR_BOUNDS,
-    "skip segid=0 != pred=1 -> bounds");
+      "skip segid=0 != pred=1 -> bounds");
     return 0;
 }
 

@@ -6,6 +6,22 @@
 
 ## Version
 
+**0.7.131** — cut 2026-11-13, not yet tagged (user's git). **Toolchain patch: cyrius 6.6.2 -> 6.6.20, and
+`lib/` re-synced to the 6.6.20 bundled snapshot** (`cyrius lib sync --relock --full`: byte-identical to the
+snapshot, and the twelve held-back undeclared bundles are current). No decoder logic changed.
+**`make lint` and `make fmt-check` are green again.** Both had been red since 0.7.130.
+- lint: four stale "Deferred" comments that the 6.6.20 linter now catches were reworded, and three
+  over-120-column lines were wrapped.
+- fmt-check: 49 files got a whitespace-only `cyrius fmt` re-indent (937 lines). All 45 program and
+  harness binaries are byte-identical before and after.
+**ALL gates green:** 38 suites with **30,300** suite + **7,410** fuzz assertions, bench, vet, lint,
+fmt-check, version-check, `distlib --check`, and `make conformance` (strict: **33 matched / 0 known-gap /
+0 regressed**). New tool-generated files: `cyrius.lock` and `dist/drishti.deps`. The roadmap's toolchain
+references (still "6.6.2") were not refreshed in this cut.
+
+**0.7.130** — cut 2026-09-10. Toolchain patch, cyrius 6.4.78 -> 6.6.2 (the `Result`/`Option` value form);
+no source change was needed. `dist/` was not regenerated at this cut, and this file was not refreshed.
+
 **0.7.129** — cut 2026-07-26, not yet tagged (user's git). **AV1 DECODE IS CONFORMANCE-CLEAN ON THE GATE:
 `make conformance` = 33 matched / 0 KNOWN-GAP / 0 regressed. Every case — all eight published libaom
 vectors, the generated corpus WITH and WITHOUT loop filters, and the committed reproducers — is BIT-EXACT
@@ -1374,17 +1390,21 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.78` (in `cyrius.cyml [package].cyrius`) — bumped from 6.4.46 at the 0.7.128 cut (it had sat there since 0.7.7, when `>>>` landed; nothing since required a newer toolchain, so this is hygiene). Min
-  version for the arithmetic-shift operator `>>>`. The pin is the
-  *minimum*; any newer installed `cycc` (**6.4.64** at the 0.7.79 cut, and it
-  moves) compiles clean and only emits a harmless drift note — do not chase
-  the number, the contract is that drift is expected and benign. **Set
-  `CYRIUS_NO_WARN_PIN_DRIFT=1`** in the env for clean build/test/lint
-  output; a local `./lib/` also shadows the pinned stdlib and warns, so
-  **`CYRIUS_NO_WARN_SHADOW_LIB=1`** too. Bump the pin only when a new
-  toolchain feature is actually used (none needed so far past 6.4.46).
-- **`lib/`**: materialized by `cyrius deps` — real directory, never a
-  symlink, never committed.
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`). History:
+  6.4.46 at 0.7.7 (when `>>>` landed), 6.4.78 at 0.7.128, 6.6.2 at 0.7.130,
+  6.6.20 at 0.7.131. Under the 6.6.x wrapper the pin **selects** the
+  toolchain: `cyrius --version` reports `manifest-pin`, and that exact
+  version runs, regardless of the newer wrapper at `~/.cyrius/bin`. Build,
+  test and lint run with no pin-drift or lib-shadow warnings at this pin.
+  - `cyrius fmt <file>` **rewrites in place** in 6.6.x. Use `--check` or
+    `--dry` to report only.
+  - The 6.6.x formatter's continuation indent is 2 spaces per open paren
+    (4 accepted). The tree was brought into line at 0.7.131.
+- **`lib/`**: a real directory (never a symlink; `make check-lib-wiring`
+  enforces it), **committed**, and byte-identical to the pinned toolchain's
+  bundled snapshot. It is refreshed with `cyrius lib sync --full`, plus
+  `--relock` when a build under a just-moved pin has already locked the old
+  rows. `cyrius.lock` records a sha256 per file (`cyrius deps --verify`).
 
 ## Source (40 `[lib]` modules, dependency order)
 

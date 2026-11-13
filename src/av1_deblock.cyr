@@ -300,17 +300,17 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     # block, so prev and current are the same block and the two terms duplicate skip /
     # is_intra. Dropping them survives the suite for that reason, not for want of a fixture.
     if ((is_tx_edge != 0) && (is_block_edge || (skip == 0) || (prev_skip == 0)
-    || is_intra || prev_is_intra)) { apply = 1; }
+        || is_intra || prev_is_intra)) { apply = 1; }
     var filter_size = av1_lf_filter_size(tx_sz, prev_tx_sz, pass, plane);
     # 7.14.5 adaptive strength for THIS block; if it comes out 0 the spec re-derives it at the
     # PREVIOUS block (an edge between a zero-level and a non-zero-level block is still
     # filtered, at the neighbour's level). av1_lf_strength already implemented the ref/mode
     # deltas — it was simply never handed a real ref or mode_type.
     var lvl = av1_lf_strength(fh, plane, pass, ref0,
-    av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)), 0);
+      av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)), 0);
     if (lvl == 0) {
         lvl = av1_lf_strength(fh, plane, pass, prev_ref0,
-        av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)), 0);
+          av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)), 0);
     }
     var lim = alloc(3 * 8);
     av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);
@@ -318,7 +318,7 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
         var i = 0;
         while (i < AV1_MI_SIZE) {
             av1_lf_sample(frame, plane, xp + (dy * i), yp + (dx * i),
-            load64(lim + 0), load64(lim + 8), load64(lim + 16), dx, dy, filter_size);
+              load64(lim + 0), load64(lim + 8), load64(lim + 16), dx, dy, filter_size);
             i = i + 1;
         }
     }

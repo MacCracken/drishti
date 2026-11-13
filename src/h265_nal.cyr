@@ -285,7 +285,7 @@ fn h265_rbsp_extract(ebsp, size, out_rbsp, out_size): i64 {
         # 7.3.1.1 window: bytes i, i+1, i+2 all inside the payload.
         if ((i + 2) < size) {
             if ((load8(ebsp + i) == 0) && (load8(ebsp + i + 1) == 0)
-            && (load8(ebsp + i + 2) == 3)) {
+              && (load8(ebsp + i + 2) == 3)) {
                 # Copy the two zeros, discard the 0x03 EPB.
                 store8(rbsp + n, 0);
                 store8(rbsp + n + 1, 0);

@@ -544,7 +544,7 @@ fn test_cfl_maxluma_hostile() {
     cfl_fill(b, 0, 0, 8, 8, 32, 200);
     cfl_fill(b, 1, 0, 0, 4, 32, 128);
     assert_eq(av1_predict_chroma_from_luma(b, 1, 0, 0, 2, 5, 4, 1000000, 1000000), DR_OK,
-    "cfl hostile maxluma still ok");
+      "cfl hostile maxluma still ok");
     var i = 0;
     var diff = 0;
     while (i < 32) {

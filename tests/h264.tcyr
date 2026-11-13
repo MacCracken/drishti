@@ -160,7 +160,7 @@ fn test_h264_find_start_code() {
     b = alloc(4);
     store8(b, 0); store8(b + 1, 0); store8(b + 2, 1); store8(b + 3, 0x41);
     assert_eq(h264_find_start_code(b, 4, 1, &sc_len), H264_NAL_END,
-    "from past sc -> END");
+      "from past sc -> END");
     return 0;
 }
 
@@ -258,7 +258,7 @@ fn test_h264_scan_edges() {
     assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "zero-length nal yields");
     assert_eq(sz, 0, "size 0");
     assert_eq(h264_nal_hdr_parse(nal, sz, &ref, &typ), DR_ERR_TRUNCATED,
-    "size-0 nal -> header truncated");
+      "size-0 nal -> header truncated");
     assert_eq(h264_scan_next(s, &nal, &sz), DR_OK, "second nal yields");
     assert_eq(sz, 1, "second nal size 1");
     assert_eq(load8(nal), 0x4A, "second nal byte");
@@ -275,16 +275,16 @@ fn test_h264_scan_edges() {
     store8(b, 0xAA); store8(b + 1, 0xBB);
     s = h264_scan_init(b, 2);
     assert_eq(h264_scan_next(s, &nal, &sz), H264_ERR_NO_START_CODE,
-    "no sc -> error");
+      "no sc -> error");
     assert_eq(h264_scan_next(s, &nal, &sz), H264_ERR_NO_START_CODE,
-    "error is sticky");
+      "error is sticky");
     assert_eq(h264_scan_err(s), H264_ERR_NO_START_CODE, "sticky code readable");
     # All-zero buffer: still no start code (00 00 01 never appears).
     b = alloc(4);
     store8(b, 0); store8(b + 1, 0); store8(b + 2, 0); store8(b + 3, 0);
     s = h264_scan_init(b, 4);
     assert_eq(h264_scan_next(s, &nal, &sz), H264_ERR_NO_START_CODE,
-    "all zeros -> no start code");
+      "all zeros -> no start code");
     # Empty buffer: clean end, not an error.
     s = h264_scan_init(b, 0);
     assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "empty -> clean end");
@@ -331,10 +331,10 @@ fn test_h264_nal_hdr() {
     # forbidden_zero_bit set (7.4.1: shall be 0): 0xE7 = 0x80 | 0x67.
     store8(b, 0xE7);
     assert_eq(h264_nal_hdr_parse(b, 1, &ref, &typ), DR_ERR_FORBIDDEN_BIT,
-    "forbidden bit -> error");
+      "forbidden bit -> error");
     # Empty NAL.
     assert_eq(h264_nal_hdr_parse(b, 0, &ref, &typ), DR_ERR_TRUNCATED,
-    "len 0 -> truncated");
+      "len 0 -> truncated");
     # Type names never null.
     assert(h264_nal_type_name(H264_NAL_SPS) != 0, "SPS name non-null");
     assert(h264_nal_type_name(17) != 0, "reserved type name non-null");
@@ -393,7 +393,7 @@ fn test_h264_epb_strip() {
     assert_eq(olen, 0, "empty stays empty");
     # Negative length.
     assert_eq(h264_rbsp_extract(b, -1, &out, &olen), DR_ERR_BOUNDS,
-    "negative len -> bounds");
+      "negative len -> bounds");
     return 0;
 }
 
@@ -448,7 +448,7 @@ fn test_h264_epb_insert() {
     assert_eq(olen, 0, "empty stays empty");
     # Negative length.
     assert_eq(h264_epb_insert(b, -1, &out, &olen), DR_ERR_BOUNDS,
-    "negative len -> bounds");
+      "negative len -> bounds");
 
     # Round-trip: extract(insert(x)) == x on a vector hitting every
     # boundary pattern plus a long zero run.
@@ -469,7 +469,7 @@ fn test_h264_epb_insert() {
     var bad = 0;
     while ((i + 2) < elen) {
         if ((load8(enc + i) == 0) && (load8(enc + i + 1) == 0)
-        && (load8(enc + i + 2) <= 2)) { bad = 1; }
+          && (load8(enc + i + 2) <= 2)) { bad = 1; }
         i = i + 1;
     }
     assert_eq(bad, 0, "no prohibited pattern survives insert");
@@ -489,7 +489,7 @@ fn test_h264_annexb_wrap() {
     var slen = 0;
     var sps = fx_h264_sps_qcif(&slen);
     assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps, slen, 1, &out, &olen),
-    DR_OK, "sps wraps");
+      DR_OK, "sps wraps");
     assert_eq(olen, 4 + 1 + 7, "4-byte sc + hdr + 7 payload (no EPB needed)");
     assert_eq(load8(out), 0, "sc byte 0");
     assert_eq(load8(out + 1), 0, "sc byte 1");
@@ -499,7 +499,7 @@ fn test_h264_annexb_wrap() {
     assert(fx_h264_bytes_eq(out + 5, sps, 7), "payload verbatim");
     # Short start code form.
     assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps, slen, 0, &out, &olen),
-    DR_OK, "short-sc wrap");
+      DR_OK, "short-sc wrap");
     assert_eq(olen, 3 + 1 + 7, "3-byte sc + hdr + payload");
     assert_eq(load8(out + 2), 1, "3-byte sc");
     assert_eq(load8(out + 3), 0x67, "hdr after 3-byte sc");
@@ -510,7 +510,7 @@ fn test_h264_annexb_wrap() {
     store8(raw + 1, 0); store8(raw + 2, 0); store8(raw + 3, 1);   # 00 00 01 inside
     store8(raw + 4, 0xBB);
     assert_eq(h264_annexb_wrap(2, H264_NAL_SLICE, raw, 5, 1, &out, &olen),
-    DR_OK, "hostile payload wraps");
+      DR_OK, "hostile payload wraps");
     assert_eq(olen, 4 + 1 + 6, "one EPB inserted");
     var s = h264_scan_init(out, olen);
     var nal = 0; var nsz = 0;
@@ -525,26 +525,26 @@ fn test_h264_annexb_wrap() {
     assert_eq(typ, H264_NAL_SLICE, "type round-trips");
     var dec = 0; var dlen = 0;
     assert_eq(h264_rbsp_extract(nal + 1, olen - 5, &dec, &dlen), DR_OK,
-    "payload extracts");
+      "payload extracts");
     assert_eq(dlen, 5, "payload length restored");
     assert(fx_h264_bytes_eq(dec, raw, 5), "payload bytes restored");
     # 7.4.1 header validation on the encode side.
     assert_eq(h264_annexb_wrap(0, H264_NAL_SPS, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "ref_idc 0 SPS rejected");
+      DR_ERR_BAD_HEADER, "ref_idc 0 SPS rejected");
     assert_eq(h264_annexb_wrap(0, H264_NAL_IDR, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "ref_idc 0 IDR rejected");
+      DR_ERR_BAD_HEADER, "ref_idc 0 IDR rejected");
     assert_eq(h264_annexb_wrap(3, H264_NAL_SEI, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "ref_idc 3 SEI rejected");
+      DR_ERR_BAD_HEADER, "ref_idc 3 SEI rejected");
     assert_eq(h264_annexb_wrap(1, H264_NAL_AUD, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "ref_idc 1 AUD rejected");
+      DR_ERR_BAD_HEADER, "ref_idc 1 AUD rejected");
     assert_eq(h264_annexb_wrap(3, 0, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "type 0 rejected");
+      DR_ERR_BAD_HEADER, "type 0 rejected");
     assert_eq(h264_annexb_wrap(3, 32, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "type 32 rejected");
+      DR_ERR_BAD_HEADER, "type 32 rejected");
     assert_eq(h264_annexb_wrap(4, H264_NAL_SPS, sps, slen, 1, &out, &olen),
-    DR_ERR_BAD_HEADER, "ref_idc 4 rejected");
+      DR_ERR_BAD_HEADER, "ref_idc 4 rejected");
     assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps, -1, 1, &out, &olen),
-    DR_ERR_BOUNDS, "negative payload len rejected");
+      DR_ERR_BOUNDS, "negative payload len rejected");
     return 0;
 }
 
@@ -617,7 +617,7 @@ fn test_h264_sps_writer_crosscheck() {
     var hlen = 0;
     var hand = fx_h264_sps_qcif(&hlen);
     assert(fx_h264_bytes_eq(dr_bw_buf(bw), hand, 7),
-    "writer output == hand vector, byte for byte");
+      "writer output == hand vector, byte for byte");
     # And the writer-built bytes parse to the same geometry.
     var e = 0;
     var sps = h264_sps_parse(dr_bw_buf(bw), n, &e);
@@ -1103,13 +1103,13 @@ fn test_h264_stream_end_to_end() {
     var n2 = 0; var l2 = 0;
     var n3 = 0; var l3 = 0;
     assert_eq(h264_annexb_wrap(3, H264_NAL_SPS, sps_rbsp, slen, 1, &n0, &l0),
-    DR_OK, "sps wraps");
+      DR_OK, "sps wraps");
     assert_eq(h264_annexb_wrap(3, H264_NAL_PPS, pps_rbsp, plen, 1, &n1, &l1),
-    DR_OK, "pps wraps");
+      DR_OK, "pps wraps");
     assert_eq(h264_annexb_wrap(0, H264_NAL_SEI, sei_rbsp, 4, 0, &n2, &l2),
-    DR_OK, "sei wraps");
+      DR_OK, "sei wraps");
     assert_eq(h264_annexb_wrap(3, H264_NAL_IDR, idr_rbsp, 9, 1, &n3, &l3),
-    DR_OK, "idr wraps");
+      DR_OK, "idr wraps");
     # Concatenate into one Annex-B stream.
     var total = l0 + l1 + l2 + l3;
     var stream = alloc(total);
@@ -1129,7 +1129,7 @@ fn test_h264_stream_end_to_end() {
     # Unwrap + parse the SPS through the real decode path.
     var rb = 0; var rblen = 0;
     assert_eq(h264_rbsp_extract(nal + 1, sz - 1, &rb, &rblen), DR_OK,
-    "sps rbsp extracts");
+      "sps rbsp extracts");
     var sps = h264_sps_parse(rb, rblen, &e);
     assert(sps != 0, "e2e sps parses");
     assert_eq(h264_sps_width(sps), 176, "e2e sps width");
@@ -1138,7 +1138,7 @@ fn test_h264_stream_end_to_end() {
     h264_nal_hdr_parse(nal, sz, &ref, &typ);
     assert_eq(typ, H264_NAL_PPS, "e2e nal 2 = PPS");
     assert_eq(h264_rbsp_extract(nal + 1, sz - 1, &rb, &rblen), DR_OK,
-    "pps rbsp extracts");
+      "pps rbsp extracts");
     var pps = h264_pps_parse(rb, rblen, &e);
     assert(pps != 0, "e2e pps parses");
     assert_eq(h264_pps_entropy_coding_mode(pps), 1, "e2e pps is CABAC");
@@ -1151,7 +1151,7 @@ fn test_h264_stream_end_to_end() {
     assert_eq(typ, H264_NAL_IDR, "e2e nal 4 = IDR");
     # The hostile IDR payload survives the EPB round trip on the wire.
     assert_eq(h264_rbsp_extract(nal + 1, sz - 1, &rb, &rblen), DR_OK,
-    "idr rbsp extracts");
+      "idr rbsp extracts");
     assert_eq(rblen, 9, "idr payload length restored");
     assert(fx_h264_bytes_eq(rb, idr_rbsp, 9), "idr payload bytes restored");
     assert_eq(h264_scan_next(s, &nal, &sz), H264_NAL_END, "e2e clean end");

@@ -89,20 +89,20 @@ fn av1_lr_params_from_fh(fh, seq, uw, fh_h, np, out_err): i64 {
     store64(out_err, DR_OK);
     if (av1_fh_uses_lr(fh) == 0) { return 0; }
     var params = av1_lr_params_new(uw, fh_h, np, av1_seq_subsampling_x(seq),
-    av1_seq_subsampling_y(seq), 1);
+      av1_seq_subsampling_y(seq), 1);
     if (params == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     var plane = 0;
     while (plane < np) {
         var rtype = av1_fh_frame_restoration_type(fh, plane);
         if (rtype != AV1_RESTORE_NONE) {
             var rc = av1_lr_params_set_plane(params, plane, rtype,
-            av1_fh_loop_restoration_size(fh, plane));
+              av1_fh_loop_restoration_size(fh, plane));
             if (rc != DR_OK) { store64(out_err, rc); return 0; }
         }
         plane = plane + 1;
     }
     av1_lr_params_set_frame_flags(params, av1_fh_allow_intrabc(fh),
-    av1_fh_use_superres(fh), av1_fh_superres_denom(fh));
+      av1_fh_use_superres(fh), av1_fh_superres_denom(fh));
     return params;
 }
 
@@ -123,7 +123,7 @@ fn av1_activate_intra_filters(tile, seq, fh, lr_params): i64 {
     av1_tile_set_lr_params(tile, lr_params);
     if (av1_seq_enable_cdef(seq) != 0) {
         return av1_tile_set_cdef_ctx(tile, av1_seq_enable_cdef(seq),
-        av1_fh_cdef_bits(fh), av1_fh_coded_lossless(fh), av1_fh_allow_intrabc(fh), 0);
+          av1_fh_cdef_bits(fh), av1_fh_coded_lossless(fh), av1_fh_allow_intrabc(fh), 0);
     }
     return DR_OK;
 }
@@ -249,7 +249,7 @@ fn av1_tile_group_parse(tg, buf, sz, fh, out_err): i64 {
     var tile_cols = av1_fh_tile_cols(fh);
     var tile_rows = av1_fh_tile_rows(fh);
     if ((tile_cols <= 0) || (tile_rows <= 0)
-    || (tile_cols > AV1_MAX_TILE_COLS) || (tile_rows > AV1_MAX_TILE_ROWS)) {
+      || (tile_cols > AV1_MAX_TILE_COLS) || (tile_rows > AV1_MAX_TILE_ROWS)) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
     var num_tiles = tile_cols * tile_rows;
@@ -357,7 +357,7 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # named context tile). A single-tile frame forces context_update_tile_id = 0, and a non-adapting
     # frame's saved CDFs are its (tile-independent) initial context, so both are handled.
     if ((av1_fh_disable_frame_end_update_cdf(fh) == 0)
-    && (av1_fh_context_update_tile_id(fh) != 0)) {
+      && (av1_fh_context_update_tile_id(fh) != 0)) {
         store64(out_err, DR_ERR_UNSUPPORTED);
         return 0;
     }
@@ -390,13 +390,13 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # second with room to spare. Reported plane dims are unchanged, so CDEF, loop restoration,
     # superres and the output crop all still measure the VISIBLE frame.
     var frame = dr_frame_new_ext(av1_fh_frame_width(fh), av1_fh_frame_height(fh),
-    av1_decode_alloc_w(fh), av1_decode_alloc_h(fh),
-    num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),
-    av1_seq_bitdepth(seq), AV1_DECODE_BORDER, out_err);
+      av1_decode_alloc_w(fh), av1_decode_alloc_h(fh),
+      num_planes, av1_seq_subsampling_x(seq), av1_seq_subsampling_y(seq),
+      av1_seq_bitdepth(seq), AV1_DECODE_BORDER, out_err);
     if (frame == 0) { return 0; }   # dr_frame_new already wrote the precise cause
     var terr = 0;
     var lr_params = av1_lr_params_from_fh(fh, seq, av1_fh_upscaled_width(fh),
-    av1_fh_frame_height(fh), num_planes, &terr);
+      av1_fh_frame_height(fh), num_planes, &terr);
     if (terr != DR_OK) { store64(out_err, terr); return 0; }
     var fdc = alloc(AV1FDEC_SIZE);   # AV1FDEC_SIZE bytes
     if (fdc == 0) { store64(out_err, DR_ERR_OOM); return 0; }
@@ -459,7 +459,7 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         var row_start = av1_fh_mi_row_start(fh, trow);
         var row_end = av1_fh_mi_row_start(fh, trow + 1);
         var tile = av1_tile_new(frame, col_end - col_start, row_end - row_start,
-        base_q, enable_ef, reduced_tx, num_planes);
+          base_q, enable_ef, reduced_tx, num_planes);
         if (tile == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
         store64(tile + AV1TILE_TX_MODE, tx_mode);
         store64(tile + AV1TILE_ENABLE_FI, enable_fi);
@@ -484,12 +484,12 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
             var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
             if (ir != DR_OK) { store64(out_err, ir); return 0 - 1; }
             var dri = av1_decode_inter_tile(tile, buf + av1_tg_tile_offset(tg, tn),
-            av1_tg_tile_size(tg, tn), disable_cdf);
+              av1_tg_tile_size(tg, tn), disable_cdf);
             if (dri != DR_OK) { store64(out_err, dri); return 0 - 1; }
             tn = tn + 1;
         } else {
             var dr = av1_decode_intra_tile(tile, buf + av1_tg_tile_offset(tg, tn),
-            av1_tg_tile_size(tg, tn), disable_cdf);
+              av1_tg_tile_size(tg, tn), disable_cdf);
             if (dr != DR_OK) { store64(out_err, dr); return 0 - 1; }
             tn = tn + 1;
         }
@@ -648,7 +648,7 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
             var o = av1_obu_iter_obu(it);
             var ferr = 0;
             fh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
-            av1_obu_sid(o), buf + ooff, osize, &ferr);
+              av1_obu_sid(o), buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
             if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
         }
@@ -661,7 +661,7 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
             var of = av1_obu_iter_obu(it);
             var frr = 0;
             var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
-            av1_obu_sid(of), buf + ooff, osize, &frr);
+              av1_obu_sid(of), buf + ooff, osize, &frr);
             if (frr != DR_OK) { store64(out_err, frr); return 0; }
             if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
             # headerBytes = ceil(bits_consumed / 8): the byte_alignment() after the

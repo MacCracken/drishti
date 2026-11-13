@@ -130,7 +130,7 @@ fn mcs_ident(name, fw, fh, planes, subx, suby, bd, plane, x, y, w, h, mvr, mvc, 
     assert_eq(step, 1024, name);
     var o = mcs_out();
     assert_eq(av1_mc_put_8tap_scaled(o, 0, w, ref, plane, startx, starty, step, step,
-    w, h, fx, fy, bd, 0), DR_OK, name);
+        w, h, fx, fy, bd, 0), DR_OK, name);
     var bad = 0;
     var r = 0;
     while (r < h) {
@@ -177,7 +177,7 @@ fn test_mc_scaled_identity() {
 # 16 phases, rows summing to 128, spec InterRound0/InterRound1 — so agreement with drishti's
 # halved dav1d convention is a cross-convention result).
 fn mcs_mc(name, rw, rh, dw, dh, planes, subx, suby, bd, plane, x, y, w, h, mvr, mvc,
-fx, fy, comp, cs, first, last) {
+  fx, fy, comp, cs, first, last) {
     var oe = alloc(8);
     var ref = dr_frame_new(rw, rh, planes, subx, suby, bd, 0, oe);
     assert_eq(load64(oe), DR_OK, name);
@@ -195,8 +195,8 @@ fx, fy, comp, cs, first, last) {
     assert_eq(av1_mc_scale_valid(rw, rh, dw, dh), 1, name);
     var o = mcs_out();
     assert_eq(av1_mc_put_8tap_scaled(o, 0, w, ref, plane,
-    av1_mc_scaled_start(x, mvc, sx, xs), av1_mc_scaled_start(y, mvr, sy, ys),
-    av1_mc_scaled_step(xs), av1_mc_scaled_step(ys), w, h, fx, fy, bd, comp), DR_OK, name);
+        av1_mc_scaled_start(x, mvc, sx, xs), av1_mc_scaled_start(y, mvr, sy, ys),
+        av1_mc_scaled_step(xs), av1_mc_scaled_step(ys), w, h, fx, fy, bd, comp), DR_OK, name);
     assert_eq(mcs_cs(o, w, h), cs, name);
     assert_eq(load64(o + 0), first, name);
     assert_eq(load64(o + ((((h - 1) * w) + (w - 1)) * 8)), last, name);
@@ -207,10 +207,10 @@ fn test_mc_scaled_known_answers() {
     mcs_mc("s01 2x-down luma", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 0, 177987, 178, 103);
     mcs_mc("s02 2x-up luma", 64, 64, 32, 32, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 0, 261315, 218, 112);
     mcs_mc("s03 2x-up h128 maxmid", 64, 64, 32, 32, 1, 0, 0, 8, 0, 0, 0, 8, 128, 0, 0, 0, 0, 0,
-    63933595, 21, 182);
+      63933595, 21, 182);
     mcs_mc("s04 asymmetric", 40, 24, 20, 18, 1, 0, 0, 8, 0, 4, 3, 8, 8, 11, 19, 0, 0, 0, 277054, 167, 213);
     mcs_mc("s05 neg clamp", 48, 48, 32, 32, 1, 0, 0, 8, 0, 0, 0, 8, 8, 0 - 40, 0 - 40, 0, 0, 0,
-    105746, 0, 186);
+      105746, 0, 186);
     mcs_mc("s06 far clamp", 48, 48, 32, 32, 1, 0, 0, 8, 0, 24, 24, 8, 8, 200, 200, 0, 0, 0, 526240, 253, 253);
     mcs_mc("s07 chroma 420", 40, 24, 20, 18, 3, 1, 1, 8, 1, 2, 2, 4, 4, 7, 0 - 5, 0, 0, 0, 16183, 236, 193);
     mcs_mc("s08 10-bit", 32, 32, 16, 16, 1, 0, 0, 10, 0, 4, 4, 8, 8, 0 - 3, 5, 0, 0, 0, 1590450, 427, 92);
@@ -218,7 +218,7 @@ fn test_mc_scaled_known_answers() {
     mcs_mc("s10 sharp", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 2, 2, 0, 176515, 184, 107);
     mcs_mc("s11 mixed filters", 40, 24, 20, 18, 1, 0, 0, 8, 0, 4, 3, 8, 8, 11, 19, 1, 2, 0, 266936, 175, 207);
     mcs_mc("s12 bilinear scaled", 40, 24, 20, 18, 1, 0, 0, 8, 0, 4, 3, 8, 8, 11, 19, 3, 3, 0,
-    275724, 168, 202);
+      275724, 168, 202);
     mcs_mc("s13 w4 remap", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 4, 8, 5, 0 - 3, 0, 0, 0, 48737, 178, 37);
     mcs_mc("s14 compound", 32, 32, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 1, 2858049, 2850, 1654);
     mcs_mc("s15 16x-smaller", 4, 4, 64, 64, 1, 0, 0, 8, 0, 8, 6, 8, 8, 5, 0 - 3, 0, 0, 0, 18439, 0, 17);
@@ -233,44 +233,44 @@ fn test_mc_scaled_rejects() {
     mcd_fill(ref);
     var o = mcs_out();
     assert_eq(av1_mc_put_8tap_scaled(0, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: null out");
+      DR_ERR_BOUNDS, "scaled: null out");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, 0, 0, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: null ref");
+      DR_ERR_BOUNDS, "scaled: null ref");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 1, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: plane out of range");
+      DR_ERR_BOUNDS, "scaled: plane out of range");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0 - 1, 0, 0, 1024, 1024, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: negative plane");
+      DR_ERR_BOUNDS, "scaled: negative plane");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 0, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: zero width");
+      DR_ERR_BOUNDS, "scaled: zero width");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 129, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: oversize height");
+      DR_ERR_BOUNDS, "scaled: oversize height");
     # THE WRAPPING MULTIPLY. (h - 1) * stepy is an i64 multiply: h - 1 == 2^54 with
     # stepy == 1024 wraps the product to exactly 0, so av1_mc_scaled_mid_h returns 8 and an
     # intermediateHeight-only check would PASS — after which the vertical loop runs 2^54
     # iterations off the end of the buffer. Only bounding h itself catches it.
     assert_eq(av1_mc_scaled_mid_h((1 << 54) + 1, 1024), 8, "wrapped (h-1)*step gives midH 8");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, (1 << 54) + 1,
-    0, 0, 8, 0), DR_ERR_BOUNDS, "scaled: wrapping h rejected by the h cap");
+        0, 0, 8, 0), DR_ERR_BOUNDS, "scaled: wrapping h rejected by the h cap");
     # step bounds: 0 would make every output sample the same, and > 2048 is beyond the
     # conformance ratio and would overrun the intermediate.
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 0, 1024, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: zero stepX");
+      DR_ERR_BOUNDS, "scaled: zero stepX");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 4096, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: stepY beyond the conformance cap");
+      DR_ERR_BOUNDS, "scaled: stepY beyond the conformance cap");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 0 - 1024, 8, 8, 0, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: negative stepY");
+      DR_ERR_BOUNDS, "scaled: negative stepY");
     # filter index: 4 would read past the 6-set blob via av1_mc_subpel_row.
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 8, 4, 0, 8, 0),
-    DR_ERR_BOUNDS, "scaled: filter fx out of range");
+      DR_ERR_BOUNDS, "scaled: filter fx out of range");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0, 0, 1024, 1024, 8, 8, 0, 0 - 1, 8, 0),
-    DR_ERR_BOUNDS, "scaled: filter fy negative");
+      DR_ERR_BOUNDS, "scaled: filter fy negative");
     # a hostile START is SAFE by construction, not by a check: every reference read is
     # av1_clip3'd to the plane, and the vertical index depends only on (starty & 1023),
     # which is non-negative because Cyrius & is bitwise two's-complement.
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 0 - 999999, 0 - 999999, 1024, 1024,
-    8, 8, 0, 0, 8, 0), DR_OK, "scaled: hostile negative start is clamped, not rejected");
+        8, 8, 0, 0, 8, 0), DR_OK, "scaled: hostile negative start is clamped, not rejected");
     assert_eq(av1_mc_put_8tap_scaled(o, 0, 8, ref, 0, 999999, 999999, 1024, 1024,
-    8, 8, 0, 0, 8, 0), DR_OK, "scaled: hostile positive start is clamped");
+        8, 8, 0, 0, 8, 0), DR_OK, "scaled: hostile positive start is clamped");
     return 0;
 }
 
@@ -443,7 +443,7 @@ fn test_mc_scaled_selector_exact() {
     var over = dr_frame_new(32768, 8, 1, 0, 0, 8, 0, Mcd_Err);
     assert_eq(load64(Mcd_Err), DR_ERR_OVERSIZE, "selector: 32768-wide frame is over the cap");
     assert_eq(av1_scale_factor(32767, 32768), 1 << AV1_REF_SCALE_SHIFT,
-    "selector: 32767/32768 WOULD round to a unit scale factor");
+      "selector: 32767/32768 WOULD round to a unit scale factor");
     # ...and within the cap, a one-sample difference NEVER rounds to unit, on either side,
     # at the cap itself and just above/below the half-way points that bound the window.
     var bad = 0;
@@ -477,9 +477,9 @@ fn test_mc_compound_scaled() {
     # the difference far past +-1.
     var s = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     assert_eq(av1_mc_pred_block(s, rs, 0, 0, 0, 32, 32, 5, 0 - 3, 0, 0), DR_OK,
-    "compound scaled: single-ref scaled DR_OK");
+      "compound scaled: single-ref scaled DR_OK");
     assert_eq(av1_mc_pred_compound(d, rs, rs, 0, 0, 0, 32, 32, 5, 0 - 3, 5, 0 - 3, 0, 0, 8, 8,
-    0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound scaled: AVERAGE-of-self DR_OK");
+        0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound scaled: AVERAGE-of-self DR_OK");
     var big = 0;
     var y = 0;
     while (y < 32) {
@@ -498,10 +498,10 @@ fn test_mc_compound_scaled() {
     # than the whole block taking one path.
     var du = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     assert_eq(av1_mc_pred_compound(du, r, r, 0, 0, 0, 32, 32, 5, 0 - 3, 5, 0 - 3, 0, 0, 8, 8,
-    0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound scaled: both-unscaled DR_OK");
+        0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound scaled: both-unscaled DR_OK");
     var dm = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     assert_eq(av1_mc_pred_compound(dm, r, rs, 0, 0, 0, 32, 32, 5, 0 - 3, 5, 0 - 3, 0, 0, 8, 8,
-    0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound MIXED unscaled+scaled DR_OK (was UNSUPPORTED)");
+        0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "compound MIXED unscaled+scaled DR_OK (was UNSUPPORTED)");
     var nu = 0;
     var ns = 0;
     y = 0;
@@ -525,9 +525,9 @@ fn test_mc_compound_scaled() {
     var wm = warp_model();
     var dw = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     assert_eq(av1_warp_pred_block(dw, rs, 0, 0, 0, 32, 32, wm), DR_ERR_UNSUPPORTED,
-    "warp still rejects a scaled reference");
+      "warp still rejects a scaled reference");
     assert_eq(av1_warp_pred_block(dw, r, 0, 0, 0, 32, 32, wm), DR_OK,
-    "...but accepts an unscaled one (the reject is about SCALE, not the model)");
+      "...but accepts an unscaled one (the reject is about SCALE, not the model)");
     return 0;
 }
 
@@ -549,26 +549,26 @@ fn test_mc_pred_rejects() {
     var sub444 = dr_frame_new(24, 18, 3, 0, 0, 8, 0, Mcd_Err);
     mcd_fill(sub444);
     assert_eq(av1_mc_pred_block(d, sub444, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_UNSUPPORTED,
-    "subsampling mismatch");
+      "subsampling mismatch");
     # A reference whose SIZE RATIO is outside the 7.11.3.3 conformance bounds is a bitstream
     # ERROR (DR_ERR_BAD_HEADER), not an unsupported feature: at most 2x larger and at most
     # 16x smaller, per axis. Pinned on each axis in both directions.
     var too_wide = dr_frame_new(49, 18, 3, 1, 1, 8, 0, Mcd_Err);
     mcd_fill(too_wide);
     assert_eq(av1_mc_pred_block(d, too_wide, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
-    "ref more than 2x wide");
+      "ref more than 2x wide");
     var too_tall = dr_frame_new(24, 37, 3, 1, 1, 8, 0, Mcd_Err);
     mcd_fill(too_tall);
     assert_eq(av1_mc_pred_block(d, too_tall, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
-    "ref more than 2x tall");
+      "ref more than 2x tall");
     var too_narrow = dr_frame_new(1, 18, 3, 1, 1, 8, 0, Mcd_Err);
     mcd_fill(too_narrow);
     assert_eq(av1_mc_pred_block(d, too_narrow, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
-    "ref more than 16x narrow");
+      "ref more than 16x narrow");
     var too_short = dr_frame_new(24, 1, 3, 1, 1, 8, 0, Mcd_Err);
     mcd_fill(too_short);
     assert_eq(av1_mc_pred_block(d, too_short, 0, 4, 3, 8, 8, 0, 0, 0, 0), DR_ERR_BAD_HEADER,
-    "ref more than 16x short");
+      "ref more than 16x short");
     # ...and exactly AT each bound the reference is ACCEPTED — a lone reject case cannot
     # distinguish > from >=, so both sides of every comparator are pinned.
     var at2x = dr_frame_new(48, 36, 3, 1, 1, 8, 0, Mcd_Err);
@@ -590,9 +590,9 @@ fn test_mc_pred_rejects() {
     # the block-inside-plane check, reaching dr_frame_set with an unclamped coord (OOB write).
     # The subtraction-form guard (x > pw - w) must reject it cleanly.
     assert_eq(av1_mc_pred_block(d, ref, 0, 9223372036854775807, 0, 8, 8, 0, 0, 0, 0),
-    DR_ERR_BOUNDS, "x overflow guard bypass");
+      DR_ERR_BOUNDS, "x overflow guard bypass");
     assert_eq(av1_mc_pred_block(d, ref, 0, 0, 9223372036854775807, 8, 8, 0, 0, 0, 0),
-    DR_ERR_BOUNDS, "y overflow guard bypass");
+      DR_ERR_BOUNDS, "y overflow guard bypass");
     return 0;
 }
 
@@ -615,7 +615,7 @@ fn test_mc_compound_avg() {
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     # ref0 MV (row 16=+2px, col 8=+1px); ref1 MV (row -8=-1px, col 24=+3px). Filter 0.
     assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-    DR_OK, "compound-average decodes");
+      DR_OK, "compound-average decodes");
     var diff = 0;
     y = 0;
     while (y < 32) {
@@ -679,7 +679,7 @@ fn test_mc_compound_warp() {
     av1_warp_pred_block(s, r, 0, 0, 0, 32, 32, wm);   # the VERIFIED single-ref final warp
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     assert_eq(av1_mc_pred_compound(d, r, r, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, 0, wm, wm, 1, 1),
-    DR_OK, "compound warp: AVERAGE-of-self DR_OK");
+      DR_OK, "compound warp: AVERAGE-of-self DR_OK");
     var big = 0;
     var y = 0;
     while (y < 32) {
@@ -780,7 +780,7 @@ fn test_mc_compound_warp() {
         y = y + 1;
     }
     assert(dcorrect < dswapped,
-    "compound warp: m10 tracks ref0=warp lane, not the use_warp0<->use_warp1 swap");
+      "compound warp: m10 tracks ref0=warp lane, not the use_warp0<->use_warp1 swap");
     return 0;
 }
 
@@ -791,8 +791,8 @@ fn test_mc_compound_warp() {
 fn mcd_dist_oracle(r0, r1, fwd, bck, tag): i64 {
     var d = dr_frame_new(32, 32, 1, 0, 0, 8, 8, Mcd_Err);
     assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 16, 8, 0 - 8, 24, 0, 0, fwd, bck,
-    0, 0, 0, 0, 0, 0, 0, 0, 0),
-    DR_OK, tag);
+        0, 0, 0, 0, 0, 0, 0, 0, 0),
+      DR_OK, tag);
     var diff = 0;
     var y = 0;
     while (y < 32) {
@@ -873,8 +873,8 @@ fn mcd_diffwtd_case(bd, mask_type, tag): i64 {
     }
     var d = dr_frame_new(32, 32, 1, 0, 0, bd, 8, Mcd_Err);
     assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type,
-    0, 0, 0, 0, 0, 0, 0),
-    DR_OK, tag);
+        0, 0, 0, 0, 0, 0, 0),
+      DR_OK, tag);
     var ib = 4;
     if (bd == 12) { ib = 2; }
     var nsh = (bd - 8) + ib;
@@ -930,11 +930,11 @@ fn mcd_diffwtd_chroma_case(bd, mask_type, tag): i64 {
     }
     var d = dr_frame_new(32, 32, 3, 1, 1, bd, 8, Mcd_Err);
     assert_eq(av1_mc_pred_compound(d, r0, r1, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type,
-    0, 0, 0, 0, 0, 0, 0),
-    DR_OK, tag);
+        0, 0, 0, 0, 0, 0, 0),
+      DR_OK, tag);
     assert_eq(av1_mc_pred_compound(d, r0, r1, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, mask_type,
-    0, 0, 0, 0, 0, 0, 0),
-    DR_OK, tag);
+        0, 0, 0, 0, 0, 0, 0),
+      DR_OK, tag);
     var ib = 4;
     if (bd == 12) { ib = 2; }
     var nsh = (bd - 8) + ib;
@@ -1387,7 +1387,7 @@ fn test_wedge_cs() {
             while (sg < 2) {
                 av1_wedge_mask_build(ms, wi, sg, w, h);
                 assert_eq(wedge_cs(w, h), load64(exp + ((((r * 16) + wi) * 2) + sg) * 8),
-                "wedge mask checksum vs wedge_ref.py");
+                  "wedge mask checksum vs wedge_ref.py");
                 sg = sg + 1;
             }
             wi = wi + 1;
@@ -1487,7 +1487,7 @@ fn ii_orch_case(r0, ii_mode, tag): i64 {
     av1_intra_predict(tf, 0, 0, 0, 0, 0, 0, 0, imode, 0, 0, 0, 0, 0, 5, 5, 8, 8);
     var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
     assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, ii_mode, 0, 0,
-    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+        AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     av1_ii_smooth_mask_build(32, 32, 32, 32, ii_mode);
     var diff = 0;
     var i = 0;
@@ -1518,7 +1518,7 @@ fn ii_orch_chroma(r0, ii_mode, tag): i64 {
     av1_intra_predict(tf, 1, 0, 0, 0, 0, 0, 0, imode, 0, 0, 0, 0, 0, 4, 4, 8, 8);
     var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
     assert_eq(av1_mc_pred_interintra(df, r0, 1, 0, 0, 16, 16, 0, 0, 0, 0, ii_mode, 0, 0,
-    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+        AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     av1_ii_smooth_mask_build(16, 16, 16, 16, ii_mode);
     var diff = 0;
     var i = 0;
@@ -1553,7 +1553,7 @@ fn ii_warp_orch_case(r0, fdim, wm, ii_mode, bx, by, hl, hu, tag): i64 {
     assert_eq(av1_warp_pred_block(wf, r0, 0, bx, by, 32, 32, wm), DR_OK, tag);
     var df = dr_frame_new(fdim, fdim, 1, 0, 0, 8, 8, oe);
     assert_eq(av1_mc_pred_interintra_w(df, r0, 0, bx, by, 32, 32, 0, 0, 0, 0, ii_mode, 0, 0,
-    AV1_BLOCK_32X32, hl, hu, 8, 8, wm, 1), DR_OK, tag);
+        AV1_BLOCK_32X32, hl, hu, 8, 8, wm, 1), DR_OK, tag);
     av1_ii_smooth_mask_build(32, 32, 32, 32, ii_mode);
     var diff = 0;
     var i = 0;
@@ -1660,7 +1660,7 @@ fn iiw_luma(r0, wedge_idx, tag): i64 {
     av1_intra_predict(tf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 8, 8);
     var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
     assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 1, wedge_idx,
-    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+        AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     av1_wedge_mask_build(AV1_BLOCK_32X32, wedge_idx, 0, 32, 32);
     var diff = 0;
     var i = 0;
@@ -1686,9 +1686,9 @@ fn iiw_chroma(r0, wedge_idx, tag): i64 {
     var df = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
     # plane 0 builds the luma wedge mask (into Av1_McMask); plane 1 subsamples it.
     assert_eq(av1_mc_pred_interintra(df, r0, 0, 0, 0, 32, 32, 0, 0, 0, 0, 0, 1, wedge_idx,
-    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+        AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     assert_eq(av1_mc_pred_interintra(df, r0, 1, 0, 0, 16, 16, 0, 0, 0, 0, 0, 1, wedge_idx,
-    AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
+        AV1_BLOCK_32X32, 0, 0, 8, 8), DR_OK, tag);
     # oracle mask = the luma wedge mask 2x2-averaged (manual, independent of av1_diffwtd_mask_at).
     av1_wedge_mask_build(AV1_BLOCK_32X32, wedge_idx, 0, 32, 32);
     var diff = 0;

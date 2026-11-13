@@ -119,11 +119,11 @@ fn test_inter_tile_e2e() {
     assert_eq(av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb), DR_OK, "decode tile inter ctx");
     av1_grid_set(dt, AV1TILE_SKIPMODES, 4, 4, 7);    # the store-observability sentinel
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
-    "THE MILESTONE: an inter tile decodes end-to-end");
+      "THE MILESTONE: an inter tile decodes end-to-end");
     # the expectation, computed INDEPENDENTLY through the MC driver.
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     assert_eq(av1_mc_pred_block(xf, ref, 0, 0, 0, 64, 64, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP),
-    DR_OK, "independent MC prediction");
+      DR_OK, "independent MC prediction");
     var diff = 0;
     var y = 0;
     while (y < 64) {
@@ -138,10 +138,10 @@ fn test_inter_tile_e2e() {
     # spot known answer: the MV points INTO the reference (7.11.3.3 adds it), so
     # out(x, y) = ref(x + 1, y + 2) — at (10, 10): 11 + 2*12 = 35.
     assert_eq(dr_frame_get(df, 0, 10, 10), ((10 + 1) + (2 * (10 + 2))) & 255,
-    "spot KA: the shifted gradient");
+      "spot KA: the shifted gradient");
     # far-edge clamp: out(63, 63) <- ref(64, 65), clamped to ref(63, 63) = 189.
     assert_eq(dr_frame_get(df, 0, 63, 63), (63 + (2 * 63)) & 255,
-    "edge clamp: out-of-frame reference samples clamp to the edge");
+      "edge clamp: out-of-frame reference samples clamp to the edge");
     # the MI grid was populated (future blocks' scans read what this block stored).
     var cell = av1_mv_grid_cell(load64(dt + AV1TILE_MVGRID), 16, 4, 4);
     assert_eq(load64(cell + AV1MIR_REF0), AV1_LAST_FRAME, "MI grid: ref stored");
@@ -206,7 +206,7 @@ fn test_inter_frame_route() {
     assert_eq(load64(oe), DR_OK, "frame-level inter decode ok");
     assert_eq(out != 0, 1, "frame returned");
     assert_eq(dr_frame_get(out, 0, 10, 10), ((10 + 1) + (2 * (10 + 2))) & 255,
-    "frame-level pixels match the tile-level decode");
+      "frame-level pixels match the tile-level decode");
     var oe2 = alloc(8);
     assert_eq(av1_decode_frame_ref(seq, fh, 0, 0, tb, tlen, oe2), 0, "no DPB -> no frame");
     assert_eq(load64(oe2), DR_ERR_UNSUPPORTED, "no DPB -> UNSUPPORTED, never garbage");
@@ -232,7 +232,7 @@ fn test_tmvs_save_hook() {
     assert_eq(out != 0, 1, "tmvs hook: frame returned");
     assert_eq(av1_ref_saved_mf(refs, 0) != 0, 1, "tmvs hook: the save FIRED (slot 0 non-null)");
     assert_eq(av1_ref_saved_mf(refs, 5), av1_ref_saved_mf(refs, 0),
-    "tmvs hook: all refreshed slots ALIAS one buffer");
+      "tmvs hook: all refreshed slots ALIAS one buffer");
     return 0;
 }
 
@@ -643,7 +643,7 @@ fn test_inter_oh_header_parseback() {
     assert_eq(av1_fh_order_hint(ifh), 9, "OH inter: order_hint = 9 (explicit f(7))");
     assert_eq(av1_fh_primary_ref_frame(ifh), 7, "OH inter: primary_ref_frame = 7 read EXPLICITLY (never before)");
     assert_eq(av1_fh_frame_refs_short_signaling(ifh), 0,
-    "OH inter: frame_refs_short_signaling = 0 (read, was gated off)");
+      "OH inter: frame_refs_short_signaling = 0 (read, was gated off)");
     # OrderHints[LAST] = the key's order_hint (5) since ref_frame_idx[0] -> slot 0 = key.
     assert_eq(av1_fh_order_hint_ref(ifh, AV1_LAST_FRAME), 5, "OH inter: OrderHints[LAST] = key order_hint 5");
     # get_relative_dist(OrderHints[LAST]=5, OrderHint=9) is now NON-ZERO for the first time.
@@ -963,7 +963,7 @@ fn test_inter_stream_compound_oh() {
     var oe2 = alloc(8);
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
     av1_mc_pred_compound(xf, snapA, snapB, 0, 0, 0, 64, 64, mvr0, mvc0, mvr1, mvc1,
-    AV1_EIGHTTAP, AV1_EIGHTTAP, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      AV1_EIGHTTAP, AV1_EIGHTTAP, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     # and each single-reference MC, to prove neither ref alone reproduces the compound output.
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
     av1_mc_pred_block(af, snapA, 0, 0, 0, 64, 64, mvr0, mvc0, AV1_EIGHTTAP, AV1_EIGHTTAP);
@@ -1123,7 +1123,7 @@ fn test_inter_stream_motion() {
     var oe2 = alloc(8);
     var orc = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe2);
     assert_eq(av1_mc_pred_block(orc, snap, 0, 0, 0, 64, 64, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP),
-    DR_OK, "milestone: oracle MC predicts");
+      DR_OK, "milestone: oracle MC predicts");
     var diff_oracle = 0;
     var diff_copy = 0;
     var y = 0;
@@ -2001,7 +2001,7 @@ fn test_inter_tile_globalwarp() {
     av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);       # BLOCK_64X64=12, block at (0,0)
     var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     var difft = 0;
     y = 0;
     while (y < 64) {
@@ -2092,13 +2092,13 @@ fn test_inter_tile_globalwarp_scaled() {
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     # THE WITNESS: dropping the is_scaled conjunct makes this latch DR_ERR_UNSUPPORTED.
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
-    "gw-scaled: decodes (no warp attempted on a scaled ref)");
+      "gw-scaled: decodes (no warp attempted on a scaled ref)");
     # ...and the pixels are the global-MV translation through the SCALED MC path.
     var gmv = alloc(16);
     av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
     var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     assert_eq(av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
-    AV1_EIGHTTAP, AV1_EIGHTTAP), DR_OK, "gw-scaled: scaled translation oracle predicts");
+        AV1_EIGHTTAP, AV1_EIGHTTAP), DR_OK, "gw-scaled: scaled translation oracle predicts");
     assert_eq(it_gws_diff(df, tf), 0, "gw-scaled: decoded == scaled global-MV translation (4096 px)");
     # and the warp really is refused for this reference, not merely unused.
     var wm = av1_warp_model_new();
@@ -2106,7 +2106,7 @@ fn test_inter_tile_globalwarp_scaled() {
     assert_eq(av1_warp_model_shear_valid(wm), 1, "gw-scaled: ...and would be shear-realizable");
     var wf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     assert_eq(av1_warp_pred_block(wf, ref, 0, 0, 0, 64, 64, wm), DR_ERR_UNSUPPORTED,
-    "gw-scaled: warping a scaled ref is refused (what the gate spares us)");
+      "gw-scaled: warping a scaled ref is refused (what the gate spares us)");
     return 0;
 }
 
@@ -2185,7 +2185,7 @@ fn test_inter_tile_globalwarp_scaled_compound() {
     # the two must DIFFER: they scale opposite lanes, so a fixture that accidentally treated
     # both references alike would produce the same pixels twice.
     assert_eq(it_gws_diff(d0, d1) > 0, 1,
-    "gg-scaled: scaling ref0 vs ref1 gives different pixels (the lanes are independent)");
+      "gg-scaled: scaling ref0 vs ref1 gives different pixels (the lanes are independent)");
     return 0;
 }
 
@@ -2211,7 +2211,7 @@ fn test_inter_tile_scaled_metadata_vs_pixels() {
     av1_dpb_store(dpbA, fhA, small);
     var refsA = it_refs();                      # metadata still claims 64x64
     assert_eq(av1_is_scaled(fhA, refsA, AV1_LAST_FRAME), 0,
-    "meta/pixel A: metadata claims UNSCALED (gating believes it)");
+      "meta/pixel A: metadata claims UNSCALED (gating believes it)");
     var seq = it_seq();
     var tlenA = 0;
     var tbA = it_enc_tile(dpbA, refsA, seq, fhA, it_blk_global(), &tlenA);
@@ -2221,7 +2221,7 @@ fn test_inter_tile_scaled_metadata_vs_pixels() {
     av1_tile_grids_new(dtA);
     av1_tile_set_inter_ctx(dtA, fhA, refsA, seq, dpbA);
     assert_eq(av1_decode_inter_tile(dtA, tbA, tlenA, 1), DR_ERR_UNSUPPORTED,
-    "meta/pixel A: lying metadata -> clean reject from the warp path, no crash");
+      "meta/pixel A: lying metadata -> clean reject from the warp path, no crash");
     # CASE B — metadata says SCALED, pixels are FULL SIZE.
     # Gating believes the metadata and suppresses the warp; MC then measures the real
     # DrFrame, finds it matches the current frame exactly, and takes the UNSCALED fast path.
@@ -2236,7 +2236,7 @@ fn test_inter_tile_scaled_metadata_vs_pixels() {
     store64(refsB + AV1REF_FRAME_W + 0, 32);
     store64(refsB + AV1REF_FRAME_H + 0, 32);
     assert_eq(av1_is_scaled(fhB, refsB, AV1_LAST_FRAME), 1,
-    "meta/pixel B: metadata claims SCALED (gating believes it -> no warp)");
+      "meta/pixel B: metadata claims SCALED (gating believes it -> no warp)");
     var tlenB = 0;
     var tbB = it_enc_tile(dpbB, refsB, seq, fhB, it_blk_global(), &tlenB);
     assert_eq(tlenB > 0, 1, "meta/pixel B: tile encoded");
@@ -2245,14 +2245,14 @@ fn test_inter_tile_scaled_metadata_vs_pixels() {
     av1_tile_grids_new(dtB);
     av1_tile_set_inter_ctx(dtB, fhB, refsB, seq, dpbB);
     assert_eq(av1_decode_inter_tile(dtB, tbB, tlenB, 1), DR_OK,
-    "meta/pixel B: decodes — MC measures the PIXELS, which are unscaled");
+      "meta/pixel B: decodes — MC measures the PIXELS, which are unscaled");
     var gmv = alloc(16);
     av1_setup_global_mv(gmv, fhB, AV1_LAST_FRAME, 0, 0, 12);
     var tfB = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(tfB, full, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     assert_eq(it_gws_diff(dfB, tfB), 0,
-    "meta/pixel B: == UNSCALED global-MV translation (geometry came from the pixels)");
+      "meta/pixel B: == UNSCALED global-MV translation (geometry came from the pixels)");
     return 0;
 }
 
@@ -2282,7 +2282,7 @@ fn test_inter_tile_globalwarp_translation() {
     av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
     var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     var diff = 0;
     var y = 0;
     while (y < 64) {
@@ -2364,7 +2364,7 @@ fn test_inter_tile_globalwarp_unrealizable() {
     av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
     var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     var diff = 0;
     var y = 0;
     while (y < 64) {
@@ -2403,7 +2403,7 @@ fn test_inter_tile_globalwarp_force_int() {
     av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, 0, 0, 12);
     var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(tf, ref, 0, 0, 0, 64, 64, av1_mv_row(gmv), av1_mv_col(gmv),
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     var diff = 0;
     var y = 0;
     while (y < 64) {
@@ -2461,7 +2461,7 @@ fn test_inter_tile_globalwarp_ii_warpblend() {
     av1_tile_grids_new(dt);
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
-    "gw-ii: GLOBALMV inter-intra + would-warp GM now decodes (warp-blend, 0.7.105)");
+      "gw-ii: GLOBALMV inter-intra + would-warp GM now decodes (warp-blend, 0.7.105)");
     # direct warp-blend reference: the global warp model + av1_mc_pred_interintra_w(use_warp=1) on a fresh
     # frame. The block is SKIP + at (0,0) with no neighbours, so the decode's 32x32 luma == this reference.
     var wm = av1_warp_model_new();
@@ -2469,7 +2469,7 @@ fn test_inter_tile_globalwarp_ii_warpblend() {
     av1_setup_shear(wm);
     var rf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_interintra_w(rf, r0, 0, 0, 0, 32, 32, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP, 0, 0, 0,
-    AV1_BLOCK_32X32, 0, 0, load64(dt + AV1TILE_FMI_COLS), load64(dt + AV1TILE_FMI_ROWS), wm, 1);
+      AV1_BLOCK_32X32, 0, 0, load64(dt + AV1TILE_FMI_COLS), load64(dt + AV1TILE_FMI_ROWS), wm, 1);
     var diffw = 0;
     var yy = 0;
     while (yy < 32) {
@@ -2719,7 +2719,7 @@ fn test_obmc_edge_gate() {
     while (k < 8) { obmc_set_nb(grid, fmi_cols, k, 3, 0, 32); k = k + 1; }
     av1_mc_pred_block(frame, ref, 0, 16, 0, 8, 8, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
     assert_eq(av1_obmc_predict(tile, frame, 0, 0, 4, AV1_BLOCK_8X8, 0, 0), DR_OK,
-    "obmc edge: top-edge block decodes (above pass skipped, no row -1 read)");
+      "obmc edge: top-edge block decodes (above pass skipped, no row -1 read)");
     # LEFT-EDGE block at mi(4,0) = pixel (0,16): an ABOVE neighbour (row 3), NO left (col -1).
     var frame2 = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     var tile2 = av1_tile_new(frame2, 16, 16, 40, 1, 0, 1);
@@ -2737,7 +2737,7 @@ fn test_obmc_edge_gate() {
     av1_mc_pred_block(frame2, ref, 0, 0, 16, 8, 8, 32, 32, AV1_EIGHTTAP, AV1_EIGHTTAP);
     var own2_04 = dr_frame_get(frame2, 0, 0, 20);        # block (0,16) row 4: below the above strip, col 0
     assert_eq(av1_obmc_predict(tile2, frame2, 0, 4, 0, AV1_BLOCK_8X8, 0, 0), DR_OK,
-    "obmc edge: left-edge block decodes (left pass skipped, no col -1 read)");
+      "obmc edge: left-edge block decodes (left pass skipped, no col -1 read)");
     # the left strip below the above region stays own (left pass skipped); a `>=` mutation would blend
     # the wrapped col-15 neighbour here.
     assert_eq(dr_frame_get(frame2, 0, 0, 20), own2_04, "obmc edge: left-edge left pass skipped (col 0 unchanged)");
@@ -2789,7 +2789,7 @@ fn test_obmc_scan_intra() {
     var own_c = dr_frame_get(frame, 0, 52, 32);    # C slice
     # BLOCK_32X32 = 9. The call COMPLETING is the no-infinite-loop witness (mutation: advance-inside-if).
     assert_eq(av1_obmc_predict(tile, frame, 0, 8, 8, 9, 0, 0), DR_OK,
-    "obmc scan: 32x32 block, intra neighbour stepped over (no hang)");
+      "obmc scan: 32x32 block, intra neighbour stepped over (no hang)");
     assert_eq(dr_frame_get(frame, 0, 44, 32), own_b, "obmc scan: B (intra) slice unchanged (REF0>INTRA skip)");
     assert_eq(dr_frame_get(frame, 0, 36, 32) != own_a, 1, "obmc scan: A (inter) slice blended");
     assert_eq(dr_frame_get(frame, 0, 52, 32) != own_c, 1, "obmc scan: C (inter) slice blended (past the intra)");
@@ -2977,7 +2977,7 @@ fn itw_ref420_hc(w, h, mic, mir, fh, refs, seq, dpb): i64 {
             var xx = 0;
             while (xx < pw) {
                 dr_frame_set(ref, p, xx, yy,
-                ((((xx * 37) + (yy * 53)) + (((xx * yy) % 7) * 29)) + (p * 11)) & 255);
+                  ((((xx * 37) + (yy * 53)) + (((xx * yy) % 7) * 29)) + (p * 11)) & 255);
                 xx = xx + 1;
             }
             yy = yy + 1;
@@ -3038,7 +3038,7 @@ fn test_some_use_intra_leaf() {
         var tc = 6 + (k & 1);
         av1_mv_grid_set(g, 8, tr, tc, 1, 1, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
         assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 1, 1), 1,
-        "someUseIntra: an intra sibling fires");
+          "someUseIntra: an intra sibling fires");
         av1_mv_grid_set(g, 8, tr, tc, 1, 1, 0, AV1_NEWMV, AV1_LAST_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
         k = k + 1;
     }
@@ -3047,15 +3047,15 @@ fn test_some_use_intra_leaf() {
     # would widen the scan and make luma see its neighbours.
     av1_mv_grid_set(g, 8, 6, 7, 1, 1, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
     assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 0, 0), 0,
-    "someUseIntra: subsampling 0 scans 1x1 — the neighbour is out of range");
+      "someUseIntra: subsampling 0 scans 1x1 — the neighbour is out of range");
     assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 1, 1, 1, 0), 1,
-    "someUseIntra: subX 1 widens the scan to include it");
+      "someUseIntra: subX 1 widens the scan to include it");
     av1_mv_grid_set(g, 8, 6, 7, 1, 1, 0, AV1_NEWMV, AV1_LAST_FRAME, AV1_REF_NONE, 0, 0, 0, 0);
     # CLIPPING: a scan that would run off the grid must stop, not read past it. Cells at
     # row/col 8 do not exist in an 8x8 grid; an unclipped scan reads them as whatever follows
     # the allocation. Asking for a 4x4 scan from (6,6) covers (6..9, 6..9).
     assert_eq(av1_inter_some_use_intra(g, 8, 8, 6, 6, 4, 4, 0, 0), 0,
-    "someUseIntra: an overhanging scan is clipped, not read out of bounds");
+      "someUseIntra: an overhanging scan is clipped, not read out of bounds");
     return 0;
 }
 
@@ -3203,7 +3203,7 @@ fn test_inter_chroma_sibling_mvs() {
     av1_tile_grids_new(dt);
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK,
-    "sub8 chroma: tile decodes (was DR_ERR_UNSUPPORTED)");
+      "sub8 chroma: tile decodes (was DR_ERR_UNSUPPORTED)");
     # LUMA: each 4x4 leaf predicted with its OWN motion vector.
     var lf = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe);
     av1_mc_pred_block(lf, ref, 0, 24, 24, 4, 4, m0r, m0c, AV1_EIGHTTAP, AV1_EIGHTTAP);
@@ -3305,7 +3305,7 @@ fn test_inter_ref_selection() {
     }
     assert_eq(diff, 0, "pixels come from GOLDEN's slot (the gradient), not slot 0");
     assert_eq(load64(av1_mv_grid_cell(load64(dt + AV1TILE_MVGRID), 16, 4, 4) + AV1MIR_REF0),
-    AV1_GOLDEN_FRAME, "MI grid: GOLDEN stored");
+      AV1_GOLDEN_FRAME, "MI grid: GOLDEN stored");
     return 0;
 }
 # a NON-SB-ALIGNED frame (48x48, one 64x64 block overhanging): the visible-extent
@@ -3397,7 +3397,7 @@ fn test_inter_lossless_tx4x4() {
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "lossless inter tile decodes");
     assert_eq(dr_frame_get(df, 0, 10, 10), ((10 + 1) + (2 * (10 + 2))) & 255,
-    "lossless pixels: the shifted gradient");
+      "lossless pixels: the shifted gradient");
     assert_eq(av1_lftx_get(dt, 0, 4, 4), 0, "lossless LFTX = TX_4X4, not max-rect");
     return 0;
 }
@@ -3453,9 +3453,9 @@ fn test_inter_share_grids() {
     av1_tile_share_grids(t2, t1);
     av1_tile_set_inter_ctx(t2, fh, refs, seq, dpb);
     assert_eq(load64(t2 + AV1TILE_MVGRID), load64(t1 + AV1TILE_MVGRID),
-    "tile 2 SHARES tile 1's MV grid (set_inter_ctx preserved it)");
+      "tile 2 SHARES tile 1's MV grid (set_inter_ctx preserved it)");
     assert_eq(load64(t2 + AV1TILE_SKIPMODES), load64(t1 + AV1TILE_SKIPMODES),
-    "tile 2 SHARES tile 1's SkipModes grid");
+      "tile 2 SHARES tile 1's SkipModes grid");
     return 0;
 }
 # a CDEF-wired encode tile WITHOUT a cdef plan is REFUSED (the plan slot is the
@@ -3476,7 +3476,7 @@ fn test_inter_cdef_plan_refused() {
     store64(pf + 0, it_blk(16, 8));
     var elen = 0;
     assert_eq(av1_encode_inter_tile(et, pp, pf, 1, &elen), 0,
-    "a cdef-wired encode tile without a plan is REFUSED, never a null deref");
+      "a cdef-wired encode tile without a plan is REFUSED, never a null deref");
     assert_eq(elen, 0, "the refused cdef encode emits no bytes");
     # and a WIRED plan is carried into the ICDEF bundle (the write lane's slot).
     var plan = alloc(8);
@@ -3657,10 +3657,10 @@ fn ir_roundtrip(ref, fh, refs, seq, blk, nsplit, w, h, planes, sx, sy, mic, mir)
 # compiled while silently reading garbage for the new trailing argument.
 fn ir_oracle(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma, tx_luma, chroma_tt): i64 {
     return ir_oracle_f(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma,
-    tx_luma, chroma_tt, AV1_EIGHTTAP);
+      tx_luma, chroma_tt, AV1_EIGHTTAP);
 }
 fn ir_oracle_f(ref, mvr, mvc, resid, w, h, planes, sx, sy, sub_size, tx_size_luma, tx_luma,
-chroma_tt, filt): i64 {
+  chroma_tt, filt): i64 {
     var oe = alloc(8);
     var xf = dr_frame_new(w, h, planes, sx, sy, 8, 8, oe);
     var q_dc = av1_get_dc_quant(8, 40, 0);
@@ -3768,7 +3768,7 @@ fn test_intra_block_reconstruct() {
     var df = ir_roundtrip(ref, fh, refs, seq, its_intra_blk(AV1_DC_PRED, resid), 1, 32, 32, 1, 0, 0, 8, 8);
     var xf = iir_oracle(resid, 32, 9, 3, AV1_DCT_DCT);   # sub_size 9 = BLOCK_32X32, tx 3 = TX_32X32
     assert_eq(ir_diff(df, xf, 32, 32, 1, 0, 0), 0,
-    "C2 RECON: intra block in an inter frame == DC-predict + reconstruct oracle (1024 px)");
+      "C2 RECON: intra block in an inter frame == DC-predict + reconstruct oracle (1024 px)");
     var moved = 0;
     var my = 0;
     while (my < 32) {
@@ -4097,7 +4097,7 @@ fn test_cdf_inheritance() {
     var fSS = load64(dtSS + AV1TILE_FRAME);
     var fDD = load64(dtDD + AV1TILE_FRAME);
     assert_eq(ir_diff(fSS, fDD, 32, 32, 1, 0, 0), 0,
-    "C1 inheritance round-trips: inherited-CDF decode == default-CDF decode of the same content");
+      "C1 inheritance round-trips: inherited-CDF decode == default-CDF decode of the same content");
 
     # (2) load-bearing: decode bS (coded against S) with the DEFAULT CDFs -> arithmetic coder desyncs.
     var rcSD = alloc(8);
@@ -4108,7 +4108,7 @@ fn test_cdf_inheritance() {
         if (ir_diff(load64(dtSD + AV1TILE_FRAME), fSS, 32, 32, 1, 0, 0) != 0) { diverged = 1; }
     }
     assert_eq(diverged, 1,
-    "C1 load is load-bearing: decoding inherited-CDF bytes WITHOUT inheritance diverges");
+      "C1 load is load-bearing: decoding inherited-CDF bytes WITHOUT inheritance diverges");
     return 0;
 }
 
@@ -4192,7 +4192,7 @@ fn test_ir_inter1() {
 fn test_inter_residual_deltaq_ydc() {
     var delta_ydc = 40;   # in-range su(1+6); qindex 40 -> dc_q index 80 (dc_q 41 -> 74)
     assert_neq(av1_get_dc_quant(8, 40, delta_ydc), av1_get_dc_quant(8, 40, 0),
-    "inter: DeltaQYDc shifts the DC quant (fixture teeth)");
+      "inter: DeltaQYDc shifts the DC quant (fixture teeth)");
     var ref = ir_ref(8, 8, 1, 0, 0);
     var fh = ir_fh(8, 8, 2, 2, AV1_TX_MODE_LARGEST);
     store64(fh + AV1FH_DELTA_Q_Y_DC, delta_ydc);   # the field under test
@@ -4213,12 +4213,12 @@ fn test_inter_residual_deltaq_ydc() {
     var xs = dr_frame_new(8, 8, 1, 0, 0, 8, 8, oes);
     av1_mc_pred_block(xs, ref, 0, 0, 0, 8, 8, 8, 0 - 4, AV1_EIGHTTAP, AV1_EIGHTTAP);
     av1_reconstruct(xs, 0, 0, 0, 1, AV1_ADST_DCT, 0, coeff,
-    av1_get_dc_quant(8, 40, delta_ydc), av1_get_ac_quant(8, 40, 0));
+      av1_get_dc_quant(8, 40, delta_ydc), av1_get_ac_quant(8, 40, 0));
 
     assert_eq(ir_diff(df, xs, 8, 8, 1, 0, 0), 0,
-    "inter deltaq: decode == MC + reconstruct at dc_q(qindex + DeltaQYDc)");
+      "inter deltaq: decode == MC + reconstruct at dc_q(qindex + DeltaQYDc)");
     assert_eq(ir_diff(df, xz, 8, 8, 1, 0, 0) > 0, 1,
-    "inter deltaq: decode differs from the delta-0 dequant (delta applied)");
+      "inter deltaq: decode differs from the delta-0 dequant (delta applied)");
     return 0;
 }
 # BILINEAR end-to-end (0.7.108): the frame header's interpolation_filter f(2) == BILINEAR.
@@ -4254,12 +4254,12 @@ fn test_ir_bilinear() {
     var df = ir_roundtrip(ref, fh, refs, seq, blk, 2, 16, 16, 1, 0, 0, 4, 4);
     # decodes to BILINEAR-filtered pixels...
     var xb = ir_oracle_f(ref, 0 - 6, 10, resid, 16, 16, 1, 0, 0, 6, 2, AV1_DCT_ADST, 0,
-    AV1_BILINEAR);
+      AV1_BILINEAR);
     assert_eq(ir_diff(df, xb, 16, 16, 1, 0, 0), 0, "BILINEAR e2e: decode == bilinear oracle");
     # ...and NOT to EIGHTTAP pixels. Without this the test would pass even if the header
     # value never reached the kernel.
     var xe = ir_oracle_f(ref, 0 - 6, 10, resid, 16, 16, 1, 0, 0, 6, 2, AV1_DCT_ADST, 0,
-    AV1_EIGHTTAP);
+      AV1_EIGHTTAP);
     assert_eq(ir_diff(df, xe, 16, 16, 1, 0, 0) > 0, 1, "BILINEAR e2e: differs from EIGHTTAP");
     return 0;
 }
@@ -4395,7 +4395,7 @@ fn test_ir_vartx() {
     av1_reconstruct(xf, 0, 0, 8, 1, AV1_ADST_ADST, 0, ir_leaf_coeff(50, 0), q_dc, q_ac);
     av1_reconstruct(xf, 0, 8, 8, 1, AV1_IDTX, 0, ir_leaf_coeff(0 - 30, 0), q_dc, q_ac);
     assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0,
-    "var-tx 16x16 -> 4x TX_8X8: decode == independent per-leaf oracle (256)");
+      "var-tx 16x16 -> 4x TX_8X8: decode == independent per-leaf oracle (256)");
     return 0;
 }
 # VAR-TX edge clamp (review CRITICAL): a var-tx leaf-fill that overhangs the tile
@@ -4473,7 +4473,7 @@ fn test_ir_vartx_32() {
         yy = yy + 8;
     }
     assert_eq(ir_diff(df, xf, 32, 32, 1, 0, 0), 0,
-    "var-tx 32x32 -> 16x TX_8X8 (depth-2 forced leaf): decode == oracle (1024)");
+      "var-tx 32x32 -> 16x TX_8X8 (depth-2 forced leaf): decode == oracle (1024)");
     return 0;
 }
 # the InterTxSizes grid records the PER-LEAF tx after a var-tx decode+store (NOT the
@@ -4580,7 +4580,7 @@ fn test_ir_vartx_rect() {
     av1_reconstruct(xf, 0, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(50, 0 - 20), q_dc, q_ac);
     av1_reconstruct(xf, 0, 8, 0, 1, AV1_DCT_ADST, 0, ir_leaf_coeff(0 - 35, 0), q_dc, q_ac);
     assert_eq(ir_diff(df, xf, 16, 8, 1, 0, 0), 0,
-    "rect var-tx 16x8 -> 2x TX_8X8 (transform_tree w>h): decode == oracle (128)");
+      "rect var-tx 16x8 -> 2x TX_8X8 (transform_tree w>h): decode == oracle (128)");
     return 0;
 }
 # VAR-TX 4:2:0: the same 4x TX_8X8 luma split with chroma. The 8x8 chroma tx
@@ -4632,7 +4632,7 @@ fn test_ir_vartx_420() {
     av1_reconstruct(xf, 1, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(40, 0), q_dc, q_ac);
     av1_reconstruct(xf, 2, 0, 0, 1, AV1_ADST_DCT, 0, ir_leaf_coeff(0 - 35, 0), q_dc, q_ac);
     assert_eq(ir_diff(df, xf, 16, 16, 3, 1, 1), 0,
-    "var-tx 4:2:0: all planes == oracle; chroma co-locates the TL leaf type");
+      "var-tx 4:2:0: all planes == oracle; chroma co-locates the TL leaf type");
     return 0;
 }
 # VAR-TX mixed-depth: 16x16 -> 4x TX_8X8, and the TOP-LEFT 8x8 further -> 4x TX_4X4
@@ -4695,7 +4695,7 @@ fn test_ir_vartx_mixed() {
     av1_reconstruct(xf, 0, 0, 8, 1, AV1_DCT_ADST, 0, ir_leaf_coeff(0 - 40, 0), q_dc, q_ac);
     av1_reconstruct(xf, 0, 8, 8, 1, AV1_IDTX, 0, ir_leaf_coeff(35, 0), q_dc, q_ac);
     assert_eq(ir_diff(df, xf, 16, 16, 1, 0, 0), 0,
-    "var-tx mixed-depth (8x8 -> 4x TX_4X4): decode == per-leaf oracle (256)");
+      "var-tx mixed-depth (8x8 -> 4x TX_4X4): decode == per-leaf oracle (256)");
     return 0;
 }
 
@@ -5000,10 +5000,10 @@ fn test_ir_luma_allzero_chroma() {
     store64(cv + (1 * 8), 20);
     var lenV = 0;
     var tbV = ir_enc_only(ref, ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST), refs, seq,
-    ir_blk(0 - 6, 10, ir_az_plan(AV1_V_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4, &lenV);
+      ir_blk(0 - 6, 10, ir_az_plan(AV1_V_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4, &lenV);
     var lenD = 0;
     var tbD = ir_enc_only(ref, ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST), refs, seq,
-    ir_blk(0 - 6, 10, ir_az_plan(AV1_DCT_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4, &lenD);
+      ir_blk(0 - 6, 10, ir_az_plan(AV1_DCT_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4, &lenD);
     assert_eq(lenV > 0, 1, "luma-all-zero tile encoded");
     assert_eq(lenV, lenD, "luma all_zero: plan luma type ignored (same byte length)");
     var i = 0;
@@ -5015,7 +5015,7 @@ fn test_ir_luma_allzero_chroma() {
     assert_eq(d, 0, "luma all_zero: encode ignores the plan luma type (byte-identical)");
     # and the round-trip decodes cleanly (chroma tx type in sync).
     var df = ir_roundtrip(ref, ir_fh(16, 16, 4, 4, AV1_TX_MODE_LARGEST), refs, seq,
-    ir_blk(0 - 6, 10, ir_az_plan(AV1_DCT_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4);
+      ir_blk(0 - 6, 10, ir_az_plan(AV1_DCT_DCT, cu, cv)), 2, 16, 16, 3, 1, 1, 4, 4);
     assert_eq(df != 0, 1, "luma all_zero: decodes");
     return 0;
 }
@@ -5166,19 +5166,19 @@ fn test_vt_ctx_skip_neighbour() {
     store64(av1_mv_grid_cell(load64(t + AV1TILE_MVGRID), 16, 3, 4) + AV1MIR_ISINTER, 1);
     # above_txw = 16, tx TX_16X16 width 16 -> above=(16<16)=0. left unavail -> 0. ctx 12.
     assert_eq(av1_txfm_split_ctx(t, 4, 4, 2, 6, 4, 4, 1, 0), 12,
-    "ctx: skip-inter above neighbour uses Block_Width (16X8 -> 16, above=0)");
+      "ctx: skip-inter above neighbour uses Block_Width (16X8 -> 16, above=0)");
     # LEFT: left neighbour (4,3) a skip inter BLOCK_8X16 (width 8, height 16).
     # get_left_tx_height -> Block_Height = 16 -> left=(16<16)=0. ctx 12.
     av1_grid_set(t, AV1TILE_SKIPS, 4, 3, 1);
     av1_grid_set(t, AV1TILE_MISIZES, 4, 3, 4);   # BLOCK_8X16
     store64(av1_mv_grid_cell(load64(t + AV1TILE_MVGRID), 16, 4, 3) + AV1MIR_ISINTER, 1);
     assert_eq(av1_txfm_split_ctx(t, 4, 4, 2, 6, 4, 4, 1, 1), 12,
-    "ctx: skip-inter left neighbour uses Block_Height (8X16 -> 16, left=0)");
+      "ctx: skip-inter left neighbour uses Block_Height (8X16 -> 16, left=0)");
     # and a skip-inter neighbour SMALLER than the tx flips above/left to 1: an above
     # BLOCK_8X8 (width 8 < 16) -> above=1.
     av1_grid_set(t, AV1TILE_MISIZES, 3, 4, 3);   # BLOCK_8X8
     assert_eq(av1_txfm_split_ctx(t, 4, 4, 2, 6, 4, 4, 1, 0), 13,
-    "ctx: skip-inter above 8x8 (width 8 < 16) -> above=1");
+      "ctx: skip-inter above 8x8 (width 8 < 16) -> above=1");
     return 0;
 }
 fn test_vt_cdf_pins() {
@@ -5278,7 +5278,7 @@ fn test_ir_compound() {
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "compound tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     y = 0;
     while (y < 64) {
@@ -5358,7 +5358,7 @@ fn test_ir_compound_global_warp() {
     av1_setup_shear(wm1);
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 0, 0, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0, wm0, wm1, 1, 1);
+      8, 8, 0, 0, 0, 0, 0, wm0, wm1, 1, 1);
     var diffw = 0;
     y = 0;
     while (y < 64) {
@@ -5373,7 +5373,7 @@ fn test_ir_compound_global_warp() {
     # DIFFERS from a translation-compound reference -> the dispatch actually warped both refs.
     var tf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(tf, r0, r1, 0, 0, 0, 64, 64, 0, 0, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var difft = 0;
     y = 0;
     while (y < 64) {
@@ -5438,7 +5438,7 @@ fn test_ir_compound_missing_ref() {
     av1_tile_grids_new(dt);
     av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb2);
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_ERR_BOUNDS,
-    "missing-ref: compound with empty ALTREF slot -> BOUNDS (no OOB)");
+      "missing-ref: compound with empty ALTREF slot -> BOUNDS (no OOB)");
     return 0;
 }
 
@@ -5465,7 +5465,7 @@ fn test_dist_tables() {
     var i = 0;
     while (i < 4) {
         assert_eq(av1_quant_dist_lookup(i * 2) + av1_quant_dist_lookup((i * 2) + 1), 16,
-        "Lookup row sums to 16");
+          "Lookup row sums to 16");
         i = i + 1;
     }
     return 0;
@@ -5504,7 +5504,7 @@ fn test_ir_dist_weights() {
     store64(soff + AV1_SEQ_ENABLE_ORDER_HINT, 0);
     assert_eq(av1_ref_dist(soff, Dwt_Fh, AV1_LAST_FRAME), 0, "order_hint off -> dist 0");
     assert_eq(av1_dist_wtd_fwd(soff, Dwt_Fh, AV1_LAST_FRAME, AV1_ALTREF_FRAME), 3,
-    "order_hint off -> Fwd = 3");
+      "order_hint off -> Fwd = 3");
     return 0;
 }
 # DISTANCE (jnt) ROUND-TRIP: a skip=1 compound_idx==0 block with UNEQUAL-distance refs
@@ -5565,10 +5565,10 @@ fn test_ir_compound_distance() {
     assert_eq(fwd, 13, "round-trip Fwd = 13 (dist0=2, dist1=10)");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    fwd, 16 - fwd, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      fwd, 16 - fwd, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -5639,10 +5639,10 @@ fn it_diffwtd_roundtrip(mask_type, tag): i64 {
     assert_eq(av1_decode_inter_tile(dt, tb, tlen, 1), DR_OK, "diffwtd tile decodes");
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(xf, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 1, mask_type, 0, 0, 0, 0, 0, 0, 0);
+      8, 8, 1, mask_type, 0, 0, 0, 0, 0, 0, 0);
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -5673,7 +5673,7 @@ fn test_ir_compound_diffwtd() {
 # decode threaded comp_mode=2 + wedge_idx/sign + sub_size, and built the codebook mask).
 fn iw_oracle(dstf, r0, r1, rx, ry, wedge_idx, wedge_sign): i64 {
     av1_mc_pred_compound(dstf, r0, r1, 0, rx, ry, 32, 32, 16, 8, 0 - 8, 24, AV1_EIGHTTAP,
-    AV1_EIGHTTAP, 8, 8, 2, 0, AV1_BLOCK_32X32, wedge_idx, wedge_sign, 0, 0, 0, 0);
+      AV1_EIGHTTAP, 8, 8, 2, 0, AV1_BLOCK_32X32, wedge_idx, wedge_sign, 0, 0, 0, 0);
     return 0;
 }
 fn it_wedge_roundtrip(wedge_idx, wedge_sign, tag): i64 {
@@ -5739,7 +5739,7 @@ fn it_wedge_roundtrip(wedge_idx, wedge_sign, tag): i64 {
     # AVERAGE oracle (comp_mode=0) for the differs-witness.
     var af = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_compound(af, r0, r1, 0, 0, 0, 64, 64, 16, 8, 0 - 8, 24, AV1_EIGHTTAP, AV1_EIGHTTAP,
-    8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     var diff = 0;
     var adiff = 0;
     y = 0;
@@ -5927,7 +5927,7 @@ fn it_interintra_roundtrip(ii_mode, is_wedge, wedge_idx, tag): i64 {
     # oracle: block 0 (0,0), no neighbors -> deterministic.
     var xf = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_interintra(xf, r0, 0, 0, 0, 32, 32, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP, ii_mode,
-    is_wedge, wedge_idx, AV1_BLOCK_32X32, 0, 0, 16, 16);
+      is_wedge, wedge_idx, AV1_BLOCK_32X32, 0, 0, 16, 16);
     # pure-inter reference for the differs-witness.
     var pfr = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
     av1_mc_pred_block(pfr, r0, 0, 0, 0, 32, 32, 16, 8, AV1_EIGHTTAP, AV1_EIGHTTAP);

@@ -64,7 +64,7 @@ fn dr_clip1(x, bit_depth): i64 {
 #   DR_ERR_OOM      — allocation failure
 fn dr_frame_new(width, height, num_planes, subx, suby, bit_depth, border, out_err): i64 {
     return dr_frame_new_ext(width, height, width, height, num_planes, subx, suby,
-    bit_depth, border, out_err);
+      bit_depth, border, out_err);
 }
 
 # dr_frame_new_ext — allocate to (alloc_w, alloc_h) while REPORTING (width, height).
@@ -87,7 +87,7 @@ fn dr_frame_new(width, height, num_planes, subx, suby, bit_depth, border, out_er
 # Returns the DrFrame handle, or 0 with *out_err set (see dr_frame_new above); additionally
 # DR_ERR_BOUNDS if alloc_w/alloc_h are smaller than the visible dimensions.
 fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit_depth,
-border, out_err): i64 {
+  border, out_err): i64 {
     store64(out_err, DR_OK);
     if ((width <= 0) || (height <= 0) || (border < 0)) {
         store64(out_err, DR_ERR_BOUNDS);

@@ -283,22 +283,22 @@ fn test_h265_nal_hdr_reject() {
     # forbidden_zero_bit set (7.4.2.2): 0xC2 = 1 100001 0
     store8(b, 0xC2); store8(b + 1, 0x01);
     assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_ERR_FORBIDDEN_BIT,
-    "forbidden bit -> DR_ERR_FORBIDDEN_BIT");
+      "forbidden bit -> DR_ERR_FORBIDDEN_BIT");
     # nuh_temporal_id_plus1 == 0 (7.4.2.2): byte1 = 0x00
     store8(b, 0x42); store8(b + 1, 0x00);
     assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), H265_ERR_TEMPORAL_ID0,
-    "tid_plus1 0 -> H265_ERR_TEMPORAL_ID0");
+      "tid_plus1 0 -> H265_ERR_TEMPORAL_ID0");
     assert(H265_ERR_TEMPORAL_ID0 >= 50, "family code in the H.265 band (low)");
     assert(H265_ERR_TEMPORAL_ID0 <= 69, "family code in the H.265 band (high)");
     # Both faults at once: forbidden bit checked first.
     store8(b, 0xC2); store8(b + 1, 0x00);
     assert_eq(h265_nal_hdr_parse(b, 2, &t, &l, &tid), DR_ERR_FORBIDDEN_BIT,
-    "forbidden bit wins over tid0");
+      "forbidden bit wins over tid0");
     # Truncation: fewer than 2 header bytes.
     assert_eq(h265_nal_hdr_parse(b, 1, &t, &l, &tid), DR_ERR_TRUNCATED,
-    "1 byte -> truncated");
+      "1 byte -> truncated");
     assert_eq(h265_nal_hdr_parse(b, 0, &t, &l, &tid), DR_ERR_TRUNCATED,
-    "0 bytes -> truncated");
+      "0 bytes -> truncated");
     # Outputs untouched on every reject path above.
     assert_eq(t, 99, "out_type untouched on reject");
     assert_eq(l, 99, "out_layer untouched on reject");
@@ -398,17 +398,17 @@ fn test_h265_annexb_reject() {
     store8(s + 3, 0x01); store8(s + 4, 0x40); store8(s + 5, 0x01);
     var sc = h265_ab_init(s, 6);
     assert_eq(h265_ab_next(sc, &nal, &sz), DR_ERR_BAD_HEADER,
-    "non-zero byte before start code rejected");
+      "non-zero byte before start code rejected");
     assert_eq(h265_ab_err(sc), DR_ERR_BAD_HEADER, "error is sticky");
     assert_eq(h265_ab_next(sc, &nal, &sz), DR_ERR_BAD_HEADER,
-    "sticky: same error on retry");
+      "sticky: same error on retry");
     # Short prefix: 00 01 is not a start code (needs two zeros).
     var s2 = alloc(4);
     store8(s2, 0x00); store8(s2 + 1, 0x01);
     store8(s2 + 2, 0x42); store8(s2 + 3, 0x01);
     var sc2 = h265_ab_init(s2, 4);
     assert_eq(h265_ab_next(sc2, &nal, &sz), DR_ERR_BAD_HEADER,
-    "lone 00 01 rejected (B.2.2 needs 00 00 01)");
+      "lone 00 01 rejected (B.2.2 needs 00 00 01)");
     # Negative length refused at init.
     assert_eq(h265_ab_init(s2, 0 - 1), 0, "negative len -> no scanner");
     return 0;
@@ -464,7 +464,7 @@ fn test_h265_epb_strip() {
     assert_eq(h265_rbsp_extract(e, 0, &rb, &n), DR_OK, "empty ok");
     assert_eq(n, 0, "empty RBSP");
     assert_eq(h265_rbsp_extract(e, 0 - 1, &rb, &n), DR_ERR_BOUNDS,
-    "negative size -> bounds");
+      "negative size -> bounds");
     return 0;
 }
 
@@ -638,7 +638,7 @@ fn test_h265_vps_sublayer() {
     assert_eq(e, DR_OK, "no error");
     assert_eq(h265_vps_max_sub_layers_minus1(v), 1, "mslm1 1");
     assert_eq(h265_ptl_max_sub_layers_minus1(h265_vps_ptl(v)), 1,
-    "PTL parsed against mslm1 1");
+      "PTL parsed against mslm1 1");
     return 0;
 }
 

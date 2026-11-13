@@ -275,10 +275,10 @@ fn test_av1_obu_walk_reject() {
     var it = av1_obu_iter_init(b, 5);
     assert_eq(av1_obu_next(it, &t, &off, &sz), DR_OK, "TD still yields");
     assert_eq(av1_obu_next(it, &t, &off, &sz), DR_ERR_TRUNCATED,
-    "lying size -> truncated");
+      "lying size -> truncated");
     assert_eq(av1_obu_iter_err(it), DR_ERR_TRUNCATED, "iterator fault sticky");
     assert_eq(av1_obu_next(it, &t, &off, &sz), DR_ERR_TRUNCATED,
-    "sticky on repeat");
+      "sticky on repeat");
     # Forbidden bit mid-stream.
     var b2 = alloc(4);
     store8(b2, 0x12); store8(b2 + 1, 0x00);
@@ -286,7 +286,7 @@ fn test_av1_obu_walk_reject() {
     var it2 = av1_obu_iter_init(b2, 4);
     assert_eq(av1_obu_next(it2, &t, &off, &sz), DR_OK, "TD yields first");
     assert_eq(av1_obu_next(it2, &t, &off, &sz), DR_ERR_FORBIDDEN_BIT,
-    "forbidden bit mid-stream -> error");
+      "forbidden bit mid-stream -> error");
     # Negative length refused at init.
     assert_eq(av1_obu_iter_init(b2, 0 - 1), 0, "negative len -> no iterator");
     # Empty buffer: clean END immediately.
@@ -303,7 +303,7 @@ fn test_av1_obu_write_exact_bytes() {
     # TD: expect exactly 0x12 0x00.
     var bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0, 0, 1, 0),
-    DR_OK, "TD header writes");
+      DR_OK, "TD header writes");
     assert_eq(dr_bw_flush(bw), 2, "TD is 2 bytes");
     var p = dr_bw_buf(bw);
     assert_eq(load8(p), 0x12, "TD byte 0");
@@ -312,7 +312,7 @@ fn test_av1_obu_write_exact_bytes() {
     # (mirrors test_av1_obu_parse_ext's hand vector).
     var bw2 = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw2, AV1_OBU_TILE_GROUP, 1, 2, 1, 1, 3),
-    DR_OK, "ext header writes");
+      DR_OK, "ext header writes");
     assert_eq(dr_bw_flush(bw2), 3, "ext header is 3 bytes");
     var p2 = dr_bw_buf(bw2);
     assert_eq(load8(p2), 0x26, "ext byte 0");
@@ -321,7 +321,7 @@ fn test_av1_obu_write_exact_bytes() {
     # No size field: single byte 0x30.
     var bw3 = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw3, AV1_OBU_FRAME, 0, 0, 0, 0, 0),
-    DR_OK, "no-size header writes");
+      DR_OK, "no-size header writes");
     assert_eq(dr_bw_flush(bw3), 1, "no-size header is 1 byte");
     assert_eq(load8(dr_bw_buf(bw3)), 0x30, "no-size byte");
     return 0;
@@ -332,7 +332,7 @@ fn test_av1_obu_write_parse_roundtrip() {
     # tid 3, sid 2: byte0 = 0 0110 1 1 0 = 0x36, ext = 011 10 000 = 0x70.
     var bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, AV1_OBU_FRAME, 1, 3, 2, 1, 1000),
-    DR_OK, "1000-byte-size header writes");
+      DR_OK, "1000-byte-size header writes");
     var hlen = dr_bw_flush(bw);
     assert_eq(hlen, 4, "header is 4 bytes (2 fixed + 2 leb)");
     var hp = dr_bw_buf(bw);
@@ -360,26 +360,26 @@ fn test_av1_obu_write_reject() {
     # Each case uses a fresh writer — the faults are sticky.
     var bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, 16, 0, 0, 0, 1, 0), DR_ERR_BOUNDS,
-    "type 16 rejected");
+      "type 16 rejected");
     assert_eq(dr_bw_err(bw), DR_ERR_BOUNDS, "type fault sticky");
     bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, 0 - 1, 0, 0, 0, 1, 0), DR_ERR_BOUNDS,
-    "negative type rejected");
+      "negative type rejected");
     bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, 6, 1, 8, 0, 1, 0), DR_ERR_BOUNDS,
-    "tid 8 rejected");
+      "tid 8 rejected");
     bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, 6, 1, 0, 4, 1, 0), DR_ERR_BOUNDS,
-    "sid 4 rejected");
+      "sid 4 rejected");
     # obu_size outside the 4.10.5 32-bit bound -> core leb128 writer code.
     bw = dr_bw_init(0);
     assert_eq(av1_obu_write_header(bw, 6, 0, 0, 0, 1, 0x100000000),
-    DR_ERR_BAD_LEB128, "2^32 size rejected");
+      DR_ERR_BAD_LEB128, "2^32 size rejected");
     # Misaligned writer: OBUs are byte entities.
     bw = dr_bw_init(0);
     dr_bw_put_bit(bw, 1);
     assert_eq(av1_obu_write_header(bw, 6, 0, 0, 0, 1, 0), DR_ERR_BOUNDS,
-    "misaligned writer rejected");
+      "misaligned writer rejected");
     assert_eq(dr_bw_err(bw), DR_ERR_BOUNDS, "misalignment sticky");
     return 0;
 }
@@ -761,9 +761,9 @@ fn test_av1_obu_seq_integration() {
     # Assemble TD + SEQUENCE_HEADER(payload) with the writer.
     var bw = dr_bw_init(16);
     assert_eq(av1_obu_write_header(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0, 0, 1, 0),
-    DR_OK, "TD written");
+      DR_OK, "TD written");
     assert_eq(av1_obu_write_header(bw, AV1_OBU_SEQUENCE_HEADER, 0, 0, 0, 1, slen),
-    DR_OK, "seq OBU header written");
+      DR_OK, "seq OBU header written");
     var i = 0;
     while (i < slen) {
         dr_bw_put_bits(bw, load8(seq + i), 8);   # seq payload bytes

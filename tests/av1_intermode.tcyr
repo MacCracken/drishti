@@ -682,7 +682,7 @@ fn av1_t_chk16(p, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c1
 }
 fn av1_t_chk_wunif(p): i64 {
     av1_t_chk16(p, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384,
-    18432, 20480, 22528, 24576, 26624, 28672, 30720);
+      18432, 20480, 22528, 24576, 26624, 28672, 30720);
     return 0;
 }
 # 4-symbol row check {c0, c1, c2, 32768, count}.
@@ -732,19 +732,19 @@ fn test_interintra_cdf() {
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 1));
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 2));
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 3), 2438, 4440, 6599, 8663, 11005, 12874, 15751, 18094,
-    20359, 22362, 24127, 25702, 27752, 29450, 31171);
+      20359, 22362, 24127, 25702, 27752, 29450, 31171);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 4), 806, 3266, 6005, 6738, 7218, 7367, 7771, 14588,
-    16323, 17367, 18452, 19422, 22839, 26127, 29629);
+      16323, 17367, 18452, 19422, 22839, 26127, 29629);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 5), 2779, 3738, 4683, 7213, 7775, 8017, 8655, 14357,
-    17939, 21332, 24520, 27470, 29456, 30529, 31656);
+      17939, 21332, 24520, 27470, 29456, 30529, 31656);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 6), 1684, 3625, 5675, 7108, 9302, 11274, 14429, 17144,
-    19163, 20961, 22884, 24471, 26719, 28714, 30877);
+      19163, 20961, 22884, 24471, 26719, 28714, 30877);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 7), 1142, 3491, 6277, 7314, 8089, 8355, 9023, 13624,
-    15369, 16730, 18114, 19313, 22521, 26012, 29550);
+      15369, 16730, 18114, 19313, 22521, 26012, 29550);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 8), 2742, 4195, 5727, 8035, 8980, 9336, 10146, 14124,
-    17270, 20533, 23434, 25972, 27944, 29570, 31416);
+      17270, 20533, 23434, 25972, 27944, 29570, 31416);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 9), 1727, 3948, 6101, 7796, 9841, 12344, 15766, 18944,
-    20638, 22038, 23963, 25311, 26988, 28766, 31012);
+      20638, 22038, 23963, 25311, 26988, 28766, 31012);
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 10));
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 11));
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 12));
@@ -754,9 +754,9 @@ fn test_interintra_cdf() {
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 16));
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 17));
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 18), 154, 987, 1925, 2051, 2088, 2111, 2151, 23033,
-    23703, 24284, 24985, 25684, 27259, 28883, 30911);
+      23703, 24284, 24985, 25684, 27259, 28883, 30911);
     av1_t_chk16(av1_iicdf_wedgeidx(cc, 19), 1135, 1322, 1493, 2635, 2696, 2737, 2770, 21016,
-    22935, 25057, 27251, 29173, 30089, 30960, 31933);
+      22935, 25057, 27251, 29173, 30089, 30960, 31933);
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 20));
     av1_t_chk_wunif(av1_iicdf_wedgeidx(cc, 21));
     return 0;
@@ -870,14 +870,14 @@ fn test_iicdf_layout() {
     assert_eq(av1_iicdf_groupidx(cc, 0) - cc, 464 * 8, "groupidx base 464");
     assert_eq(av1_iicdf_groupidx(cc, 1) - av1_iicdf_groupidx(cc, 0), 3 * 8, "groupidx stride 3");
     assert_eq(av1_iicdf_groupidx(cc, AV1_COMP_GROUP_IDX_CONTEXTS) - cc, 482 * 8,
-    "groupidx[6 rows] ends at 482");
+      "groupidx[6 rows] ends at 482");
     assert_eq(av1_iicdf_compidx(cc, 0) - cc, 482 * 8, "compidx base 482");
     assert_eq(av1_iicdf_compidx(cc, 1) - av1_iicdf_compidx(cc, 0), 3 * 8, "compidx stride 3");
     assert_eq(av1_iicdf_compidx(cc, AV1_COMPOUND_IDX_CONTEXTS) - cc, 500 * 8, "compidx[6 rows] ends at 500");
     assert_eq(av1_iicdf_comptype(cc, 0) - cc, 500 * 8, "comptype base 500");
     assert_eq(av1_iicdf_comptype(cc, 1) - av1_iicdf_comptype(cc, 0), 3 * 8, "comptype stride 3");
     assert_eq(av1_iicdf_comptype(cc, AV1_BLOCK_SIZES) - cc, AV1IICDF_SIZE * 8,
-    "comptype[22 rows] ends EXACTLY at the blob end");
+      "comptype[22 rows] ends EXACTLY at the blob end");
     return 0;
 }
 fn test_imcdf_layout() {
@@ -903,7 +903,7 @@ fn test_imcdf_layout() {
     assert_eq(av1_imcdf_useobmc(cc, 0) - cc, 275 * 8, "useobmc base 275");
     assert_eq(av1_imcdf_useobmc(cc, 1) - av1_imcdf_useobmc(cc, 0), 3 * 8, "useobmc stride 3");
     assert_eq(av1_imcdf_useobmc(cc, AV1_BLOCK_SIZES) - cc, AV1IMCDF_SIZE * 8,
-    "useobmc[22 rows] ends EXACTLY at the blob end");
+      "useobmc[22 rows] ends EXACTLY at the blob end");
     return 0;
 }
 fn test_refcdf_layout() {
@@ -913,7 +913,7 @@ fn test_refcdf_layout() {
     assert_eq(av1_refcdf_singleref(cc, 0, 0) - cc, 12 * 8, "singleref base 12");
     assert_eq(av1_refcdf_singleref(cc, 0, 1) - av1_refcdf_singleref(cc, 0, 0), 3 * 8, "singleref j-stride 3");
     assert_eq(av1_refcdf_singleref(cc, 1, 0) - av1_refcdf_singleref(cc, 0, 0), 18 * 8,
-    "singleref ctx-stride 6*3");
+      "singleref ctx-stride 6*3");
     assert_eq(av1_refcdf_singleref(cc, 3, 0) - cc, 66 * 8, "singleref[3x6 rows] ends at 66");
     assert_eq(av1_refcdf_compmode(cc, 0) - cc, 66 * 8, "comp_mode base 66");
     assert_eq(av1_refcdf_compmode(cc, 5) - cc, 81 * 8, "comp_mode[5 rows] ends at 81");
@@ -927,7 +927,7 @@ fn test_refcdf_layout() {
     assert_eq(av1_refcdf_unicompref(cc, 3, 0) - cc, 168 * 8, "uni_comp_ref[3x3 rows] ends at 168");
     assert_eq(av1_refcdf_skipmode(cc, 0) - cc, 168 * 8, "skip_mode base 168 (0.7.83)");
     assert_eq(av1_refcdf_skipmode(cc, 3) - cc, AV1REFCDF_SIZE * 8,
-    "skip_mode[3 rows] ends EXACTLY at the blob end");
+      "skip_mode[3 rows] ends EXACTLY at the blob end");
     # the Default_Skip_Mode_Cdf values (spec 10), pinned per-row at ABSOLUTE offsets.
     assert_eq(load64(cc + (168 * 8)), 32621, "skip_mode[0] c0");
     assert_eq(load64(cc + (171 * 8)), 20708, "skip_mode[1] c0");
@@ -1037,17 +1037,17 @@ fn ct_rt_both(is_comp, skip, sz, en_masked, en_jnt, ii, wii, gctx, cctx, exp, ta
 fn test_comptype_nosym() {
     # skip_mode -> COMPOUND_AVERAGE, nothing coded (even though is_compound=1).
     ct_rt_both(1, 1, 6, 1, 1, 0, 0, 2, 2, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
-    "skip_mode -> AVERAGE");
+      "skip_mode -> AVERAGE");
     # non-compound, no interintra -> COMPOUND_AVERAGE.
     ct_rt_both(0, 0, 6, 1, 1, 0, 0, 2, 2, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
-    "single, !interintra -> AVERAGE");
+      "single, !interintra -> AVERAGE");
     # non-compound + interintra, intra blending -> COMPOUND_INTRA.
     ct_rt_both(0, 0, 6, 1, 1, 1, 0, 2, 2, ct_mk(AV1_COMPOUND_INTRA, 0, 1, 0, 0, 0),
-    "single, interintra, !wedge_ii -> INTRA");
+      "single, interintra, !wedge_ii -> INTRA");
     # non-compound + interintra + wedge_interintra -> COMPOUND_WEDGE, and NO wedge_index /
     # wedge_sign is re-read here (5.11.28 already read them) — wedge fields stay 0.
     ct_rt_both(0, 0, 6, 1, 1, 1, 1, 2, 2, ct_mk(AV1_COMPOUND_WEDGE, 0, 1, 0, 0, 0),
-    "single, interintra, wedge_ii -> WEDGE (no wedge re-read)");
+      "single, interintra, wedge_ii -> WEDGE (no wedge re-read)");
     return 0;
 }
 # ct_rt CANNOT prove the writer's no-symbol gates: on these paths the reader consumes
@@ -1088,37 +1088,37 @@ fn test_comptype_nosym_marker() {
 fn test_comptype_group0() {
     # enable_jnt_comp, compound_idx=1 -> COMPOUND_AVERAGE.
     ct_rt_both(1, 0, 6, 1, 1, 0, 0, 0, 0, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
-    "group0, jnt, compound_idx=1 -> AVERAGE");
+      "group0, jnt, compound_idx=1 -> AVERAGE");
     # enable_jnt_comp, compound_idx=0 -> COMPOUND_DISTANCE.
     ct_rt_both(1, 0, 6, 1, 1, 0, 0, 3, 3, ct_mk(AV1_COMPOUND_DISTANCE, 0, 0, 0, 0, 0),
-    "group0, jnt, compound_idx=0 -> DISTANCE");
+      "group0, jnt, compound_idx=0 -> DISTANCE");
     # !enable_jnt_comp -> COMPOUND_AVERAGE, compound_idx stays at its default 1.
     ct_rt_both(1, 0, 6, 1, 0, 0, 0, 5, 5, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
-    "group0, !jnt -> AVERAGE (compound_idx defaults 1)");
+      "group0, !jnt -> AVERAGE (compound_idx defaults 1)");
     # !enable_masked_compound -> comp_group_idx not coded, stays 0.
     ct_rt_both(1, 0, 6, 0, 1, 0, 0, 1, 1, ct_mk(AV1_COMPOUND_AVERAGE, 0, 1, 0, 0, 0),
-    "!masked -> group_idx defaults 0");
+      "!masked -> group_idx defaults 0");
     return 0;
 }
 # the comp_group_idx == 1 branch: WEDGE / DIFFWTD, incl. the n==0 forced-DIFFWTD case.
 fn test_comptype_group1() {
     # wedge-capable MiSize (Wedge_Bits=4): compound_type coded. WEDGE -> wedge_index + sign.
     ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, 11, 1, 0),
-    "group1, WEDGE -> wedge_index+sign");
+      "group1, WEDGE -> wedge_index+sign");
     ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, 0, 0, 0),
-    "group1, WEDGE idx 0 sign 0");
+      "group1, WEDGE idx 0 sign 0");
     ct_rt_both(1, 0, 9, 1, 1, 0, 0, 2, 2, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, 15, 1, 0),
-    "group1, WEDGE idx 15 (MiSize 9)");
+      "group1, WEDGE idx 15 (MiSize 9)");
     # DIFFWTD -> mask_type literal, both values.
     ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
-    "group1, DIFFWTD mask UNIFORM_45");
+      "group1, DIFFWTD mask UNIFORM_45");
     ct_rt_both(1, 0, 6, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45_INV),
-    "group1, DIFFWTD mask UNIFORM_45_INV");
+      "group1, DIFFWTD mask UNIFORM_45_INV");
     # n == 0 (Wedge_Bits[10]=0): compound_type NOT coded, forced COMPOUND_DIFFWTD.
     ct_rt_both(1, 0, 10, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45_INV),
-    "group1, n==0 -> forced DIFFWTD");
+      "group1, n==0 -> forced DIFFWTD");
     ct_rt_both(1, 0, 0, 1, 1, 0, 0, 0, 0, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
-    "group1, n==0 (MiSize 0) -> forced DIFFWTD");
+      "group1, n==0 (MiSize 0) -> forced DIFFWTD");
     return 0;
 }
 # The spec opens read_compound_type with `comp_group_idx = 0; compound_idx = 1`, and every
@@ -1156,13 +1156,13 @@ fn test_comptype_reset() {
     var cc = av1_iicdf_blob();
     var enc = av1_sym_enc_init(64, 1);
     av1_write_compound_type(enc, cc, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
-    1, 0, 6, 1, 1, 0, 0, 4, 4);
+      1, 0, 6, 1, 1, 0, 0, 4, 4);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 1);
     av1_read_compound_type(sd, cc, r, 1, 0, 6, 1, 1, 0, 0, 4, 4);
     ct_assert(r, ct_mk(AV1_COMPOUND_DIFFWTD, 1, 1, 0, 0, AV1_UNIFORM_45),
-    "DIFFWTD clears stale wedge_index/sign");
+      "DIFFWTD clears stale wedge_index/sign");
     return 0;
 }
 # every wedge-capable MiSize round-trips a WEDGE compound_type over every wedge_index.
@@ -1178,7 +1178,7 @@ fn test_comptype_wedge_sweep() {
         var w = 0;
         while (w < AV1_WEDGE_TYPES) {
             ct_rt(1, 0, sz, 1, 1, 0, 0, 4, 4, ct_mk(AV1_COMPOUND_WEDGE, 1, 1, w, w & 1, 0), 1,
-            "wedge sweep");
+              "wedge sweep");
             w = w + 1;
         }
         i = i + 1;
@@ -1405,7 +1405,7 @@ fn test_nbctx_full_enumeration() {
                         var id = 0;
                         while (id < 9) {
                             var nb = nb_build(au, al, load64(refs + (ia * 8)), load64(refs + (ib * 8)),
-                            load64(refs + (ic * 8)), load64(refs + (id * 8)));
+                              load64(refs + (ic * 8)), load64(refs + (id * 8)));
                             var ii = av1_is_inter_ctx(nb);
                             var cm = av1_comp_mode_ctx(nb);
                             # ACCUMULATE range violations rather than asserting per combo:
@@ -1521,17 +1521,17 @@ fn test_ref_family_direction() {
     assert_eq(av1_comp_bwdref_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 7)), 0, "comp_bwdref -> 0 (pair order)");
     assert_eq(av1_comp_bwdref_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 5)), 2, "comp_bwdref -> 2 (pair order)");
     assert_eq(av1_comp_bwdref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 6)), 0,
-    "comp_bwdref_p1 -> 0 (pair order)");
+      "comp_bwdref_p1 -> 0 (pair order)");
     assert_eq(av1_comp_bwdref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 5)), 2,
-    "comp_bwdref_p1 -> 2 (pair order)");
+      "comp_bwdref_p1 -> 2 (pair order)");
     assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 5)), 0,
-    "single_ref_p1 -> 0 (pair order)");
+      "single_ref_p1 -> 0 (pair order)");
     assert_eq(av1_single_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 1)), 2,
-    "single_ref_p1 -> 2 (pair order)");
+      "single_ref_p1 -> 2 (pair order)");
     assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 3)), 0,
-    "uni_comp_ref_p1 -> 0 (pair order)");
+      "uni_comp_ref_p1 -> 0 (pair order)");
     assert_eq(av1_uni_comp_ref_p1_ctx(nb_build(1, 1, 0 - 1, 0 - 1, 0 - 1, 2)), 2,
-    "uni_comp_ref_p1 -> 2 (pair order)");
+      "uni_comp_ref_p1 -> 2 (pair order)");
     return 0;
 }
 # the ALIASES must equal the functions the spec says they are computed as.
@@ -1548,7 +1548,7 @@ fn test_ref_family_aliases() {
         var j = 0;
         while (j < 9) {
             var nb = nb_build(1, 1, load64(refs + (i * 8)), load64(refs + (j * 8)),
-            load64(refs + (j * 8)), load64(refs + (i * 8)));
+              load64(refs + (j * 8)), load64(refs + (i * 8)));
             av1_single_ref_ctxs(nb, sr);
             av1_comp_ref_ctxs(nb, cc);
             # single_ref_p2..p6 alias comp_bwdref / comp_ref / comp_ref_p1 / comp_ref_p2 / comp_bwdref_p1.
@@ -1597,7 +1597,7 @@ fn test_ref_family_enumeration() {
                         var id = 0;
                         while (id < 9) {
                             var nb = nb_build(au, al, load64(refs + (ia * 8)), load64(refs + (ib * 8)),
-                            load64(refs + (ic * 8)), load64(refs + (id * 8)));
+                              load64(refs + (ic * 8)), load64(refs + (id * 8)));
                             var v_cr = av1_comp_ref_ctx(nb);
                             var v_cr1 = av1_comp_ref_p1_ctx(nb);
                             var v_cr2 = av1_comp_ref_p2_ctx(nb);
@@ -1680,7 +1680,7 @@ fn test_ref_ctxs_feed_the_reads() {
 # ================================================================
 # build an nbctx whose neighbour cells also carry the new grid fields.
 fn nb_build_g(avail_u, avail_l, aref0, aref1, lref0, lref1, agrp, aidx, ai0, ai1,
-lgrp, lidx, li0, li1): i64 {
+  lgrp, lidx, li0, li1): i64 {
     var cols = 8;
     var g = av1_mv_grid_new(cols, 8);
     var acell = av1_mv_grid_cell(g, cols, 2, 3);      # above of the block at (3,3)
@@ -1702,12 +1702,12 @@ lgrp, lidx, li0, li1): i64 {
 # behind two equal values.
 fn cg_case(au, al, a0, a1, l0, l1, agrp, lgrp, exp, tag): i64 {
     assert_eq(av1_comp_group_idx_ctx(nb_build_g(au, al, a0, a1, l0, l1, agrp, 1 - agrp, 0, 0,
-    lgrp, 1 - lgrp, 0, 0)), exp, tag);
+          lgrp, 1 - lgrp, 0, 0)), exp, tag);
     return 0;
 }
 fn ci_case(au, al, a0, a1, l0, l1, aidx, lidx, fe, exp, tag): i64 {
     assert_eq(av1_compound_idx_ctx(nb_build_g(au, al, a0, a1, l0, l1, 1 - aidx, aidx, 0, 0,
-    1 - lidx, lidx, 0, 0), fe), exp, tag);
+          1 - lidx, lidx, 0, 0), fe), exp, tag);
     return 0;
 }
 fn it_case(au, al, a0, l0, ai, li, dir, r0, r1, exp, tag): i64 {
@@ -1776,11 +1776,11 @@ fn test_nbctx_setup_reuse() {
     var fresh = av1_nbctx_new();
     av1_nbctx_setup(fresh, g, cols, 3, 3, 0, 0);
     assert_eq(av1_comp_group_idx_ctx(nb), av1_comp_group_idx_ctx(fresh),
-    "reuse: comp_group_idx ctx == a fresh record's");
+      "reuse: comp_group_idx ctx == a fresh record's");
     assert_eq(av1_compound_idx_ctx(nb, 1), av1_compound_idx_ctx(fresh, 1),
-    "reuse: compound_idx ctx == a fresh record's");
+      "reuse: compound_idx ctx == a fresh record's");
     assert_eq(av1_interp_filter_ctx(nb, 0, 1, 0 - 1), av1_interp_filter_ctx(fresh, 0, 1, 0 - 1),
-    "reuse: interp_filter ctx == a fresh record's");
+      "reuse: interp_filter ctx == a fresh record's");
     return 0;
 }
 fn test_comp_group_idx_ctx() {
@@ -1866,8 +1866,8 @@ fn test_last_ctx_enumeration() {
                                     # DE-ALIASED: CompoundIdxs = 1-ag so a context
                                     # reading the wrong field shifts the digest.
                                     var nb = nb_build_g(au, al, load64(refs + (ia * 8)),
-                                    load64(refs + (ib * 8)), load64(refs + (ic * 8)),
-                                    load64(refs + (id * 8)), ag, 1 - ag, 0, 0, lg, 1 - lg, 0, 0);
+                                      load64(refs + (ib * 8)), load64(refs + (ic * 8)),
+                                      load64(refs + (id * 8)), ag, 1 - ag, 0, 0, lg, 1 - lg, 0, 0);
                                     var v = av1_comp_group_idx_ctx(nb);
                                     if (v < 0 || v > 5) { bad = bad + 1; }
                                     cg_sum = cg_sum + v; n_cg = n_cg + 1;
@@ -2010,25 +2010,25 @@ fn test_needs_interp_filter() {
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0), 1, "NEWMV -> needs filter");
     # large + GLOBALMV: only when the model is a plain TRANSLATION.
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_TRANSLATION, 0), 1,
-    "large GLOBALMV + TRANSLATION -> needs filter");
+      "large GLOBALMV + TRANSLATION -> needs filter");
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0), 0,
-    "large GLOBALMV + ROTZOOM -> no filter");
+      "large GLOBALMV + ROTZOOM -> no filter");
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_IDENTITY, 0), 0,
-    "large GLOBALMV + IDENTITY -> no filter");
+      "large GLOBALMV + IDENTITY -> no filter");
     # GLOBAL_GLOBALMV: EITHER model being TRANSLATION suffices.
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBAL_GLOBALMV, AV1_GM_TRANSLATION,
-    AV1_GM_ROTZOOM), 1, "GLOBAL_GLOBALMV + gm0 TRANSLATION -> needs filter");
+        AV1_GM_ROTZOOM), 1, "GLOBAL_GLOBALMV + gm0 TRANSLATION -> needs filter");
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBAL_GLOBALMV, AV1_GM_ROTZOOM,
-    AV1_GM_TRANSLATION), 1, "GLOBAL_GLOBALMV + gm1 TRANSLATION -> needs filter");
+        AV1_GM_TRANSLATION), 1, "GLOBAL_GLOBALMV + gm1 TRANSLATION -> needs filter");
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 6, AV1_GLOBAL_GLOBALMV, AV1_GM_ROTZOOM,
-    AV1_GM_AFFINE), 0, "GLOBAL_GLOBALMV + neither TRANSLATION -> no filter");
+        AV1_GM_AFFINE), 0, "GLOBAL_GLOBALMV + neither TRANSLATION -> no filter");
     # SMALL block: the `large` guard means GLOBALMV still needs a filter. MiSize 0 = 4x4.
     assert_eq(av1_block_width(0), 4, "MiSize 0 is 4 wide");
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 0, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0), 1,
-    "SMALL GLOBALMV + ROTZOOM -> STILL needs a filter (the large guard)");
+      "SMALL GLOBALMV + ROTZOOM -> STILL needs a filter (the large guard)");
     # MiSize 3 (8x8) is exactly the `>= 8` boundary -> large.
     assert_eq(av1_needs_interp_filter(0, AV1_MM_SIMPLE, 3, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0), 0,
-    "8x8 IS large (the >= 8 boundary)");
+      "8x8 IS large (the >= 8 boundary)");
     return 0;
 }
 # the interp_filter loop (5.11.23 tail).
@@ -2055,17 +2055,17 @@ fn test_read_interp_filters() {
     if_rt(2, 0, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 1, 1, 2, 2, "!SWITCHABLE (2) -> both dirs = 2");
     # SWITCHABLE + dual: both dirs coded independently.
     if_rt(AV1_INTERP_SWITCHABLE, 1, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 1, 2, 1,
-    "SWITCHABLE + dual -> both dirs coded");
+      "SWITCHABLE + dual -> both dirs coded");
     if_rt(AV1_INTERP_SWITCHABLE, 1, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 0, 2, 0, 2,
-    "SWITCHABLE + dual -> dirs are independent");
+      "SWITCHABLE + dual -> dirs are independent");
     # SWITCHABLE, NO dual: only dir 0 is coded and dir 1 MIRRORS it.
     if_rt(AV1_INTERP_SWITCHABLE, 0, 0, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 0, 2, 2,
-    "SWITCHABLE, !dual -> dir1 mirrors dir0 (the src's dir1 is ignored)");
+      "SWITCHABLE, !dual -> dir1 mirrors dir0 (the src's dir1 is ignored)");
     # SWITCHABLE but needs_interp_filter false -> EIGHTTAP, nothing coded.
     if_rt(AV1_INTERP_SWITCHABLE, 1, 1, AV1_MM_SIMPLE, 6, AV1_NEWMV, 0, 0, 2, 2, AV1_EIGHTTAP,
-    AV1_EIGHTTAP, "SWITCHABLE + skip_mode -> EIGHTTAP, nothing coded");
+      AV1_EIGHTTAP, "SWITCHABLE + skip_mode -> EIGHTTAP, nothing coded");
     if_rt(AV1_INTERP_SWITCHABLE, 1, 0, AV1_MM_SIMPLE, 6, AV1_GLOBALMV, AV1_GM_ROTZOOM, 0, 2, 2,
-    AV1_EIGHTTAP, AV1_EIGHTTAP, "SWITCHABLE + large GLOBALMV/ROTZOOM -> EIGHTTAP");
+      AV1_EIGHTTAP, AV1_EIGHTTAP, "SWITCHABLE + large GLOBALMV/ROTZOOM -> EIGHTTAP");
     return 0;
 }
 
@@ -2106,7 +2106,7 @@ fn mm_grid(mvr, mvc, ref0, ref1): i64 {
         var c = 0;
         while (c < 16) {
             av1_mi_store_mode(g, cols, 16, r, c, 6, AV1_NEWMV, ref0, ref1, 1, mvr, mvc, 0, 0,
-            0, 0, 0, 0, 0);
+              0, 0, 0, 0, 0);
             av1_mi_store_final(g, cols, 16, r, c, 6, 1);
             c = c + 4;
         }
@@ -2137,9 +2137,9 @@ fn test_is_scaled() {
     # the +FrameWidth/2 rounding: 32767/32768 lands EXACTLY on noScale (16383.5 -> 16384).
     var fh2 = mm_fh(1, 0, 1, 1, 32768, 64);
     assert_eq(av1_is_scaled(fh2, mm_refs(32767, 64), AV1_LAST_FRAME), 0,
-    "x rounding edge 32767/32768 -> unscaled (the +fw/2 term)");
+      "x rounding edge 32767/32768 -> unscaled (the +fw/2 term)");
     assert_eq(av1_is_scaled(fh2, mm_refs(32766, 64), AV1_LAST_FRAME), 1,
-    "one below the rounding edge -> scaled");
+      "one below the rounding edge -> scaled");
     var fh3 = mm_fh(1, 0, 1, 1, 64, 32768);
     assert_eq(av1_is_scaled(fh3, mm_refs(64, 32767), AV1_LAST_FRAME), 0, "y rounding edge -> unscaled");
     # hostile guards: a refFrame outside LAST..ALTREF or a lying slot index -> "scaled".
@@ -2176,9 +2176,9 @@ fn test_is_scaled() {
     assert_eq(av1_is_scaled(fh7, refs7, AV1_LAST_FRAME), 0, "slot 7 (last valid) is read, not guarded");
     # hostile: zero frame dims -> "scaled" (the divide-by-zero backstop, both axes).
     assert_eq(av1_is_scaled(mm_fh(1, 0, 1, 1, 0, 64), mm_refs(64, 64), AV1_LAST_FRAME), 1,
-    "FrameWidth 0 -> backstop fires");
+      "FrameWidth 0 -> backstop fires");
     assert_eq(av1_is_scaled(mm_fh(1, 0, 1, 1, 64, 0), mm_refs(64, 64), AV1_LAST_FRAME), 1,
-    "FrameHeight 0 -> backstop fires");
+      "FrameHeight 0 -> backstop fires");
     return 0;
 }
 # round-trip motion_mode through the driver: write via the encoder inverse, decode via
@@ -2194,7 +2194,7 @@ fn mm_rt(fh, refs, g, sz, skip, y_mode, ref0, ref1, is_comp, src_mode, exp_mode,
     var ctxd = mm_ctx(g, sz, ref0, scan_ref1);
     var enc = av1_sym_enc_init(64, 1);
     assert_eq(av1_write_motion_mode(enc, cc, ctxe, wse, fh, refs, skip, y_mode, ref0, ref1,
-    is_comp, 8, 8, src_mode), DR_OK, tag);
+        is_comp, 8, 8, src_mode), DR_OK, tag);
     av1_sym_encode_literal(enc, 165, 8);             # marker: 8-bit 0xA5 (a lucky one-symbol
     #   desync can fake a binary marker — an 8-bit literal survives at 1/256, not 1/2)
     var olen = 0;
@@ -2202,7 +2202,7 @@ fn mm_rt(fh, refs, g, sz, skip, y_mode, ref0, ref1, is_comp, src_mode, exp_mode,
     var sd = av1_sym_dec_init(out, olen, 1);
     var got = alloc(8);
     assert_eq(av1_read_motion_mode(sd, cc, got, ctxd, wsd, fh, refs, skip, y_mode, ref0, ref1,
-    is_comp, 8, 8), DR_OK, tag);
+        is_comp, 8, 8), DR_OK, tag);
     assert_eq(load64(got + 0), exp_mode, tag);
     assert_eq(av1_sym_read_literal(sd, 8), 165, "marker: reader consumed exactly the writer's symbols");
     return 0;
@@ -2216,74 +2216,74 @@ fn test_read_motion_mode_gate() {
     var g_intra = mm_grid(8, 8, AV1_INTRA_FRAME, AV1_REF_NONE);   # intra: not overlappable
     # A: permissive -> the WARP branch (@@motion_mode); all three values round-trip.
     mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_SIMPLE,
-    AV1_MM_SIMPLE, "A warp branch: SIMPLE");
+      AV1_MM_SIMPLE, "A warp branch: SIMPLE");
     mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_OBMC,
-    AV1_MM_OBMC, "A warp branch: OBMC");
+      AV1_MM_OBMC, "A warp branch: OBMC");
     mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
-    AV1_MM_LOCALWARP, "A warp branch: LOCALWARP");
+      AV1_MM_LOCALWARP, "A warp branch: LOCALWARP");
     # B/C: skip_mode / !is_motion_mode_switchable -> SIMPLE, nothing coded.
     mm_rt(fh_ok, refs_ok, g_same, 6, 1, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
-    AV1_MM_SIMPLE, "B skip_mode -> SIMPLE, no symbol");
+      AV1_MM_SIMPLE, "B skip_mode -> SIMPLE, no symbol");
     mm_rt(mm_fh(0, 0, 1, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "C !switchable -> SIMPLE, no symbol");
+      AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "C !switchable -> SIMPLE, no symbol");
     # D: min(Block_Width, Block_Height) < 8 -> SIMPLE. MiSize 0 = 4x4, 1 = 4x8; 3 = 8x8.
     mm_rt(fh_ok, refs_ok, g_same, 0, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
-    AV1_MM_SIMPLE, "D 4x4 -> SIMPLE, no symbol");
+      AV1_MM_SIMPLE, "D 4x4 -> SIMPLE, no symbol");
     mm_rt(fh_ok, refs_ok, g_same, 1, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
-    AV1_MM_SIMPLE, "D2 4x8 -> SIMPLE, no symbol");
+      AV1_MM_SIMPLE, "D2 4x8 -> SIMPLE, no symbol");
     mm_rt(fh_ok, refs_ok, g_same, 3, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
-    AV1_MM_LOCALWARP, "D3 8x8 (the >= 8 boundary) IS large -> warp branch");
+      AV1_MM_LOCALWARP, "D3 8x8 (the >= 8 boundary) IS large -> warp branch");
     # E: GLOBALMV with a global model beyond TRANSLATION -> SIMPLE; TRANSLATION passes;
     # force_integer_mv SKIPS the global gate but then forces the OBMC branch.
     mm_rt(mm_fh(1, 0, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "E GLOBALMV + ROTZOOM -> SIMPLE");
+      AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "E GLOBALMV + ROTZOOM -> SIMPLE");
     mm_rt(mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP, "E2 GLOBALMV + TRANSLATION -> warp branch");
+      AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP, "E2 GLOBALMV + TRANSLATION -> warp branch");
     mm_rt(mm_fh(1, 1, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC, "E3 GLOBALMV + ROTZOOM + force_int -> @@use_obmc");
+      AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC, "E3 GLOBALMV + ROTZOOM + force_int -> @@use_obmc");
     mm_rt(mm_fh(1, 1, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_SIMPLE, AV1_MM_SIMPLE, "E3b ...use_obmc = 0 decodes SIMPLE");
+      AV1_REF_NONE, 0, AV1_MM_SIMPLE, AV1_MM_SIMPLE, "E3b ...use_obmc = 0 decodes SIMPLE");
     mm_rt(mm_fh(1, 0, 1, AV1_GM_AFFINE, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBAL_GLOBALMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "L GLOBAL_GLOBALMV + AFFINE -> SIMPLE");
+      AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_SIMPLE, "L GLOBAL_GLOBALMV + AFFINE -> SIMPLE");
     # M: the y_mode RESTRICTION on the global gate — a non-GLOBALMV-family mode is NOT
     # gated by a beyond-TRANSLATION model (a bug applying the gate to every mode would
     # silently desync every NEWMV block in a ROTZOOM/AFFINE global-motion frame; the
     # LOCALWARP expectation can only decode from @@motion_mode, so even a gate bug
     # SHARED by driver + inverse fails here).
     mm_rt(mm_fh(1, 0, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
-    "M NEWMV + ROTZOOM -> NOT gated, warp branch");
+      AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
+      "M NEWMV + ROTZOOM -> NOT gated, warp branch");
     mm_rt(mm_fh(1, 0, 1, AV1_GM_AFFINE, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC,
-    "M2 NEWMV + AFFINE -> NOT gated, warp branch");
+      AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC,
+      "M2 NEWMV + AFFINE -> NOT gated, warp branch");
     # boundary: ALTREF (7, the LAST valid ref) round-trips on a coded branch — pins the
     # ref0 guard's upper edge (a >= mutant would reject every valid ALTREF block).
     mm_rt(fh_ok, refs_ok, mm_grid(8, 8, AV1_ALTREF_FRAME, AV1_REF_NONE), 6, 0, AV1_NEWMV,
-    AV1_ALTREF_FRAME, AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
-    "ref0 = ALTREF (upper valid boundary) -> warp branch");
+      AV1_ALTREF_FRAME, AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
+      "ref0 = ALTREF (upper valid boundary) -> warp branch");
     # F/G: compound / inter-intra (RefFrame[1] == INTRA_FRAME) -> SIMPLE.
     mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEW_NEWMV, 1, 5, 1, AV1_MM_LOCALWARP,
-    AV1_MM_SIMPLE, "F compound -> SIMPLE, no symbol");
+      AV1_MM_SIMPLE, "F compound -> SIMPLE, no symbol");
     mm_rt(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_INTRA_FRAME, 0, AV1_MM_LOCALWARP,
-    AV1_MM_SIMPLE, "G interintra (ref1 = INTRA_FRAME) -> SIMPLE, no symbol");
+      AV1_MM_SIMPLE, "G interintra (ref1 = INTRA_FRAME) -> SIMPLE, no symbol");
     # H: no overlappable inter neighbour -> SIMPLE.
     mm_rt(fh_ok, refs_ok, g_intra, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP,
-    AV1_MM_SIMPLE, "H intra neighbours -> SIMPLE, no symbol");
+      AV1_MM_SIMPLE, "H intra neighbours -> SIMPLE, no symbol");
     # I: overlappable neighbours on ANOTHER ref -> NumSamples == 0 -> the OBMC branch.
     mm_rt(fh_ok, refs_ok, g_other, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_OBMC,
-    AV1_MM_OBMC, "I NumSamples == 0 -> @@use_obmc (OBMC)");
+      AV1_MM_OBMC, "I NumSamples == 0 -> @@use_obmc (OBMC)");
     mm_rt(fh_ok, refs_ok, g_other, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_SIMPLE,
-    AV1_MM_SIMPLE, "I2 NumSamples == 0 -> @@use_obmc (SIMPLE)");
+      AV1_MM_SIMPLE, "I2 NumSamples == 0 -> @@use_obmc (SIMPLE)");
     # J: !allow_warped_motion -> the OBMC branch.
     mm_rt(mm_fh(1, 0, 0, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC, "J !allow_warped_motion -> @@use_obmc");
+      AV1_REF_NONE, 0, AV1_MM_OBMC, AV1_MM_OBMC, "J !allow_warped_motion -> @@use_obmc");
     # K: a scaled reference -> the OBMC branch; and the 32767/32768 rounding edge is
     # UNSCALED end-to-end (the ref port's rounding case driving the real driver).
     mm_rt(fh_ok, mm_refs(32, 64), g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_OBMC,
-    AV1_MM_OBMC, "K scaled ref -> @@use_obmc");
+      AV1_MM_OBMC, "K scaled ref -> @@use_obmc");
     mm_rt(mm_fh(1, 0, 1, AV1_GM_TRANSLATION, 32768, 64), mm_refs(32767, 64), g_same, 6, 0,
-    AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
-    "K2 rounding-edge ref (32767/32768) is UNSCALED -> warp branch");
+      AV1_NEWMV, 1, AV1_REF_NONE, 0, AV1_MM_LOCALWARP, AV1_MM_LOCALWARP,
+      "K2 rounding-edge ref (32767/32768) is UNSCALED -> warp branch");
     return 0;
 }
 # decode-side CONFORMANCE, independent of the driver's own inverse: the symbol stream is
@@ -2303,10 +2303,10 @@ fn mm_dec(fh, refs, g, sz, skip, y_mode, ref0, ref1, is_comp, kind, val, exp_mod
     var scan_ref1 = AV1_REF_NONE;
     if (is_comp != 0) { scan_ref1 = ref1; }
     assert_eq(av1_read_motion_mode(sd, cc, got, mm_ctx(g, sz, ref0, scan_ref1), av1_warp_new(),
-    fh, refs, skip, y_mode, ref0, ref1, is_comp, 8, 8), DR_OK, tag);
+        fh, refs, skip, y_mode, ref0, ref1, is_comp, 8, 8), DR_OK, tag);
     assert_eq(load64(got + 0), exp_mode, tag);
     assert_eq(av1_sym_read_literal(sd, 8), 165,
-    "marker: the driver consumed exactly the expected symbols");
+      "marker: the driver consumed exactly the expected symbols");
     return 0;
 }
 fn test_read_motion_mode_conformance() {
@@ -2317,25 +2317,25 @@ fn test_read_motion_mode_conformance() {
     var g_intra = mm_grid(8, 8, AV1_INTRA_FRAME, AV1_REF_NONE);
     # the WARP branch consumes @@motion_mode:
     mm_dec(fh_ok, refs_ok, g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 2, AV1_MM_LOCALWARP,
-    AV1_MM_LOCALWARP, "conformance: permissive -> @@motion_mode");
+      AV1_MM_LOCALWARP, "conformance: permissive -> @@motion_mode");
     # each OBMC-branch trigger consumes @@use_obmc:
     mm_dec(mm_fh(1, 1, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
-    AV1_REF_NONE, 0, 1, 1, AV1_MM_OBMC, "conformance: force_integer_mv -> @@use_obmc");
+      AV1_REF_NONE, 0, 1, 1, AV1_MM_OBMC, "conformance: force_integer_mv -> @@use_obmc");
     mm_dec(fh_ok, refs_ok, g_other, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 1, 1,
-    AV1_MM_OBMC, "conformance: NumSamples == 0 -> @@use_obmc");
+      AV1_MM_OBMC, "conformance: NumSamples == 0 -> @@use_obmc");
     mm_dec(mm_fh(1, 0, 0, AV1_GM_TRANSLATION, 64, 64), refs_ok, g_same, 6, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, 1, 1, AV1_MM_OBMC, "conformance: !allow_warped_motion -> @@use_obmc");
+      AV1_REF_NONE, 0, 1, 1, AV1_MM_OBMC, "conformance: !allow_warped_motion -> @@use_obmc");
     mm_dec(fh_ok, mm_refs(32, 64), g_same, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 1, 1,
-    AV1_MM_OBMC, "conformance: scaled ref -> @@use_obmc");
+      AV1_MM_OBMC, "conformance: scaled ref -> @@use_obmc");
     # early-SIMPLE paths consume NOTHING:
     mm_dec(fh_ok, refs_ok, g_same, 6, 1, AV1_NEWMV, 1, AV1_REF_NONE, 0, 0, 0,
-    AV1_MM_SIMPLE, "conformance: skip_mode consumes nothing");
+      AV1_MM_SIMPLE, "conformance: skip_mode consumes nothing");
     mm_dec(fh_ok, refs_ok, g_intra, 6, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 0, 0,
-    AV1_MM_SIMPLE, "conformance: no overlappable consumes nothing");
+      AV1_MM_SIMPLE, "conformance: no overlappable consumes nothing");
     mm_dec(fh_ok, refs_ok, g_same, 6, 0, AV1_NEW_NEWMV, 1, 5, 1, 0, 0,
-    AV1_MM_SIMPLE, "conformance: compound consumes nothing");
+      AV1_MM_SIMPLE, "conformance: compound consumes nothing");
     mm_dec(mm_fh(1, 0, 1, AV1_GM_ROTZOOM, 64, 64), refs_ok, g_same, 6, 0, AV1_GLOBALMV, 1,
-    AV1_REF_NONE, 0, 0, 0, AV1_MM_SIMPLE, "conformance: GLOBALMV + ROTZOOM consumes nothing");
+      AV1_REF_NONE, 0, 0, 0, AV1_MM_SIMPLE, "conformance: GLOBALMV + ROTZOOM consumes nothing");
     return 0;
 }
 # driver side-effects + hostile inputs: ws is zeroed on gated-off paths, filled on the
@@ -2348,7 +2348,7 @@ fn test_motion_mode_driver_state() {
     var enc = av1_sym_enc_init(64, 1);
     var wse = av1_warp_new();
     av1_write_motion_mode(enc, cc, mm_ctx(g_same, 6, 1, AV1_REF_NONE), wse, fh_ok, refs_ok, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, 8, 8, AV1_MM_LOCALWARP);
+      AV1_REF_NONE, 0, 8, 8, AV1_MM_LOCALWARP);
     assert_eq(av1_warp_num(wse), 4, "the encoder inverse also runs find_warp_samples");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -2357,7 +2357,7 @@ fn test_motion_mode_driver_state() {
     var wsd = av1_warp_new();
     store64(wsd + AV1WS_NUM, 7);                     # stale: the driver must reset it
     av1_read_motion_mode(sd, cc, got, mm_ctx(g_same, 6, 1, AV1_REF_NONE), wsd, fh_ok, refs_ok, 0, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, 8, 8);
+      AV1_REF_NONE, 0, 8, 8);
     assert_eq(load64(got + 0), AV1_MM_LOCALWARP, "warp branch decodes");
     assert_eq(av1_warp_num(wsd), 4, "the WARP branch leaves NumSamples for warp_estimation");
     # a gated-off path ZEROES the caller's ws (stale NumSamples must not leak).
@@ -2366,33 +2366,33 @@ fn test_motion_mode_driver_state() {
     var got2 = alloc(8);
     var sd2 = av1_sym_dec_init(out, olen, 1);
     av1_read_motion_mode(sd2, cc, got2, mm_ctx(g_same, 6, 1, AV1_REF_NONE), ws2, fh_ok, refs_ok, 1, AV1_NEWMV, 1,
-    AV1_REF_NONE, 0, 8, 8);
+      AV1_REF_NONE, 0, 8, 8);
     assert_eq(load64(got2 + 0), AV1_MM_SIMPLE, "skip_mode -> SIMPLE");
     assert_eq(av1_warp_num(ws2), 0, "a gated-off path zeroes ws");
     # hostile: ref0 / MiSize out of range, or a null out -> DR_ERR_BOUNDS, no symbol read.
     var got3 = alloc(8);
     var sd3 = av1_sym_dec_init(out, olen, 1);
     assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 6, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
-    0, AV1_NEWMV, 0, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ref0 = INTRA_FRAME -> bounds error");
+        0, AV1_NEWMV, 0, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ref0 = INTRA_FRAME -> bounds error");
     assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 6, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
-    0, AV1_NEWMV, 8, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ref0 = 8 -> bounds error");
+        0, AV1_NEWMV, 8, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ref0 = 8 -> bounds error");
     assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 25, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
-    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "MiSize 25 -> bounds error");
+        0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "MiSize 25 -> bounds error");
     # the guard's exact boundaries: 22 is the FIRST invalid, negative is invalid, and 21
     # (the last valid) is accepted — off-by-one mutants die on all three.
     assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 22, 1, AV1_REF_NONE), av1_warp_new(),
-    fh_ok, refs_ok, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS,
-    "MiSize 22 (first invalid) -> bounds error");
+        fh_ok, refs_ok, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS,
+      "MiSize 22 (first invalid) -> bounds error");
     assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 0 - 1, 1, AV1_REF_NONE), av1_warp_new(),
-    fh_ok, refs_ok, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS,
-    "negative MiSize -> bounds error");
+        fh_ok, refs_ok, 0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS,
+      "negative MiSize -> bounds error");
     assert_eq(av1_read_motion_mode(av1_sym_dec_init(out, olen, 1), cc, got3,
-    mm_ctx(g_same, 21, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
-    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_OK, "MiSize 21 (last valid) is accepted");
+        mm_ctx(g_same, 21, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
+        0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_OK, "MiSize 21 (last valid) is accepted");
     assert_eq(av1_read_motion_mode(sd3, cc, 0, mm_ctx(g_same, 6, 1, AV1_REF_NONE), av1_warp_new(), fh_ok, refs_ok,
-    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "out = 0 -> bounds error");
+        0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "out = 0 -> bounds error");
     assert_eq(av1_read_motion_mode(sd3, cc, got3, mm_ctx(g_same, 6, 1, AV1_REF_NONE), 0, fh_ok, refs_ok,
-    0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ws = 0 -> bounds error");
+        0, AV1_NEWMV, 1, AV1_REF_NONE, 0, 8, 8), DR_ERR_BOUNDS, "ws = 0 -> bounds error");
     return 0;
 }
 
@@ -2463,7 +2463,7 @@ fn rrf_dec(fh, nb, skip, seg_id, sz, kind, cmv, r0, r1, e0, e1, tag): i64 {
     assert_eq(load64(got + 0), e0, tag);
     assert_eq(load64(got + 8), e1, tag);
     assert_eq(av1_sym_read_literal(sd, 8), 165,
-    "marker: the driver consumed exactly the expected symbols");
+      "marker: the driver consumed exactly the expected symbols");
     return 0;
 }
 # seg_feature_active (5.11.14) — both ways on every condition + the defensive guards.
@@ -2476,7 +2476,7 @@ fn test_seg_feature_active() {
     var fh_off = rrf_fh(0, 0, 0, 0);
     rrf_feature(fh_off, 2, AV1_SEG_LVL_REF_FRAME, 4);
     assert_eq(av1_seg_feature_active(fh_off, 2, AV1_SEG_LVL_REF_FRAME), 0,
-    "segmentation_enabled = 0 -> inactive even with the feature bit set");
+      "segmentation_enabled = 0 -> inactive even with the feature bit set");
     # defensive guards read NOTHING out of range (both edges of both indices).
     assert_eq(av1_seg_feature_active(fh, 0 - 1, AV1_SEG_LVL_REF_FRAME), 0, "seg -1 -> inactive");
     assert_eq(av1_seg_feature_active(fh, 8, AV1_SEG_LVL_REF_FRAME), 0, "seg 8 -> inactive");
@@ -2485,7 +2485,7 @@ fn test_seg_feature_active() {
     assert_eq(av1_seg_feature_active(fh, 7, AV1_SEG_LVL_REF_FRAME), 0, "seg 7 (last valid) is READ");
     rrf_feature(fh, 7, AV1_SEG_LVL_GLOBALMV, 0);
     assert_eq(av1_seg_feature_active(fh, 7, AV1_SEG_LVL_GLOBALMV), 1,
-    "seg 7 / feature 7 (both last valid) -> active, not guarded");
+      "seg 7 / feature 7 (both last valid) -> active, not guarded");
     return 0;
 }
 # the no-symbol dispatch paths (ref-port cases A-D, G).
@@ -2497,15 +2497,15 @@ fn test_read_ref_frames_dispatch() {
     var fh_seg = rrf_fh(1, 1, 1, 5);
     rrf_feature(fh_seg, 2, AV1_SEG_LVL_REF_FRAME, AV1_GOLDEN_FRAME);
     rrf_rt(fh_seg, nb, 0, 2, 6, 0, 0, AV1_GOLDEN_FRAME, AV1_REF_NONE,
-    "B seg REF_FRAME -> (GOLDEN, NONE), no symbol");
+      "B seg REF_FRAME -> (GOLDEN, NONE), no symbol");
     # B2: the same feature bits but segmentation DISABLED -> the tree runs instead.
     var fh_soff = rrf_fh(0, 1, 1, 5);
     rrf_feature(fh_soff, 2, AV1_SEG_LVL_REF_FRAME, AV1_GOLDEN_FRAME);
     rrf_rt(fh_soff, nb, 0, 2, 6, AV1_LAST2_FRAME, AV1_REF_NONE, AV1_LAST2_FRAME, AV1_REF_NONE,
-    "B2 feature set but segmentation OFF -> the tree runs");
+      "B2 feature set but segmentation OFF -> the tree runs");
     # B3: the feature is on ANOTHER segment -> the tree runs for this one.
     rrf_rt(fh_seg, nb, 0, 3, 6, AV1_LAST2_FRAME, AV1_REF_NONE, AV1_LAST2_FRAME, AV1_REF_NONE,
-    "B3 feature on another segment -> the tree runs");
+      "B3 feature on another segment -> the tree runs");
     # B4/B5: the parse-clipped FeatureData boundaries land verbatim: 7 (ALTREF) and 0 (INTRA).
     var fh_b4 = rrf_fh(1, 1, 0, 0);
     rrf_feature(fh_b4, 4, AV1_SEG_LVL_REF_FRAME, 7);
@@ -2517,11 +2517,11 @@ fn test_read_ref_frames_dispatch() {
     var fh_sk = rrf_fh(1, 1, 0, 0);
     rrf_feature(fh_sk, 1, AV1_SEG_LVL_SKIP, 0);
     rrf_rt(fh_sk, nb, 0, 1, 6, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
-    "C seg SKIP -> (LAST, NONE), no symbol");
+      "C seg SKIP -> (LAST, NONE), no symbol");
     var fh_gm = rrf_fh(1, 1, 0, 0);
     rrf_feature(fh_gm, 1, AV1_SEG_LVL_GLOBALMV, 0);
     rrf_rt(fh_gm, nb, 0, 1, 6, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
-    "C2 seg GLOBALMV -> (LAST, NONE), no symbol");
+      "C2 seg GLOBALMV -> (LAST, NONE), no symbol");
     # D: skip_mode BEATS an active seg REF_FRAME (dispatch order).
     rrf_rt(fh_seg, nb, 1, 2, 6, 0, 0, 1, 5, "D skip_mode beats seg REF_FRAME");
     # G: REF_FRAME beats SKIP when both are active on the SAME segment (dispatch order).
@@ -2529,7 +2529,7 @@ fn test_read_ref_frames_dispatch() {
     rrf_feature(fh_both, 3, AV1_SEG_LVL_REF_FRAME, AV1_LAST2_FRAME);
     rrf_feature(fh_both, 3, AV1_SEG_LVL_SKIP, 0);
     rrf_rt(fh_both, nb, 0, 3, 6, 0, 0, AV1_LAST2_FRAME, AV1_REF_NONE,
-    "G REF_FRAME beats SKIP on the same segment");
+      "G REF_FRAME beats SKIP on the same segment");
     return 0;
 }
 # the tree path: the comp_mode gate (ref-port cases E-F3) + both trees + conformance.
@@ -2539,27 +2539,27 @@ fn test_read_ref_frames_tree() {
     var fh_off = rrf_fh(0, 0, 0, 0);    # reference_select off
     # E: single refs round-trip at BOTH boundary values (LAST = 1, ALTREF = 7).
     rrf_rt(fh_on, nb, 0, 0, 6, AV1_LAST_FRAME, AV1_REF_NONE, AV1_LAST_FRAME, AV1_REF_NONE,
-    "E single LAST via comp_mode gate");
+      "E single LAST via comp_mode gate");
     rrf_rt(fh_on, nb, 0, 0, 6, AV1_ALTREF_FRAME, AV1_REF_NONE, AV1_ALTREF_FRAME, AV1_REF_NONE,
-    "E single ALTREF via comp_mode gate");
+      "E single ALTREF via comp_mode gate");
     # E: compound pairs round-trip (unidir + bidir).
     rrf_rt(fh_on, nb, 0, 0, 6, AV1_LAST_FRAME, AV1_LAST2_FRAME, AV1_LAST_FRAME, AV1_LAST2_FRAME,
-    "E compound unidir (LAST, LAST2)");
+      "E compound unidir (LAST, LAST2)");
     rrf_rt(fh_on, nb, 0, 0, 6, AV1_GOLDEN_FRAME, AV1_ALTREF_FRAME, AV1_GOLDEN_FRAME, AV1_ALTREF_FRAME,
-    "E compound bidir (GOLDEN, ALTREF)");
+      "E compound bidir (GOLDEN, ALTREF)");
     # E2: reference_select OFF -> comp_mode is NOT coded (conformance: single tree only).
     rrf_dec(fh_off, nb, 0, 0, 6, 3, 0, AV1_LAST3_FRAME, AV1_REF_NONE, AV1_LAST3_FRAME, AV1_REF_NONE,
-    "E2 ref_select off -> forced SINGLE, no comp_mode symbol");
+      "E2 ref_select off -> forced SINGLE, no comp_mode symbol");
     # F/F2: min(bw4, bh4) == 1 -> forced SINGLE even with ref_select on (4x8 and 8x4).
     rrf_dec(fh_on, nb, 0, 0, 1, 3, 0, AV1_BWDREF_FRAME, AV1_REF_NONE, AV1_BWDREF_FRAME, AV1_REF_NONE,
-    "F 4x8 (min = 1) -> forced SINGLE, no comp_mode symbol");
+      "F 4x8 (min = 1) -> forced SINGLE, no comp_mode symbol");
     rrf_dec(fh_on, nb, 0, 0, 2, 3, 0, AV1_LAST_FRAME, AV1_REF_NONE, AV1_LAST_FRAME, AV1_REF_NONE,
-    "F2 8x4 (min = 1) -> forced SINGLE, no comp_mode symbol");
+      "F2 8x4 (min = 1) -> forced SINGLE, no comp_mode symbol");
     # F3: 8x8 (min = 2) is the exact boundary -> comp_mode IS coded.
     rrf_dec(fh_on, nb, 0, 0, 3, 1, AV1_SINGLE_REFERENCE, AV1_LAST2_FRAME, AV1_REF_NONE,
-    AV1_LAST2_FRAME, AV1_REF_NONE, "F3 8x8 (min = 2) -> comp_mode coded (SINGLE)");
+      AV1_LAST2_FRAME, AV1_REF_NONE, "F3 8x8 (min = 2) -> comp_mode coded (SINGLE)");
     rrf_dec(fh_on, nb, 0, 0, 3, 2, AV1_COMPOUND_REFERENCE, AV1_LAST_FRAME, AV1_ALTREF_FRAME,
-    AV1_LAST_FRAME, AV1_ALTREF_FRAME, "F3b 8x8 -> comp_mode coded (COMPOUND) + pair");
+      AV1_LAST_FRAME, AV1_ALTREF_FRAME, "F3b 8x8 -> comp_mode coded (COMPOUND) + pair");
     # adaptive-CDF mode: encoder and decoder contexts adapt in lockstep.
     var cce = av1_refcdf_new();
     var ccd = av1_refcdf_new();
@@ -2589,24 +2589,24 @@ fn test_read_ref_frames_errors() {
     var got = alloc(16);
     var sd = av1_sym_dec_init(alloc(8), 8, 1);
     assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), 0, nb, fh, 1, 0, 6), DR_ERR_BOUNDS,
-    "out = 0 -> bounds error");
+      "out = 0 -> bounds error");
     assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 0 - 1, 6), DR_ERR_BOUNDS,
-    "segment_id -1 -> bounds error");
+      "segment_id -1 -> bounds error");
     assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 8, 6), DR_ERR_BOUNDS,
-    "segment_id 8 (first invalid) -> bounds error");
+      "segment_id 8 (first invalid) -> bounds error");
     assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 0, 0 - 1), DR_ERR_BOUNDS,
-    "negative MiSize -> bounds error");
+      "negative MiSize -> bounds error");
     assert_eq(av1_read_ref_frames(sd, av1_refcdf_blob(), got, nb, fh, 1, 0, 22), DR_ERR_BOUNDS,
-    "MiSize 22 (first invalid) -> bounds error");
+      "MiSize 22 (first invalid) -> bounds error");
     # both last-valid boundaries ACCEPTED, through a real coded round-trip.
     rrf_rt(fh, nb, 0, 7, 21, AV1_LAST2_FRAME, AV1_REF_NONE, AV1_LAST2_FRAME, AV1_REF_NONE,
-    "segment_id 7 + MiSize 21 (both last valid) are accepted");
+      "segment_id 7 + MiSize 21 (both last valid) are accepted");
     # the writer replays the same guards.
     var enc = av1_sym_enc_init(32, 1);
     assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh, 0, 8, 6, 1, 0 - 1), DR_ERR_BOUNDS,
-    "writer: segment_id 8 -> bounds error");
+      "writer: segment_id 8 -> bounds error");
     assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh, 0, 0, 22, 1, 0 - 1), DR_ERR_BOUNDS,
-    "writer: MiSize 22 -> bounds error");
+      "writer: MiSize 22 -> bounds error");
     return 0;
 }
 # review hardening (the 0.7.81 adversarial review's 9 confirmed findings — all test /
@@ -2620,47 +2620,47 @@ fn test_read_ref_frames_review_hardening() {
     var fh6 = rrf_fh(1, 1, 0, 0);
     store64(fh6 + AV1FH_FEATURE_ENABLED + ((1 * 8 + 6) * 8), 1);    # literal slot 6 = SKIP
     rrf_dec(fh6, nb, 0, 1, 6, 0, 0, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
-    "SEG_LVL_SKIP is slot 6 exactly (absolute-offset pin)");
+      "SEG_LVL_SKIP is slot 6 exactly (absolute-offset pin)");
     var fh7 = rrf_fh(1, 1, 0, 0);
     store64(fh7 + AV1FH_FEATURE_ENABLED + ((1 * 8 + 7) * 8), 1);    # literal slot 7 = GLOBALMV
     rrf_dec(fh7, nb, 0, 1, 6, 0, 0, 0, 0, AV1_LAST_FRAME, AV1_REF_NONE,
-    "SEG_LVL_GLOBALMV is slot 7 exactly (absolute-offset pin)");
+      "SEG_LVL_GLOBALMV is slot 7 exactly (absolute-offset pin)");
     # (2) the WRITER's comp_mode gate through the PAIRED round-trip: at the exact 8x8
     # boundary (compound), closed-by-size (4x8), and closed-by-reference_select — the
     # leaf-built conformance cases only ever exercised the reader's copy of the gate.
     var fh_on = rrf_fh(0, 1, 0, 0);
     var fh_off = rrf_fh(0, 0, 0, 0);
     rrf_rt(fh_on, nb, 0, 0, 3, AV1_LAST_FRAME, AV1_ALTREF_FRAME, AV1_LAST_FRAME, AV1_ALTREF_FRAME,
-    "writer gate: compound at the exact 8x8 boundary");
+      "writer gate: compound at the exact 8x8 boundary");
     rrf_rt(fh_on, nb, 0, 0, 1, AV1_BWDREF_FRAME, AV1_REF_NONE, AV1_BWDREF_FRAME, AV1_REF_NONE,
-    "writer gate: 4x8 forces SINGLE through the paired round-trip");
+      "writer gate: 4x8 forces SINGLE through the paired round-trip");
     rrf_rt(fh_off, nb, 0, 0, 6, AV1_GOLDEN_FRAME, AV1_REF_NONE, AV1_GOLDEN_FRAME, AV1_REF_NONE,
-    "writer gate: reference_select off through the paired round-trip");
+      "writer gate: reference_select off through the paired round-trip");
     # (3) an UNREPRESENTABLE compound pair (gate closed) is a surfaced bounds error, not
     # a silently-emitted stream the reader cannot parse.
     var enc = av1_sym_enc_init(32, 1);
     assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_off, 0, 0, 6,
-    AV1_LAST_FRAME, AV1_ALTREF_FRAME), DR_ERR_BOUNDS,
-    "writer: compound pair, gate closed by ref_select -> bounds error");
+        AV1_LAST_FRAME, AV1_ALTREF_FRAME), DR_ERR_BOUNDS,
+      "writer: compound pair, gate closed by ref_select -> bounds error");
     assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_on, 0, 0, 1,
-    AV1_LAST_FRAME, AV1_ALTREF_FRAME), DR_ERR_BOUNDS,
-    "writer: compound pair, gate closed by 4x8 size -> bounds error");
+        AV1_LAST_FRAME, AV1_ALTREF_FRAME), DR_ERR_BOUNDS,
+      "writer: compound pair, gate closed by 4x8 size -> bounds error");
     # (4) r1 == INTRA_FRAME (the post-interintra pair) classifies SINGLE — the writer's
     # is_comp `>` driven at its exact boundary.
     rrf_rt(fh_on, nb, 0, 0, 6, AV1_LAST_FRAME, AV1_INTRA_FRAME, AV1_LAST_FRAME, AV1_REF_NONE,
-    "writer: r1 = INTRA_FRAME classifies SINGLE (the > boundary)");
+      "writer: r1 = INTRA_FRAME classifies SINGLE (the > boundary)");
     # (5) the writer's NEGATIVE-edge guards (the reader's were pinned; the writer's not).
     assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_on, 0, 0 - 1, 6, 1, 0 - 1),
-    DR_ERR_BOUNDS, "writer: segment_id -1 -> bounds error");
+      DR_ERR_BOUNDS, "writer: segment_id -1 -> bounds error");
     assert_eq(av1_write_ref_frames(enc, av1_refcdf_blob(), nb, fh_on, 0, 0, 0 - 1, 1, 0 - 1),
-    DR_ERR_BOUNDS, "writer: negative MiSize -> bounds error");
+      DR_ERR_BOUNDS, "writer: negative MiSize -> bounds error");
     # (6) NON-VACUOUS first-invalid probes for seg_feature_active: plant a 1 at the exact
     # aliased location an unguarded read would hit (seg 8 / j 5 lands on FeatureData[0][5];
     # seg 2 / j 8 lands on FeatureEnabled[3][0]) — the guard's 0 is proof, not luck.
     var fha = rrf_fh(1, 0, 0, 0);
     store64(fha + AV1FH_FEATURE_DATA + (5 * 8), 1);
     assert_eq(av1_seg_feature_active(fha, 8, AV1_SEG_LVL_REF_FRAME), 0,
-    "seg 8 guard is no aliasing accident");
+      "seg 8 guard is no aliasing accident");
     var fhb = rrf_fh(1, 0, 0, 0);
     store64(fhb + AV1FH_FEATURE_ENABLED + ((3 * 8 + 0) * 8), 1);
     assert_eq(av1_seg_feature_active(fhb, 2, 8), 0, "feature 8 guard is no aliasing accident");
@@ -2670,9 +2670,9 @@ fn test_read_ref_frames_review_hardening() {
     var nb2 = nb_build(1, 1, AV1_BWDREF_FRAME, AV1_REF_NONE, AV1_LAST_FRAME, AV1_REF_NONE);
     assert_eq(av1_comp_mode_ctx(nb2), 1, "the hardening fixture's comp_mode ctx is nonzero");
     rrf_rt(fh_on, nb2, 0, 0, 6, AV1_LAST_FRAME, AV1_ALTREF_FRAME, AV1_LAST_FRAME, AV1_ALTREF_FRAME,
-    "compound round-trip on the nonzero comp_mode ctx");
+      "compound round-trip on the nonzero comp_mode ctx");
     rrf_dec(fh_on, nb2, 0, 0, 6, 1, AV1_SINGLE_REFERENCE, AV1_LAST3_FRAME, AV1_REF_NONE,
-    AV1_LAST3_FRAME, AV1_REF_NONE, "leaf-built conformance on the nonzero ctx (driver wiring)");
+      AV1_LAST3_FRAME, AV1_REF_NONE, "leaf-built conformance on the nonzero ctx (driver wiring)");
     # (8) the persistent-scratch layout contract, pinned absolutely: refctx[6] (48 bytes)
     # fits ONLY because Av1CompCtx is 9 slots ending exactly at AV1CCTX_SIZE. (Residual:
     # an alloc-site literal shrink is undetectable — the arena has no red zones.)
@@ -2723,7 +2723,7 @@ fn ib_grid2(ref0, ref1): i64 {
             var mvc = 8;
             if (c >= 8) { mvr = 32; mvc = 16; }
             av1_mi_store_mode(g, cols, 16, r, c, 6, AV1_NEWMV, ref0, ref1, 1, mvr, mvc,
-            mvr, mvc, 0, 0, 0, 0, 0);
+              mvr, mvc, 0, 0, 0, 0, 0);
             av1_mi_store_final(g, cols, 16, r, c, 6, 1);
             c = c + 4;
         }
@@ -2768,14 +2768,14 @@ fn ib_rt(fh, s, g, sz, skip, seg_id, blk, exp_ref1, exp_mm, tag): i64 {
     av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
     var enc = av1_sym_enc_init(128, 1);
     assert_eq(av1_write_inter_block_mode_info(enc, ccr, ccim, ccii, ccmv, blk, ib_ctx(g, sz),
-    nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0), DR_OK, tag);
+        nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0), DR_OK, tag);
     av1_sym_encode_literal(enc, 165, 8);             # marker
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 1);
     var got = av1_interblock_new();
     assert_eq(av1_inter_block_mode_info(sd, ccr, ccim, ccii, ccmv, got, ib_ctx(g, sz),
-    nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0), DR_OK, tag);
+        nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0), DR_OK, tag);
     assert_eq(av1_ib_ref(got, 0), load64(blk + AV1IB_REF0), tag);
     assert_eq(av1_ib_ref(got, 1), exp_ref1, tag);
     assert_eq(av1_ib_ymode(got), load64(blk + AV1IB_YMODE), tag);
@@ -2783,7 +2783,7 @@ fn ib_rt(fh, s, g, sz, skip, seg_id, blk, exp_ref1, exp_mm, tag): i64 {
     assert_eq(av1_ib_motion_mode(got), exp_mm, tag);
     assert_eq(av1_ib_interp(got, 0), load64(blk + AV1IB_INTERP + 0), tag);
     assert_eq(av1_sym_read_literal(sd, 8), 165,
-    "marker: reader consumed exactly the writer's symbols");
+      "marker: reader consumed exactly the writer's symbols");
     return got;
 }
 # ref-port cases 1-4, 10, 11: the single-prediction schedules.
@@ -2793,7 +2793,7 @@ fn test_inter_block_single() {
     var g = mm_grid(8, 8, 1, AV1_REF_NONE);
     # 1: NEWMV — inter_mode(1) + drl + read_mv; the warp branch codes @@motion_mode.
     var got = ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4,
-    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "1 single NEWMV");
+        0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "1 single NEWMV");
     assert_eq(load64(got + AV1IB_MV0 + AV1MV_ROW), 12, "1 NEWMV mv row");
     assert_eq(load64(got + AV1IB_MV0 + AV1MV_COL), 0 - 4, "1 NEWMV mv col");
     assert_eq(av1_ib_is_comp(got), 0, "1 single");
@@ -2801,29 +2801,29 @@ fn test_inter_block_single() {
     # 10: the LOCALWARP value survives the warp branch end-to-end. A LOCALWARP block
     # codes NO interp filter (needs_interp_filter = 0), so the source carries EIGHTTAP.
     ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0,
-    AV1_MM_LOCALWARP, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_LOCALWARP,
-    "10 warp-branch LOCALWARP");
+        AV1_MM_LOCALWARP, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_LOCALWARP,
+      "10 warp-branch LOCALWARP");
     # 2: NEARESTMV — inter_mode(3), no DRL (uniform grid dedups to 1 candidate), no mv
     # read; the decoded mv IS the uniform fixture's (8, 8).
     var g2 = ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEARESTMV, 0, 8, 8,
-    0, 0, AV1_MM_SIMPLE, 1, 1), AV1_REF_NONE, AV1_MM_SIMPLE, "2 single NEARESTMV");
+        0, 0, AV1_MM_SIMPLE, 1, 1), AV1_REF_NONE, AV1_MM_SIMPLE, "2 single NEARESTMV");
     assert_eq(load64(g2 + AV1IB_MV0 + AV1MV_ROW), 8, "2 NEARESTMV mv = the stack head");
     assert_eq(load64(g2 + AV1IB_MV0 + AV1MV_COL), 8, "2 NEARESTMV mv col");
     # 4: GLOBALMV with an IDENTITY model — mv (0,0); needs_interp_filter = 0 (large +
     # GLOBALMV + gm != TRANSLATION), so interp reads NOTHING and defaults EIGHTTAP.
     var g4 = ib_rt(fh, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV, 0, 0, 0,
-    0, 0, AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE,
-    "4 single GLOBALMV (IDENTITY)");
+        0, 0, AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE,
+      "4 single GLOBALMV (IDENTITY)");
     assert_eq(load64(g4 + AV1IB_MV0 + AV1MV_ROW), 0, "4 GLOBALMV mv row 0");
     # 3: NEARMV + a real DRL read on the two-MV grid (NumMvFound >= 2).
     var gd = ib_grid2(1, AV1_REF_NONE);
     ib_rt(fh, s0, gd, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEARMV, 1, 0, 0, 0, 0,
-    AV1_MM_SIMPLE, 0, 0), AV1_REF_NONE, AV1_MM_SIMPLE, "3 single NEARMV + DRL idx 1");
+        AV1_MM_SIMPLE, 0, 0), AV1_REF_NONE, AV1_MM_SIMPLE, "3 single NEARMV + DRL idx 1");
     # 11: a fixed (non-SWITCHABLE) frame filter codes NO interp symbols; both dirs
     # take the frame's filter.
     var fh_fix = ib_fh(1, 2, 1, 1, 0, 0);
     var g11 = ib_rt(fh_fix, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12,
-    0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "11 fixed filter");
+        0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "11 fixed filter");
     assert_eq(av1_ib_interp(g11, 1), 2, "11 dir 1 takes the frame filter");
     # 12: GLOBALMV with a TRANSLATION model — the global-MV WIRING is observable:
     # gm_params (8192, 16384) >>> 13 = the (1, 2) candidate the orchestrator must
@@ -2834,7 +2834,7 @@ fn test_inter_block_single() {
     store64(fh_gm + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 0) * 8), 8192);
     store64(fh_gm + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 1) * 8), 16384);
     var g12 = ib_rt(fh_gm, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV, 0, 1, 2,
-    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "12 GLOBALMV + TRANSLATION");
+        0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "12 GLOBALMV + TRANSLATION");
     assert_eq(load64(g12 + AV1IB_MV0 + AV1MV_ROW), 1, "12 global mv row (8192 >>> 13)");
     assert_eq(load64(g12 + AV1IB_MV0 + AV1MV_COL), 2, "12 global mv col (16384 >>> 13)");
     return 0;
@@ -2863,7 +2863,7 @@ fn test_inter_block_compound() {
     # 7: skip_mode — the SkipModeFrame pair, fixed NEAREST_NEARESTMV, and NOT ONE
     # symbol in the stream (the marker is the whole payload).
     var b7 = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE,
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     store64(b7 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);   # 0 would alias WEDGE
     var g7 = ib_rt(fh, s, gc, 6, 1, 0, b7, 7, AV1_MM_SIMPLE, "7 skip_mode");
     assert_eq(load64(g7 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_AVERAGE, "7 skip CT AVERAGE");
@@ -2873,7 +2873,7 @@ fn test_inter_block_compound() {
     store64(fh_p + AV1FH_SEG_ENABLED, 1);
     rrf_feature(fh_p, 2, AV1_SEG_LVL_SKIP, 0);
     var b7b = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE,
-    AV1_EIGHTTAP, AV1_EIGHTTAP);
+      AV1_EIGHTTAP, AV1_EIGHTTAP);
     store64(b7b + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);  # 0 would alias WEDGE
     ib_rt(fh_p, s, gc, 6, 1, 2, b7b, 7, AV1_MM_SIMPLE, "7b skip_mode beats seg SKIP");
     return 0;
@@ -2897,7 +2897,7 @@ fn ib_grid_y(ymode, mvr, mvc, ref0, ref1): i64 {
         var c = 0;
         while (c < 16) {
             av1_mi_store_mode(g, cols, 16, r, c, 6, ymode, ref0, ref1, 1, mvr, mvc,
-            mvr, mvc, 0, 0, 0, 0, 0);
+              mvr, mvc, 0, 0, 0, 0, 0);
             av1_mi_store_final(g, cols, 16, r, c, 6, 1);
             c = c + 4;
         }
@@ -2915,21 +2915,21 @@ fn ib_rt_at(fh, s, g, sz, mi_row, mi_col, au, al, skip, seg_id, blk, exp_ref1, e
     av1_nbctx_setup(nb, g, 16, mi_row, mi_col, au, al);
     var enc = av1_sym_enc_init(128, 1);
     assert_eq(av1_write_inter_block_mode_info(enc, ccr, ccim, ccii, ccmv, blk,
-    ib_ctx_at(g, sz, mi_row, mi_col), nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0),
-    DR_OK, tag);
+        ib_ctx_at(g, sz, mi_row, mi_col), nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0),
+      DR_OK, tag);
     av1_sym_encode_literal(enc, 165, 8);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 1);
     var got = av1_interblock_new();
     assert_eq(av1_inter_block_mode_info(sd, ccr, ccim, ccii, ccmv, got,
-    ib_ctx_at(g, sz, mi_row, mi_col), nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0),
-    DR_OK, tag);
+        ib_ctx_at(g, sz, mi_row, mi_col), nb, av1_warp_new(), fh, refs, s, skip, seg_id, 0),
+      DR_OK, tag);
     assert_eq(av1_ib_ref(got, 1), exp_ref1, tag);
     assert_eq(av1_ib_ymode(got), load64(blk + AV1IB_YMODE), tag);
     assert_eq(av1_ib_motion_mode(got), exp_mm, tag);
     assert_eq(av1_sym_read_literal(sd, 8), 165,
-    "marker: reader consumed exactly the writer's symbols");
+      "marker: reader consumed exactly the writer's symbols");
     return got;
 }
 # the 0.7.82 review hardening — kills the reviewer-run surviving mutants.
@@ -2947,8 +2947,8 @@ fn test_inter_block_review_hardening() {
     store64(fh_rz + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 2) * 8), (1 << 16) + 8192);
     store64(fh_rz + AV1FH_GM_PARAMS + (((AV1_LAST_FRAME - 1) * 6 + 5) * 8), 1 << 16);
     var h1 = ib_rt_at(fh_rz, s0, g, 3, 1, 2, 1, 1, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV,
-    0, 0, 11, 0, 0, AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE,
-    "H1 GLOBALMV + ROTZOOM at (1,2)");
+        0, 0, 11, 0, 0, AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE,
+      "H1 GLOBALMV + ROTZOOM at (1,2)");
     assert_eq(load64(h1 + AV1IB_MV0 + AV1MV_COL), 11, "H1 rotzoom col 11 (position-derived)");
     assert_eq(load64(h1 + AV1IB_MV0 + AV1MV_ROW), 0, "H1 rotzoom row 0");
     # H2: GLOBALMV-family NEIGHBOURS + ROTZOOM — the scans SUBSTITUTE the installed
@@ -2956,12 +2956,12 @@ fn test_inter_block_review_hardening() {
     # runs after find_mv_stack, or the position args swap, or the install is zeroed.
     var gg = ib_grid_y(AV1_GLOBALMV, 8, 8, 1, AV1_REF_NONE);
     var h2 = ib_rt_at(fh_rz, s0, gg, 3, 1, 2, 1, 1, 0, 0, ib_mk(1, AV1_REF_NONE,
-    AV1_NEARESTMV, 0, 0, 11, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE,
-    "H2 global substitution in the scans");
+        AV1_NEARESTMV, 0, 0, 11, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE,
+      "H2 global substitution in the scans");
     assert_eq(load64(h2 + AV1IB_MV0 + AV1MV_COL), 11, "H2 substituted candidate col 11");
     # H3: en_dual — two INDEPENDENT interp symbols.
     var h3 = ib_rt(fh, ib_seq(0, 0, 1, 0), g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0,
-    12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 1), AV1_REF_NONE, AV1_MM_SIMPLE, "H3 dual filter");
+        12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 1), AV1_REF_NONE, AV1_MM_SIMPLE, "H3 dual filter");
     assert_eq(av1_ib_interp(h3, 1), 1, "H3 dir 1 is independent under en_dual");
     # H4: an interintra record the gate cannot code is SURFACED as a bounds error —
     # by en_interintra = 0, and by a 64x64 block outside the 8x8..32x32 window.
@@ -2971,31 +2971,31 @@ fn test_inter_block_review_hardening() {
     store64(b4 + AV1IB_II + AV1II_INTERINTRA, 1);
     var enc4 = av1_sym_enc_init(64, 1);
     assert_eq(av1_write_inter_block_mode_info(enc4, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), b4, ib_ctx(g, 6), nbg, av1_warp_new(), fh,
-    mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS, "H4 uncodable interintra (en=0) -> bounds");
+        av1_iicdf_blob(), av1_mvcdf_blob(), b4, ib_ctx(g, 6), nbg, av1_warp_new(), fh,
+        mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS, "H4 uncodable interintra (en=0) -> bounds");
     assert_eq(av1_write_inter_block_mode_info(enc4, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), b4, ib_ctx_at(g, 11, 0, 0), nbg, av1_warp_new(), fh,
-    mm_refs(64, 64), ib_seq(1, 0, 0, 0), 0, 0, 0), DR_ERR_BOUNDS,
-    "H4b uncodable interintra (64x64) -> bounds");
+        av1_iicdf_blob(), av1_mvcdf_blob(), b4, ib_ctx_at(g, 11, 0, 0), nbg, av1_warp_new(), fh,
+        mm_refs(64, 64), ib_seq(1, 0, 0, 0), 0, 0, 0), DR_ERR_BOUNDS,
+      "H4b uncodable interintra (64x64) -> bounds");
     # H5: mi_size variation — 8x8 with the ii gate OPEN (reads the interintra=0 symbol)
     # and 64x64 with the gate CLOSED by size (reads nothing); both behind the marker.
     ib_rt(fh, ib_seq(1, 0, 0, 0), g, 3, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12,
-    0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H5 8x8, ii gate open");
+        0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H5 8x8, ii gate open");
     var h5b = ib_rt_at(fh, ib_seq(1, 0, 0, 0), g, 11, 0, 0, 0, 0, 0, 0, ib_mk(1, AV1_REF_NONE,
-    AV1_NEWMV, 0, 16, 8, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE,
-    "H5b 64x64, ii gate closed by size");
+        AV1_NEWMV, 0, 16, 8, 0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE,
+      "H5b 64x64, ii gate closed by size");
     assert_eq(load64(h5b + AV1IB_MV0 + AV1MV_ROW), 16, "H5b 64x64 NEWMV mv");
     # H6: MV-precision threading — force_integer_mv = 1 (integer MVs; also forces the
     # OBMC motion branch) and allow_high_precision_mv = 0 (even MVs).
     var fh_fi = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
     store64(fh_fi + AV1FH_FORCE_INT_MV, 1);
     var h6 = ib_rt(fh_fi, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 16, 0 - 8,
-    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H6 force_integer_mv");
+        0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H6 force_integer_mv");
     assert_eq(load64(h6 + AV1IB_MV0 + AV1MV_ROW), 16, "H6 integer mv row");
     var fh_lp = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
     store64(fh_lp + AV1FH_ALLOW_HIGH_PREC_MV, 0);
     var h6b = ib_rt(fh_lp, s0, g, 6, 0, 0, ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 10, 0 - 6,
-    0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H6b allow_hp = 0");
+        0, 0, AV1_MM_SIMPLE, 2, 2), AV1_REF_NONE, AV1_MM_SIMPLE, "H6b allow_hp = 0");
     assert_eq(load64(h6b + AV1IB_MV0 + AV1MV_COL), 0 - 6, "H6b low-precision mv col");
     # H7: interintra WEDGE through the orchestrator (16x16: Wedge_Bits > 0).
     var b7h = ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2);
@@ -3004,7 +3004,7 @@ fn test_inter_block_review_hardening() {
     store64(b7h + AV1IB_II + AV1II_WEDGE, 1);
     store64(b7h + AV1IB_II + AV1II_WEDGEIDX, 11);
     var h7 = ib_rt(fh, ib_seq(1, 0, 0, 0), g, 6, 0, 0, b7h, AV1_INTRA_FRAME, AV1_MM_SIMPLE,
-    "H7 interintra wedge");
+      "H7 interintra wedge");
     assert_eq(av1_interintra_wedge(h7 + AV1IB_II), 1, "H7 wedge on");
     assert_eq(av1_interintra_wedge_idx(h7 + AV1IB_II), 11, "H7 wedge index");
     assert_eq(load64(h7 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_WEDGE, "H7 CT WEDGE");
@@ -3015,7 +3015,7 @@ fn test_inter_block_review_hardening() {
     store64(b8 + AV1IB_CT + AV1CT_WEDGEIDX, 5);
     store64(b8 + AV1IB_CT + AV1CT_WEDGESIGN, 1);
     var h8 = ib_rt(ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 1, 7), ib_seq(0, 1, 0, 1), gc, 6,
-    0, 0, b8, 7, AV1_MM_SIMPLE, "H8 compound group-1 wedge");
+      0, 0, b8, 7, AV1_MM_SIMPLE, "H8 compound group-1 wedge");
     assert_eq(load64(h8 + AV1IB_CT + AV1CT_GROUPIDX), 1, "H8 group idx 1");
     assert_eq(load64(h8 + AV1IB_CT + AV1CT_TYPE), AV1_COMPOUND_WEDGE, "H8 CT WEDGE");
     assert_eq(load64(h8 + AV1IB_CT + AV1CT_WEDGEIDX), 5, "H8 wedge index");
@@ -3024,7 +3024,7 @@ fn test_inter_block_review_hardening() {
     var b9 = ib_mk(1, 7, AV1_NEAREST_NEARESTMV, 0, 8, 8, 0, 0, AV1_MM_SIMPLE, 1, 1);
     store64(b9 + AV1IB_CT + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
     ib_rt(ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 1, 7), s0, gc, 6, 0, 0, b9, 7,
-    AV1_MM_SIMPLE, "H9 compound, enables off -> no CT symbols");
+      AV1_MM_SIMPLE, "H9 compound, enables off -> no CT symbols");
     return 0;
 }
 # adaptive mv_ctx pin: the MV CDF DEFAULTS are identical across the two contexts, so
@@ -3042,13 +3042,13 @@ fn test_inter_block_mvctx_adaptation() {
     var blk = ib_mk(1, AV1_REF_NONE, AV1_NEWMV, 0, 12, 0 - 4, 0, 0, AV1_MM_SIMPLE, 2, 2);
     var enc = av1_sym_enc_init(128, 0);
     av1_write_inter_block_mode_info(enc, av1_refcdf_new(), av1_imcdf_new(), av1_iicdf_new(),
-    cmv_e, blk, ib_ctx(g, 6), nb, av1_warp_new(), fh, refs, s0, 0, 0, 0);
+      cmv_e, blk, ib_ctx(g, 6), nb, av1_warp_new(), fh, refs, s0, 0, 0, 0);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 0);
     var got = av1_interblock_new();
     av1_inter_block_mode_info(sd, av1_refcdf_new(), av1_imcdf_new(), av1_iicdf_new(),
-    cmv_d, got, ib_ctx(g, 6), nb, av1_warp_new(), fh, refs, s0, 0, 0, 0);
+      cmv_d, got, ib_ctx(g, 6), nb, av1_warp_new(), fh, refs, s0, 0, 0, 0);
     assert_eq(load64(got + AV1IB_MV0 + AV1MV_ROW), 12, "adaptive NEWMV decodes");
     assert_eq(load64(av1_mvcdf_joint(cmv_d, 0) + 32) > 0, 1, "MV adaptation lands in ctx 0");
     assert_eq(load64(av1_mvcdf_joint(cmv_d, 1) + 32), 0, "ctx 1 (intrabc) untouched");
@@ -3074,7 +3074,7 @@ fn test_inter_block_conformance() {
     av1_mvctx_set_global(ctxi, 0, 0, 0, 0, 0, 0);
     av1_find_mv_stack(ctxi, 0);
     assert_eq(av1_mv_stack_num(load64(ctxi + AV1MVC_STACK)), 1,
-    "conformance precondition: the uniform grid dedups to one candidate");
+      "conformance precondition: the uniform grid dedups to one candidate");
     var scr = alloc(AV1CCTX_SIZE);
     var enc = av1_sym_enc_init(128, 1);
     # 5.11.25: comp_mode (gate open at 16x16) + the single tree for LAST
@@ -3095,7 +3095,7 @@ fn test_inter_block_conformance() {
     var sd = av1_sym_dec_init(out, olen, 1);
     var got = av1_interblock_new();
     assert_eq(av1_inter_block_mode_info(sd, ccr, ccim, ccii, ccmv, got, ib_ctx(g, 6), nb,
-    av1_warp_new(), fh, refs, s0, 0, 0, 0), DR_OK, "conformance decode ok");
+        av1_warp_new(), fh, refs, s0, 0, 0, 0), DR_OK, "conformance decode ok");
     assert_eq(av1_ib_ref(got, 0), AV1_LAST_FRAME, "conformance ref LAST");
     assert_eq(av1_ib_ymode(got), AV1_NEWMV, "conformance NEWMV");
     assert_eq(load64(got + AV1IB_MV0 + AV1MV_ROW), 12, "conformance mv row");
@@ -3103,7 +3103,7 @@ fn test_inter_block_conformance() {
     assert_eq(av1_ib_motion_mode(got), AV1_MM_SIMPLE, "conformance motion mode");
     assert_eq(av1_ib_interp(got, 0), 2, "conformance interp SHARP");
     assert_eq(av1_sym_read_literal(sd, 8), 165,
-    "marker: the driver consumed exactly the leaf-built symbols");
+      "marker: the driver consumed exactly the leaf-built symbols");
     return 0;
 }
 
@@ -3131,8 +3131,8 @@ fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, ta
     var nbw = av1_nbctx_new();
     var enc = av1_sym_enc_init(160, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, blk,
-    ib_ctx(g, sz), nbw, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0, 0),
-    DR_OK, tag);
+        ib_ctx(g, sz), nbw, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0, 0),
+      DR_OK, tag);
     av1_sym_encode_literal(enc, 165, 8);             # marker
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
@@ -3140,8 +3140,8 @@ fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, ta
     var got = av1_blockinfo_new();
     var nbr = av1_nbctx_new();
     assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got,
-    ib_ctx(g, sz), nbr, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0, 0),
-    DR_OK, tag);
+        ib_ctx(g, sz), nbr, av1_warp_new(), fh, refs, s, au, al, a_skip, l_skip, sm_ctx, 0, 0, 1, 0, 0, 0),
+      DR_OK, tag);
     assert_eq(av1_fb_skip_mode(got), load64(blk + AV1FB_SKIPMODE), tag);
     assert_eq(av1_fb_skip(got), load64(blk + AV1FB_SKIP), tag);
     assert_eq(av1_fb_is_inter(got), 1, tag);
@@ -3150,7 +3150,7 @@ fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, ta
     assert_eq(av1_ib_ymode(av1_fb_ib(got)), load64(blk + AV1FB_IB + AV1IB_YMODE), tag);
     assert_eq(av1_ib_motion_mode(av1_fb_ib(got)), exp_mm, tag);
     assert_eq(av1_sym_read_literal(sd, 8), 165,
-    "marker: reader consumed exactly the writer's symbols");
+      "marker: reader consumed exactly the writer's symbols");
     return got;
 }
 fn fb_fh(skip_mode_present, smf0, smf1): i64 {
@@ -3226,7 +3226,7 @@ fn smg_closed(fh, seg_id, sz, tag): i64 {
     assert_eq(av1_sym_read_literal(sd, 8), 165, tag);
     var enc2 = av1_sym_enc_init(32, 1);
     assert_eq(av1_write_skip_mode(enc2, cc, 0, fh, seg_id, sz, 1), DR_ERR_BOUNDS,
-    "closed gate + skip_mode 1 record -> surfaced, not silent");
+      "closed gate + skip_mode 1 record -> surfaced, not silent");
     return 0;
 }
 # the is_inter dispatch (leaf-written conformance for the fall-through).
@@ -3237,22 +3237,22 @@ fn test_is_inter_dispatch() {
     var fh = fb_fh(1, 0, 0);
     var sd0 = av1_sym_dec_init(alloc(8), 8, 1);
     assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh, 1, 0), 1,
-    "skip_mode forces inter, no symbol");
+      "skip_mode forces inter, no symbol");
     var fh_r0 = fb_fh(1, 0, 0);
     store64(fh_r0 + AV1FH_SEG_ENABLED, 1);
     rrf_feature(fh_r0, 3, AV1_SEG_LVL_REF_FRAME, 0);
     assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_r0, 0, 3), 0,
-    "seg REF datum 0 -> intra, no symbol");
+      "seg REF datum 0 -> intra, no symbol");
     var fh_r4 = fb_fh(1, 0, 0);
     store64(fh_r4 + AV1FH_SEG_ENABLED, 1);
     rrf_feature(fh_r4, 3, AV1_SEG_LVL_REF_FRAME, 4);
     assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_r4, 0, 3), 1,
-    "seg REF datum 4 -> inter, no symbol");
+      "seg REF datum 4 -> inter, no symbol");
     var fh_gm = fb_fh(1, 0, 0);
     store64(fh_gm + AV1FH_SEG_ENABLED, 1);
     rrf_feature(fh_gm, 3, AV1_SEG_LVL_GLOBALMV, 0);
     assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_gm, 0, 3), 1,
-    "seg GLOBALMV -> inter, no symbol");
+      "seg GLOBALMV -> inter, no symbol");
     # the 5.11.15 PRIORITY: with BOTH features active on one segment and a REF_FRAME
     # datum of INTRA, REF_FRAME wins -> intra (a branch swap derives inter).
     var fh_b = fb_fh(1, 0, 0);
@@ -3260,20 +3260,20 @@ fn test_is_inter_dispatch() {
     rrf_feature(fh_b, 3, AV1_SEG_LVL_REF_FRAME, 0);
     rrf_feature(fh_b, 3, AV1_SEG_LVL_GLOBALMV, 0);
     assert_eq(av1_read_is_inter(sd0, av1_refcdf_blob(), nb, fh_b, 0, 3), 0,
-    "REF_FRAME beats GLOBALMV (the 5.11.15 order)");
+      "REF_FRAME beats GLOBALMV (the 5.11.15 order)");
     # the write-side forced paths: an AGREEING record writes nothing; a disagreeing
     # one is unrepresentable (surfaced, never a silent desync).
     var encw = av1_sym_enc_init(32, 1);
     var ccw = av1_refcdf_blob();
     assert_eq(av1_write_is_inter(encw, ccw, nb, fh, 1, 0, 1), DR_OK, "skip_mode: 1 agrees");
     assert_eq(av1_write_is_inter(encw, ccw, nb, fh, 1, 0, 0), DR_ERR_BOUNDS,
-    "skip_mode: is_inter 0 is unrepresentable");
+      "skip_mode: is_inter 0 is unrepresentable");
     assert_eq(av1_write_is_inter(encw, ccw, nb, fh_r0, 0, 3, 0), DR_OK, "seg REF datum 0: intra agrees");
     assert_eq(av1_write_is_inter(encw, ccw, nb, fh_r0, 0, 3, 1), DR_ERR_BOUNDS,
-    "seg REF datum 0: inter is unrepresentable");
+      "seg REF datum 0: inter is unrepresentable");
     assert_eq(av1_write_is_inter(encw, ccw, nb, fh_gm, 0, 3, 1), DR_OK, "seg GLOBALMV: inter agrees");
     assert_eq(av1_write_is_inter(encw, ccw, nb, fh_gm, 0, 3, 0), DR_ERR_BOUNDS,
-    "seg GLOBALMV: intra is unrepresentable");
+      "seg GLOBALMV: intra is unrepresentable");
     # the fall-through codes @@is_inter at the DERIVED ctx — leaf-written stream.
     var cc = av1_refcdf_blob();
     var enc = av1_sym_enc_init(32, 1);
@@ -3306,7 +3306,7 @@ fn test_inter_frame_mode_info() {
     store64(ib1 + AV1IB_INTERP + 8, 2);
     store64(ib1 + AV1IB_CT + AV1CT_COMPIDX, 1);
     var f1 = fb_rt(fb_fh(1, 0, 0), s0, g, 6, 1, 1, 0, 0, 0, b1, AV1_REF_NONE,
-    AV1_MM_SIMPLE, "F1 plain inter NEWMV");
+      AV1_MM_SIMPLE, "F1 plain inter NEWMV");
     assert_eq(load64(av1_fb_ib(f1) + AV1IB_MV0 + AV1MV_ROW), 12, "F1 mv through the stack");
     # F2: skip_mode — skip forced 1 (no skip symbol), is_inter forced (no symbol),
     # the SkipModeFrame pair (1, 7) drives a compound NEAREST_NEARESTMV block.
@@ -3332,7 +3332,7 @@ fn test_inter_frame_mode_info() {
     store64(ib3 + AV1IB_INTERP + 8, 1);
     store64(ib3 + AV1IB_CT + AV1CT_COMPIDX, 1);
     fb_rt(fb_fh(0, 0, 0), s0, g, 6, 1, 1, 1, 1, 0, b3, AV1_REF_NONE, AV1_MM_SIMPLE,
-    "F3 present off, skip = 1");
+      "F3 present off, skip = 1");
     # F4: a 4x8 block closes the skip_mode gate by SIZE (present is on).
     var b4 = fb_mk(0, 0, 1);
     var ib4 = b4 + AV1FB_IB;
@@ -3345,7 +3345,7 @@ fn test_inter_frame_mode_info() {
     store64(ib4 + AV1IB_INTERP + 8, 1);
     store64(ib4 + AV1IB_CT + AV1CT_COMPIDX, 1);
     fb_rt(fb_fh(1, 0, 0), s0, g, 1, 1, 1, 0, 0, 0, b4, AV1_REF_NONE, AV1_MM_SIMPLE,
-    "F4 4x8 closes the skip_mode gate");
+      "F4 4x8 closes the skip_mode gate");
     # gates: segmentation / delta-q / delta-lf -> UNSUPPORTED, consuming NOTHING (a
     # marker-only stream distinguishes the gate from a downstream accident: a dropped
     # gate decodes garbage and can land on UNSUPPORTED via the intra fork by luck —
@@ -3362,25 +3362,25 @@ fn test_inter_frame_mode_info() {
     store64(fh_sg + AV1FH_SEG_TEMPORAL_UPDATE, 1);
     var sd = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
-    DR_ERR_UNSUPPORTED, "unsupported seg config (temporal) gates UNSUPPORTED");
+        av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
+        av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
+      DR_ERR_UNSUPPORTED, "unsupported seg config (temporal) gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd, 8), 165, "the segmentation gate consumed NOTHING");
     var fh_dq = fb_fh(1, 0, 0);
     store64(fh_dq + AV1FH_DELTA_Q_PRESENT, 1);
     var sd_q = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd_q, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), av1_warp_new(), fh_dq, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
-    DR_ERR_UNSUPPORTED, "delta_q gates UNSUPPORTED");
+        av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
+        av1_nbctx_new(), av1_warp_new(), fh_dq, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
+      DR_ERR_UNSUPPORTED, "delta_q gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd_q, 8), 165, "the delta_q gate consumed NOTHING");
     var fh_dl = fb_fh(1, 0, 0);
     store64(fh_dl + AV1FH_DELTA_LF_PRESENT, 1);
     var sd_l = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd_l, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), av1_warp_new(), fh_dl, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
-    DR_ERR_UNSUPPORTED, "delta_lf gates UNSUPPORTED");
+        av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
+        av1_nbctx_new(), av1_warp_new(), fh_dl, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
+      DR_ERR_UNSUPPORTED, "delta_lf gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd_l, 8), 165, "the delta_lf gate consumed NOTHING");
     # the intra fork (5.11.24) now DECODES an is_inter = 0 block's mode-info through the dispatch (both
     # lanes), not a reject. Integration round-trip: write a directional-Y-mode intra block via
@@ -3395,8 +3395,8 @@ fn test_inter_frame_mode_info() {
     av1_nbctx_setup(nbw, g, 16, 4, 4, 1, 1);
     var enc = av1_sym_enc_init(64, 1);
     av1_write_inter_frame_mode_info(enc, cc, av1_imcdf_blob(), av1_iicdf_blob(),
-    av1_mvcdf_blob(), ncc, srcfb, ib_ctx(g, 6), nbw, av1_warp_new(), fb_fh(1, 0, 0),
-    mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      av1_mvcdf_blob(), ncc, srcfb, ib_ctx(g, 6), nbw, av1_warp_new(), fb_fh(1, 0, 0),
+      mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "intra fork write ok");
     var olen = 0;
     var ob = av1_sym_enc_finish(enc, &olen);
@@ -3405,21 +3405,21 @@ fn test_inter_frame_mode_info() {
     var nbd = av1_nbctx_new();
     av1_nbctx_setup(nbd, g, 16, 4, 4, 1, 1);
     assert_eq(av1_inter_frame_mode_info(sd2, cc, av1_imcdf_blob(), av1_iicdf_blob(),
-    av1_mvcdf_blob(), ncd, gotfb, ib_ctx(g, 6), nbd, av1_warp_new(), fb_fh(1, 0, 0),
-    mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "the intra fork DECODES (5.11.24)");
+        av1_mvcdf_blob(), ncd, gotfb, ib_ctx(g, 6), nbd, av1_warp_new(), fb_fh(1, 0, 0),
+        mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "the intra fork DECODES (5.11.24)");
     assert_eq(load64(gotfb + AV1FB_ISINTER), 0, "intra fork: is_inter = 0");
     assert_eq(load64((gotfb + AV1FB_MI) + AV1MI_YMODE), AV1_V_PRED, "intra fork: Y-mode round-trips");
     assert_eq(load64((gotfb + AV1FB_MI) + AV1MI_ANGLE_Y), 2, "intra fork: AngleDeltaY round-trips");
     assert_eq(load64((gotfb + AV1FB_IB) + AV1IB_REF0), AV1_INTRA_FRAME, "intra fork: RefFrame[0] = INTRA");
     # hostile nulls + mi_size bounds (both edges).
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
-    av1_mvcdf_blob(), ncc, 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
-    "out = 0 -> bounds");
+        av1_mvcdf_blob(), ncc, 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
+        fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
+      "out = 0 -> bounds");
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
-    av1_mvcdf_blob(), ncc, av1_blockinfo_new(), ib_ctx(g, 22), av1_nbctx_new(),
-    av1_warp_new(), fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
-    DR_ERR_BOUNDS, "MiSize 22 -> bounds");
+        av1_mvcdf_blob(), ncc, av1_blockinfo_new(), ib_ctx(g, 22), av1_nbctx_new(),
+        av1_warp_new(), fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0),
+      DR_ERR_BOUNDS, "MiSize 22 -> bounds");
     return 0;
 }
 # the 0.7.83 review hardening: the cdef splice exercised for REAL, the driver-writer
@@ -3469,16 +3469,16 @@ fn test_inter_frame_hardening() {
     var ccmv = av1_mvcdf_blob();
     var ncc = av1_ncdf_new();
     assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, b1,
-    ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
-    fb_cdef_ctx(wgrid, plan), 0, 1, 0, 0, 0), DR_OK, "C1 write with a live cdef ctx");
+        ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
+        fb_cdef_ctx(wgrid, plan), 0, 1, 0, 0, 0), DR_OK, "C1 write with a live cdef ctx");
     av1_sym_encode_literal(enc, 165, 8);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 1);
     var got = av1_blockinfo_new();
     assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got,
-    ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
-    fb_cdef_ctx(rgrid, 0), 0, 1, 0, 0, 0), DR_OK, "C1 read with a live cdef ctx");
+        ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
+        fb_cdef_ctx(rgrid, 0), 0, 1, 0, 0, 0), DR_OK, "C1 read with a live cdef ctx");
     assert_eq(load64(rgrid + 0), 5, "C1 the decoded cdef index LANDS in the grid");
     assert_eq(av1_sym_read_literal(sd, 8), 165, "C1 marker");
     # C2: skip = 1 CLOSES the cdef read (the skip argument is load-bearing): nothing
@@ -3497,47 +3497,47 @@ fn test_inter_frame_hardening() {
     var rg2 = fb_cdef_grid(0 - 1);
     var enc2 = av1_sym_enc_init(160, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc2, ccr, ccim, ccii, ccmv, ncc, b2,
-    ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
-    fb_cdef_ctx(wg2, plan), 0, 1, 0, 0, 0), DR_OK, "C2 write, skip = 1");
+        ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0,
+        fb_cdef_ctx(wg2, plan), 0, 1, 0, 0, 0), DR_OK, "C2 write, skip = 1");
     av1_sym_encode_literal(enc2, 165, 8);
     var ol2 = 0;
     var ob2 = av1_sym_enc_finish(enc2, &ol2);
     var sd2 = av1_sym_dec_init(ob2, ol2, 1);
     assert_eq(av1_inter_frame_mode_info(sd2, ccr, ccim, ccii, ccmv, ncc,
-    av1_blockinfo_new(), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0,
-    1, 1, 0, 0, 0, fb_cdef_ctx(rg2, 0), 0, 1, 0, 0, 0), DR_OK, "C2 read, skip = 1");
+        av1_blockinfo_new(), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh, refs, s0,
+        1, 1, 0, 0, 0, fb_cdef_ctx(rg2, 0), 0, 1, 0, 0, 0), DR_OK, "C2 read, skip = 1");
     assert_eq(load64(rg2 + 0), 0 - 1, "C2 skip = 1 leaves the cdef grid untouched");
     assert_eq(av1_sym_read_literal(sd2, 8), 165, "C2 marker: skip coded no cdef literal");
     # the driver-writer desync guards: an inconsistent or uncodable record is surfaced.
     var enc3 = av1_sym_enc_init(32, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-    fb_mk(1, 0, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(1, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
-    "skip_mode = 1 with skip = 0 -> surfaced, not silent");
+        fb_mk(1, 0, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
+        fb_fh(1, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
+      "skip_mode = 1 with skip = 0 -> surfaced, not silent");
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-    fb_mk(1, 1, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(0, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
-    "skip_mode = 1 with present off -> surfaced, not silent");
+        fb_mk(1, 1, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
+        fb_fh(0, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0), DR_ERR_BOUNDS,
+      "skip_mode = 1 with present off -> surfaced, not silent");
     # the writer's feature gates mirror the reader's (feature-gated list; roadmap.md).
     var fh_sg = fb_fh(1, 0, 0);
     store64(fh_sg + AV1FH_SEG_ENABLED, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-    fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg, refs, s0,
-    1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");
+        fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg, refs, s0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");
     var fh_dq = fb_fh(1, 0, 0);
     store64(fh_dq + AV1FH_DELTA_Q_PRESENT, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-    fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dq, refs, s0,
-    1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_q gates UNSUPPORTED");
+        fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dq, refs, s0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_q gates UNSUPPORTED");
     var fh_dl = fb_fh(1, 0, 0);
     store64(fh_dl + AV1FH_DELTA_LF_PRESENT, 1);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-    fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dl, refs, s0,
-    1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_lf gates UNSUPPORTED");
+        fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_dl, refs, s0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: delta_lf gates UNSUPPORTED");
     # the intra fork (5.11.24) now WRITES an is_inter = 0 block's mode-info (not a reject).
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-    fb_mk(0, 0, 0), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fb_fh(1, 0, 0), refs,
-    s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "writer: the intra fork WRITES its mode-info");
+        fb_mk(0, 0, 0), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fb_fh(1, 0, 0), refs,
+        s0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_OK, "writer: the intra fork WRITES its mode-info");
     # the record layout, pinned absolutely (a shrunk AV1FB_IB aliases ISINTER).
     assert_eq(AV1FB_IB, 32, "Av1BlockInfo: IB starts at 32");
     # the embedded IB ends where the (0.7.85) encode-residual-plan slot begins.
@@ -3566,8 +3566,8 @@ fn test_inter_frame_conformance() {
     var sd = av1_sym_dec_init(out, olen, 1);
     var got = av1_blockinfo_new();
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
-    av1_mvcdf_blob(), ncc, got, ib_ctx(gc, 6), av1_nbctx_new(), av1_warp_new(), fh_p,
-    mm_refs(64, 64), s0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0), DR_OK, "Ca decode at skip_mode ctx 2");
+        av1_mvcdf_blob(), ncc, got, ib_ctx(gc, 6), av1_nbctx_new(), av1_warp_new(), fh_p,
+        mm_refs(64, 64), s0, 1, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0), DR_OK, "Ca decode at skip_mode ctx 2");
     assert_eq(av1_fb_skip_mode(got), 1, "Ca skip_mode decodes at ctx 2");
     assert_eq(av1_fb_skip(got), 1, "Ca skip forced 1");
     assert_eq(av1_ib_ref(av1_fb_ib(got), 0), 1, "Ca SkipModeFrame[0]");
@@ -3601,8 +3601,8 @@ fn test_inter_frame_conformance() {
     var sd2 = av1_sym_dec_init(ob2, ol2, 1);
     var got2 = av1_blockinfo_new();
     assert_eq(av1_inter_frame_mode_info(sd2, cc2, ccim, av1_iicdf_blob(),
-    av1_mvcdf_blob(), ncc2, got2, ib_ctx(g, 1), av1_nbctx_new(), av1_warp_new(),
-    fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0), DR_OK, "Cb F5 decode at 4x8");
+        av1_mvcdf_blob(), ncc2, got2, ib_ctx(g, 1), av1_nbctx_new(), av1_warp_new(),
+        fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0), DR_OK, "Cb F5 decode at 4x8");
     assert_eq(av1_fb_skip_mode(got2), 0, "Cb 4x8: NO skip_mode symbol (size gate)");
     assert_eq(av1_fb_skip(got2), 1, "Cb skip decodes at the threaded ctx");
     assert_eq(av1_fb_is_inter(got2), 1, "Cb is_inter");
@@ -3638,17 +3638,17 @@ fn test_inter_block_seg_and_errors() {
     # mv (0,0) from the IDENTITY model; interp reads nothing (GLOBALMV + !TRANSLATION);
     # the warp branch still codes @@motion_mode (IDENTITY is not gated).
     var g8 = ib_rt(fh, s0, g, 6, 0, 2, ib_mk(1, AV1_REF_NONE, AV1_GLOBALMV, 0, 0, 0, 0, 0,
-    AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE, "8 seg GLOBALMV");
+        AV1_MM_SIMPLE, AV1_EIGHTTAP, AV1_EIGHTTAP), AV1_REF_NONE, AV1_MM_SIMPLE, "8 seg GLOBALMV");
     assert_eq(load64(g8 + AV1IB_MV0 + AV1MV_ROW), 0, "8 GLOBALMV mv 0");
     # hostile: null out / ctx / ws.
     var sd = av1_sym_dec_init(alloc(8), 8, 1);
     assert_eq(av1_inter_block_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
-    fh, mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS, "out = 0 -> bounds error");
+        av1_iicdf_blob(), av1_mvcdf_blob(), 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
+        fh, mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS, "out = 0 -> bounds error");
     assert_eq(av1_inter_block_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), av1_interblock_new(), ib_ctx(g, 6),
-    av1_nbctx_new(), 0, fh, mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS,
-    "ws = 0 -> bounds error");
+        av1_iicdf_blob(), av1_mvcdf_blob(), av1_interblock_new(), ib_ctx(g, 6),
+        av1_nbctx_new(), 0, fh, mm_refs(64, 64), s0, 0, 0, 0), DR_ERR_BOUNDS,
+      "ws = 0 -> bounds error");
     # a hostile seg REF_FRAME datum of 0 (INTRA) reaching the INTER path is rejected —
     # 5.11.15 would have derived is_inter = 0 from it.
     var fh_bad = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
@@ -3657,9 +3657,9 @@ fn test_inter_block_seg_and_errors() {
     var nb = av1_nbctx_new();
     av1_nbctx_setup(nb, g, 16, 4, 4, 1, 1);
     assert_eq(av1_inter_block_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
-    av1_iicdf_blob(), av1_mvcdf_blob(), av1_interblock_new(), ib_ctx(g, 6), nb,
-    av1_warp_new(), fh_bad, mm_refs(64, 64), s0, 0, 3, 0), DR_ERR_BOUNDS,
-    "seg REF_FRAME datum 0 on the inter path -> bounds error");
+        av1_iicdf_blob(), av1_mvcdf_blob(), av1_interblock_new(), ib_ctx(g, 6), nb,
+        av1_warp_new(), fh_bad, mm_refs(64, 64), s0, 0, 3, 0), DR_ERR_BOUNDS,
+      "seg REF_FRAME datum 0 on the inter path -> bounds error");
     # the record layout, pinned absolutely.
     assert_eq(AV1IB_II + AV1II_SIZE, AV1IB_CT, "II region ends exactly at CT");
     assert_eq(AV1IB_CT + AV1CT_SIZE, AV1IB_SIZE, "CT region ends exactly at AV1IB_SIZE");

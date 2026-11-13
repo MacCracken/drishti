@@ -666,7 +666,7 @@ fn av1_write_lr_unit(enc, ncc, params, plane, unit_row, unit_col): i64 {
             var v = av1_lr_sgrxqd_get_one(params, plane, unit_row, unit_col, i);
             if (radius != 0) {
                 av1_encode_signed_subexp_with_ref_bool(enc, v, av1_lr_xqd_min(i), av1_lr_xqd_max(i) + 1, 4,
-                av1_lr_refx_get(params, plane, i));
+                  av1_lr_refx_get(params, plane, i));
             } else {
                 # radius==0 emits no bits; the decoder recomputes v, so mirror it to
                 # keep the Ref predictor in sync (0, or the clip when i==1).

@@ -68,7 +68,7 @@ enum DrFourcc {
 # ================================================================
 
 fn drishti_version(): i64 {
-    return 830;
+    return 831;
 }
 
 # ================================================================
@@ -147,11 +147,11 @@ fn dr_sniff(buf, len): i64 {
     if (len >= 4) {
         # "DKIF" byte-by-byte — no unaligned 32-bit read needed.
         if ((load8(buf) == 0x44) && (load8(buf + 1) == 0x4B)
-        && (load8(buf + 2) == 0x49) && (load8(buf + 3) == 0x46)) {
+          && (load8(buf + 2) == 0x49) && (load8(buf + 3) == 0x46)) {
             return DR_SNIFF_IVF;
         }
         if ((load8(buf) == 0) && (load8(buf + 1) == 0)
-        && (load8(buf + 2) == 0) && (load8(buf + 3) == 1)) {
+          && (load8(buf + 2) == 0) && (load8(buf + 3) == 1)) {
             return DR_SNIFF_ANNEXB;
         }
     }

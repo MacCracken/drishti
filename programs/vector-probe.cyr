@@ -156,7 +156,7 @@ fn main() {
                         var o = av1_obu_iter_obu(it);
                         var ferr = 0;
                         var fh = av1_frame_parse_uncompressed_header(seq, refs,
-                        av1_obu_tid(o), av1_obu_sid(o), pp + ooff, osize, &ferr);
+                          av1_obu_tid(o), av1_obu_sid(o), pp + ooff, osize, &ferr);
                         if ((fh == 0) || (ferr != DR_OK)) {
                             probe_puts("  FH PARSE FAILED err=");
                             probe_putn(ferr);

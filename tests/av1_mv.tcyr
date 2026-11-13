@@ -99,45 +99,45 @@ fn test_setup_global_mv() {
     var ONE = 1 << 16;
     # IDENTITY model -> zero MV.
     chk_gmv(mv_fh(AV1_GM_IDENTITY, 0, 0, ONE, 0, 0, ONE, 1, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 0, 0, "identity -> 0");
+      AV1_LAST_FRAME, 0, 0, 3, 0, 0, "identity -> 0");
     # INTRA_FRAME ref -> zero MV (never reads GmType).
     chk_gmv(mv_fh(AV1_GM_ROTZOOM, 99, 99, ONE, 0, 0, ONE, 1, 0),
-    AV1_INTRA_FRAME, 0, 0, 3, 0, 0, "intra ref -> 0");
+      AV1_INTRA_FRAME, 0, 0, 3, 0, 0, "intra ref -> 0");
     # TRANSLATION, high precision: mv = gm_params[0,1] >> 13.
     chk_gmv(mv_fh(AV1_GM_TRANSLATION, 40960, 0 - 24576, 0, 0, 0, 0, 1, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 5, 0 - 3, "translation hp 5/-3");
+      AV1_LAST_FRAME, 0, 0, 3, 5, 0 - 3, "translation hp 5/-3");
     # TRANSLATION, low precision: then the low bit is cleared toward zero.
     chk_gmv(mv_fh(AV1_GM_TRANSLATION, 40960, 0 - 24576, 0, 0, 0, 0, 0, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 4, 0 - 2, "translation lp 4/-2");
+      AV1_LAST_FRAME, 0, 0, 3, 4, 0 - 2, "translation lp 4/-2");
     # TRANSLATION, negative exact.
     chk_gmv(mv_fh(AV1_GM_TRANSLATION, 0 - 57344, 73728, 0, 0, 0, 0, 1, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 0 - 7, 9, "translation neg -7/9");
+      AV1_LAST_FRAME, 0, 0, 3, 0 - 7, 9, "translation neg -7/9");
     # ROTZOOM, high precision, 8x8 at (0,0): x=y=3, alpha=8192 -> col 3.
     chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0, 0, ONE, 1, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 0, 3, "rotzoom hp 0/3");
+      AV1_LAST_FRAME, 0, 0, 3, 0, 3, "rotzoom hp 0/3");
     # ROTZOOM at a non-zero block origin: mi_col=2, mi_row=1 -> x=11 -> col 11.
     chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0, 0, ONE, 1, 0),
-    AV1_LAST_FRAME, 2, 1, 3, 0, 11, "rotzoom offset 0/11");
+      AV1_LAST_FRAME, 2, 1, 3, 0, 11, "rotzoom offset 0/11");
     # AFFINE with an identity linear part -> behaves like translation (4096/-8192).
     chk_gmv(mv_fh(AV1_GM_AFFINE, 4096, 0 - 8192, ONE, 0, 0, ONE, 1, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 0 - 1, 1, "affine-identity -1/1");
+      AV1_LAST_FRAME, 0, 0, 3, 0 - 1, 1, "affine-identity -1/1");
     # ROTZOOM, low precision: 1/4-pel round *2 -> col 4.
     chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0, 0, ONE, 0, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 0, 4, "rotzoom lp 0/4");
+      AV1_LAST_FRAME, 0, 0, 3, 0, 4, "rotzoom lp 0/4");
     # ROTZOOM, force_integer_mv, 16x16: projected 34 -> snapped to 32.
     chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 40000, 0, 0, ONE, 0, 1),
-    AV1_LAST_FRAME, 0, 0, 6, 0, 32, "rotzoom force_int 0/32");
+      AV1_LAST_FRAME, 0, 0, 6, 0, 32, "rotzoom force_int 0/32");
     # FULL rotzoom with non-zero shear (p3,p4) AND scale (p5 != ONE) at a non-zero
     # origin (mi_col=2, mi_row=1): exercises EVERY yc term (gm[4]*x, (gm[5]-ONE)*y,
     # gm[3]*y) + the mi_row->y wiring — a swapped index or mi_row/mi_col mix-up here
     # would not match (18, 4).
     chk_gmv(mv_fh(AV1_GM_ROTZOOM, 0, 0, ONE + 8192, 0 - 8192, 8192, ONE + 8192, 1, 0),
-    AV1_LAST_FRAME, 2, 1, 3, 18, 4, "full-rotzoom shear+scale 18/4");
+      AV1_LAST_FRAME, 2, 1, 3, 18, 4, "full-rotzoom shear+scale 18/4");
     # NEGATIVE projection that DISTINGUISHES Round2Signed from Round2: yc=-12288 rounds
     # to -2 under the symmetric Round2Signed but to -1 under floor Round2 — pins that
     # the projection uses the signed variant.
     chk_gmv(mv_fh(AV1_GM_AFFINE, 0, 0 - 12288, ONE, 0, 0, ONE, 1, 0),
-    AV1_LAST_FRAME, 0, 0, 3, 0 - 2, 0, "neg-round Round2Signed -2/0");
+      AV1_LAST_FRAME, 0, 0, 3, 0 - 2, 0, "neg-round Round2Signed -2/0");
     return 0;
 }
 
@@ -349,7 +349,7 @@ fn mvs_ctx(mi_size, mi_row, mi_col): i64 { return mvs_ctx_dim(16, mi_size, mi_ro
 # set an MI cell in ctx's grid (fmi_cols read from the ctx).
 fn mvs_cell(ctx, r, c, avail, is_inter, mi_size, ymode, ref0, ref1, mv0r, mv0c, mv1r, mv1c): i64 {
     return av1_mv_grid_set(load64(ctx + AV1MVC_GRID), load64(ctx + AV1MVC_FMI_COLS), r, c,
-    avail, is_inter, mi_size, ymode, ref0, ref1, mv0r, mv0c, mv1r, mv1c);
+      avail, is_inter, mi_size, ymode, ref0, ref1, mv0r, mv0c, mv1r, mv1c);
 }
 fn mvs_num(ctx): i64 { return av1_mv_stack_num(load64(ctx + AV1MVC_STACK)); }
 fn mvs_nmv(ctx): i64 { return av1_mv_stack_newmv_count(load64(ctx + AV1MVC_STACK)); }
@@ -756,7 +756,7 @@ fn test_mi_grid_addressing() {
     assert_eq(av1_mv_grid_cell(g, cols, 1, 0) - g, cols * AV1MIR_SIZE, "row stride = fmi_cols cells");
     assert_eq(av1_mv_grid_cell(g, cols, 3, 4) - g, ((3 * 7) + 4) * AV1MIR_SIZE, "cell(3,4)");
     assert_eq(av1_mv_grid_cell(g, cols, rows - 1, cols - 1) + AV1MIR_SIZE - g,
-    rows * cols * AV1MIR_SIZE, "last cell ends EXACTLY at the grid end");
+      rows * cols * AV1MIR_SIZE, "last cell ends EXACTLY at the grid end");
     return 0;
 }
 
@@ -829,7 +829,7 @@ fn test_mi_store_mode_footprint() {
     var g2 = av1_mv_grid_new(cols, rows);
     av1_mi_store_mode(g2, cols, rows, 5, 5, 4, AV1_NEWMV, 1, AV1_REF_NONE, 1, 5, 6, 0, 0, 0, 0, 0, 0, 0);
     mi_assert_rect_ymode(g2, cols, rows, 5, 5, av1_num_4x4_w(4), av1_num_4x4_h(4), AV1_NEWMV,
-    "store_mode 8x16 footprint (w/h not swapped)");
+      "store_mode 8x16 footprint (w/h not swapped)");
     # the MVs must reach EVERY cell of the footprint, not just the top-left.
     assert_eq(mi_fld(g2, cols, 8, 6, AV1MIR_MV0ROW), 5, "mv reaches the far corner of the footprint");
     assert_eq(mi_fld(g2, cols, 8, 6, AV1MIR_MV0COL), 6, "mv col reaches the far corner");
@@ -892,7 +892,7 @@ fn test_mi_store_inter_fields() {
     # (they are independent binary syntax elements) cannot hide behind equal values.
     var g = av1_mv_grid_new(cols, rows);
     av1_mi_store_mode(g, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 0, 0, 0, 0,
-    0, 1, 0, 2, 1);
+      0, 1, 0, 2, 1);
     var r = 1;
     while (r < 3) {
         var c = 1;
@@ -908,7 +908,7 @@ fn test_mi_store_inter_fields() {
     # use_intrabc=1: CompGroupIdxs/CompoundIdxs suppressed, InterpFilters STILL written.
     var gb = av1_mv_grid_new(cols, rows);
     av1_mi_store_mode(gb, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 0, 0, 0, 0,
-    1, 1, 0, 2, 1);
+      1, 1, 0, 2, 1);
     assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_COMPGRP), 0, "use_intrabc suppresses comp_group_idx");
     assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_COMPIDX), 0, "use_intrabc suppresses compound_idx");
     assert_eq(mi_fld(gb, cols, 1, 1, AV1MIR_INTERP0), 2, "use_intrabc still stores InterpFilters[0]");
@@ -916,7 +916,7 @@ fn test_mi_store_inter_fields() {
     # INTRA: none of the inter-only fields are stored even though non-zero args are passed.
     var gi = av1_mv_grid_new(cols, rows);
     av1_mi_store_mode(gi, cols, rows, 1, 1, 3, 0, AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0, 0,
-    0, 1, 1, 2, 2);
+      0, 1, 1, 2, 2);
     assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_COMPGRP), 0, "intra stores no comp_group_idx");
     assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_COMPIDX), 0, "intra stores no compound_idx");
     assert_eq(mi_fld(gi, cols, 1, 1, AV1MIR_INTERP0), 0, "intra stores no InterpFilters[0]");
@@ -924,7 +924,7 @@ fn test_mi_store_inter_fields() {
     # the two interp dirs are DISTINCT slots (not aliased).
     var gd = av1_mv_grid_new(cols, rows);
     av1_mi_store_mode(gd, cols, rows, 1, 1, 3, AV1_NEWMV, 1, AV1_REF_NONE, 1, 0, 0, 0, 0,
-    0, 0, 0, 0, 2);
+      0, 0, 0, 0, 2);
     assert_eq(mi_fld(gd, cols, 1, 1, AV1MIR_INTERP0), 0, "InterpFilters[0] independent of [1]");
     assert_eq(mi_fld(gd, cols, 1, 1, AV1MIR_INTERP1), 2, "InterpFilters[1] independent of [0]");
     return 0;
@@ -946,7 +946,7 @@ fn test_mi_store_clip() {
     # store_mode clips identically.
     var g3 = av1_mv_grid_new(cols, rows);
     assert_eq(av1_mi_store_mode(g3, cols, rows, 4, 4, 6, AV1_NEWMV, 1, AV1_INTRA_FRAME, 1, 9, 9, 0, 0, 0, 0, 0, 0, 0),
-    DR_OK, "store_mode overhang ok");
+      DR_OK, "store_mode overhang ok");
     assert_eq(mi_fld(g3, cols, 4, 5, AV1MIR_MV0ROW), 9, "in-grid corner written");
     assert_eq(mi_fld(g3, cols, 5, 5, AV1MIR_MV0ROW), 9, "in-grid corner written 2");
     return 0;
@@ -962,7 +962,7 @@ fn test_mi_store_badargs() {
     assert_eq(av1_mi_store_final(g, cols, rows, 0, 0, 22, 1), DR_ERR_BOUNDS, "MiSize 22 rejected");
     assert_eq(av1_mi_store_final(g, cols, rows, 0, 0, 0 - 1, 1), DR_ERR_BOUNDS, "MiSize -1 rejected");
     assert_eq(av1_mi_store_mode(g, cols, rows, 0, 0, 22, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), DR_ERR_BOUNDS,
-    "store_mode MiSize 22 rejected");
+      "store_mode MiSize 22 rejected");
     # a rejected call must not have written anything.
     mi_assert_rect(g, cols, rows, 0, 0, 0, 0, "rejected calls wrote nothing");
     return 0;
@@ -1006,7 +1006,7 @@ fn warp_grid(mvr, mvc, ref0, ref1): i64 {
         var c = 0;
         while (c < 16) {
             av1_mi_store_mode(g, cols, 16, r, c, 6, AV1_NEWMV, ref0, ref1, 1, mvr, mvc, 0, 0,
-            0, 0, 0, 0, 0);
+              0, 0, 0, 0, 0);
             av1_mi_store_final(g, cols, 16, r, c, 6, 1);
             c = c + 4;
         }
@@ -1027,10 +1027,10 @@ fn warp_ctx(g): i64 {
 fn test_has_overlappable_candidates() {
     # inter neighbours above and left -> 1.
     assert_eq(av1_has_overlappable_candidates(warp_ctx(warp_grid(8, 8, 1, AV1_REF_NONE))), 1,
-    "inter neighbours -> overlappable");
+      "inter neighbours -> overlappable");
     # an INTRA grid (ref0 = INTRA_FRAME) -> 0: the check is RefFrames[..][0] > INTRA_FRAME.
     assert_eq(av1_has_overlappable_candidates(warp_ctx(warp_grid(8, 8, AV1_INTRA_FRAME,
-    AV1_REF_NONE))), 0, "intra neighbours -> NOT overlappable");
+            AV1_REF_NONE))), 0, "intra neighbours -> NOT overlappable");
     # a block at (0,0) has neither neighbour inside the tile -> 0.
     var g = warp_grid(8, 8, 1, AV1_REF_NONE);
     var c0 = av1_mvctx_new();
@@ -1043,7 +1043,7 @@ fn test_has_overlappable_candidates() {
     assert_eq(av1_has_overlappable_candidates(c0), 0, "block at (0,0): no neighbours -> 0");
     # a COMPOUND neighbour still counts (the test is on RefFrame[0] only).
     assert_eq(av1_has_overlappable_candidates(warp_ctx(warp_grid(8, 8, 1, 5))), 1,
-    "compound neighbour still overlappable (ref0 test only)");
+      "compound neighbour still overlappable (ref0 test only)");
     return 0;
 }
 fn test_find_warp_samples() {
@@ -1051,7 +1051,7 @@ fn test_find_warp_samples() {
     # top-right. cand0 = {midY*8, midX*8, +mv} from the port.
     var ws = av1_warp_new();
     assert_eq(av1_find_warp_samples(warp_ctx(warp_grid(8, 8, 1, AV1_REF_NONE)), ws, 8, 8),
-    DR_OK, "find_warp_samples ok");
+      DR_OK, "find_warp_samples ok");
     assert_eq(av1_warp_num(ws), 4, "4 valid samples");
     assert_eq(av1_warp_scanned(ws), 4, "4 scanned");
     assert_eq(av1_warp_cand(ws, 0, 0), 56, "cand[0][0] = midY*8");
@@ -1111,7 +1111,7 @@ fn warp_grid_sz(sz, mvr, mvc, ref0, ref1, step_r, step_c): i64 {
         var c = 0;
         while (c < 16) {
             av1_mi_store_mode(g, cols, 16, r, c, sz, AV1_NEWMV, ref0, ref1, 1, mvr, mvc, 0, 0,
-            0, 0, 0, 0, 0);
+              0, 0, 0, 0, 0);
             av1_mi_store_final(g, cols, 16, r, c, sz, 1);
             c = c + step_c;
         }
@@ -1155,7 +1155,7 @@ fn test_warp_nonsquare_and_clamp() {
         var c = 0;
         while (c < 64) {
             av1_mi_store_mode(big, 64, 64, r, c, 15, AV1_NEWMV, 1, AV1_REF_NONE, 1, 128, 8, 0, 0,
-            0, 0, 0, 0, 0);
+              0, 0, 0, 0, 0);
             av1_mi_store_final(big, 64, 64, r, c, 15, 1);
             c = c + 32;
         }
@@ -1187,10 +1187,10 @@ fn test_overlappable_granularity() {
         var ref_odd = AV1_INTRA_FRAME;
         if (c - ((c / 2) * 2) == 1) { ref_odd = 1; }           # inter on ODD cols
         av1_mi_store_mode(geven, cols, 16, 3, c, 0, AV1_NEWMV, ref_even, AV1_REF_NONE, 1, 8, 8, 0, 0,
-        0, 0, 0, 0, 0);
+          0, 0, 0, 0, 0);
         av1_mi_store_final(geven, cols, 16, 3, c, 0, 1);
         av1_mi_store_mode(godd, cols, 16, 3, c, 0, AV1_NEWMV, ref_odd, AV1_REF_NONE, 1, 8, 8, 0, 0,
-        0, 0, 0, 0, 0);
+          0, 0, 0, 0, 0);
         av1_mi_store_final(godd, cols, 16, 3, c, 0, 1);
         c = c + 1;
     }
@@ -1198,17 +1198,17 @@ fn test_overlappable_granularity() {
     var r = 0;
     while (r < 16) {
         av1_mi_store_mode(geven, cols, 16, r, 3, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 1,
-        8, 8, 0, 0, 0, 0, 0, 0, 0);
+          8, 8, 0, 0, 0, 0, 0, 0, 0);
         av1_mi_store_final(geven, cols, 16, r, 3, 0, 1);
         av1_mi_store_mode(godd, cols, 16, r, 3, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 1,
-        8, 8, 0, 0, 0, 0, 0, 0, 0);
+          8, 8, 0, 0, 0, 0, 0, 0, 0);
         av1_mi_store_final(godd, cols, 16, r, 3, 0, 1);
         r = r + 1;
     }
     assert_eq(av1_has_overlappable_candidates(warp_ctx_sz(geven, 6, 16)), 0,
-    "inter on EVEN cols only: the x4|1 ODD probe finds nothing");
+      "inter on EVEN cols only: the x4|1 ODD probe finds nothing");
     assert_eq(av1_has_overlappable_candidates(warp_ctx_sz(godd, 6, 16)), 1,
-    "inter on ODD cols only: the x4|1 ODD probe finds it");
+      "inter on ODD cols only: the x4|1 ODD probe finds it");
     # The `x4 += 2` step is ONLY observable at an ODD MiCol: at an even one, x4|1 maps
     # both x and x+1 to the same odd column, so stepping by 1 probes the same SET. At
     # MiCol=5 with w4=4 the range is [5,9): step 2 probes {5,7}, step 1 probes {5,7,9}.
@@ -1219,10 +1219,10 @@ fn test_overlappable_granularity() {
         var rf = AV1_INTRA_FRAME;
         if (k == 9) { rf = 1; }
         av1_mi_store_mode(g9, 16, 16, 3, k, 0, AV1_NEWMV, rf, AV1_REF_NONE, 1, 8, 8, 0, 0,
-        0, 0, 0, 0, 0);
+          0, 0, 0, 0, 0);
         av1_mi_store_final(g9, 16, 16, 3, k, 0, 1);
         av1_mi_store_mode(g9, 16, 16, k, 4, 0, AV1_NEWMV, AV1_INTRA_FRAME, AV1_REF_NONE, 1,
-        8, 8, 0, 0, 0, 0, 0, 0, 0);
+          8, 8, 0, 0, 0, 0, 0, 0, 0);
         av1_mi_store_final(g9, 16, 16, k, 4, 0, 1);
         k = k + 1;
     }
@@ -1234,7 +1234,7 @@ fn test_overlappable_granularity() {
     av1_mvctx_set_precision(c9, 1, 0);
     av1_mvctx_set_stack(c9, av1_mv_stack_new());
     assert_eq(av1_has_overlappable_candidates(c9), 0,
-    "ODD MiCol=5, inter only at col 9: the 8x8 step-2 probe must NOT reach it");
+      "ODD MiCol=5, inter only at col 9: the 8x8 step-2 probe must NOT reach it");
     return 0;
 }
 # THE TEMPORAL-MV PRODUCER KAT (0.7.102): av1_mv_save_field vs the spec-literal scripts/refs/tmvs_save_ref.py.
@@ -2055,11 +2055,11 @@ fn test_setup_shear() {
     ss_check(ss_model(0, 0, 65536, 0, 0, 65536), 1, 0, 0, 0, 0, "shear identity");
     # real warp_estimation outputs (0.7.93 F/E/G) -> genuine 4-distinct shear params, valid.
     ss_check(ss_model(0 - 185328, 0 - 101166, 70077, 211, 0 - 868, 68998),
-    1, 4544, 192, 0 - 832, 3456, "shear est_F (4 distinct params)");
+      1, 4544, 192, 0 - 832, 3456, "shear est_F (4 distinct params)");
     ss_check(ss_model(0 - 317031, 0 - 312936, 73727, 0 - 62, 8191, 65369),
-    1, 8192, 0 - 64, 7296, 0 - 192, "shear est_E");
+      1, 8192, 0 - 64, 7296, 0 - 192, "shear est_E");
     ss_check(ss_model(317031, 321126, 57345, 62, 0 - 8191, 65493),
-    1, 0 - 8192, 64, 0 - 9344, 0 - 64, "shear est_G");
+      1, 0 - 8192, 64, 0 - 9344, 0 - 64, "shear est_G");
     # fail the 4|alpha|+7|beta| realizability check -> warpValid 0 (params still computed).
     ss_check(ss_model(0, 0, 73727, 8191, 0, 65536), 0, 8192, 8192, 0, 0, "shear bad_ab reject");
     # alpha EXACTLY at the boundary (4*16384==65536) -> pins the alpha coeff + the >= compare.

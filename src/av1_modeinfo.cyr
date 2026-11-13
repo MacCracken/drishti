@@ -53,7 +53,7 @@ enum Av1ModeInfoConst {
 # ================================================================
 var Av1_BlkTab = 0;
 fn av1_mi_fill22(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11,
-v12, v13, v14, v15, v16, v17, v18, v19, v20, v21) {
+  v12, v13, v14, v15, v16, v17, v18, v19, v20, v21) {
     store64(t + ((off + 0) * 8), v0);    store64(t + ((off + 1) * 8), v1);
     store64(t + ((off + 2) * 8), v2);    store64(t + ((off + 3) * 8), v3);
     store64(t + ((off + 4) * 8), v4);    store64(t + ((off + 5) * 8), v5);
@@ -397,7 +397,7 @@ fn av1_write_intra_block_mode_info(enc, ncc, mi, mi_size, has_chroma, enable_fil
         av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, load64(mi + AV1MI_ANGLE_UV));
     }
     av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, 0,
-    load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
+      load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
     return av1_sym_enc_err(enc);
 }
 
@@ -416,7 +416,7 @@ fn av1_read_angle_delta_y(sd, ncc, mi_size, ymode): i64 {
 fn av1_write_angle_delta_y(enc, ncc, mi_size, ymode, angle_delta_y): i64 {
     if (av1_angle_delta_active(mi_size, ymode) == 0) { return DR_OK; }
     return av1_sym_encode_symbol(enc, av1_ncdf_angle_delta(ncc, ymode - AV1_V_PRED), 7,
-    angle_delta_y + AV1_MAX_ANGLE_DELTA);
+      angle_delta_y + AV1_MAX_ANGLE_DELTA);
 }
 
 # uv_mode (9.3) CfL-allowed selection: TileUVModeCflAllowedCdf if
@@ -498,7 +498,7 @@ fn av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode): i64 {
 fn av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, angle_delta_uv): i64 {
     if (av1_angle_delta_active(mi_size, uvmode) == 0) { return DR_OK; }
     return av1_sym_encode_symbol(enc, av1_ncdf_angle_delta(ncc, uvmode - AV1_V_PRED), 7,
-    angle_delta_uv + AV1_MAX_ANGLE_DELTA);
+      angle_delta_uv + AV1_MAX_ANGLE_DELTA);
 }
 
 # filter_intra_mode_info (5.11.24): only when enable_filter_intra && YMode==DC_PRED
@@ -544,7 +544,7 @@ fn av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, palette
 # into `grid` (row stride `stride` i64), filling the block's 4x4 extent. Gated off
 # (reads nothing) on skip / coded_lossless / !enable_cdef / allow_intrabc.
 fn av1_read_cdef(sd, grid, stride, mi_row, mi_col, mi_size, skip,
-enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
+  enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
     if (skip || coded_lossless || (enable_cdef == 0) || allow_intrabc) { return 0; }
     var r1 = (mi_row >> 4) << 4;
     var c1 = (mi_col >> 4) << 4;
@@ -567,7 +567,7 @@ enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
 # 64x64 (same grid==-1 guard, `grid` tracking the emitted units), and fills the
 # extent — so a decode with read_cdef reconstructs `plan` into its grid.
 fn av1_write_cdef(enc, grid, plan, stride, mi_row, mi_col, mi_size, skip,
-enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
+  enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
     if (skip || coded_lossless || (enable_cdef == 0) || allow_intrabc) { return 0; }
     var r1 = (mi_row >> 4) << 4;
     var c1 = (mi_col >> 4) << 4;
@@ -612,14 +612,15 @@ fn av1_clear_cdef(grid, stride, rows, r, c, use_128): i64 {
 
 # ================================================================
 # intra_frame_mode_info() — intra branch orchestrator (decode + inverse encode).
-# Fills / reads Av1ModeInfo. Deferred features (segment/cdef/deltas/intrabc/
-# palette) are elided per the module SCOPE note; PaletteSizeY is fixed 0.
+# Fills / reads Av1ModeInfo. intra_segment_id (5.11.9) and read_cdef (5.11.56)
+# are read below; delta-q/lf, intrabc and palette are elided (PaletteSizeY is
+# fixed 0) per the module SCOPE note.
 # Read order mirrors the spec: skip, y_mode, angle_y, then (HasChroma) uv_mode,
 # cfl_alphas (if UV_CFL_PRED), angle_uv, then filter_intra.
 # ================================================================
 fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
-avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
+  avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
+  lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
     # intra_segment_id (5.11.9): read BEFORE skip iff SegIdPreSkip, else after (still before read_cdef).
     # A tile with no SEG_FH / segmentation disabled makes these a no-op returning 0.
     var seg_pre = av1_tile_seg_id_pre_skip(tile);
@@ -670,8 +671,8 @@ lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 
 }
 
 fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
-avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
+  avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
+  lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
     # intra_segment_id (5.11.9) mirror — write the segment BEFORE skip iff SegIdPreSkip, else after.
     var seg_pre = av1_tile_seg_id_pre_skip(tile);
     var segment_id = load64(mi + AV1MI_SEGID);
@@ -683,7 +684,7 @@ lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 
     av1_write_skip(enc, ncc, sctx, load64(mi + AV1MI_SKIP));
     if (seg_pre == 0) {
         var isp0 = av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l,
-        load64(mi + AV1MI_SKIP), segment_id);
+          load64(mi + AV1MI_SKIP), segment_id);
         if (isp0 != DR_OK) { return isp0; }
     }
     # write_cdef mirror — same splice point as read_cdef (after skip).
@@ -713,6 +714,6 @@ lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 
     }
 
     av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, 0,
-    load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
+      load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
     return av1_sym_enc_err(enc);
 }

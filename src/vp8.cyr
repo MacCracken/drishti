@@ -105,7 +105,7 @@ fn vp8_parse_frame_hdr(buf, len, out_err): i64 {
         }
         # 9.1: "vet via sync code" — bytes 3..5 must be 9d 01 2a.
         if ((load8(buf + 3) != VP8_START_0) || (load8(buf + 4) != VP8_START_1)
-        || (load8(buf + 5) != VP8_START_2)) {
+          || (load8(buf + 5) != VP8_START_2)) {
             store64(out_err, VP8_ERR_BAD_START_CODE);
             return 0;
         }
@@ -173,11 +173,11 @@ fn vp8_hdr_new(key_frame, version, show_frame, part_size, width, height, hscale,
         return 0;
     }
     if ((show_frame < 0) || (show_frame > 1)
-    || (part_size < 0) || (part_size > 0x7FFFF)
-    || (width < 0) || (width > 0x3FFF)
-    || (height < 0) || (height > 0x3FFF)
-    || (hscale < 0) || (hscale > 3)
-    || (vscale < 0) || (vscale > 3)) {
+      || (part_size < 0) || (part_size > 0x7FFFF)
+      || (width < 0) || (width > 0x3FFF)
+      || (height < 0) || (height > 0x3FFF)
+      || (hscale < 0) || (hscale > 3)
+      || (vscale < 0) || (vscale > 3)) {
         store64(out_err, DR_ERR_BOUNDS);
         return 0;
     }

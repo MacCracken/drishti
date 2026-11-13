@@ -88,7 +88,7 @@ fn h264_find_start_code(buf, len, from, out_sc_len): i64 {
     # Pattern needs bytes i, i+1, i+2.
     while ((i + 2) < len) {
         if ((load8(buf + i) == 0) && (load8(buf + i + 1) == 0)
-        && (load8(buf + i + 2) == 1)) {
+          && (load8(buf + i + 2) == 1)) {
             # zero_byte attribution: a 0x00 directly before the prefix
             # (still inside [from, len)) belongs to the start code.
             if ((i > from) && (load8(buf + i - 1) == 0)) {
@@ -336,15 +336,15 @@ fn h264_annexb_wrap(ref_idc, type, rbsp, rbsp_len, long_sc, out_buf, out_len): i
     if ((type < 1) || (type > 31)) { return DR_ERR_BAD_HEADER; }
     if (ref_idc == 0) {
         if ((type == H264_NAL_IDR) || (type == H264_NAL_SPS)
-        || (type == H264_NAL_PPS) || (type == H264_NAL_SPS_EXT)
-        || (type == H264_NAL_SUBSET_SPS)) {
+          || (type == H264_NAL_PPS) || (type == H264_NAL_SPS_EXT)
+          || (type == H264_NAL_SUBSET_SPS)) {
             return DR_ERR_BAD_HEADER;
         }
     }
     if (ref_idc != 0) {
         if ((type == H264_NAL_SEI) || (type == H264_NAL_AUD)
-        || (type == H264_NAL_EOSEQ) || (type == H264_NAL_EOSTREAM)
-        || (type == H264_NAL_FILLER)) {
+          || (type == H264_NAL_EOSEQ) || (type == H264_NAL_EOSTREAM)
+          || (type == H264_NAL_FILLER)) {
             return DR_ERR_BAD_HEADER;
         }
     }

@@ -203,7 +203,7 @@ fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
             var o = av1_obu_iter_obu(it);
             var ferr = 0;
             fh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
-            av1_obu_sid(o), buf + ooff, osize, &ferr);
+              av1_obu_sid(o), buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
             if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
             fdc = 0;   # a new frame begins; any prior context is retired
@@ -224,13 +224,13 @@ fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
             var of = av1_obu_iter_obu(it);
             var frr = 0;
             var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
-            av1_obu_sid(of), buf + ooff, osize, &frr);
+              av1_obu_sid(of), buf + ooff, osize, &frr);
             if (frr != DR_OK) { store64(out_err, frr); return 0; }
             if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
             if (hbytes > osize) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
             var frame = av1_decode_frame_ref(seq, ffh, dpb, refs, buf + ooff + hbytes,
-            osize - hbytes, out_err);
+              osize - hbytes, out_err);
             if (frame == 0) { return 0; }   # av1_decode_frame wrote the precise cause
             var uerr2 = av1_dpb_update(dpb, refs, seq, ffh, frame);
             if (uerr2 != DR_OK) { store64(out_err, uerr2); return 0; }

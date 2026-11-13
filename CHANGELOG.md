@@ -4,6 +4,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.131] - 2026-11-13
+
+Toolchain patch: **cyrius 6.6.2 → 6.6.20**, with `lib/` re-synced to the 6.6.20
+bundled snapshot. No decoder logic changed. **Every gate is green**: all
+**30,300 assertions** across 38 suites, **7,410** fuzz assertions, bench,
+`vet`, `lint`, `fmt-check`, `version-check`, `distlib --check`, and
+`make conformance` (strict) at **33 matched / 0 known-gap / 0 regressed**.
+
+### Changed — cyrius 6.6.2 → 6.6.20
+
+- `cyrius.cyml [package].cyrius` = `6.6.20`. The 6.6.x wrapper runs the
+  pinned version exactly (`cyrius --version` → `6.6.20 / manifest-pin: 6.6.20`)
+  rather than treating the pin as a minimum.
+- The smoke binary grew from 1,227,584 to **1,258,208 bytes**. The growth comes
+  from the new compiler plus the refreshed declared stdlib (not separated here).
+  Under 6.6.20, the builds before and after the full `lib/` sync differ in
+  exactly one byte, the packed version constant (830 → 831).
+
+### Changed — `lib/` re-synced to the 6.6.20 bundled versions
+
+`cyrius lib sync --relock --full` vendors the whole 6.6.20 snapshot. `lib/` is
+now byte-identical to `~/.cyrius/versions/6.6.20/lib` (107 entries, 113 `.cyr`
+files), and the "`./lib/` shadows version-pinned" build warning is gone. The
+twelve undeclared bundles that 0.7.130 deliberately held back moved together:
+bayan 1.2.1→1.5.12, ganita 1.0.4→1.2.14, sakshi 2.4.6→2.5.7, niyama
+1.0.6→1.0.13, sigil 3.12.1→3.13.10, sandhi 1.9.3→1.10.8, yukti 2.2.10→2.3.15,
+patra 1.12.12→1.15.2, vani 1.1.2→1.2.9, mabda 4.0.7→4.1.7, sankoch
+2.7.5→2.8.1, yantra 1.0.1→1.0.8. Eight entries are new to the snapshot:
+`alloc_cx`, `async_macos`, `boxed`, `hashseed`, `poison`, `thread_macos`,
+`tls_hostid`, and the `unicode/` directory. This supersedes 0.7.130's "do not
+run `--full`" note. drishti still reaches none of the undeclared bundles, so
+the sync changed nothing in the compiled output.
+
+`--relock` was needed because the first 6.6.20 `cyrius build` auto-ran `deps`.
+That run created `cyrius.lock` (new with this toolchain) holding the pre-sync
+rows under the new pin, and `lib sync` refused 70 files until relocked.
+`cyrius deps --verify`: 113 verified, 0 failed.
+
+### Added — tool-generated
+
+- `cyrius.lock`: per-file sha256 of everything in `lib/`.
+- `dist/drishti.deps`: a sidecar naming the bundle's stdlib leaves (`alloc`,
+  `string`). `dist/drishti.cyr` now opens with the matching
+  `include "lib/alloc.cyr"` / `include "lib/string.cyr"` lines, and `distlib`
+  compile-verifies them. The bundle is regenerated at v0.7.131. It had still
+  been stamped v0.7.129, because the 0.7.130 cut never re-ran `make dist`.
+
+### Fixed — `make lint` green again (82 files)
+
+- The 6.6.20 deferral linter matches "Deferred"/"DEFERRED" case-insensitively,
+  which surfaced four comments. All four described work that has since landed,
+  so the fix is the wording, not a roadmap stamp:
+  `src/av1_mv.cyr` (the temporal scan "is DEFERRED": it is `av1_temporal_scan`,
+  run since 0.7.129), `src/av1_intermode.cyr` ×2 (segment-id / `read_cdef` /
+  the intra fork are wired; only non-spatial segmentation and delta-q/lf gate;
+  the second hit was spec read-order wording, not a deferral), and
+  `src/av1_modeinfo.cyr` (segment-id and `read_cdef` are read).
+- Two lines over 120 columns in `src/av1_mv.cyr` were wrapped: a comment, and
+  `av1_ls_product2`'s return expression, token for token. Both were already red at 0.7.130 under 6.6.2.
+- Proof that these are comment/layout-only: the smoke binary is byte-identical
+  before and after.
+
+### Fixed — `make fmt-check` green again (whitespace-only reformat)
+
+49 files failed 6.6.x's continuation-indent rule ("2 spaces per open paren, 4
+also accepted"). The same 49 failed at 0.7.130 under 6.6.2, so the drift dates
+from the 6.6.2 bump. `cyrius fmt` re-indented 937 continuation lines across
+`src/` (30 modules), `programs/vector-probe.cyr` and 18 test suites.
+- No line count changed, and `diff -w` against the pre-format tree is empty.
+- **All 45 binaries are byte-identical** before and after: the 4 programs plus
+  all 38 `.tcyr`, 2 `.fcyr` and 1 `.bcyr` harnesses. That also rules out a
+  change hidden inside a string literal.
+- The re-indent pushed one parameter continuation in `av1_mc_pred_compound`
+  (`src/av1_mc.cyr`) past 120 columns; it is split onto one more line.
+
+NB: in 6.6.x, `cyrius fmt <file>` **rewrites the file in place**. Use `--check`
+or `--dry` to report only.
+
 ## [0.7.130] - 2026-09-10
 
 Toolchain patch: **cyrius 6.4.78 → 6.6.2**. No decoder logic changed — all

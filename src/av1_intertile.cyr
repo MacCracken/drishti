@@ -121,9 +121,9 @@ fn av1_inter_block_setup(tile, r, c, sub_size, out): i64 {
     }
     var ctx = load64(tile + AV1TILE_MVCTX);
     av1_mvctx_set_grid(ctx, load64(tile + AV1TILE_MVGRID), load64(tile + AV1TILE_FMI_COLS),
-    load64(tile + AV1TILE_FMI_ROWS));
+      load64(tile + AV1TILE_FMI_ROWS));
     av1_mvctx_set_tile(ctx, load64(tile + AV1TILE_ROW_START), load64(tile + AV1TILE_ROW_END),
-    load64(tile + AV1TILE_COL_START), load64(tile + AV1TILE_COL_END));
+      load64(tile + AV1TILE_COL_START), load64(tile + AV1TILE_COL_END));
     av1_mvctx_set_block(ctx, r, c, sub_size);
     av1_mvctx_set_precision(ctx, av1_fh_allow_high_precision_mv(fh), av1_fh_force_integer_mv(fh));
     av1_mvctx_set_signbias(ctx, load64(tile + AV1TILE_SIGNBIAS));   # 7.20 RefFrameSignBias
@@ -172,9 +172,9 @@ fn av1_inter_store_mode(tile, r, c, sub_size, fb): i64 {
     var mv1 = av1_ib_mv(ib, 1);
     var ct = av1_ib_ct(ib);
     av1_mi_store_mode(grid, fmi_cols, fmi_rows, r, c, sub_size, av1_ib_ymode(ib),
-    av1_ib_ref(ib, 0), av1_ib_ref(ib, 1), 1, av1_mv_row(mv0), av1_mv_col(mv0),
-    av1_mv_row(mv1), av1_mv_col(mv1), 0, load64(ct + AV1CT_GROUPIDX),
-    load64(ct + AV1CT_COMPIDX), av1_ib_interp(ib, 0), av1_ib_interp(ib, 1));
+      av1_ib_ref(ib, 0), av1_ib_ref(ib, 1), 1, av1_mv_row(mv0), av1_mv_col(mv0),
+      av1_mv_row(mv1), av1_mv_col(mv1), 0, load64(ct + AV1CT_GROUPIDX),
+      load64(ct + AV1CT_COMPIDX), av1_ib_interp(ib, 0), av1_ib_interp(ib, 1));
     return DR_OK;
 }
 
@@ -203,7 +203,7 @@ fn av1_inter_some_use_intra(grid, fmi_cols, fmi_rows, cand_row, cand_col, n4w, n
             var gc = cand_col + cc;
             if ((gr < fmi_rows) && (gc < fmi_cols)) {
                 if (load64(av1_mv_grid_cell(grid, fmi_cols, gr, gc) + AV1MIR_REF0)
-                == AV1_INTRA_FRAME) {
+                  == AV1_INTRA_FRAME) {
                     return 1;
                 }
             }
@@ -228,7 +228,7 @@ fn av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx
     var write_intertx = 1;
     if (is_vartx != 0) { write_intertx = 0; }   # var-tx filled InterTxSizes per-leaf
     av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, av1_ib_ymode(ib), 0, skip,
-    tx_size, has_chroma, write_intertx);
+      tx_size, has_chroma, write_intertx);
     var row_end = load64(tile + AV1TILE_ROW_END);
     var col_end = load64(tile + AV1TILE_COL_END);
     # RefFrame[0] across the footprint, for the DEBLOCKER's 7.14.5 ref/mode deltas. Written
@@ -341,8 +341,8 @@ fn av1_obmc_overlap(tile, frame, plane, cell, dpb, fh, predX, predY, predW, pred
     # neighbour list-0 MV + the NEIGHBOUR's interp filters (dir0 = vertical = filt_y, dir1 = horizontal =
     # filt_x — the same mapping the block's own MC uses at av1_ib_interp(ib,0/1)).
     var em = av1_mc_pred_core(buf, frame, nref, plane, predX, predY, mc_w, mc_h,
-    load64(cell + AV1MIR_MV0ROW), load64(cell + AV1MIR_MV0COL),
-    load64(cell + AV1MIR_INTERP1), load64(cell + AV1MIR_INTERP0), 0);
+      load64(cell + AV1MIR_MV0ROW), load64(cell + AV1MIR_MV0COL),
+      load64(cell + AV1MIR_INTERP1), load64(cell + AV1MIR_INTERP0), 0);
     if (em != DR_OK) { return av1_ierr_latch(tile, em); }
     var mlen = predW;
     if (pass == 0) { mlen = predH; }
@@ -381,7 +381,7 @@ fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i
     var ph = dr_frame_plane_height(frame, plane);
     # ABOVE pass.
     if ((mi_row > load64(tile + AV1TILE_ROW_START))
-    && (av1_get_plane_residual_size(sub_size, plane, subX, subY) >= AV1_BLOCK_8X8)) {
+      && (av1_get_plane_residual_size(sub_size, plane, subX, subY) >= AV1_BLOCK_8X8)) {
         var nlim = av1_min(4, av1_mi_width_log2(sub_size));
         var ncount = 0;
         var x4 = mi_col;
@@ -396,7 +396,7 @@ fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i
                 var apw = av1_min(nom_w, (astep * 4) >> subX);
                 var aph = av1_min(nom_h >> 1, 32 >> subY);
                 var eo = av1_obmc_overlap(tile, frame, plane, acell, dpb, fh,
-                (x4 * 4) >> subX, (mi_row * 4) >> subY, apw, aph, 0, pw, ph);
+                  (x4 * 4) >> subX, (mi_row * 4) >> subY, apw, aph, 0, pw, ph);
                 if (eo != DR_OK) { return eo; }
             }
             x4 = x4 + astep;
@@ -418,7 +418,7 @@ fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i
                 var lpw = av1_min(nom_w >> 1, 32 >> subX);
                 var lph = av1_min(nom_h, (lstep * 4) >> subY);
                 var eo2 = av1_obmc_overlap(tile, frame, plane, lcell, dpb, fh,
-                (mi_col * 4) >> subX, (y4 * 4) >> subY, lpw, lph, 1, pw, ph);
+                  (mi_col * 4) >> subX, (y4 * 4) >> subY, lpw, lph, 1, pw, ph);
                 if (eo2 != DR_OK) { return eo2; }
             }
             y4 = y4 + lstep;
@@ -440,9 +440,9 @@ fn av1_get_above_tx_width(tile, row, col, mi_row, avail_u): i64 {
     if (row == mi_row) {
         if (avail_u == 0) { return 64; }
         var above = av1_mv_grid_cell(load64(tile + AV1TILE_MVGRID),
-        load64(tile + AV1TILE_FMI_COLS), row - 1, col);
+          load64(tile + AV1TILE_FMI_COLS), row - 1, col);
         if ((av1_grid_get(tile, AV1TILE_SKIPS, row - 1, col) != 0)
-        && (load64(above + AV1MIR_ISINTER) != 0)) {
+          && (load64(above + AV1MIR_ISINTER) != 0)) {
             return av1_block_width(av1_grid_get(tile, AV1TILE_MISIZES, row - 1, col));
         }
     }
@@ -452,9 +452,9 @@ fn av1_get_left_tx_height(tile, row, col, mi_col, avail_l): i64 {
     if (col == mi_col) {
         if (avail_l == 0) { return 64; }
         var left = av1_mv_grid_cell(load64(tile + AV1TILE_MVGRID),
-        load64(tile + AV1TILE_FMI_COLS), row, col - 1);
+          load64(tile + AV1TILE_FMI_COLS), row, col - 1);
         if ((av1_grid_get(tile, AV1TILE_SKIPS, row, col - 1) != 0)
-        && (load64(left + AV1MIR_ISINTER) != 0)) {
+          && (load64(left + AV1MIR_ISINTER) != 0)) {
             return av1_block_height(av1_grid_get(tile, AV1TILE_MISIZES, row, col - 1));
         }
     }
@@ -500,7 +500,7 @@ fn av1_read_var_tx_size(tile, row, col, tx_sz, depth, mi_size, mi_row, mi_col, a
             var j = 0;
             while (j < w4) {
                 av1_read_var_tx_size(tile, row + i, col + j, sub, depth + 1,
-                mi_size, mi_row, mi_col, avail_u, avail_l);
+                  mi_size, mi_row, mi_col, avail_u, avail_l);
                 j = j + stepw;
             }
             i = i + steph;
@@ -570,12 +570,12 @@ fn av1_transform_block_inter(tile, r, c, sub_size, plane, tx_sz, x, y): i64 {
     # coeffs() reads the inter tx_type (ttx.IS_INTER=1) + the shared base/eob/br
     # CDFs, and updates the rebased level/dc strips; returns eob into quant[].
     var eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
-    load64(tile + AV1TILE_NCC), plane, tx_sz, ttx,
-    av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
-    mi_cols >> subx, mi_rows >> suby, bw, bh,
-    load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
-    load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
-    quant, load64(tile + AV1TILE_OTT));
+      load64(tile + AV1TILE_NCC), plane, tx_sz, ttx,
+      av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
+      mi_cols >> subx, mi_rows >> suby, bw, bh,
+      load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
+      load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
+      quant, load64(tile + AV1TILE_OTT));
     # luma: broadcast this leaf's TxType (compute_tx_type's result, DCT_DCT on the
     # all_zero path) across the leaf footprint so chroma co-locates the right value.
     if (plane == 0) {
@@ -613,7 +613,7 @@ fn av1_transform_block_inter(tile, r, c, sub_size, plane, tx_sz, x, y): i64 {
         var q_dc = av1_get_dc_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, ddc);
         var q_ac = av1_get_ac_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, dac);
         return av1_reconstruct(frame, plane, start_x, start_y, tx_sz,
-        load64(load64(tile + AV1TILE_OTT)), lossless, quant, q_dc, q_ac);
+          load64(load64(tile + AV1TILE_OTT)), lossless, quant, q_dc, q_ac);
     }
     return DR_OK;
 }
@@ -631,7 +631,7 @@ fn av1_transform_tree(tile, r, c, sub_size, start_x, start_y, w, h): i64 {
     if ((w <= luma_w) && (h <= luma_h)) {
         var tsz = av1_find_tx_size(w, h);
         return av1_transform_block_inter(tile, r, c, sub_size, 0, tsz,
-        (start_x >> 2) - c, (start_y >> 2) - r);
+          (start_x >> 2) - c, (start_y >> 2) - r);
     }
     var hw = w >> 1;
     var hh = h >> 1;
@@ -698,8 +698,8 @@ fn av1_residual_inter(tile, r, c, sub_size, has_chroma, tx_size, is_vartx): i64 
                 if ((plane == 0) && (is_vartx != 0) && (lossless == 0)) {
                     # transform_tree takes the CHUNK origin as its base (not block + offset).
                     var e = av1_transform_tree(tile, r, c, sub_size,
-                    (mi_col_chunk >> sx) * AV1_MI_SIZE, (mi_row_chunk >> sy) * AV1_MI_SIZE,
-                    num4x4w * 4, num4x4h * 4);
+                      (mi_col_chunk >> sx) * AV1_MI_SIZE, (mi_row_chunk >> sy) * AV1_MI_SIZE,
+                      num4x4w * 4, num4x4h * 4);
                     if (e != DR_OK) { return e; }
                 } else {
                     var ptx = 0;                                # Lossless: TX_4X4
@@ -713,7 +713,7 @@ fn av1_residual_inter(tile, r, c, sub_size, has_chroma, tx_size, is_vartx): i64 
                         var xx = 0;
                         while (xx < num4x4w) {
                             var e = av1_transform_block_inter(tile, r, c, sub_size, plane, ptx,
-                            xx + off_x, y + off_y);
+                              xx + off_x, y + off_y);
                             if (e != DR_OK) { return e; }
                             xx = xx + step_x;
                         }
@@ -760,12 +760,12 @@ fn av1_transform_block_inter_encode(tile, r, c, sub_size, plane, tx_sz, x, y, eo
         tt = av1_compute_tx_type(plane, tx_sz, ttx, load64(ttx + AV1TTC_LUMA_TXTYPE));
     }
     var e = av1_coeffs_encode(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_CC),
-    load64(tile + AV1TILE_NCC), plane, tx_sz, ttx, tt,
-    av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
-    mi_cols >> subx, mi_rows >> suby, av1_block_width(plane_sz), av1_block_height(plane_sz),
-    load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
-    load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
-    coeff, eob);
+      load64(tile + AV1TILE_NCC), plane, tx_sz, ttx, tt,
+      av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
+      mi_cols >> subx, mi_rows >> suby, av1_block_width(plane_sz), av1_block_height(plane_sz),
+      load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
+      load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
+      coeff, eob);
     # luma: broadcast this leaf's TxType (DCT_DCT if all-zero) into the grid so chroma
     # co-locates it (matches the decode broadcast).
     if (plane == 0) {
@@ -816,7 +816,7 @@ fn av1_write_var_tx_size(tile, row, col, tx_sz, depth, target, mi_size, mi_row, 
             var j = 0;
             while (j < w4) {
                 av1_write_var_tx_size(tile, row + i, col + j, sub, depth + 1,
-                target, mi_size, mi_row, mi_col, avail_u, avail_l);
+                  target, mi_size, mi_row, mi_col, avail_u, avail_l);
                 j = j + stepw;
             }
             i = i + steph;
@@ -857,8 +857,8 @@ fn av1_transform_tree_encode(tile, r, c, sub_size, start_x, start_y, w, h, plan)
         var ent = leaves + (cur * 3 * 8);
         store64(plan + (1 * 8), cur + 1);
         return av1_transform_block_inter_encode(tile, r, c, sub_size, 0, tsz,
-        (start_x >> 2) - c, (start_y >> 2) - r,
-        load64(ent + (1 * 8)), load64(ent + (2 * 8)), load64(ent + 0));
+          (start_x >> 2) - c, (start_y >> 2) - r,
+          load64(ent + (1 * 8)), load64(ent + (2 * 8)), load64(ent + 0));
     }
     var hw = w >> 1;
     var hh = h >> 1;
@@ -910,7 +910,7 @@ fn av1_residual_inter_encode(tile, r, c, sub_size, has_chroma, tx_size, fb, is_v
             # var-tx LUMA: walk the leaf tree (write_var_tx_size already filled the grid).
             store64(vplan + (1 * 8), 0);                    # reset the leaf cursor
             var ev = av1_transform_tree_encode(tile, r, c, sub_size, c * AV1_MI_SIZE,
-            r * AV1_MI_SIZE, num4x4w * 4, num4x4h * 4, vplan);
+              r * AV1_MI_SIZE, num4x4w * 4, num4x4h * 4, vplan);
             if (ev != DR_OK) { return ev; }
         } else {
             var ptx = 0;
@@ -934,7 +934,7 @@ fn av1_residual_inter_encode(tile, r, c, sub_size, has_chroma, tx_size, fb, is_v
                 var xx = 0;
                 while (xx < num4x4w) {
                     var e = av1_transform_block_inter_encode(tile, r, c, sub_size, plane, ptx,
-                    xx, y, eob, coeff, luma_tt);
+                      xx, y, eob, coeff, luma_tt);
                     if (e != DR_OK) { return e; }
                     xx = xx + step_x;
                 }
@@ -956,16 +956,16 @@ fn av1_residual_inter_encode(tile, r, c, sub_size, has_chroma, tx_size, fb, is_v
 # store the intra block's mode into the MV grid (is_inter=0 -> only ymode + refs written; no MV/interp).
 fn av1_intra_store_mode(tile, r, c, sub_size, mi): i64 {
     av1_mi_store_mode(load64(tile + AV1TILE_MVGRID), load64(tile + AV1TILE_FMI_COLS),
-    load64(tile + AV1TILE_FMI_ROWS), r, c, sub_size, load64(mi + AV1MI_YMODE),
-    AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      load64(tile + AV1TILE_FMI_ROWS), r, c, sub_size, load64(mi + AV1MI_YMODE),
+      AV1_INTRA_FRAME, AV1_REF_NONE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     return DR_OK;
 }
 # storage loop 2 (is_inter=0) + the intra YModes/UVModes/MiSizes/Skips grids.
 fn av1_intra_store_block(tile, r, c, sub_size, mi, tx_size, has_chroma, skip): i64 {
     av1_mi_store_final(load64(tile + AV1TILE_MVGRID), load64(tile + AV1TILE_FMI_COLS),
-    load64(tile + AV1TILE_FMI_ROWS), r, c, sub_size, 0);
+      load64(tile + AV1TILE_FMI_ROWS), r, c, sub_size, 0);
     av1_block_write_grids(tile, r, c, av1_num_4x4_w(sub_size), av1_num_4x4_h(sub_size), sub_size,
-    load64(mi + AV1MI_YMODE), load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma, 1);
+      load64(mi + AV1MI_YMODE), load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma, 1);
     return DR_OK;
 }
 # encode an intra block's residual coeffs from the plan — the IS_INTER=0 analogue of
@@ -1081,12 +1081,12 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     var fb = av1_blockinfo_new();
     if (fb == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
     var e = av1_inter_frame_mode_info(sd, load64(tile + AV1TILE_CCREF),
-    load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
-    load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
-    load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
-    load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
-    load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-    (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
+      load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
+      load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
+      load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
+      load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
+      load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
+      (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # per-segment dequant (0.7.125 D1): resolve this block's qindex from its segment_id so residual()
     # dequantizes at the right quantizer. == base_q when segmentation is disabled / segment inactive. Also
@@ -1095,7 +1095,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     if (av1_fh_segmentation_enabled(fh) != 0) {
         store64(tile + AV1TILE_CUR_QINDEX, av1_get_qindex_ignore_delta(fh, av1_fb_segment_id(fb)));
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
-        load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
+          load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
     } else {
         store64(tile + AV1TILE_CUR_QINDEX, load64(tile + AV1TILE_BASE_Q));
     }
@@ -1121,7 +1121,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         var iloss = (load64(tile + AV1TILE_BASE_Q) == 0);
         var itxc = av1_tx_depth_ctx(iavu, load64(inb + 32), iavl, load64(inb + 40), av1_max_tx_size_rect(sub_size));
         var itx = av1_read_tx_size(sd, load64(tile + AV1TILE_NCC), sub_size, iloss,
-        load64(tile + AV1TILE_TX_MODE), 1, itxc);
+          load64(tile + AV1TILE_TX_MODE), 1, itxc);
         if (av1_fb_skip(fb) != 0) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
         var iblk = av1_block_new();
         if (iblk == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
@@ -1154,7 +1154,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     # / TX_MODE_LARGEST / ONLY_4X4 / lossless take the uniform tx path.
     var is_vartx = 0;
     if ((skip == 0) && (load64(tile + AV1TILE_TX_MODE) == AV1_TX_MODE_SELECT)
-    && (sub_size > AV1_BLOCK_4X4) && (load64(tile + AV1TILE_BASE_Q) != 0)) {
+      && (sub_size > AV1_BLOCK_4X4) && (load64(tile + AV1TILE_BASE_Q) != 0)) {
         is_vartx = 1;
     }
     # the nominal (chroma / uniform / lossless) tx_size — read_tx_size(0) else branch;
@@ -1177,7 +1177,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     if (is_comp != 0) {
         var ct = av1_ib_ct(ib);
         if ((load64(ct + AV1CT_GROUPIDX) != 0) && (av1_comptype_type(ct) != AV1_COMPOUND_DIFFWTD)
-        && (av1_comptype_type(ct) != AV1_COMPOUND_WEDGE)) {
+          && (av1_comptype_type(ct) != AV1_COMPOUND_WEDGE)) {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }
@@ -1205,7 +1205,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             var vc = 0;
             while (vc < bw4) {
                 av1_read_var_tx_size(tile, r + vr, c + vc, mtx, 0, sub_size, r, c,
-                load64(st + 0), load64(st + 8));
+                  load64(st + 0), load64(st + 8));
                 vc = vc + txw4;
             }
             vr = vr + txh4;
@@ -1267,7 +1267,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         if ((is_comp == 0) && (ymode == AV1_GLOBALMV)) {
             var g_ref0 = av1_ib_ref(ib, 0);
             if ((av1_fh_gm_type(fh, g_ref0) > AV1_GM_TRANSLATION) && (fint == 0)
-            && (av1_is_scaled(fh, refs2, g_ref0) == 0)) {
+              && (av1_is_scaled(fh, refs2, g_ref0) == 0)) {
                 wm = av1_warp_model_scratch();
                 if (wm == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
                 var egw = av1_warp_model_from_global(wm, fh, g_ref0);
@@ -1278,7 +1278,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         if ((is_comp != 0) && (ymode == AV1_GLOBAL_GLOBALMV)) {
             var cr0 = av1_ib_ref(ib, 0);
             if ((av1_fh_gm_type(fh, cr0) > AV1_GM_TRANSLATION) && (fint == 0)
-            && (av1_is_scaled(fh, refs2, cr0) == 0)) {
+              && (av1_is_scaled(fh, refs2, cr0) == 0)) {
                 wm0 = av1_warp_model_scratch();
                 if (wm0 == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
                 var e0 = av1_warp_model_from_global(wm0, fh, cr0);
@@ -1287,7 +1287,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             }
             var cr1 = av1_ib_ref(ib, 1);
             if ((av1_fh_gm_type(fh, cr1) > AV1_GM_TRANSLATION) && (fint == 0)
-            && (av1_is_scaled(fh, refs2, cr1) == 0)) {
+              && (av1_is_scaled(fh, refs2, cr1) == 0)) {
                 wm1 = av1_warp_model_scratch2();
                 if (wm1 == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
                 var e1 = av1_warp_model_from_global(wm1, fh, cr1);
@@ -1328,7 +1328,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             } else {
                 if (load64(ctp + AV1CT_COMPIDX) == 0) {
                     cfwd = av1_dist_wtd_fwd(load64(tile + AV1TILE_SEQ), fh, av1_ib_ref(ib, 0),
-                    av1_ib_ref(ib, 1));
+                      av1_ib_ref(ib, 1));
                     cbck = 16 - cfwd;
                 }
             }
@@ -1371,8 +1371,8 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             # someUseIntra collapses the borrow back to a single whole-extent prediction from
             # the block's own cell.
             if (av1_inter_some_use_intra(load64(tile + AV1TILE_MVGRID),
-            load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS),
-            cand_row, cand_col, n4w, n4h, sx, sy) != 0) {
+                load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS),
+                cand_row, cand_col, n4w, n4h, sx, sy) != 0) {
                 pred_w = n4w * 4;
                 pred_h = n4h * 4;
                 cand_row = r;
@@ -1435,11 +1435,11 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                         var gr = cand_row + sub_r;
                         var gc = cand_col + sub_c;
                         if ((gr >= load64(tile + AV1TILE_FMI_ROWS))
-                        || (gc >= load64(tile + AV1TILE_FMI_COLS))) {
+                          || (gc >= load64(tile + AV1TILE_FMI_COLS))) {
                             return av1_ierr_latch(tile, DR_ERR_BOUNDS);
                         }
                         var qcell = av1_mv_grid_cell(load64(tile + AV1TILE_MVGRID),
-                        load64(tile + AV1TILE_FMI_COLS), gr, gc);
+                          load64(tile + AV1TILE_FMI_COLS), gr, gc);
                         # a compound sibling has no single MV to lend. Unreachable for a legal
                         # stream (compound is not signalled at these sizes) — rejected rather
                         # than silently borrowing list 0.
@@ -1447,14 +1447,14 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
                         }
                         var qref = av1_dpb_ref_frame(load64(tile + AV1TILE_DPB), fh,
-                        load64(qcell + AV1MIR_REF0));
+                          load64(qcell + AV1MIR_REF0));
                         if (qref == 0) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }
                         # the NEIGHBOUR's own interp filters, dir0 = vertical = filt_y and
                         # dir1 = horizontal = filt_x (the av1_obmc_overlap precedent). Getting
                         # this pair backwards is silent wrong pixels, not an error.
                         var eq = av1_mc_pred_block(frame, qref, plane, x, y, w, h,
-                        load64(qcell + AV1MIR_MV0ROW), load64(qcell + AV1MIR_MV0COL),
-                        load64(qcell + AV1MIR_INTERP1), load64(qcell + AV1MIR_INTERP0));
+                          load64(qcell + AV1MIR_MV0ROW), load64(qcell + AV1MIR_MV0COL),
+                          load64(qcell + AV1MIR_INTERP1), load64(qcell + AV1MIR_INTERP0));
                         if (eq != DR_OK) { return av1_ierr_latch(tile, eq); }
                     }
                     if ((w > 0) && (h > 0) && (multi == 0)) {
@@ -1473,21 +1473,21 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                         var em = DR_OK;
                         if (is_comp != 0) {
                             em = av1_mc_pred_compound(frame, refframe, ref1frame, plane, x, y, w, h,
-                            mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
-                            sub_size, cwidx, cwsign, wm0, wm1, use_warp0, use_warp1);
+                              mv_row, mv_col, mv1_row, mv1_col, filt_x, filt_y, cfwd, cbck, cmode, cmtype,
+                              sub_size, cwidx, cwsign, wm0, wm1, use_warp0, use_warp1);
                         } else {
                             if (is_ii != 0) {
                                 em = av1_mc_pred_interintra_w(frame, refframe, plane, x, y, w, h,
-                                mv_row, mv_col, filt_x, filt_y, av1_interintra_mode(av1_ib_ii(ib)),
-                                av1_interintra_wedge(av1_ib_ii(ib)), av1_interintra_wedge_idx(av1_ib_ii(ib)),
-                                sub_size, load64(st + 8), load64(st + 0),
-                                load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS), wm, use_warp);
+                                  mv_row, mv_col, filt_x, filt_y, av1_interintra_mode(av1_ib_ii(ib)),
+                                  av1_interintra_wedge(av1_ib_ii(ib)), av1_interintra_wedge_idx(av1_ib_ii(ib)),
+                                  sub_size, load64(st + 8), load64(st + 0),
+                                  load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS), wm, use_warp);
                             } else {
                                 if (use_warp != 0) {
                                     em = av1_warp_pred_block(frame, refframe, plane, x, y, w, h, wm);
                                 } else {
                                     em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
-                                    mv_row, mv_col, filt_x, filt_y);
+                                      mv_row, mv_col, filt_x, filt_y);
                                 }
                             }
                         }
@@ -1551,18 +1551,18 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     if (st == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
     av1_inter_block_setup(tile, r, c, sub_size, st);
     var e = av1_write_inter_frame_mode_info(enc, load64(tile + AV1TILE_CCREF),
-    load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
-    load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
-    load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
-    load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
-    load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-    (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
+      load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
+      load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
+      load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
+      load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
+      load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
+      (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # stamp segment_id across the block footprint (mirror of decode) so the encoder's later-block
     # spatial prediction reads this block's segment id.
     if ((fh != 0) && (av1_fh_segmentation_enabled(fh) != 0)) {
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
-        load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
+          load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
     }
     # the intra fork (5.11.24) RECONSTRUCTION (encode): write tx_size, encode the intra residual from the
     # plan, and mirror the decode's intra stores. tx uses max-rect (TX_MODE_LARGEST writes no tx symbol).
@@ -1578,7 +1578,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         if (eloss != 0) { etx = 0; }   # Lossless -> TX_4X4, matching the decode's av1_read_tx_size result
         var etxc = av1_tx_depth_ctx(eavu, load64(enb + 32), eavl, load64(enb + 40), av1_max_tx_size_rect(sub_size));
         av1_write_tx_size(enc, load64(tile + AV1TILE_NCC), sub_size, eloss,
-        load64(tile + AV1TILE_TX_MODE), 1, etxc, etx);
+          load64(tile + AV1TILE_TX_MODE), 1, etxc, etx);
         if (av1_fb_skip(fb) != 0) {
             av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma);
         } else {
@@ -1596,7 +1596,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     if (av1_ib_is_comp(eib) != 0) {
         var ect = av1_ib_ct(eib);
         if ((load64(ect + AV1CT_GROUPIDX) != 0) && (av1_comptype_type(ect) != AV1_COMPOUND_DIFFWTD)
-        && (av1_comptype_type(ect) != AV1_COMPOUND_WEDGE)) {
+          && (av1_comptype_type(ect) != AV1_COMPOUND_WEDGE)) {
             return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);
         }
     }
@@ -1612,7 +1612,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     # txfm_split (mirror the decode gate); uniform/skip/lossless encode uniformly.
     var is_vartx = 0;
     if ((av1_fb_skip(fb) == 0) && (load64(tile + AV1TILE_TX_MODE) == AV1_TX_MODE_SELECT)
-    && (sub_size > AV1_BLOCK_4X4) && (load64(tile + AV1TILE_BASE_Q) != 0)) {
+      && (sub_size > AV1_BLOCK_4X4) && (load64(tile + AV1TILE_BASE_Q) != 0)) {
         is_vartx = 1;
     }
     var tx_size = av1_max_tx_size_rect(sub_size);
@@ -1631,7 +1631,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
             var vc = 0;
             while (vc < bw4) {
                 av1_write_var_tx_size(tile, r + vr, c + vc, mtx, 0, load64(vplan + 0),
-                sub_size, r, c, load64(st + 0), load64(st + 8));
+                  sub_size, r, c, load64(st + 0), load64(st + 8));
                 vc = vc + txw4;
             }
             vr = vr + txh4;
@@ -1776,7 +1776,7 @@ fn av1_decode_inter_tile(tile, buf, sz, disable_cdf): i64 {
     var cmv = av1_mvcdf_new();
     var sd = av1_sym_dec_init(buf, sz, disable_cdf);
     if ((ncc == 0) || (cc == 0) || (ccr == 0) || (cim == 0) || (cii == 0) || (cmv == 0)
-    || (sd == 0)) { return DR_ERR_OOM; }
+      || (sd == 0)) { return DR_ERR_OOM; }
     store64(tile + AV1TILE_SD, sd);
     store64(tile + AV1TILE_CC, cc);
     store64(tile + AV1TILE_NCC, ncc);
@@ -1803,7 +1803,7 @@ fn av1_encode_inter_tile(tile, plan_part, plan_fb, disable_cdf, out_len): i64 {
     var cmv = av1_mvcdf_new();
     var enc = av1_sym_enc_init(256, disable_cdf);
     if ((ncc == 0) || (cc == 0) || (ccr == 0) || (cim == 0) || (cii == 0) || (cmv == 0)
-    || (enc == 0)) { return 0; }
+      || (enc == 0)) { return 0; }
     store64(tile + AV1TILE_ENC, enc);
     store64(tile + AV1TILE_CC, cc);
     store64(tile + AV1TILE_NCC, ncc);

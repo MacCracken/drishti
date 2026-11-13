@@ -580,7 +580,7 @@ fn av1_read_inter_mode(sd, cc, mvctx): i64 {
 # component (NEARMV single; the three compound modes carrying a NEAR half).
 fn av1_has_nearmv(y_mode): i64 {
     if ((y_mode == AV1_NEARMV) || (y_mode == AV1_NEAR_NEARMV)
-    || (y_mode == AV1_NEAR_NEWMV) || (y_mode == AV1_NEW_NEARMV)) {
+      || (y_mode == AV1_NEAR_NEWMV) || (y_mode == AV1_NEW_NEARMV)) {
         return 1;
     }
     return 0;
@@ -682,7 +682,7 @@ fn av1_assign_mv_list(sd, mvcc, mvctx, comp_mode, ref_mv_idx, ref_list, mv_ctx, 
 # assign_mv, SINGLE prediction — Mv[0] into out_mv (get_mode(YMode, 0) == YMode).
 fn av1_assign_mv_single(sd, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, allow_hp, force_int, out_mv): i64 {
     return av1_assign_mv_list(sd, mvcc, mvctx, av1_get_mode(y_mode, 0), ref_mv_idx, 0,
-    mv_ctx, allow_hp, force_int, out_mv);
+      mv_ctx, allow_hp, force_int, out_mv);
 }
 
 # assign_mv, COMPOUND prediction — Mv[0]/Mv[1] into out_mv0/out_mv1. Each list gets
@@ -690,9 +690,9 @@ fn av1_assign_mv_single(sd, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, allow_hp, f
 # order (0 then 1) through the same MV CDF context.
 fn av1_assign_mv_compound(sd, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, allow_hp, force_int, out_mv0, out_mv1): i64 {
     av1_assign_mv_list(sd, mvcc, mvctx, av1_get_mode(y_mode, 0), ref_mv_idx, 0,
-    mv_ctx, allow_hp, force_int, out_mv0);
+      mv_ctx, allow_hp, force_int, out_mv0);
     av1_assign_mv_list(sd, mvcc, mvctx, av1_get_mode(y_mode, 1), ref_mv_idx, 1,
-    mv_ctx, allow_hp, force_int, out_mv1);
+      mv_ctx, allow_hp, force_int, out_mv1);
     return DR_OK;
 }
 
@@ -1400,7 +1400,7 @@ fn av1_read_compound_ref(sd, cc, cctx, out_ref): i64 {
     var r0 = 0;
     var r1 = 0;
     var comp_ref_type = av1_sym_read_symbol(sd,
-    av1_refcdf_comprftype(cc, load64(cctx + AV1CCTX_REF_TYPE)), 2);
+      av1_refcdf_comprftype(cc, load64(cctx + AV1CCTX_REF_TYPE)), 2);
     if (comp_ref_type == AV1_UNIDIR_COMP_REFERENCE) {
         var uni = av1_sym_read_symbol(sd, av1_refcdf_unicompref(cc, load64(cctx + AV1CCTX_UNI), 0), 2);
         if (uni != 0) {
@@ -1450,7 +1450,7 @@ fn av1_write_compound_ref(enc, cc, cctx, r0, r1): i64 {
     }
     if (is_unidir != 0) {
         av1_sym_encode_symbol(enc, av1_refcdf_comprftype(cc, load64(cctx + AV1CCTX_REF_TYPE)),
-        2, AV1_UNIDIR_COMP_REFERENCE);
+          2, AV1_UNIDIR_COMP_REFERENCE);
         if ((r0 == AV1_BWDREF_FRAME) && (r1 == AV1_ALTREF_FRAME)) {
             av1_sym_encode_symbol(enc, av1_refcdf_unicompref(cc, load64(cctx + AV1CCTX_UNI), 0), 2, 1);
         } else {
@@ -1466,7 +1466,7 @@ fn av1_write_compound_ref(enc, cc, cctx, r0, r1): i64 {
         }
     } else {
         av1_sym_encode_symbol(enc, av1_refcdf_comprftype(cc, load64(cctx + AV1CCTX_REF_TYPE)),
-        2, AV1_BIDIR_COMP_REFERENCE);
+          2, AV1_BIDIR_COMP_REFERENCE);
         if ((r0 == AV1_LAST_FRAME) || (r0 == AV1_LAST2_FRAME)) {
             av1_sym_encode_symbol(enc, av1_refcdf_compref(cc, load64(cctx + AV1CCTX_REF), 0), 2, 0);
             var cp1 = 0;
@@ -1526,7 +1526,7 @@ fn av1_read_compound_mode(sd, cc, mvctx): i64 {
 fn av1_write_compound_mode(enc, cc, mvctx, y_mode): i64 {
     var ctx = av1_compound_mode_ctx(av1_mvctx_refmv_context(mvctx), av1_mvctx_newmv_context(mvctx));
     av1_sym_encode_symbol(enc, av1_imcdf_compmode(cc, ctx), AV1_COMPOUND_MODES,
-    y_mode - AV1_NEAREST_NEARESTMV);
+      y_mode - AV1_NEAREST_NEARESTMV);
     return DR_OK;
 }
 
@@ -1617,7 +1617,7 @@ fn av1_iicdf_put16(p, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13
 # the uniform wedge_index row {2048,4096,...,30720, 32768, 0} (the never-used MiSizes).
 fn av1_iicdf_wedge_unif(p): i64 {
     av1_iicdf_put16(p, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384,
-    18432, 20480, 22528, 24576, 26624, 28672, 30720);
+      18432, 20480, 22528, 24576, 26624, 28672, 30720);
     return DR_OK;
 }
 
@@ -1659,19 +1659,19 @@ fn av1_iicdf_fill(cc): i64 {
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 1));
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 2));
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 3), 2438, 4440, 6599, 8663, 11005, 12874, 15751, 18094,
-    20359, 22362, 24127, 25702, 27752, 29450, 31171);
+      20359, 22362, 24127, 25702, 27752, 29450, 31171);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 4), 806, 3266, 6005, 6738, 7218, 7367, 7771, 14588,
-    16323, 17367, 18452, 19422, 22839, 26127, 29629);
+      16323, 17367, 18452, 19422, 22839, 26127, 29629);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 5), 2779, 3738, 4683, 7213, 7775, 8017, 8655, 14357,
-    17939, 21332, 24520, 27470, 29456, 30529, 31656);
+      17939, 21332, 24520, 27470, 29456, 30529, 31656);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 6), 1684, 3625, 5675, 7108, 9302, 11274, 14429, 17144,
-    19163, 20961, 22884, 24471, 26719, 28714, 30877);
+      19163, 20961, 22884, 24471, 26719, 28714, 30877);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 7), 1142, 3491, 6277, 7314, 8089, 8355, 9023, 13624,
-    15369, 16730, 18114, 19313, 22521, 26012, 29550);
+      15369, 16730, 18114, 19313, 22521, 26012, 29550);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 8), 2742, 4195, 5727, 8035, 8980, 9336, 10146, 14124,
-    17270, 20533, 23434, 25972, 27944, 29570, 31416);
+      17270, 20533, 23434, 25972, 27944, 29570, 31416);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 9), 1727, 3948, 6101, 7796, 9841, 12344, 15766, 18944,
-    20638, 22038, 23963, 25311, 26988, 28766, 31012);
+      20638, 22038, 23963, 25311, 26988, 28766, 31012);
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 10));
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 11));
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 12));
@@ -1681,9 +1681,9 @@ fn av1_iicdf_fill(cc): i64 {
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 16));
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 17));
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 18), 154, 987, 1925, 2051, 2088, 2111, 2151, 23033,
-    23703, 24284, 24985, 25684, 27259, 28883, 30911);
+      23703, 24284, 24985, 25684, 27259, 28883, 30911);
     av1_iicdf_put16(av1_iicdf_wedgeidx(cc, 19), 1135, 1322, 1493, 2635, 2696, 2737, 2770, 21016,
-    22935, 25057, 27251, 29173, 30089, 30960, 31933);
+      22935, 25057, 27251, 29173, 30089, 30960, 31933);
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 20));
     av1_iicdf_wedge_unif(av1_iicdf_wedgeidx(cc, 21));
     # Default_Comp_Group_Idx_Cdf[6] — binary.
@@ -1871,7 +1871,7 @@ fn av1_write_compound_type_sym(enc, cc, mi_size, v): i64 {
 # read_compound_type (spec 5.11.29) — fills `out` (an av1_comptype_new record) with
 # compound_type + the syntax elements it implies. Returns DR_OK.
 fn av1_read_compound_type(sd, cc, out, is_compound, skip_mode, mi_size, en_masked, en_jnt,
-interintra, wedge_ii, group_ctx, comp_ctx): i64 {
+  interintra, wedge_ii, group_ctx, comp_ctx): i64 {
     store64(out + AV1CT_GROUPIDX, 0);            # comp_group_idx = 0
     store64(out + AV1CT_COMPIDX, 1);             # compound_idx = 1
     store64(out + AV1CT_WEDGEIDX, 0);
@@ -1921,7 +1921,7 @@ interintra, wedge_ii, group_ctx, comp_ctx): i64 {
 # write_compound_type — the encoder inverse: emits exactly the symbols read_compound_type
 # would consume, in the same order, driven by the values already in `out`.
 fn av1_write_compound_type(enc, cc, out, is_compound, skip_mode, mi_size, en_masked, en_jnt,
-interintra, wedge_ii, group_ctx, comp_ctx): i64 {
+  interintra, wedge_ii, group_ctx, comp_ctx): i64 {
     if (skip_mode != 0) { return DR_OK; }        # nothing is coded
     if (is_compound == 0) { return DR_OK; }      # nothing is coded
     var n = av1_wedge_bits(mi_size);
@@ -2041,7 +2041,7 @@ fn av1_needs_interp_filter(skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i
 #   SWITCHABLE -> code (enable_dual_filter ? 2 : 1) dirs, each gated by needs_interp_filter;
 #                 an ungated dir is EIGHTTAP, and without dual filter dir 1 mirrors dir 0.
 fn av1_read_interp_filters(sd, cc, out, interp_filter_fh, en_dual, ctx0, ctx1,
-skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
+  skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
     if (out == 0) { return DR_ERR_BOUNDS; }
     if (interp_filter_fh != AV1_INTERP_SWITCHABLE) {
         store64(out + 0, interp_filter_fh);
@@ -2064,7 +2064,7 @@ skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
     return DR_OK;
 }
 fn av1_write_interp_filters(enc, cc, out, interp_filter_fh, en_dual, ctx0, ctx1,
-skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
+  skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
     if (interp_filter_fh != AV1_INTERP_SWITCHABLE) { return DR_OK; }   # nothing is coded
     if (av1_needs_interp_filter(skip_mode, motion_mode, mi_size, y_mode, gm0, gm1) == 0) {
         return DR_OK;                                                   # every dir is EIGHTTAP
@@ -2104,7 +2104,7 @@ skip_mode, motion_mode, mi_size, y_mode, gm0, gm1): i64 {
 # out[0] <- motion_mode (SIMPLE / OBMC / LOCALWARP).
 # ================================================================
 fn av1_read_motion_mode(sd, cc, out, ctx, ws, fh, refs, skip_mode, y_mode, ref0, ref1,
-is_compound, mv_row, mv_col): i64 {
+  is_compound, mv_row, mv_col): i64 {
     if ((out == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     store64(out + 0, AV1_MM_SIMPLE);
     memset(ws, 0, AV1WS_SIZE);
@@ -2126,7 +2126,7 @@ is_compound, mv_row, mv_col): i64 {
     var e = av1_find_warp_samples(ctx, ws, mv_row, mv_col);
     if (e != DR_OK) { return e; }
     if ((av1_fh_force_integer_mv(fh) != 0) || (av1_warp_num(ws) == 0)
-    || (av1_fh_allow_warped_motion(fh) == 0) || (av1_is_scaled(fh, refs, ref0) != 0)) {
+      || (av1_fh_allow_warped_motion(fh) == 0) || (av1_is_scaled(fh, refs, ref0) != 0)) {
         var mm = AV1_MM_SIMPLE;
         if (av1_read_use_obmc(sd, cc, mi_size) != 0) { mm = AV1_MM_OBMC; }
         store64(out + 0, mm);
@@ -2139,7 +2139,7 @@ is_compound, mv_row, mv_col): i64 {
 # reader consumes: @@use_obmc on the warp-disabled branch (use_obmc = motion_mode ==
 # OBMC; LOCALWARP is not representable there), @@motion_mode on the warp-allowed one.
 fn av1_write_motion_mode(enc, cc, ctx, ws, fh, refs, skip_mode, y_mode, ref0, ref1,
-is_compound, mv_row, mv_col, motion_mode): i64 {
+  is_compound, mv_row, mv_col, motion_mode): i64 {
     if (ws == 0) { return DR_ERR_BOUNDS; }
     memset(ws, 0, AV1WS_SIZE);
     if ((ref0 < AV1_LAST_FRAME) || (ref0 > AV1_ALTREF_FRAME)) { return DR_ERR_BOUNDS; }
@@ -2158,7 +2158,7 @@ is_compound, mv_row, mv_col, motion_mode): i64 {
     var e = av1_find_warp_samples(ctx, ws, mv_row, mv_col);
     if (e != DR_OK) { return e; }
     if ((av1_fh_force_integer_mv(fh) != 0) || (av1_warp_num(ws) == 0)
-    || (av1_fh_allow_warped_motion(fh) == 0) || (av1_is_scaled(fh, refs, ref0) != 0)) {
+      || (av1_fh_allow_warped_motion(fh) == 0) || (av1_is_scaled(fh, refs, ref0) != 0)) {
         av1_write_use_obmc(enc, cc, mi_size, motion_mode == AV1_MM_OBMC);
         return DR_OK;
     }
@@ -2205,7 +2205,7 @@ fn av1_read_ref_frames(sd, cc, out_ref, nb, fh, skip_mode, segment_id, mi_size):
         return DR_OK;
     }
     if ((av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0)
-    || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
+      || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
         return DR_OK;      # LAST + NONE (stored above)
     }
     var comp_mode = AV1_SINGLE_REFERENCE;
@@ -2236,7 +2236,7 @@ fn av1_write_ref_frames(enc, cc, nb, fh, skip_mode, segment_id, mi_size, r0, r1)
     if (skip_mode != 0) { return DR_OK; }
     if (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_REF_FRAME) != 0) { return DR_OK; }
     if ((av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0)
-    || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
+      || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
         return DR_OK;
     }
     var is_comp = AV1_SINGLE_REFERENCE;
@@ -2315,7 +2315,7 @@ fn av1_ibmi_scratch(): i64 {
     return AV1IBMI_SCRATCH;
 }
 fn av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out, ctx, nb, ws, fh, refs, s,
-skip_mode, segment_id, fwd_eq_bck): i64 {
+  skip_mode, segment_id, fwd_eq_bck): i64 {
     if ((out == 0) || (ctx == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1IB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -2356,7 +2356,7 @@ skip_mode, segment_id, fwd_eq_bck): i64 {
     if (skip_mode != 0) { mode_done = 1; }
     if (mode_done == 0) {
         if ((av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0)
-        || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
+          || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
             y_mode = AV1_GLOBALMV;
             mode_done = 1;
         }
@@ -2375,33 +2375,33 @@ skip_mode, segment_id, fwd_eq_bck): i64 {
     var force_int = av1_fh_force_integer_mv(fh);
     if (is_comp != 0) {
         av1_assign_mv_compound(sd, cc_mv, ctx, y_mode, ref_mv_idx, 0, allow_hp, force_int,
-        out + AV1IB_MV0, out + AV1IB_MV1);
+          out + AV1IB_MV0, out + AV1IB_MV1);
     } else {
         av1_assign_mv_single(sd, cc_mv, ctx, y_mode, ref_mv_idx, 0, allow_hp, force_int,
-        out + AV1IB_MV0);
+          out + AV1IB_MV0);
     }
     av1_read_interintra_mode(sd, cc_ii, out + AV1IB_II, is_comp, skip_mode, mi_size,
-    av1_seq_enable_interintra_compound(s));
+      av1_seq_enable_interintra_compound(s));
     if (av1_interintra_set_ref1(out + AV1IB_II) != 0) {
         ref1 = AV1_INTRA_FRAME;                # the 5.11.28 side-effect, applied HERE
         store64(out + AV1IB_REF1, AV1_INTRA_FRAME);
     }
     var e2 = av1_read_motion_mode(sd, cc_im, out + AV1IB_MOTIONMODE, ctx, ws, fh, refs,
-    skip_mode, y_mode, ref0, ref1, is_comp,
-    load64(out + AV1IB_MV0 + AV1MV_ROW), load64(out + AV1IB_MV0 + AV1MV_COL));
+      skip_mode, y_mode, ref0, ref1, is_comp,
+      load64(out + AV1IB_MV0 + AV1MV_ROW), load64(out + AV1IB_MV0 + AV1MV_COL));
     if (e2 != DR_OK) { return e2; }
     av1_read_compound_type(sd, cc_ii, out + AV1IB_CT, is_comp, skip_mode, mi_size,
-    av1_seq_enable_masked_compound(s), av1_seq_enable_jnt_comp(s),
-    av1_interintra_on(out + AV1IB_II), av1_interintra_wedge(out + AV1IB_II),
-    av1_comp_group_idx_ctx(nb), av1_compound_idx_ctx(nb, fwd_eq_bck));
+      av1_seq_enable_masked_compound(s), av1_seq_enable_jnt_comp(s),
+      av1_interintra_on(out + AV1IB_II), av1_interintra_wedge(out + AV1IB_II),
+      av1_comp_group_idx_ctx(nb), av1_compound_idx_ctx(nb, fwd_eq_bck));
     # the interp-filter tail: GmType[RefFrame[1]] is only consulted for
     # GLOBAL_GLOBALMV (compound), but guard the post-interintra INTRA_FRAME anyway.
     var gt1n = 0;
     if (ref1 >= AV1_LAST_FRAME) { gt1n = av1_fh_gm_type(fh, ref1); }
     av1_read_interp_filters(sd, cc_im, out + AV1IB_INTERP, av1_fh_interpolation_filter(fh),
-    av1_seq_enable_dual_filter(s), av1_interp_filter_ctx(nb, 0, ref0, ref1),
-    av1_interp_filter_ctx(nb, 1, ref0, ref1), skip_mode, load64(out + AV1IB_MOTIONMODE),
-    mi_size, y_mode, gt0, gt1n);
+      av1_seq_enable_dual_filter(s), av1_interp_filter_ctx(nb, 0, ref0, ref1),
+      av1_interp_filter_ctx(nb, 1, ref0, ref1), skip_mode, load64(out + AV1IB_MOTIONMODE),
+      mi_size, y_mode, gt0, gt1n);
     return DR_OK;
 }
 
@@ -2409,7 +2409,7 @@ skip_mode, segment_id, fwd_eq_bck): i64 {
 # emit the NEWMV difference (everything else codes nothing; the mv must equal its
 # predictor, which is the round-trip's invariant, not re-checked here).
 fn av1_write_assign_mv_list(enc, mvcc, mvctx, comp_mode, ref_mv_idx, ref_list, mv_ctx,
-allow_hp, force_int, mv): i64 {
+  allow_hp, force_int, mv): i64 {
     if (comp_mode != AV1_NEWMV) { return DR_OK; }
     var mvs = load64(mvctx + AV1MVC_STACK);
     var num = av1_mv_stack_num(mvs);
@@ -2418,20 +2418,20 @@ allow_hp, force_int, mv): i64 {
     var pred_row = av1_mv_stack_row(mvs, pos, ref_list);
     var pred_col = av1_mv_stack_col(mvs, pos, ref_list);
     av1_write_mv(enc, mvcc, mv_ctx, allow_hp, force_int,
-    load64(mv + AV1MV_ROW) - pred_row, load64(mv + AV1MV_COL) - pred_col);
+      load64(mv + AV1MV_ROW) - pred_row, load64(mv + AV1MV_COL) - pred_col);
     return DR_OK;
 }
 fn av1_write_assign_mv_single(enc, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, allow_hp,
-force_int, mv): i64 {
+  force_int, mv): i64 {
     return av1_write_assign_mv_list(enc, mvcc, mvctx, av1_get_mode(y_mode, 0), ref_mv_idx,
-    0, mv_ctx, allow_hp, force_int, mv);
+      0, mv_ctx, allow_hp, force_int, mv);
 }
 fn av1_write_assign_mv_compound(enc, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, allow_hp,
-force_int, mv0, mv1): i64 {
+  force_int, mv0, mv1): i64 {
     av1_write_assign_mv_list(enc, mvcc, mvctx, av1_get_mode(y_mode, 0), ref_mv_idx, 0,
-    mv_ctx, allow_hp, force_int, mv0);
+      mv_ctx, allow_hp, force_int, mv0);
     av1_write_assign_mv_list(enc, mvcc, mvctx, av1_get_mode(y_mode, 1), ref_mv_idx, 1,
-    mv_ctx, allow_hp, force_int, mv1);
+      mv_ctx, allow_hp, force_int, mv1);
     return DR_OK;
 }
 # the 5.11.23 encoder inverse — replays the whole orchestration on the SAME ctx/nb/ws
@@ -2440,7 +2440,7 @@ force_int, mv0, mv1): i64 {
 # writer applies the 5.11.28 side-effect internally for the later steps, exactly as
 # the reader does).
 fn av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, blk, ctx, nb, ws, fh,
-refs, s, skip_mode, segment_id, fwd_eq_bck): i64 {
+  refs, s, skip_mode, segment_id, fwd_eq_bck): i64 {
     if ((blk == 0) || (ctx == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     var ref0 = load64(blk + AV1IB_REF0);
@@ -2472,7 +2472,7 @@ refs, s, skip_mode, segment_id, fwd_eq_bck): i64 {
     var mode_coded = 1;
     if (skip_mode != 0) { mode_coded = 0; }
     if ((av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0)
-    || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
+      || (av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_GLOBALMV) != 0)) {
         mode_coded = 0;
     }
     if (mode_coded != 0) {
@@ -2488,13 +2488,13 @@ refs, s, skip_mode, segment_id, fwd_eq_bck): i64 {
     var force_int = av1_fh_force_integer_mv(fh);
     if (is_comp != 0) {
         av1_write_assign_mv_compound(enc, cc_mv, ctx, y_mode, ref_mv_idx, 0, allow_hp,
-        force_int, blk + AV1IB_MV0, blk + AV1IB_MV1);
+          force_int, blk + AV1IB_MV0, blk + AV1IB_MV1);
     } else {
         av1_write_assign_mv_single(enc, cc_mv, ctx, y_mode, ref_mv_idx, 0, allow_hp,
-        force_int, blk + AV1IB_MV0);
+          force_int, blk + AV1IB_MV0);
     }
     av1_write_interintra_mode(enc, cc_ii, blk + AV1IB_II, is_comp, skip_mode, mi_size,
-    av1_seq_enable_interintra_compound(s));
+      av1_seq_enable_interintra_compound(s));
     # the 5.11.28 side-effect keys on interintra itself (SETREF1 is a READER output the
     # source record does not carry) — and fires ONLY when the FULL coding gate is open,
     # exactly as the reader's. An interintra record the gate cannot code is surfaced as
@@ -2510,19 +2510,19 @@ refs, s, skip_mode, segment_id, fwd_eq_bck): i64 {
         ref1 = AV1_INTRA_FRAME;
     }
     var e2 = av1_write_motion_mode(enc, cc_im, ctx, ws, fh, refs, skip_mode, y_mode, ref0,
-    ref1, is_comp, load64(blk + AV1IB_MV0 + AV1MV_ROW), load64(blk + AV1IB_MV0 + AV1MV_COL),
-    load64(blk + AV1IB_MOTIONMODE));
+      ref1, is_comp, load64(blk + AV1IB_MV0 + AV1MV_ROW), load64(blk + AV1IB_MV0 + AV1MV_COL),
+      load64(blk + AV1IB_MOTIONMODE));
     if (e2 != DR_OK) { return e2; }
     av1_write_compound_type(enc, cc_ii, blk + AV1IB_CT, is_comp, skip_mode, mi_size,
-    av1_seq_enable_masked_compound(s), av1_seq_enable_jnt_comp(s),
-    av1_interintra_on(blk + AV1IB_II), av1_interintra_wedge(blk + AV1IB_II),
-    av1_comp_group_idx_ctx(nb), av1_compound_idx_ctx(nb, fwd_eq_bck));
+      av1_seq_enable_masked_compound(s), av1_seq_enable_jnt_comp(s),
+      av1_interintra_on(blk + AV1IB_II), av1_interintra_wedge(blk + AV1IB_II),
+      av1_comp_group_idx_ctx(nb), av1_compound_idx_ctx(nb, fwd_eq_bck));
     var gt1n = 0;
     if (ref1 >= AV1_LAST_FRAME) { gt1n = av1_fh_gm_type(fh, ref1); }
     av1_write_interp_filters(enc, cc_im, blk + AV1IB_INTERP, av1_fh_interpolation_filter(fh),
-    av1_seq_enable_dual_filter(s), av1_interp_filter_ctx(nb, 0, ref0, ref1),
-    av1_interp_filter_ctx(nb, 1, ref0, ref1), skip_mode, load64(blk + AV1IB_MOTIONMODE),
-    mi_size, y_mode, gt0, gt1n);
+      av1_seq_enable_dual_filter(s), av1_interp_filter_ctx(nb, 0, ref0, ref1),
+      av1_interp_filter_ctx(nb, 1, ref0, ref1), skip_mode, load64(blk + AV1IB_MOTIONMODE),
+      mi_size, y_mode, gt0, gt1n);
     return DR_OK;
 }
 
@@ -2639,12 +2639,13 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # (av1_nbctx_setup) is built HERE, at the spec's preamble position, from the ctx's
 # grid; ctx carries the block geometry as for 5.11.23. above_skip/left_skip and
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
-# cdef_ctx is the intra path's splice record (0 to skip). Deferred features gate
-# hard rather than desync: segmentation reads / delta-q/lf / the intra fork
-# (roadmap.md).
+# cdef_ctx is the intra path's splice record (0 to skip). Unsupported features gate
+# hard rather than desync: a non-spatial segmentation config (av1_seg_supported)
+# and delta-q / delta-lf (roadmap.md). Segment-id reads, read_cdef and the intra
+# fork are all wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
-fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
+  fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -2660,7 +2661,7 @@ fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
     # the 5.11.15 preamble: the neighbour reference cache.
     av1_nbctx_setup(nb, load64(ctx + AV1MVC_GRID), fmi_cols, mi_row, mi_col, avail_u, avail_l);
     # inter_segment_id(1) (5.11.10): a SegIdPreSkip frame reads the segment BEFORE skip (skip=0 then);
-    # otherwise the read is DEFERRED to the inter_segment_id(0) call after skip. Only the decodable spatial
+    # otherwise the read happens in the inter_segment_id(0) call after skip. Only the decodable spatial
     # config reaches here (av1_seg_supported gated temporal / !update_map / !update_data upstream).
     var seg_pre = 0;
     if (seg_enabled != 0) { seg_pre = av1_fh_seg_id_pre_skip(fh); }
@@ -2704,16 +2705,16 @@ fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
         store64((out + AV1FB_IB) + AV1IB_REF0, AV1_INTRA_FRAME);
         store64((out + AV1FB_IB) + AV1IB_REF1, AV1_REF_NONE);
         return av1_read_intra_block_mode_info(sd, ncc, out + AV1FB_MI, mi_size, has_chroma,
-        enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
+          enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
     }
     return av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out + AV1FB_IB,
-    ctx, nb, ws, fh, refs, s, skip_mode, segment_id, fwd_eq_bck);
+      ctx, nb, ws, fh, refs, s, skip_mode, segment_id, fwd_eq_bck);
 }
 # the encoder inverse — replays the dispatch on the same state. blk is an
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
-ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
+  ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
@@ -2746,11 +2747,11 @@ fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
     if (e != DR_OK) { return e; }
     if (skip_mode == 0) {
         av1_write_skip(enc, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip),
-        load64(blk + AV1FB_SKIP));
+          load64(blk + AV1FB_SKIP));
     }
     if ((seg_enabled != 0) && (seg_pre == 0)) {
         var sp0 = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l,
-        load64(blk + AV1FB_SKIP), segid);
+          load64(blk + AV1FB_SKIP), segid);
         if (sp0 != DR_OK) { return sp0; }
     }
     if (cdef_ctx != 0) {
@@ -2762,7 +2763,7 @@ fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
         var cs = load64(cdef_ctx + 40);
         var cp = load64(cdef_ctx + 48);
         av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size,
-        load64(blk + AV1FB_SKIP), ce, cb, cl, ci);
+          load64(blk + AV1FB_SKIP), ce, cb, cl, ci);
     }
     var is_inter = load64(blk + AV1FB_ISINTER);
     var e2 = av1_write_is_inter(enc, cc_ref, nb, fh, skip_mode, segid, is_inter);
@@ -2770,8 +2771,8 @@ fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
     if (is_inter == 0) {
         # intra_block_mode_info (5.11.24) inverse — write the intra mode-info from the embedded Av1ModeInfo.
         return av1_write_intra_block_mode_info(enc, ncc, blk + AV1FB_MI, mi_size, has_chroma,
-        enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
+          enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
     }
     return av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv,
-    blk + AV1FB_IB, ctx, nb, ws, fh, refs, s, skip_mode, segid, fwd_eq_bck);
+      blk + AV1FB_IB, ctx, nb, ws, fh, refs, s, skip_mode, segid, fwd_eq_bck);
 }

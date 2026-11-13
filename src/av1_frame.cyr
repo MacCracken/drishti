@@ -565,7 +565,7 @@ fn av1_superres_params(br, s, fh): i64 {
     var upscaled = av1_fh_frame_width(fh);
     store64(fh + AV1FH_UPSCALED_WIDTH, upscaled);
     store64(fh + AV1FH_FRAME_WIDTH,
-    (upscaled * AV1_SUPERRES_NUM + (denom / 2)) / denom);
+      (upscaled * AV1_SUPERRES_NUM + (denom / 2)) / denom);
     return dr_br_err(br);
 }
 
@@ -869,8 +869,8 @@ fn av1_compute_lossless(fh): i64 {
         var qindex = av1_get_qindex_ignore_delta(fh, seg);
         var lossless = 0;
         if ((qindex == 0) && (av1_fh_delta_q_y_dc(fh) == 0)
-        && (av1_fh_delta_q_u_ac(fh) == 0) && (av1_fh_delta_q_u_dc(fh) == 0)
-        && (av1_fh_delta_q_v_ac(fh) == 0) && (av1_fh_delta_q_v_dc(fh) == 0)) {
+          && (av1_fh_delta_q_u_ac(fh) == 0) && (av1_fh_delta_q_u_dc(fh) == 0)
+          && (av1_fh_delta_q_v_ac(fh) == 0) && (av1_fh_delta_q_v_dc(fh) == 0)) {
             lossless = 1;
         }
         if (lossless == 0) { coded_lossless = 0; }
@@ -962,7 +962,7 @@ fn av1_tile_info(br, s, fh): i64 {
     var max_log2_tile_cols = av1_tile_log2(1, av1_min(sb_cols, AV1_MAX_TILE_COLS));
     var max_log2_tile_rows = av1_tile_log2(1, av1_min(sb_rows, AV1_MAX_TILE_ROWS));
     var min_log2_tiles = av1_max(min_log2_tile_cols,
-    av1_tile_log2(max_tile_area_sb, sb_rows * sb_cols));
+      av1_tile_log2(max_tile_area_sb, sb_rows * sb_cols));
     var tile_cols_log2 = 0;
     var tile_rows_log2 = 0;
     var uniform = dr_br_read_bit(br);   # uniform_tile_spacing_flag f(1)
@@ -1056,7 +1056,7 @@ fn av1_tile_info(br, s, fh): i64 {
     store64(fh + AV1FH_TILE_ROWS_LOG2, tile_rows_log2);
     if ((tile_cols_log2 > 0) || (tile_rows_log2 > 0)) {
         store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID,
-        dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2));   # context_update_tile_id
+          dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2));   # context_update_tile_id
         store64(fh + AV1FH_TILE_SIZE_BYTES, dr_br_read_bits(br, 2) + 1);   # tile_size_bytes_minus_1 f(2)
     } else {
         store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 0);
@@ -1068,7 +1068,7 @@ fn av1_tile_info(br, s, fh): i64 {
 # cdef_params() — 5.9.19.
 fn av1_cdef_params(br, s, fh): i64 {
     if (av1_fh_coded_lossless(fh) || av1_fh_allow_intrabc(fh)
-    || (av1_seq_enable_cdef(s) == 0)) {
+      || (av1_seq_enable_cdef(s) == 0)) {
         store64(fh + AV1FH_CDEF_BITS, 0);
         store64(fh + AV1FH_CDEF_Y_PRI + 0, 0);
         store64(fh + AV1FH_CDEF_Y_SEC + 0, 0);
@@ -1102,7 +1102,7 @@ fn av1_cdef_params(br, s, fh): i64 {
 # lr_params() — 5.9.20.
 fn av1_lr_params(br, s, fh): i64 {
     if (av1_fh_all_lossless(fh) || av1_fh_allow_intrabc(fh)
-    || (av1_seq_enable_restoration(s) == 0)) {
+      || (av1_seq_enable_restoration(s) == 0)) {
         store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 0, AV1_RESTORE_NONE);
         store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 8, AV1_RESTORE_NONE);
         store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 16, AV1_RESTORE_NONE);
@@ -1176,7 +1176,7 @@ fn av1_frame_reference_mode(br, fh): i64 {
 fn av1_skip_mode_params(br, s, refs, fh): i64 {
     var skip_allowed = 0;
     if (av1_fh_frame_is_intra(fh) || (av1_fh_reference_select(fh) == 0)
-    || (av1_seq_enable_order_hint(s) == 0)) {
+      || (av1_seq_enable_order_hint(s) == 0)) {
         skip_allowed = 0;
     } else {
         var forward_idx = 0 - 1;
@@ -1188,14 +1188,14 @@ fn av1_skip_mode_params(br, s, refs, fh): i64 {
             var ref_hint = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, i));
             if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) < 0) {
                 if ((forward_idx < 0)
-                || (av1_get_relative_dist(s, ref_hint, forward_hint) > 0)) {
+                  || (av1_get_relative_dist(s, ref_hint, forward_hint) > 0)) {
                     forward_idx = i;
                     forward_hint = ref_hint;
                 }
             } else {
                 if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) > 0) {
                     if ((backward_idx < 0)
-                    || (av1_get_relative_dist(s, ref_hint, backward_hint) < 0)) {
+                      || (av1_get_relative_dist(s, ref_hint, backward_hint) < 0)) {
                         backward_idx = i;
                         backward_hint = ref_hint;
                     }
@@ -1218,7 +1218,7 @@ fn av1_skip_mode_params(br, s, refs, fh): i64 {
                     var rh = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, k));
                     if (av1_get_relative_dist(s, rh, forward_hint) < 0) {
                         if ((second_idx < 0)
-                        || (av1_get_relative_dist(s, rh, second_hint) > 0)) {
+                          || (av1_get_relative_dist(s, rh, second_hint) > 0)) {
                             second_idx = k;
                             second_hint = rh;
                         }
@@ -1340,7 +1340,7 @@ fn av1_read_global_param(br, fh, refs, type, ref, idx): i64 {
     var rc = av1_decode_signed_subexp_with_ref(br, 0 - mx, mx + 1, r, &decoded);
     if (rc != DR_OK) { return rc; }
     store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + idx) * 8),
-    (decoded << prec_diff) + round);
+      (decoded << prec_diff) + round);
     return DR_OK;
 }
 
@@ -1409,7 +1409,7 @@ fn av1_global_motion_params(br, fh, refs): i64 {
 # come from the sequence header.
 fn av1_film_grain_params(br, s, fh): i64 {
     if ((av1_seq_film_grain_present(s) == 0)
-    || ((av1_fh_show_frame(fh) == 0) && (av1_fh_showable_frame(fh) == 0))) {
+      || ((av1_fh_show_frame(fh) == 0) && (av1_fh_showable_frame(fh) == 0))) {
         store64(fh + AV1FH_APPLY_GRAIN, 0);
         return DR_OK;
     }
@@ -1532,7 +1532,7 @@ fn av1_mark_ref_frames(refs, s, fh, id_len): i64 {
             }
         } else {
             if ((ref_id > current)
-            && (ref_id < ((1 << id_len) + current - (1 << diff_len)))) {
+              && (ref_id < ((1 << id_len) + current - (1 << diff_len)))) {
                 store64(refs + AV1REF_VALID + (i * 8), 0);
             }
         }
@@ -1550,7 +1550,7 @@ fn av1_find_latest_backward(shifted, used, cur_hint): i64 {
     while (i < AV1_NUM_REF_FRAMES) {
         var hint = load64(shifted + (i * 8));
         if ((load64(used + (i * 8)) == 0) && (hint >= cur_hint)
-        && ((ref < 0) || (hint >= latest))) {
+          && ((ref < 0) || (hint >= latest))) {
             ref = i;
             latest = hint;
         }
@@ -1565,7 +1565,7 @@ fn av1_find_earliest_backward(shifted, used, cur_hint): i64 {
     while (i < AV1_NUM_REF_FRAMES) {
         var hint = load64(shifted + (i * 8));
         if ((load64(used + (i * 8)) == 0) && (hint >= cur_hint)
-        && ((ref < 0) || (hint < earliest))) {
+          && ((ref < 0) || (hint < earliest))) {
             ref = i;
             earliest = hint;
         }
@@ -1580,7 +1580,7 @@ fn av1_find_latest_forward(shifted, used, cur_hint): i64 {
     while (i < AV1_NUM_REF_FRAMES) {
         var hint = load64(shifted + (i * 8));
         if ((load64(used + (i * 8)) == 0) && (hint < cur_hint)
-        && ((ref < 0) || (hint >= latest))) {
+          && ((ref < 0) || (hint >= latest))) {
             ref = i;
             latest = hint;
         }
@@ -1615,7 +1615,7 @@ fn av1_set_frame_refs(s, refs, fh, last_idx, gold_idx): i64 {
     var k = 0;
     while (k < AV1_NUM_REF_FRAMES) {
         store64(shifted + (k * 8),
-        cur_hint + av1_get_relative_dist(s, av1_ref_order_hint(refs, k), order_hint));
+          cur_hint + av1_get_relative_dist(s, av1_ref_order_hint(refs, k), order_hint));
         k = k + 1;
     }
     var ref = av1_find_latest_backward(shifted, used, cur_hint);
@@ -1725,7 +1725,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             var idx = dr_br_read_bits(br, 3);   # frame_to_show_map_idx f(3)
             store64(fh + AV1FH_FRAME_TO_SHOW, idx);
             if (av1_seq_decoder_model_present(s)
-            && (av1_seq_equal_picture_interval(s) == 0)) {
+              && (av1_seq_equal_picture_interval(s) == 0)) {
                 av1_temporal_point_info_skip(br, s);
             }
             store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 0);
@@ -1761,7 +1761,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
         }
         show_frame = dr_br_read_bit(br);   # show_frame f(1)
         if (show_frame && av1_seq_decoder_model_present(s)
-        && (av1_seq_equal_picture_interval(s) == 0)) {
+          && (av1_seq_equal_picture_interval(s) == 0)) {
             av1_temporal_point_info_skip(br, s);
         }
         if (show_frame) {
@@ -1771,7 +1771,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             showable_frame = dr_br_read_bit(br);   # showable_frame f(1)
         }
         if ((frame_type == AV1_SWITCH_FRAME)
-        || ((frame_type == AV1_KEY_FRAME) && show_frame)) {
+          || ((frame_type == AV1_KEY_FRAME) && show_frame)) {
             error_resilient = 1;
         } else {
             error_resilient = dr_br_read_bit(br);   # error_resilient_mode f(1)
@@ -1859,7 +1859,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
     store64(fh + AV1FH_ALLOW_INTRABC, 0);
     var refresh_frame_flags = 0;
     if ((frame_type == AV1_SWITCH_FRAME)
-    || ((frame_type == AV1_KEY_FRAME) && show_frame)) {
+      || ((frame_type == AV1_KEY_FRAME) && show_frame)) {
         refresh_frame_flags = all_frames;
     } else {
         refresh_frame_flags = dr_br_read_bits(br, 8);   # refresh_frame_flags f(8)
@@ -2016,7 +2016,7 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
             while (j < AV1_REFS_PER_FRAME) {
                 var rf = AV1_LAST_FRAME + j;
                 store64(refs + AV1REF_SAVED_ORDER_HINTS + ((i * 8 + rf) * 8),
-                av1_fh_order_hint_ref(fh, rf));
+                  av1_fh_order_hint_ref(fh, rf));
                 j = j + 1;
             }
             var ref = AV1_LAST_FRAME;
@@ -2024,7 +2024,7 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
                 var idx = 0;
                 while (idx < 6) {
                     store64(refs + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8),
-                    av1_fh_gm_param(fh, ref, idx));
+                      av1_fh_gm_param(fh, ref, idx));
                     idx = idx + 1;
                 }
                 ref = ref + 1;

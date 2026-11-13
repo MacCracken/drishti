@@ -1192,9 +1192,9 @@ fn test_decode_frame_alloc_invariant() {
     # 156 and goes red.
     var addressable = dr_frame_plane_stride(frame, 0) - dr_frame_border(frame);
     assert_eq(addressable >= (av1_decode_alloc_w(fh) + 28), 1,
-    "alloc invariant: decoded frame covers MiCols*4 + the 28-sample block overhang");
+      "alloc invariant: decoded frame covers MiCols*4 + the 28-sample block overhang");
     assert_eq(dr_frame_border(frame) >= 28, 1,
-    "alloc invariant: the border alone covers the worst-case overhang past the MI grid");
+      "alloc invariant: the border alone covers the worst-case overhang past the MI grid");
     # reported dims stay VISIBLE — CDEF / LR / superres / output crop must not see the pad.
     assert_eq(dr_frame_width(frame), 128, "alloc invariant: reported width is still visible");
     assert_eq(dr_frame_plane_width(frame, 0), 128, "alloc invariant: plane width is still visible");
@@ -1243,7 +1243,7 @@ fn test_cdf_save_populates_slots() {
         si = si + 1;
     }
     assert_eq(av1_ref_saved_cdf(refs, 0), av1_ref_saved_cdf(refs, 2),
-    "CDF save: ONE bundle is aliased into every refreshed slot");
+      "CDF save: ONE bundle is aliased into every refreshed slot");
     # this keyframe has disable_frame_end_update_cdf=1 (forced by disable_cdf_update=1), so 7.20 saves the
     # frame's INITIAL context — the bundle's coeff region equals a fresh q-bucket default, not adapted CDFs.
     var b = av1_ref_saved_cdf(refs, 0);
@@ -1269,7 +1269,7 @@ fn test_cdf_multitile_ctx_rejected() {
     store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, 0);       # ...and saving the adapted context
     store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 1);      # ...from a NON-tile0 context tile
     assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe), 0,
-    "adapting frame with context_update_tile_id != 0 rejected (context tile not retained)");
+      "adapting frame with context_update_tile_id != 0 rejected (context tile not retained)");
     assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "...with DR_ERR_UNSUPPORTED");
     return 0;
 }
@@ -1280,7 +1280,7 @@ fn test_silent_misdecode_rejects() {
     var out = frame_enc_keyframe(&olen);
     var oe = alloc(8);
     assert_eq(av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe) != 0, 1,
-    "reject control: the unflagged stream still decodes");
+      "reject control: the unflagged stream still decodes");
     # segmentation with update_map=0 (the memset default here) needs PrevSegmentIds — an unsupported
     # config, still rejected. A SUPPORTED spatial-map keyframe now DECODES (witnessed in av1_partition.tcyr).
     dec_reject(AV1FH_SEG_ENABLED, 1, "segmentation update_map=0 rejected (needs PrevSegmentIds)");
@@ -1293,7 +1293,7 @@ fn test_silent_misdecode_rejects() {
     var fh = frame_mk_fh(1, 1, 0, 0);
     store64(fh + AV1FH_PRIMARY_REF_FRAME, 0);
     assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe) != 0, 1,
-    "primary_ref_frame is ignored on a KEY frame (spec forces PRIMARY_REF_NONE)");
+      "primary_ref_frame is ignored on a KEY frame (spec forces PRIMARY_REF_NONE)");
     # CDF inheritance (C1) is now IMPLEMENTED, but an inter frame whose primary_ref_frame selects a
     # DPB slot that was NEVER a decoded frame (no saved CDFs) is malformed — the tile inherit rejects
     # it rather than silently start from defaults. Here nothing was decoded into any slot, so the
@@ -1303,9 +1303,9 @@ fn test_silent_misdecode_rejects() {
     store64(fh2 + AV1FH_FRAME_IS_INTRA, 0);
     store64(fh2 + AV1FH_PRIMARY_REF_FRAME, 0);
     assert_eq(av1_decode_frame(frame_mk_seq(0), fh2, out, olen, oe), 0,
-    "an INTER frame inheriting from a slot with NO saved CDFs is rejected, not mis-decoded");
+      "an INTER frame inheriting from a slot with NO saved CDFs is rejected, not mis-decoded");
     assert_eq(load64(oe), DR_ERR_UNSUPPORTED,
-    "...with DR_ERR_UNSUPPORTED, not a mis-decode returning DR_OK");
+      "...with DR_ERR_UNSUPPORTED, not a mis-decode returning DR_OK");
     return 0;
 }
 

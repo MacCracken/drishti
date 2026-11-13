@@ -250,7 +250,7 @@ fn av1_ac_q(bit_depth, b): i64 {
 # FeatureData[segmentId][SEG_LVL_ALT_Q]; current_qindex is CurrentQIndex.
 # These per-block/frame inputs are caller-provided until block decode lands.
 fn av1_get_qindex(ignore_delta_q, base_q_idx, current_qindex, delta_q_present,
-seg_active, seg_data): i64 {
+  seg_active, seg_data): i64 {
     if (seg_active) {
         var qindex = base_q_idx + seg_data;
         if ((ignore_delta_q == 0) && delta_q_present) {

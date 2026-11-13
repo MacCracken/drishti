@@ -382,11 +382,11 @@ fn av1_grid_set(tile, base, r, c, v): i64 {
 # LoopfilterTxSizes[plane][r][c] — per-plane grid, plane-MI indexed, stride FMI_COLS.
 fn av1_lftx_get(tile, plane, r, c): i64 {
     return load64(load64(tile + AV1TILE_LFTX + (plane * 8))
-    + (((r * load64(tile + AV1TILE_FMI_COLS)) + c) * 8));
+      + (((r * load64(tile + AV1TILE_FMI_COLS)) + c) * 8));
 }
 fn av1_lftx_set(tile, plane, r, c, v): i64 {
     store64(load64(tile + AV1TILE_LFTX + (plane * 8))
-    + (((r * load64(tile + AV1TILE_FMI_COLS)) + c) * 8), v);
+      + (((r * load64(tile + AV1TILE_FMI_COLS)) + c) * 8), v);
     return 0;
 }
 # CdefIdx[r][c] — per-64x64 CDEF parameter index (or -1 = no filter), MI-indexed,
@@ -619,15 +619,15 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     # unchanged there; a windowed tile (MiColStart>0) with the extent would clamp
     # the above/left fill below the block and read the neighbouring tile's pixels.
     var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
-    have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
-    load64(tile + AV1TILE_ENABLE_EF), av1_get_filter_type(tile, blk, plane),
-    log2w, log2h, load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
+      have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
+      load64(tile + AV1TILE_ENABLE_EF), av1_get_filter_type(tile, blk, plane),
+      log2w, log2h, load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
     if (rc != DR_OK) { return rc; }
     if (is_cfl) {
         var alpha = load64(mi + AV1MI_CFL_U);
         if (plane == 2) { alpha = load64(mi + AV1MI_CFL_V); }
         av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
-        alpha, load64(tile + AV1TILE_MAXLW), load64(tile + AV1TILE_MAXLH));
+          alpha, load64(tile + AV1TILE_MAXLW), load64(tile + AV1TILE_MAXLH));
     }
     if (plane == 0) {
         store64(tile + AV1TILE_MAXLW, start_x + (step_x * 4));
@@ -642,12 +642,12 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         var qindex = load64(tile + AV1TILE_CUR_QINDEX);   # per-segment qindex (== base_q when unsegmented)
         var quant = load64(tile + AV1TILE_QUANT);
         var eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
-        load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),
-        av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
-        mi_cols >> subx, mi_rows >> suby, bw, bh,
-        load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
-        load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
-        quant, load64(tile + AV1TILE_OTT));
+          load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),
+          av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
+          mi_cols >> subx, mi_rows >> suby, bw, bh,
+          load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
+          load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
+          quant, load64(tile + AV1TILE_OTT));
         if (eob > 0) {
             # per-plane DC/AC quant deltas (7.12.2) from the frame header the tile carries at
             # SEG_FH (the intra lane's qindex source; AV1TILE_FH is 0 on an intra tile). fh==0
@@ -665,7 +665,7 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
             var q_dc = av1_get_dc_quant(bit_depth, qindex, ddc);
             var q_ac = av1_get_ac_quant(bit_depth, qindex, dac);
             av1_reconstruct(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
-            load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac);
+              load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac);
         }
     }
     # mark this tx block decoded (BlockDecoded[plane][+i][+j] = 1) and record its

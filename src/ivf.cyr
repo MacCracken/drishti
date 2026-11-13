@@ -83,7 +83,7 @@ fn dr_ivf_parse_header(buf, len, out_err): i64 {
         return 0;
     }
     if ((load8(buf) != 0x44) || (load8(buf + 1) != 0x4B)
-    || (load8(buf + 2) != 0x49) || (load8(buf + 3) != 0x46)) {
+      || (load8(buf + 2) != 0x49) || (load8(buf + 3) != 0x46)) {
         store64(out_err, DR_ERR_BAD_HEADER);
         return 0;
     }

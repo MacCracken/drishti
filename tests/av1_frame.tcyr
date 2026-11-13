@@ -742,7 +742,7 @@ fn test_sign_bias_derivation() {
     store64(seq + AV1_SEQ_ENABLE_ORDER_HINT, 0);
     av1_frame_sign_bias(seq, fh, sb);
     assert_eq(load64(sb + (AV1_ALTREF_FRAME * 8)), 0,
-    "signbias: order-hint off -> ALTREF forward (get_relative_dist 0)");
+      "signbias: order-hint off -> ALTREF forward (get_relative_dist 0)");
     return 0;
 }
 

@@ -234,7 +234,7 @@ fn test_leb128_write_roundtrip() {
     # Rejection: 2^32 exceeds the 4.10.5 32-bit bound.
     bw2 = dr_bw_init(16);
     assert_eq(dr_leb128_write(bw2, 0x100000000), DR_ERR_BAD_LEB128,
-    "write 2^32 rejected");
+      "write 2^32 rejected");
     # Rejection: negative.
     bw2 = dr_bw_init(16);
     assert_eq(dr_leb128_write(bw2, -1), DR_ERR_BAD_LEB128, "write -1 rejected");

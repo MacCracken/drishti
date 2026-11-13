@@ -409,8 +409,8 @@ fn av1_intra_edge_upsample(buf, num_px, bit_depth): i64 {
 # filter/upsample only runs when enable_edge_filter is set and the angle
 # is off-axis. filter_type comes from the neighbour modes (caller input).
 fn av1_intra_directional(above, left, plane, x, y, have_left, have_above,
-mode, angle_delta, w, h, max_x, max_y, bit_depth, enable_edge_filter,
-filter_type, pred): i64 {
+  mode, angle_delta, w, h, max_x, max_y, bit_depth, enable_edge_filter,
+  filter_type, pred): i64 {
     var p_angle = av1_mode_to_angle(mode) + (angle_delta * AV1_ANGLE_STEP);
     var upsample_above = 0;
     var upsample_left = 0;
@@ -479,8 +479,8 @@ filter_type, pred): i64 {
                 var shift = ((idx << upsample_above) >> 1) & 31;
                 if (base < max_base_x) {
                     store64(pred + (((i * w) + j) * 8),
-                    av1_round2((load64(above + (base * 8)) * (32 - shift))
-                    + (load64(above + ((base + 1) * 8)) * shift), 5));
+                      av1_round2((load64(above + (base * 8)) * (32 - shift))
+                        + (load64(above + ((base + 1) * 8)) * shift), 5));
                 } else {
                     store64(pred + (((i * w) + j) * 8), load64(above + (max_base_x * 8)));
                 }
@@ -500,15 +500,15 @@ filter_type, pred): i64 {
                 if (base2 >= (0 - (1 << upsample_above))) {
                     var shift2 = ((idx2 << upsample_above) >> 1) & 31;
                     store64(pred + (((i2 * w) + j2) * 8),
-                    av1_round2((load64(above + (base2 * 8)) * (32 - shift2))
-                    + (load64(above + ((base2 + 1) * 8)) * shift2), 5));
+                      av1_round2((load64(above + (base2 * 8)) * (32 - shift2))
+                        + (load64(above + ((base2 + 1) * 8)) * shift2), 5));
                 } else {
                     var idx3 = (i2 << 6) - ((j2 + 1) * dy);
                     var base3 = idx3 >>> (6 - upsample_left);
                     var shift3 = ((idx3 << upsample_left) >> 1) & 31;
                     store64(pred + (((i2 * w) + j2) * 8),
-                    av1_round2((load64(left + (base3 * 8)) * (32 - shift3))
-                    + (load64(left + ((base3 + 1) * 8)) * shift3), 5));
+                      av1_round2((load64(left + (base3 * 8)) * (32 - shift3))
+                        + (load64(left + ((base3 + 1) * 8)) * shift3), 5));
                 }
                 j2 = j2 + 1;
             }
@@ -525,8 +525,8 @@ filter_type, pred): i64 {
             var base4 = (idx4 >> (6 - upsample_left)) + (i3 << upsample_left);
             var shift4 = ((idx4 << upsample_left) >> 1) & 31;
             store64(pred + (((i3 * w) + j3) * 8),
-            av1_round2((load64(left + (base4 * 8)) * (32 - shift4))
-            + (load64(left + ((base4 + 1) * 8)) * shift4), 5));
+              av1_round2((load64(left + (base4 * 8)) * (32 - shift4))
+                + (load64(left + ((base4 + 1) * 8)) * shift4), 5));
             j3 = j3 + 1;
         }
         i3 = i3 + 1;
@@ -656,7 +656,7 @@ fn av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred)
                         k = k + 1;
                     }
                     store64(pred + (((((i2 << 1) + i1) * w) + (j4 << 2) + j1) * 8),
-                    dr_clip1(av1_round2_signed(pr, 4), bit_depth));   # INTRA_FILTER_SCALE_BITS
+                      dr_clip1(av1_round2_signed(pr, 4), bit_depth));   # INTRA_FILTER_SCALE_BITS
                     j1 = j1 + 1;
                 }
                 i1 = i1 + 1;
@@ -687,13 +687,13 @@ fn av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred)
 # keeps its exact argument list, which matters because Cyrius does not hard-fail a wrong ARG
 # COUNT). Delegates to av1_intra_predict_gen with a null scratch.
 fn av1_intra_predict(frame, plane, x, y, have_left, have_above,
-have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
-filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
-mi_cols, mi_rows): i64 {
+  have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
+  filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
+  mi_cols, mi_rows): i64 {
     return av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
-    have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
-    filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
-    mi_cols, mi_rows, 0, 0);
+      have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
+      filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
+      mi_cols, mi_rows, 0, 0);
 }
 
 # av1_intra_predict_gen — as above, but the prediction may be written to a caller-supplied
@@ -707,9 +707,9 @@ mi_cols, mi_rows): i64 {
 # from what every other inter block leaves there. Staging it keeps the frame untouched outside
 # the region actually blended.
 fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
-have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
-filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
-mi_cols, mi_rows, out_buf, out_stride): i64 {
+  have_above_right, have_below_left, mode, angle_delta, use_filter_intra,
+  filter_intra_mode, enable_edge_filter, filter_type, log2w, log2h,
+  mi_cols, mi_rows, out_buf, out_stride): i64 {
     if ((log2w < 2) || (log2w > 6) || (log2h < 2) || (log2h > 6)) {
         return DR_ERR_BOUNDS;
     }
@@ -796,8 +796,8 @@ mi_cols, mi_rows, out_buf, out_stride): i64 {
     } else {
         if (av1_is_directional_mode(mode)) {
             rc = av1_intra_directional(above, left, plane, x, y, have_left,
-            have_above, mode, angle_delta, w, h, max_x, max_y, bit_depth,
-            enable_edge_filter, filter_type, pred);
+              have_above, mode, angle_delta, w, h, max_x, max_y, bit_depth,
+              enable_edge_filter, filter_type, pred);
         } else {
             if ((mode == AV1_SMOOTH_PRED) || (mode == AV1_SMOOTH_V_PRED) || (mode == AV1_SMOOTH_H_PRED)) {
                 rc = av1_intra_smooth(above, left, mode, log2w, log2h, w, h, pred);
@@ -856,7 +856,7 @@ fn av1_imin(a, b): i64 {
 # lying extent can never drive an out-of-bounds luma read.
 # Returns DR_OK or DR_ERR_OOM.
 fn av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
-alpha, max_luma_w, max_luma_h): i64 {
+  alpha, max_luma_w, max_luma_h): i64 {
     var w = 1 << log2w;
     var h = 1 << log2h;
     var sub_x = dr_frame_subx(frame);

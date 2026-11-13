@@ -176,7 +176,7 @@ fn av1_setup_global_mv(out_mv, fh, ref, mi_col, mi_row, mi_size): i64 {
     store64(out_mv + AV1MV_ROW, row);
     store64(out_mv + AV1MV_COL, col);
     av1_lower_mv_precision(out_mv, av1_fh_allow_high_precision_mv(fh),
-    av1_fh_force_integer_mv(fh));
+      av1_fh_force_integer_mv(fh));
     return DR_OK;
 }
 
@@ -251,7 +251,7 @@ fn av1_mv_stack_col(mvs, idx, list): i64 {
 # carrying a NEW half).
 fn av1_has_newmv(mode): i64 {
     if ((mode == AV1_NEWMV) || (mode == AV1_NEW_NEWMV) || (mode == AV1_NEAR_NEWMV)
-    || (mode == AV1_NEW_NEARMV) || (mode == AV1_NEAREST_NEWMV) || (mode == AV1_NEW_NEARESTMV)) {
+      || (mode == AV1_NEW_NEARMV) || (mode == AV1_NEAREST_NEWMV) || (mode == AV1_NEW_NEARESTMV)) {
         return 1;
     }
     return 0;
@@ -299,7 +299,7 @@ fn av1_mv_stack_add(mvs, r0, c0, r1, c1, is_compound, cand_mode, weight, allow_h
         }
         if (same == 1) {
             store64(mvs + AV1MVS_WEIGHT + (idx * 8),
-            load64(mvs + AV1MVS_WEIGHT + (idx * 8)) + weight);
+              load64(mvs + AV1MVS_WEIGHT + (idx * 8)) + weight);
             matched = 1;
             break;
         }
@@ -361,7 +361,7 @@ fn av1_mv_stack_sort(mvs, start, end, is_compound): i64 {
         var idx = start + 1;
         while (idx < end) {
             if (load64(mvs + AV1MVS_WEIGHT + ((idx - 1) * 8))
-            < load64(mvs + AV1MVS_WEIGHT + (idx * 8))) {
+              < load64(mvs + AV1MVS_WEIGHT + (idx * 8))) {
                 av1_mv_stack_swap(mvs, idx - 1, idx, is_compound);
                 new_end = idx;
             }
@@ -486,7 +486,7 @@ fn av1_mv_grid_set(grid, fmi_cols, r, c, avail, is_inter, mi_size, ymode, ref0, 
 # Note InterpFilters is written for EVERY inter block but CompGroupIdxs/CompoundIdxs only
 # when !use_intrabc — an intrabc block is is_inter with no compound signalling.
 fn av1_mi_store_mode(grid, fmi_cols, fmi_rows, r, c, mi_size, ymode, ref0, ref1, is_inter,
-mv0r, mv0c, mv1r, mv1c, use_intrabc, comp_group_idx, compound_idx, interp0, interp1): i64 {
+  mv0r, mv0c, mv1r, mv1c, use_intrabc, comp_group_idx, compound_idx, interp0, interp1): i64 {
     if (grid == 0) { return DR_ERR_BOUNDS; }
     if (r < 0 || c < 0) { return DR_ERR_BOUNDS; }
     # MiSize indexes the 22-entry Num_4x4_Blocks_* tables — guard before the load.
@@ -786,7 +786,7 @@ fn av1_mv_projection(fh, refs, s, mf, srcRef, dstSign, h8, w8, mi_rows, mi_cols)
                     # First projection scales the MV to the CURRENT frame to find where it lands (num *dstSign).
                     av1_get_mv_projection(mvr, mvc, refToCur * dstSign, refOffset, pbuf);
                     var gbp = av1_get_block_position(x8, y8, dstSign, load64(pbuf), load64(pbuf + 8),
-                    mi_rows, mi_cols, qbuf);
+                      mi_rows, mi_cols, qbuf);
                     if (gbp != 0) {
                         var posY = load64(qbuf);
                         var posX = load64(qbuf + 8);
@@ -1002,7 +1002,7 @@ fn av1_mv_search_stack(ctx, mv_row, mv_col, weight, cand_list): i64 {
     var r = 0;
     var c = 0;
     if (((cand_mode == AV1_GLOBALMV) || (cand_mode == AV1_GLOBAL_GLOBALMV))
-    && (load64(ctx + AV1MVC_GMTYPE0) > AV1_GM_TRANSLATION) && (large == 1)) {
+      && (load64(ctx + AV1MVC_GMTYPE0) > AV1_GM_TRANSLATION) && (large == 1)) {
         r = load64(ctx + AV1MVC_GMV0_ROW);
         c = load64(ctx + AV1MVC_GMV0_COL);
     } else {
@@ -1016,7 +1016,7 @@ fn av1_mv_search_stack(ctx, mv_row, mv_col, weight, cand_list): i64 {
     }
     store64(ctx + AV1MVC_FOUND, 1);
     av1_mv_stack_add(load64(ctx + AV1MVC_STACK), r, c, 0, 0, 0, cand_mode, weight,
-    load64(ctx + AV1MVC_ALLOW_HP), load64(ctx + AV1MVC_FORCE_INT));
+      load64(ctx + AV1MVC_ALLOW_HP), load64(ctx + AV1MVC_FORCE_INT));
     return DR_OK;
 }
 
@@ -1041,7 +1041,7 @@ fn av1_mv_compound_search_stack(ctx, mv_row, mv_col, weight): i64 {
     }
     store64(ctx + AV1MVC_FOUND, 1);
     av1_mv_stack_add(load64(ctx + AV1MVC_STACK), r0, c0, r1, c1, 1, cand_mode, weight,
-    load64(ctx + AV1MVC_ALLOW_HP), load64(ctx + AV1MVC_FORCE_INT));
+      load64(ctx + AV1MVC_ALLOW_HP), load64(ctx + AV1MVC_FORCE_INT));
     return DR_OK;
 }
 
@@ -1058,7 +1058,7 @@ fn av1_add_ref_mv_candidate(ctx, mv_row, mv_col, is_compound, weight): i64 {
         if (load64(cell + AV1MIR_REF1) == ref0) { av1_mv_search_stack(ctx, mv_row, mv_col, weight, 1); }
     } else {
         if ((load64(cell + AV1MIR_REF0) == ref0)
-        && (load64(cell + AV1MIR_REF1) == load64(ctx + AV1MVC_REF1))) {
+          && (load64(cell + AV1MIR_REF1) == load64(ctx + AV1MVC_REF1))) {
             av1_mv_compound_search_stack(ctx, mv_row, mv_col, weight);
         }
     }
@@ -1153,8 +1153,8 @@ fn av1_mv_scan_point(ctx, delta_row, delta_col, is_compound): i64 {
 # above — setup_global_mv (the caller pre-sets GlobalMvs), the spatial scans, the
 # stack sort — into the full candidate list + the entropy contexts (NewMv / RefMv
 # / Zero / DRL) the inter mode reader consults, with the MVs clamped to the frame.
-# The TEMPORAL scan (7.10.2.5, step 11) is DEFERRED — it needs the DPB's saved
-# motion field (roadmap.md); this driver is correct for use_ref_frame_mvs == 0.
+# The TEMPORAL scan (7.10.2.5, step 11) is av1_temporal_scan below, which this
+# driver runs when use_ref_frame_mvs == 1 (wired from the frame header in 0.7.129).
 # ================================================================
 
 # clamp_mv_row / clamp_mv_col (spec 6) — clamp an MV component so the referenced
@@ -1232,7 +1232,7 @@ fn av1_add_extra_mv_candidate(ctx, mv_row, mv_col, is_compound): i64 {
                 var dup = 0;
                 while (idx < num) {
                     if ((load64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 0) * 8)) == sr)
-                    && (load64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 1) * 8)) == sc)) {
+                      && (load64(mvs + AV1MVS_REFSTACK + (((idx * 4) + 1) * 8)) == sc)) {
                         dup = 1;
                         break;
                     }
@@ -1341,9 +1341,9 @@ fn av1_mv_extra_search(ctx, is_compound): i64 {
         if (num == 1) {
             var use_idx = 0;
             if ((load64(ctx + AV1MVC_COMB + (0 * 8)) == load64(mvs + AV1MVS_REFSTACK + (0 * 8)))
-            && (load64(ctx + AV1MVC_COMB + (1 * 8)) == load64(mvs + AV1MVS_REFSTACK + (1 * 8)))
-            && (load64(ctx + AV1MVC_COMB + (2 * 8)) == load64(mvs + AV1MVS_REFSTACK + (2 * 8)))
-            && (load64(ctx + AV1MVC_COMB + (3 * 8)) == load64(mvs + AV1MVS_REFSTACK + (3 * 8)))) {
+              && (load64(ctx + AV1MVC_COMB + (1 * 8)) == load64(mvs + AV1MVS_REFSTACK + (1 * 8)))
+              && (load64(ctx + AV1MVC_COMB + (2 * 8)) == load64(mvs + AV1MVS_REFSTACK + (2 * 8)))
+              && (load64(ctx + AV1MVC_COMB + (3 * 8)) == load64(mvs + AV1MVS_REFSTACK + (3 * 8)))) {
                 use_idx = 1;
             }
             av1_mv_store_combined(ctx, mvs, 1, use_idx);
@@ -1425,11 +1425,12 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 # ================================================================
 # THE TEMPORAL SCAN (0.7.104, spec 7.10.2.5 temporal_scan + 7.10.2.6 add_tpl_ref_mv) — the LAST find_mv_stack
 # deferral. NOTE it did not actually RUN until 0.7.129: av1_mvctx_set_use_ref_frame_mvs had zero callers, so
-# AV1MVC_USE_RFMV was always 0 and this was dead code on every decoded frame for 25 releases. Reads MotionFieldMvs (the per-8x8
-# pre-scaled field built by av1_motion_field_estimation, 0.7.103) at sampled positions and folds the
-# projected MVs into the candidate stack, plus derives ZeroMvContext. Gated on use_ref_frame_mvs. 3-source
-# reconciled (spec 7.10.2.5/6 + dav1d refmvs.c + libaom mvref_common.c). drishti reads an ALREADY-projected MV
-# (the producer pre-scaled it) — NO re-projection here, UNLIKE dav1d, which scales a single field lazily.
+# AV1MVC_USE_RFMV was always 0 and this was dead code on every decoded frame for 25 releases. Reads
+# MotionFieldMvs (the per-8x8 pre-scaled field built by av1_motion_field_estimation, 0.7.103) at sampled
+# positions and folds the projected MVs into the candidate stack, plus derives ZeroMvContext. Gated on
+# use_ref_frame_mvs. 3-source reconciled (spec 7.10.2.5/6 + dav1d refmvs.c + libaom mvref_common.c). drishti
+# reads an ALREADY-projected MV (the producer pre-scaled it) — NO re-projection here, UNLIKE dav1d, which
+# scales a single field lazily.
 # ================================================================
 # Reusable 32-byte scratch for lower_mv_precision (it mutates in place; the field getter returns a value): s0
 # at +0, s1 at +16. Hoisted like Av1_MvProjScratch. The estimation runs per-frame before the per-block scan,
@@ -1544,9 +1545,9 @@ fn av1_add_tpl_ref_mv(ctx, mf, delta_row, delta_col, is_compound): i64 {
         if (at_origin == 1) {
             var z2 = 0;
             if ((av1_iabs(mr0 - load64(ctx + AV1MVC_GMV0_ROW)) >= 16)
-            || (av1_iabs(mc0 - load64(ctx + AV1MVC_GMV0_COL)) >= 16)
-            || (av1_iabs(mr1 - load64(ctx + AV1MVC_GMV1_ROW)) >= 16)
-            || (av1_iabs(mc1 - load64(ctx + AV1MVC_GMV1_COL)) >= 16)) { z2 = 1; }
+              || (av1_iabs(mc0 - load64(ctx + AV1MVC_GMV0_COL)) >= 16)
+              || (av1_iabs(mr1 - load64(ctx + AV1MVC_GMV1_ROW)) >= 16)
+              || (av1_iabs(mc1 - load64(ctx + AV1MVC_GMV1_COL)) >= 16)) { z2 = 1; }
             store64(ctx + AV1MVC_ZEROCTX, z2);
         }
         av1_tpl_stack_append(ctx, mr0, mc0, mr1, mc1, 1);
@@ -1633,7 +1634,7 @@ fn av1_find_mv_stack(ctx, is_compound): i64 {
         var bi = 0;
         while (bi < num_nearest) {
             store64(mvs + AV1MVS_WEIGHT + (bi * 8),
-            load64(mvs + AV1MVS_WEIGHT + (bi * 8)) + AV1_REF_CAT_LEVEL);
+              load64(mvs + AV1MVS_WEIGHT + (bi * 8)) + AV1_REF_CAT_LEVEL);
             bi = bi + 1;
         }
     }
@@ -1953,7 +1954,8 @@ fn av1_ls_product1(a, b): i64 {
     return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) + (AV1_LS_STEP * AV1_LS_STEP)) >>> (2 + AV1_LS_MAT_DOWN_BITS);
 }
 fn av1_ls_product2(a, b): i64 {
-    return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) + ((AV1_LS_STEP * AV1_LS_STEP) * 2)) >>> (2 + AV1_LS_MAT_DOWN_BITS);
+    return (((a * b) * 4) + (((a + b) * 2) * AV1_LS_STEP) +
+      ((AV1_LS_STEP * AV1_LS_STEP) * 2)) >>> (2 + AV1_LS_MAT_DOWN_BITS);
 }
 
 # mult-and-clip: Round2Signed(v * divFactor, divShift) (round-half-away-from-zero),
@@ -2092,7 +2094,7 @@ fn av1_setup_shear(model): i64 {
     var gamma0 = av1_clip3(0 - 32768, 32767, av1_round2_signed(v * div_factor, div_shift));
     var w = m3 * m4;
     var delta0 = av1_clip3(0 - 32768, 32767,
-    (m5 - av1_round2_signed(w * div_factor, div_shift)) - one);
+      (m5 - av1_round2_signed(w * div_factor, div_shift)) - one);
     # reduce to a multiple of 1<<WARP_PARAM_REDUCE_BITS (=64); NO re-clamp after.
     var red = 1 << AV1_WARP_PARAM_REDUCE_BITS;
     var alpha = av1_round2_signed(alpha0, AV1_WARP_PARAM_REDUCE_BITS) * red;

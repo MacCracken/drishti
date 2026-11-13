@@ -252,7 +252,7 @@ fn test_alloc_invariant() {
     var border = dr_frame_border(f);
     var addressable_x = (dr_frame_plane_stride(f, 0) - border);
     assert_eq(addressable_x >= ((mi_cols * 4) + 28), 1,
-    "invariant: addressable width covers MiCols*4 + the 28-sample block overhang");
+      "invariant: addressable width covers MiCols*4 + the 28-sample block overhang");
     # reported dims stay VISIBLE — CDEF / LR / superres / output crop must not see the pad.
     assert_eq(dr_frame_plane_width(f, 0), 64, "invariant: reported width is the VISIBLE width");
     assert_eq(dr_frame_plane_height(f, 0), 40, "invariant: reported height is the VISIBLE height");

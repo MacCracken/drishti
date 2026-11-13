@@ -540,8 +540,8 @@ fn av1_tx_row_kind(txtype): i64 {
         return AV1_TX1D_DCT;
     }
     if ((txtype == AV1_DCT_ADST) || (txtype == AV1_ADST_ADST) || (txtype == AV1_DCT_FLIPADST)
-    || (txtype == AV1_FLIPADST_FLIPADST) || (txtype == AV1_ADST_FLIPADST) || (txtype == AV1_FLIPADST_ADST)
-    || (txtype == AV1_H_ADST) || (txtype == AV1_H_FLIPADST)) {
+      || (txtype == AV1_FLIPADST_FLIPADST) || (txtype == AV1_ADST_FLIPADST) || (txtype == AV1_FLIPADST_ADST)
+      || (txtype == AV1_H_ADST) || (txtype == AV1_H_FLIPADST)) {
         return AV1_TX1D_ADST;
     }
     return AV1_TX1D_IDTX;
@@ -552,8 +552,8 @@ fn av1_tx_col_kind(txtype): i64 {
         return AV1_TX1D_DCT;
     }
     if ((txtype == AV1_ADST_DCT) || (txtype == AV1_ADST_ADST) || (txtype == AV1_FLIPADST_DCT)
-    || (txtype == AV1_FLIPADST_FLIPADST) || (txtype == AV1_ADST_FLIPADST) || (txtype == AV1_FLIPADST_ADST)
-    || (txtype == AV1_V_ADST) || (txtype == AV1_V_FLIPADST)) {
+      || (txtype == AV1_FLIPADST_FLIPADST) || (txtype == AV1_ADST_FLIPADST) || (txtype == AV1_FLIPADST_ADST)
+      || (txtype == AV1_V_ADST) || (txtype == AV1_V_FLIPADST)) {
         return AV1_TX1D_ADST;
     }
     return AV1_TX1D_IDTX;

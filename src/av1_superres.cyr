@@ -229,7 +229,7 @@ fn av1_superres_upscale_new(down, up_w, out_err): i64 {
     var b = dr_frame_border(down);
     if (b < 8) { b = 8; }
     var up = dr_frame_new(up_w, dr_frame_height(down), dr_frame_num_planes(down),
-    dr_frame_subx(down), dr_frame_suby(down), dr_frame_bit_depth(down), b, out_err);
+      dr_frame_subx(down), dr_frame_suby(down), dr_frame_bit_depth(down), b, out_err);
     if (up == 0) { return 0; }   # dr_frame_new wrote the cause
     var rc = av1_superres_upscale_frame(down, up, dr_frame_bit_depth(down));
     if (rc != DR_OK) { store64(out_err, rc); return 0; }
