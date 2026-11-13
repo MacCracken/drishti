@@ -67,7 +67,9 @@ fuzz: check-lib-wiring
 
 # Decode streams drishti did NOT produce and compare pixels against libaom's own
 # decoder — the only gate here whose reference drishti cannot have colluded with.
-# Skips cleanly when libaom/ffmpeg are absent (CONFORMANCE_STRICT=1 to fail).
+# A case that did not run is not a pass: exit 0 = every case ran and matched,
+# 1 = a regression, 2 = something was skipped (no libaom/ffmpeg/network).
+# CONFORMANCE_ALLOW_SKIP=1 accepts a partial run on a machine without libaom.
 .PHONY: conformance
 conformance:
 	@scripts/conformance.sh

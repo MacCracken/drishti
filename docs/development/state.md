@@ -1752,9 +1752,8 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >
 > **The next release is 0.8.2: "no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any
 > preset, on a gate that cannot score a non-run as a pass"** (see the roadmap table for the full
-> batch). **Start with the gate**, since every later outcome is measured by it: today the
-> conformance harness still scores several non-runs as passes (a missing fixture, a failed vector
-> fetch). Then:
+> batch). **The gate is done (unreleased, CHANGELOG):** `make conformance` now exits 0 only when
+> every case ran fresh and matched, 2 when anything was skipped. The rest of the batch:
 > - per-superblock delta-q / delta-lf on both lanes;
 > - block-level lossless from `LosslessArray[segment_id]`;
 > - temporal segmentation (`PrevSegmentIds` + the DPB-saved map);

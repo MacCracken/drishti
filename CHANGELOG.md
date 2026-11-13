@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.2 bite 1: the conformance gate no longer scores a non-run as a pass
+
+`scripts/conformance.sh` had six ways to report green for a case that never ran, or never ran
+fresh. Each was confirmed by mutation against the pre-bite harness:
+
+| Mutation | Before | After |
+|---|---|---|
+| a committed `tests/repro` fixture missing | exit 0, "OK", matched 32; the case vanished without a word | exit 1, `FIXTURE MISSING` |
+| every published-vector fetch fails | exit 0, "OK"; 8 vectors "(unavailable — skipped)", counted nowhere | exit 2, `skipped=8`, each named |
+| `aomenc` fails on every call | `kf_only`, all five `seq_filters` frames and both `sbrepro` cases scored OK **from the previous run's streams** | exit 1, all 9 `SETUP FAILED` |
+| the decoder driver demuxes only 3 frames | `seq_filters` frames 4–5 silently unscored | f4/f5 `REGRESSED(reject)` |
+| the cached generated source is short (3 of 5 frames) | exit 0, "OK", three frames scored | the source is regenerated; all frames run |
+| libaom not on PATH | exit 0, matched 8, no skip count, no verdict line | exit 2, `skipped=17`, each named |
+
+What changed:
+- **Every case ends in one of three states**: scored, skipped, or REGRESSED. A case that tried to
+  run but could not be judged (missing fixture, no stream from `aomenc`, no reference from
+  `aomdec`, a published `.md5` holding no md5, a reference with the wrong frame count) is
+  REGRESSED.
+- **Nothing is scored from a previous run.** Every stream, reference and output is deleted before
+  the case produces it, through one `run_drishti` helper.
+- **The frames to score come from the reference decode**, not from drishti's own demux count, and
+  the reference must hold exactly the frames the encode asked for.
+- **Caches are written atomically.** The generated source and the downloaded vectors land under a
+  `.part` name and move into place only when complete. A source of the wrong size is regenerated.
+- **`skipped=` is counted and named.** The libaom-dependent cases are declared once
+  (`GEN_CASES` / `ODDMI_CASES` / `SB_CASES` / `PUBLISHED`), and the skip path counts those lists.
+  A self-check fails the run if `GEN_CASES` falls out of step with the `check` calls.
+- **New exit codes:** 0 = every case ran and matched, 1 = regression or unjudgeable case,
+  2 = skipped. A partial run is no longer a pass by default; `CONFORMANCE_ALLOW_SKIP=1` accepts one
+  explicitly (exit 0, still printed INCOMPLETE). `CONFORMANCE_STRICT=1` is accepted, and is now the
+  default behaviour.
+- **New `CONFORMANCE_AOM_BASE`** overrides the vector mirror.
+
+Two new checks were seen to fail: a corrupt published md5 → exit 1, and `GEN_CASES` out of step →
+exit 1. A clean run is unchanged: **33 matched / 0 known-gap / 0 regressed / 0 skipped**, exit 0.
+CI does not run `make conformance`, so CI is unaffected.
+
 ### Changed — roadmap re-planned: AV1 closes in 0.8.x, in a dozen releases
 
 - **Why:** the AV1 plan of record (14 releases, 0.7.129 → 0.7.142) lost its release numbers to
