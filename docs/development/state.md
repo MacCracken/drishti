@@ -1756,11 +1756,15 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - **the gate:** `make conformance` exits 0 only when every case ran fresh and matched, 2 when
 >   anything was skipped;
 > - **per-superblock delta-q / delta-lf, both lanes:** libaom delta streams are bit-exact on every
->   frame, and `make conformance` is 48 / 0 / 0 / 0.
+>   frame;
+> - **block-level lossless from `LosslessArray[segment_id]`, both lanes:** libaom mixed-lossless streams
+>   are bit-exact, and `make conformance` is 57 / 0 / 0 / 0.
 >
 > The rest of the batch:
-> - block-level lossless from `LosslessArray[segment_id]` (both lanes still derive it as
->   `base_q == 0`);
+> - the spatial-segmentation INTER divergence: libaom `--aq-mode=1 --cq-level=1`, frame 3 vs aomdec,
+>   with dav1d agreeing with aomdec. It is pre-0.8.2, and it is the first external segmentation stream
+>   ever checked, since the corpus encodes `--aq-mode=0`. Start here: the symbol-diff harness from
+>   this bite (an `AOMSYM` / `DRSYM` trace) localises it;
 > - the segment `SEG_LVL_ALT_LF` filter-level add (7.14.5 step 3, missing from `av1_lf_strength`);
 > - temporal segmentation (`PrevSegmentIds` + the DPB-saved map);
 > - the cross-frame CDF-inheritance follow-ons (`context_update_tile_id` for multi-tile);

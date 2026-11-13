@@ -369,6 +369,8 @@ fn test_tg_adversarial() {
 # tile byte buffer, length at *out_len. For NumTiles==1 this buffer IS the
 # tile-group payload (no group header bits).
 fn frame_enc_keyframe(out_len): i64 { return frame_enc_keyframe_d(out_len, 0); }
+# the same keyframe with a segmentation header + LosslessArray on the encode tile (0 = none).
+var Frame_Enc_Seg_Fh = 0;
 # the same keyframe, encoded with an Av1DeltaCtx (0 = no deltas) attached to the encode tile.
 fn frame_enc_keyframe_d(out_len, dctx): i64 {
     var mi = av1_modeinfo_new();
@@ -391,6 +393,10 @@ fn frame_enc_keyframe_d(out_len, dctx): i64 {
     var etile = av1_tile_new(eframe, 32, 16, 40, 1, 0, 1);   # enable_ef=1, reduced_tx=0, 1 plane
     av1_tile_grids_new(etile);
     av1_tile_set_dctx(etile, dctx);
+    if (Frame_Enc_Seg_Fh != 0) {
+        store64(etile + AV1TILE_SEG_FH, Frame_Enc_Seg_Fh);
+        store64(etile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(Frame_Enc_Seg_Fh));
+    }
     return av1_encode_intra_tile(etile, pp, pm, pt, 1, out_len);   # disable_cdf=1
 }
 # a sequence header carrying the fields av1_decode_frame reads (zeroed first —
@@ -1388,6 +1394,34 @@ fn test_frame_deltas_decode() {
     return 0;
 }
 
+# the FRAME driver attaches LosslessArray to every tile (0.8.2). frame_enc_keyframe's five skip blocks all
+# take the predicted segment 0, made LOSSLESS (ALT_Q -40 on base_q 40) while segment 1 stays lossy, so the
+# encoder writes NO tx_size symbol for any of them under TX_MODE_SELECT. A driver that left the tile's
+# base_q-derived mask (40 -> nothing lossless) would read five tx_size symbols that are not there.
+fn ll_frame_fh(): i64 {
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((0 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    return fh;
+}
+fn test_frame_mixed_lossless_decode() {
+    var fh = ll_frame_fh();
+    assert_eq(av1_fh_lossless_mask(fh), 1, "frame: only segment 0 lossless");
+    Frame_Enc_Seg_Fh = fh;
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    Frame_Enc_Seg_Fh = 0;
+    var oe = alloc(8);
+    assert_eq(av1_decode_frame(frame_mk_seq(0), ll_frame_fh(), out, olen, oe) != 0, 1,
+      "frame: a mixed-lossless keyframe decodes through the driver (it used to reject)");
+    assert_eq(load64(oe), DR_OK, "frame: ...with DR_OK");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
@@ -1396,6 +1430,7 @@ fn main() {
     test_silent_misdecode_rejects();
     test_tile_deltas_decode();
     test_frame_deltas_decode();
+    test_frame_mixed_lossless_decode();
     test_group("decode frame allocation extent (0.7.114 regression)");
     test_decode_alloc_extent();
     test_decode_frame_alloc_invariant();

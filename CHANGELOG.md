@@ -4,6 +4,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.2 bite 3: block-level lossless from `LosslessArray[segment_id]`, both lanes
+
+A frame whose segments are partly lossless and partly lossy now decodes. Until now
+`av1_seg_supported` refused that frame, and every block derived its lossless flag as
+`base_q == 0`. That shortcut would have decoded a libaom variance-AQ keyframe (`base_q_idx` 0,
+lossy segments raised by positive ALT_Q) entirely lossless. **libaom mixed-lossless streams now
+decode bit-exact against aomdec on every frame**, with dav1d agreeing with aomdec on each, and
+three are hard gates in `make conformance`.
+
+Spec-literal from the AV1 spec text: `LosslessArray` (5.9.2), `Lossless = LosslessArray[segment_id]`
+(5.11.9 / 5.11.18), and its uses in `read_tx_size`, `read_block_tx_size`, `residual`,
+`compute_tx_type`, the inverse transform and the CfL CDF selection (9.3). Cross-checked against
+libaom `decodeframe.c` and `av1_loopfilter.c`.
+
+What changed:
+- **`LosslessArray` is one bitmask per frame** (`av1_fh_lossless_mask`; bit s = segment s), built from
+  a single per-segment rule (`av1_fh_seg_lossless`) that `CodedLossless` now shares. The rule keeps
+  the five `DeltaQ*` terms: `base_q_idx` 0 with `DeltaQYDc != 0` is a **lossy** frame, which the old
+  shortcut also got wrong.
+- **One per-block derivation, `av1_tile_block_setup`**, runs right after mode info on all four paths
+  (intra / inter × decode / encode). It sets the dequant qindex, `Lossless`, and the tx-type read gate.
+- **The tx-type read gate is now per segment**: `segmentation_enabled ? get_qindex(1, segment_id) :
+  base_q_idx`, the spec's condition, not `Lossless`. A lossless segment in a lossy frame used to read
+  a tx-type symbol the stream does not carry.
+- **The mode-info functions take `LosslessArray` as a mask** and resolve it for the block's segment
+  themselves, because CfL's CDF choice needs `Lossless` before they return. An old caller's 0/1 is
+  exactly the mask for segment 0.
+- **All 13 per-block `base_q == 0` / `qindex == 0` proxies** on the inter lane now read the per-block
+  value: tx size, var-tx, `LoopfilterTxSizes`, the residual variants, the reconstruct, and the intra
+  fork on both directions.
+- **The "lossless-boundary-crossing" reject is gone** from `av1_seg_supported`. `vector-probe` prints
+  the mask.
+
+Evidence:
+- **Conformance**: three libaom `--aq-mode=1 --cq-level=0` streams, all frames bit-exact. They are
+  352x288 at both superblock sizes, and an odd-MI 160x136; their keyframe masks are 7 / 7 / 15.
+  Each case first proves its keyframe is mixed, and refuses a reference dav1d disagrees with.
+- **Unit tests**:
+  - `LosslessArray` KATs, including each `DeltaQ*` alone flipping base_q 0 to lossy, and ALT_Q
+    clipping to 0;
+  - `av1_tile_block_setup` KATs, including qindex 0 + `DeltaQYDc`: lossy, yet the tx-type gate is
+    closed;
+  - two lane witnesses, a skip block in a lossless segment of a lossy frame on the intra keyframe
+    lane (through `av1_encode_block`) and on the inter lane (intra-in-inter, `TX_MODE_SELECT`). It
+    consumes exactly and lands on TX_4X4, while the pre-0.8.2 cascade misreads the same stream.
+
+**Mutation-verified.** Each mutation was run against the lossless unit suites and the three libaom
+streams, and every source file was restored byte-exact afterwards:
+
+| Mutation | Unit suites | libaom streams |
+|---|---|---|
+| per-block `Lossless` from `base_q` (ignores `LosslessArray`) | red | red, all frames |
+| `LosslessArray` ignores the `DeltaQ*` terms | red | green (the streams' deltas are 0) |
+| setup drops the `segment_id` shift | red | red, all frames |
+| tx-type gate always `base_q` | red | red, all frames |
+| mode info drops the shift (CfL dispatch) | red | red |
+| intra encode lane skips the per-block setup | red | green (decode-only gate) |
+| inter decode sets only the qindex | red | green (the streams' inter frames are all-lossless) |
+| frame driver never attaches `LosslessArray` | red | red, all frames |
+| the lossless-crossing reject restored | red | red, all frames |
+| intra decode tx size from `base_q` | red | red, all frames |
+| intra residual tx-type gate from `base_q` | red | red, all frames |
+
+The first run caught three of these through the libaom streams only: the CfL dispatch, the driver,
+and the residual gate. A unit witness was added for each and seen to fail: a `uv_mode`
+adaptation-counter check on a lossless-segment block, a frame-driver decode of a mixed-lossless
+keyframe, and the residual's gate qindex. CI, which has no libaom, now catches all eleven. Both new
+conformance guards were seen to fire: a non-mixed encode (`--cq-level=10`), and a reference dav1d
+disagrees with (`--aq-mode=2`).
+
+**Gates:** 38 suites, **30,534** assertions (+50); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`. `make conformance` is **57 matched / 0 / 0 / 0 skipped** (was 48).
+
+Not separately witnessed: the inter reconstruct's lossless now comes from `LosslessArray`, not
+`qindex == 0`. They differ only for qindex 0 with a non-zero `DeltaQ*`, and no test or stream
+exercises that on the inter lane.
+
+Found, not fixed here:
+- **A pre-existing spatial-segmentation inter defect.** libaom `--aq-mode=1 --cq-level=1` (no lossless
+  segments) differs from aomdec on frame 3, with the 0.8.1 decoder too, while dav1d agrees with
+  aomdec. No external stream had ever exercised segmentation: the generated corpus encodes
+  `--aq-mode=0`. Filed in roadmap 0.8.2.
+- **libaom 3.15.3's encoder writes non-conformant streams** at `--aq-mode=2 --cq-level=0`. dav1d 1.5.4
+  and libaom 3.14.1 both reject them, and only its own aomdec accepts them. drishti decodes them
+  without error rather than rejecting. Filed in roadmap 0.8.5: find what the two decoders detect.
+
 ### Added — 0.8.2 bite 2: per-superblock delta-q / delta-lf decode, both lanes
 
 `delta_q_present` and `delta_lf_present` no longer reject. **libaom-encoded delta streams decode

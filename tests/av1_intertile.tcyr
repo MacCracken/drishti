@@ -5968,11 +5968,69 @@ fn test_cdf_bundle_layout() {
     return 0;
 }
 
+# THE INTER-LANE LOSSLESS WITNESS: a skip intra-in-inter 32x32 block in the LOSSLESS segment 0 of a lossy
+# frame (base_q 40; seg 0 ALT_Q -40 -> qindex 0, seg 1 ALT_Q 0 -> 40) under TX_MODE_SELECT. Segment 0
+# because a skip block takes its predicted segment id (0 at the origin). Encode and decode tiles carry the
+# frame's LosslessArray (as the frame driver attaches it). Lossless: no tx_size symbol, TX_4X4. With the
+# pre-0.8.2 base_q-driven lossless on the decode side only, the decoder reads a tx_size symbol the
+# encoder never wrote.
+fn ll_inter(fh, enc_mask, dec_mask, out_tile): i64 {
+    var ref = ir_ref(32, 32, 1, 0, 0);
+    var refs = ir_refs(32, 32);
+    var seq = ir_seq(1, 0, 0);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 8, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    store64(et + AV1TILE_LOSSLESS_MASK, enc_mask);
+    var blk = seg_intra_blk1(AV1_DC_PRED, 0);
+    store64(blk + AV1FB_SEGID, 0);
+    store64(blk + AV1FB_SKIP, 1);
+    store64((blk + AV1FB_MI) + AV1MI_SKIP, 1);
+    var pp = alloc(2 * 8);
+    ir_plan(pp, 1);
+    var pf = alloc(8);
+    store64(pf, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    var df = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 8, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    store64(dt + AV1TILE_LOSSLESS_MASK, dec_mask);
+    store64(out_tile, dt);
+    return av1_decode_inter_tile(dt, tb, tlen, 1);
+}
+fn test_seg_lossless_block_inter() {
+    var fh = seg_fh2(32, 32, 8, 8, AV1_TX_MODE_SELECT, 0);   # segment 1 lossy (q40)
+    store64(fh + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((0 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);   # segment 0 -> q0
+    var mask = av1_fh_lossless_mask(fh);
+    assert_eq(mask, 1, "inter lossless: segment 0 is the only lossless segment");
+    var t = alloc(8);
+    assert_eq(ll_inter(fh, mask, mask, t), DR_OK, "inter lossless: the tile decodes");
+    var dt = load64(t);
+    assert_eq(av1_sym_dec_err(load64(dt + AV1TILE_SD)), DR_OK, "inter lossless: no symbol-decoder error");
+    assert_eq(load64(dt + AV1TILE_CUR_LOSSLESS), 1, "inter lossless: per-block Lossless 1");
+    assert_eq(av1_grid_get(dt, AV1TILE_INTERTX, 0, 0), AV1_TX_4X4, "inter lossless: TxSize TX_4X4");
+    assert_eq(av1_lftx_get(dt, 0, 0, 0), AV1_TX_4X4, "inter lossless: LoopfilterTxSizes luma TX_4X4");
+    var t2 = alloc(8);
+    ll_inter(fh, mask, 0, t2);
+    var dt2 = load64(t2);
+    assert_eq(av1_grid_get(dt2, AV1TILE_INTERTX, 0, 0) != AV1_TX_4X4, 1,
+      "the base_q-driven (lossy) decode reads a tx_size and lands elsewhere");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
     test_inter_tile_e2e();
     test_cdf_bundle_layout();
+    test_seg_lossless_block_inter();
     test_inter_tile_subpel();
     test_inter_tile_two_sb();
     test_inter_tile_signbias_negation();

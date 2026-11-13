@@ -363,8 +363,8 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     }
     # segmentation (0.7.125 D1): the DECODABLE configs (spatial map read, per-segment qindex) now
     # decode on BOTH lanes (av1_intra_segment_id / av1_inter_segment_id). av1_seg_supported gates the
-    # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) and
-    # a lossless-boundary-crossing segment — which still REJECT cleanly (trust no input byte). The
+    # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) —
+    # which still REJECT cleanly (trust no input byte). Mixed lossless / lossy segments decode (0.8.2). The
     # per-superblock delta_q / delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile
     # loop below); they used to reject here because reading neither desynced the intra path.
     if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
@@ -463,6 +463,8 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         store64(tile + AV1TILE_TX_MODE, tx_mode);
         store64(tile + AV1TILE_ENABLE_FI, enable_fi);
         store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
+        # LosslessArray (5.9.2) as a mask: per-block Lossless = bit segment_id (0.8.2), on both lanes.
+        store64(tile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(fh));
         av1_tile_set_sb128(tile, av1_seq_use_128x128(seq));   # 128x128 superblocks (0.7.126 E2a)
         # per-superblock deltas (0.8.2): one Av1DeltaCtx per TILE, since CurrentQIndex and DeltaLF are
         # reset per tile (5.11.1 / 5.11.2). Only when delta_q_present (delta_lf_present implies it): a

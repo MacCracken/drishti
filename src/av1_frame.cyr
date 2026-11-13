@@ -862,18 +862,31 @@ fn av1_get_qindex_ignore_delta(fh, segmentId): i64 {
 }
 
 # CodedLossless / AllLossless derivation (5.9.2 lines after delta_lf).
+# LosslessArray[ segmentId ] (5.9.2): get_qindex( 1, segmentId ) == 0 AND all five DeltaQ* == 0. The
+# delta-q terms matter: base_q_idx 0 with a non-zero DeltaQYDc is a LOSSY frame (dc_q(0 + DeltaQYDc), the
+# DCT, the full tx-size read), which the old per-block `base_q == 0` shortcut would have decoded as lossless.
+fn av1_fh_seg_lossless(fh, seg): i64 {
+    if (av1_get_qindex_ignore_delta(fh, seg) != 0) { return 0; }
+    if ((av1_fh_delta_q_y_dc(fh) != 0) || (av1_fh_delta_q_u_ac(fh) != 0) || (av1_fh_delta_q_u_dc(fh) != 0)
+      || (av1_fh_delta_q_v_ac(fh) != 0) || (av1_fh_delta_q_v_dc(fh) != 0)) { return 0; }
+    return 1;
+}
+# LosslessArray as a bitmask: bit s set iff segment s is lossless. Without segmentation every segment
+# resolves to base_q_idx, so the mask is 0 or 0xFF — and a block's segment_id is 0 anyway.
+fn av1_fh_lossless_mask(fh): i64 {
+    var m = 0;
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        if (av1_fh_seg_lossless(fh, seg) != 0) { m = m | (1 << seg); }
+        seg = seg + 1;
+    }
+    return m;
+}
 fn av1_compute_lossless(fh): i64 {
     var coded_lossless = 1;
     var seg = 0;
     while (seg < AV1_MAX_SEGMENTS) {
-        var qindex = av1_get_qindex_ignore_delta(fh, seg);
-        var lossless = 0;
-        if ((qindex == 0) && (av1_fh_delta_q_y_dc(fh) == 0)
-          && (av1_fh_delta_q_u_ac(fh) == 0) && (av1_fh_delta_q_u_dc(fh) == 0)
-          && (av1_fh_delta_q_v_ac(fh) == 0) && (av1_fh_delta_q_v_dc(fh) == 0)) {
-            lossless = 1;
-        }
-        if (lossless == 0) { coded_lossless = 0; }
+        if (av1_fh_seg_lossless(fh, seg) == 0) { coded_lossless = 0; }
         seg = seg + 1;
     }
     store64(fh + AV1FH_CODED_LOSSLESS, coded_lossless);
@@ -919,26 +932,15 @@ fn av1_fh_seg_id_pre_skip(fh): i64 {
 # 1 = decode it; 0 = reject cleanly (trust no input byte — never silently mis-decode). Rejects the
 # configs that need PrevSegmentIds (a DPB-saved seg map, a follow-on): the temporal-predicted map
 # (temporal_update), the whole-map copy (!update_map), and feature-data inheritance (!update_data).
-# Also rejects a segment whose per-segment lossless would DIFFER from the frame's base_q lossless:
-# the lossless cascade (tx-size / var-tx selection) stays base_q-driven, so a boundary-crossing
-# segment is a lossless-segment follow-on (roadmap.md D1). A keyframe / PRIMARY_REF_NONE frame forces
-# update_map=1, temporal=0, update_data=1, so it always passes the config checks.
+# A keyframe / PRIMARY_REF_NONE frame forces update_map=1, temporal=0, update_data=1, so it always
+# passes. Mixed lossless and lossy segments DECODE as of 0.8.2 (Lossless = LosslessArray[segment_id]
+# per block, av1_tile_block_setup); they used to reject here because the lossless cascade was
+# base_q-driven.
 fn av1_seg_supported(fh): i64 {
     if (av1_fh_segmentation_enabled(fh) == 0) { return 1; }
     if (av1_fh_segmentation_temporal_update(fh) != 0) { return 0; }
     if (av1_fh_segmentation_update_map(fh) == 0) { return 0; }
     if (av1_fh_segmentation_update_data(fh) == 0) { return 0; }
-    var base_lossless = 0;
-    if (av1_fh_base_q_idx(fh) == 0) { base_lossless = 1; }
-    var s = 0;
-    while (s < AV1_MAX_SEGMENTS) {
-        # LosslessArray uses get_qindex(1, s): delta-q is ignored by definition, so this stays exact.
-        var qs = av1_get_qindex_ignore_delta(fh, s);
-        var sl = 0;
-        if (qs == 0) { sl = 1; }
-        if (sl != base_lossless) { return 0; }
-        s = s + 1;
-    }
     return 1;
 }
 

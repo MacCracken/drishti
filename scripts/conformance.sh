@@ -50,6 +50,8 @@ ODDMI_CASES="160x136:64 160x136:128 288x152:64 288x152:128"
 SB_CASES="64 128"
 # kind_WxH_sbN: dqlf = delta_q + delta_lf, dqonly = delta_q alone (0.8.2).
 DELTA_CASES="dqlf_352x288_sb64 dqlf_352x288_sb128 dqonly_352x288_sb64"
+# mixed lossless / lossy segments, WxH_sbN (0.8.2).
+LL_CASES="ll_352x288_sb64 ll_352x288_sb128 ll_160x136_sb64"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
@@ -67,6 +69,7 @@ skip_external() { # reason
     for c in $ODDMI_CASES; do skip_case "oddmi_${c%%:*}_sb${c##*:}" "$1"; done
     for c in $SB_CASES; do skip_case "sbrepro_sb$c" "$1"; done
     for c in $DELTA_CASES; do skip_case "$c" "$1"; done
+    for c in $LL_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -487,6 +490,65 @@ deltacase() { # name = kind_WxH_sbN
 }
 echo "--- per-superblock deltas (delta_q / delta_lf; every frame hard) ---"
 for c in $DELTA_CASES; do deltacase "$c"; done
+
+# ---- MIXED LOSSLESS SEGMENTS (0.8.2): Lossless = LosslessArray[ segment_id ] per block ----
+# libaom's variance AQ at cq-level 0 writes base_q_idx 0 with per-segment ALT_Q, so its keyframe has SOME
+# segments lossless and the rest lossy (LosslessArray 7 / 15). drishti used to reject that config outright,
+# and would otherwise have decoded every block lossless (the old base_q == 0 shortcut). Each case first
+# PROVES its keyframe really is mixed (segmentation on, 0 < mask < 255) through vector-probe. And because
+# libaom 3.15.3's encoder writes streams at neighbouring settings (--aq-mode=2) that dav1d AND libaom 3.14
+# both reject while its own aomdec accepts, a reference dav1d disagrees with is refused as unjudgeable
+# (when dav1d is installed): aomdec alone vouching for a stream is not enough here.
+LL_FRAMES=3
+llcase() { # name = ll_WxH_sbN
+    local n="$1" dims sbx
+    IFS=_ read -r _ dims sbx <<< "$n"
+    local w="${dims%%x*}" h="${dims##*x}" sb="${sbx#sb}"
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v $LL_FRAMES \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --sb-size="$sb" --cpu-used=8 --end-usage=q --cq-level=0 \
+        --aq-mode=1 --deltaq-mode=0 --enable-restoration=0 --tune-content=default --enable-palette=0 \
+        --enable-intrabc=0 --limit=$LL_FRAMES --lag-in-frames=0 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local probe; probe=$(./build/drishti-vector-probe 2>&1)
+    local kmask; kmask=$(echo "$probe" | grep -m1 'lossless_mask=' | tr -dc '0-9')
+    if ! echo "$probe" | grep -m1 'segmentation_enabled=' | grep -q '=1' || [ -z "$kmask" ] \
+       || [ "$kmask" -le 0 ] || [ "$kmask" -ge 255 ]; then
+        echo "  $n: SETUP FAILED (the keyframe is not mixed lossless, mask=${kmask:-none} — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    aomdec --rawvideo -o "$WORK/$n.ref" "$WORK/$n.ivf" 2>/dev/null
+    if command -v dav1d >/dev/null 2>&1; then
+        dav1d -q -i "$WORK/$n.ivf" -o "$WORK/$n.dav1d.yuv" >/dev/null 2>&1
+        if ! cmp -s "$WORK/$n.ref" "$WORK/$n.dav1d.yuv"; then
+            echo "  $n: SETUP FAILED (dav1d disagrees with aomdec — the reference cannot be trusted)"
+            fail=$((fail+1)); return
+        fi
+    fi
+    local fs=$(( (w * h) + (2 * ((w + 1) / 2) * ((h + 1) / 2)) ))
+    local refsz; refsz=$(stat -c %s "$WORK/$n.ref" 2>/dev/null || echo 0)
+    if [ "$refsz" -ne $(( fs * LL_FRAMES )) ]; then
+        echo "  $n: SETUP FAILED (reference holds $refsz bytes, not $LL_FRAMES frames of $fs)"
+        fail=$((fail+1)); return
+    fi
+    local line="  $n (mask $kmask):" k=1
+    while [ "$k" -le "$LL_FRAMES" ]; do
+        local a b
+        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
+        else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
+        k=$((k+1))
+    done
+    echo "$line"
+}
+echo "--- mixed lossless segments (LosslessArray[ segment_id ]; every frame hard) ---"
+for c in $LL_CASES; do llcase "$c"; done
 
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done

@@ -600,11 +600,147 @@ fn test_block_qindex() {
     return 0;
 }
 
+# ---- 0.8.2 block-level lossless: Lossless = LosslessArray[ segment_id ] per block ----
+# av1_tile_block_setup KATs (5.9.2 / 7.12.2 / 5.11.47). The TX-type read gate is NOT Lossless: a segment
+# at qindex 0 with a non-zero DeltaQYDc is lossy (mask bit clear) and still reads no tx_type (txq 0).
+fn test_block_setup_kat() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);
+    var fh = seg_kf_fh(40, 0 - 40);                      # seg 1: qindex 0 -> lossless
+    store64(tile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(fh));
+    assert_eq(load64(tile + AV1TILE_LOSSLESS_MASK), 2, "mask: only segment 1 lossless");
+    av1_tile_block_setup(tile, fh, 1);
+    assert_eq(load64(tile + AV1TILE_CUR_LOSSLESS), 1, "seg 1 block: Lossless");
+    assert_eq(load64(tile + AV1TILE_CUR_QINDEX), 0, "seg 1 block: dequant qindex 0");
+    assert_eq(load64(tile + AV1TILE_CUR_TXQ), 0, "seg 1 block: tx-type read gate qindex 0");
+    av1_tile_block_setup(tile, fh, 0);
+    assert_eq(load64(tile + AV1TILE_CUR_LOSSLESS), 0, "seg 0 block: lossy");
+    assert_eq(load64(tile + AV1TILE_CUR_TXQ), 40, "seg 0 block: gate qindex 40");
+    # qindex 0 but DeltaQYDc != 0: lossy, yet the tx-type gate is still closed.
+    store64(fh + AV1FH_DELTA_Q_Y_DC, 2);
+    store64(tile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(fh));
+    assert_eq(load64(tile + AV1TILE_LOSSLESS_MASK), 0, "DeltaQYDc != 0: no segment lossless");
+    av1_tile_block_setup(tile, fh, 1);
+    assert_eq(load64(tile + AV1TILE_CUR_LOSSLESS), 0, "qindex 0 + DeltaQYDc: NOT lossless");
+    assert_eq(load64(tile + AV1TILE_CUR_TXQ), 0, "...but the tx-type read gate stays closed (qindex 0)");
+    # segmentation OFF: the gate is base_q_idx and the mask is the tile's.
+    var fhoff = seg_kf_fh(40, 0 - 40);
+    store64(fhoff + AV1FH_SEG_ENABLED, 0);
+    av1_tile_block_setup(tile, fhoff, 0);
+    assert_eq(load64(tile + AV1TILE_CUR_TXQ), 40, "segmentation off: gate = base_q_idx");
+    # the tile default without a header is the old base_q-driven cascade.
+    var t0 = av1_tile_new(frame, 16, 16, 0, 1, 0, 1);
+    assert_eq(load64(t0 + AV1TILE_LOSSLESS_MASK), 255, "default mask, base_q 0: every segment lossless");
+    assert_eq(load64(tile + AV1TILE_SIZE - 8) == load64(tile + AV1TILE_CUR_TXQ), 1, "CUR_TXQ is the last field");
+    return 0;
+}
+# THE INTRA-KEYFRAME LOSSLESS WITNESS: an 8x8 skip block in a LOSSLESS segment of a LOSSY frame (base_q 40;
+# segment 0 ALT_Q -40 -> qindex 0, segment 1 ALT_Q 0 -> 40). Segment 0 because a SKIP block cannot choose
+# its segment: with SegIdPreSkip 0 it takes the predicted id, which is 0 at the frame origin (the
+# writer rightly refuses anything else). A lossless block reads NO tx_size symbol (read_tx_size: TX_4X4), a lossy one
+# does. Encoded through av1_encode_block (the encode lane's own per-block setup) with a marker behind it:
+# decoded with the frame's LosslessArray it consumes exactly and lands on TX_4X4; decoded with the
+# pre-0.8.2 base_q-driven lossless (base_q 40 -> lossy) it reads a tx_size symbol that is not there.
+fn ll_kf_decode(out, olen, fh, mask): i64 {
+    var tile = mono_tile(4, 4, 40);
+    store64(tile + AV1TILE_SEG_FH, fh);
+    store64(tile + AV1TILE_LOSSLESS_MASK, mask);
+    store64(tile + AV1TILE_SD, av1_sym_dec_init(out, olen, 1));
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, av1_ncdf_new());
+    av1_bd_clear(tile, 0, 0, 16, 1);
+    av1_decode_block(tile, 0, 0, 3);
+    return tile;
+}
+fn ll_seg0_fh(): i64 {
+    var fh = seg_kf_fh(40, 0);                                # segment 1: ALT_Q 0 -> lossy q40
+    store64(fh + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((0 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);   # segment 0 -> q0
+    return fh;
+}
+fn test_intra_seg_lossless_block() {
+    var fh = ll_seg0_fh();
+    var mask = av1_fh_lossless_mask(fh);
+    assert_eq(mask, 1, "lossless: segment 0 is the only lossless segment");
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_SEGID, 0);
+    var et = mono_tile(4, 4, 40);
+    store64(et + AV1TILE_SEG_FH, fh);
+    store64(et + AV1TILE_LOSSLESS_MASK, mask);
+    var enc = av1_sym_enc_init(128, 1);
+    store64(et + AV1TILE_ENC, enc);
+    store64(et + AV1TILE_NCC, av1_ncdf_new());
+    assert_eq(av1_encode_block(et, 0, 0, 3, mi, 0), DR_OK, "lossless: the encode lane writes the block");
+    assert_eq(load64(et + AV1TILE_CUR_LOSSLESS), 1, "lossless: the ENCODER's per-block Lossless is 1");
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var tA = ll_kf_decode(out, olen, fh, mask);
+    assert_eq(av1_sym_read_literal(load64(tA + AV1TILE_SD), 8), 165, "lossless: decode consumes exactly (marker)");
+    assert_eq(load64(tA + AV1TILE_CUR_LOSSLESS), 1, "lossless: the decoder's per-block Lossless is 1");
+    assert_eq(av1_grid_get(tA, AV1TILE_INTERTX, 0, 0), AV1_TX_4X4, "lossless: TxSize forced to TX_4X4");
+    assert_eq(av1_grid_get(tA, AV1TILE_SEGIDS, 0, 0), 0, "lossless: the predicted segment_id 0");
+    assert_eq(load64(load64(tA + AV1TILE_TTX) + AV1TTC_BASE_Q), 0,
+      "lossless: the residual's tx-type read gate is the SEGMENT qindex (0), not base_q 40");
+    # the pre-0.8.2 cascade (base_q 40 -> lossy for every segment): a tx_size symbol is read that the
+    # stream does not carry, so the marker no longer lines up.
+    var tB = ll_kf_decode(out, olen, fh, 0);
+    assert_eq(av1_sym_read_literal(load64(tB + AV1TILE_SD), 8) != 165, 1,
+      "the base_q-driven (lossy) decode misreads the same stream");
+    return 0;
+}
+
+# CfL's uv_mode CDF (9.3) keys on Lossless = LosslessArray[ segment_id ]: a 16x16 block in lossless
+# segment 1 has an 8x8 chroma residual, so CfL is NOT allowed and uv_mode uses the 13-symbol non-CfL CDF;
+# the same block lossy would use the 14-symbol CfL CDF. Read through each row's ADAPTATION COUNTER, which
+# a round trip cannot see (a writer sharing the mistake would still agree with the reader).
+fn ll_cfl_tile(fh): i64 {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 3, 1, 1, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 3);
+    av1_tile_grids_new(tile);
+    store64(tile + AV1TILE_SEG_FH, fh);
+    store64(tile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(fh));
+    return tile;
+}
+fn test_cfl_dispatch_lossless_segment() {
+    var fh = seg_kf_fh(40, 0 - 40);                       # segment 1 lossless (mask 2)
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 0);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_SEGID, 1);
+    var et = ll_cfl_tile(fh);
+    var enc = av1_sym_enc_init(128, 0);
+    assert_eq(av1_intra_frame_mode_info_encode(enc, av1_ncdf_new(), mi, 6, 1, 0, 0, 0, 0, 0, 0,
+        2, 1, 1, 0, 0, 0, 0, et), DR_OK, "cfl: lossless-segment mode info writes");
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dt = ll_cfl_tile(fh);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var ncd = av1_ncdf_new();
+    var dmi = av1_modeinfo_new();
+    av1_intra_frame_mode_info_decode(sd, ncd, dmi, 6, 1, 0, 0, 0, 0, 0, 0, 2, 1, 1, 0, 0, 0, 0, dt);
+    assert_eq(load64(dmi + AV1MI_SEGID), 1, "cfl: segment_id 1 decoded");
+    assert_eq(load64(av1_ncdf_uv_mode_ncfl(ncd, AV1_DC_PRED) + (13 * 8)), 1,
+      "cfl: Lossless segment -> the NON-CfL uv_mode CDF adapted");
+    assert_eq(load64(av1_ncdf_uv_mode_cfl(ncd, AV1_DC_PRED) + (14 * 8)), 0,
+      "cfl: ...and the CfL uv_mode CDF did not");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Partition_Subsize / is_inside / partition ctx");
     test_partsub_checksum();
     test_block_qindex();
+    test_block_setup_kat();
+    test_intra_seg_lossless_block();
+    test_cfl_dispatch_lossless_segment();
     test_partsub_values();
     test_is_inside();
     test_partition_ctx();

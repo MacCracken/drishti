@@ -839,7 +839,7 @@ fn av1_write_deltas(enc, ncc, d, mi_size, skip, mi_row, mi_col): i64 {
 # ================================================================
 fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
   avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-  lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
+  lossless_mask, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
     # intra_segment_id (5.11.9): read BEFORE skip iff SegIdPreSkip, else after (still before read_cdef).
     # A tile with no SEG_FH / segmentation disabled makes these a no-op returning 0.
     var seg_pre = av1_tile_seg_id_pre_skip(tile);
@@ -854,6 +854,9 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, skip);
     }
     store64(mi + AV1MI_SEGID, segment_id);
+    # Lossless = LosslessArray[ segment_id ] (5.11.9). lossless_mask is LosslessArray as a bitmask; a
+    # caller with no segmentation passes 0 or 1, which is exactly the mask for segment 0.
+    var lossless = (lossless_mask >> segment_id) & 1;
     # read_cdef (5.11.56) is spliced here — after read_skip, before y_mode (delta_q/
     # lf disabled for a profile-0 keyframe; segmentation read above per 5.11.9).
     if (cdef_ctx != 0) {
@@ -893,10 +896,11 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
 
 fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
   avail_u, above_ymode, avail_l, left_ymode, above_skip, left_skip,
-  lossless, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
+  lossless_mask, subx, suby, enable_filter_intra, cdef_ctx, mi_row, mi_col, tile): i64 {
     # intra_segment_id (5.11.9) mirror — write the segment BEFORE skip iff SegIdPreSkip, else after.
     var seg_pre = av1_tile_seg_id_pre_skip(tile);
     var segment_id = load64(mi + AV1MI_SEGID);
+    var lossless = (lossless_mask >> segment_id) & 1;   # Lossless = LosslessArray[ segment_id ]
     if (seg_pre != 0) {
         var isp = av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l, 0, segment_id);
         if (isp != DR_OK) { return isp; }

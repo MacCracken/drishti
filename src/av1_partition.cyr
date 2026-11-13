@@ -318,6 +318,23 @@ fn av1_tile_block_qindex(tile, fh, segment_id): i64 {
     }
     return av1_get_qindex(0, base_q, cur, dq_present, seg_active, seg_data);
 }
+# The three per-block values a block's mode info determines, set right after it on all four paths
+# (intra / inter x decode / encode), for everything downstream to read off the tile:
+#   CUR_QINDEX   — get_qindex( 0, segment_id ), the dequant qindex (7.12.2);
+#   CUR_LOSSLESS — Lossless = LosslessArray[ segment_id ] (5.11.9 / 5.11.18), from the frame's mask;
+#   CUR_TXQ      — transform_type's read gate (5.11.47): segmentation_enabled ? get_qindex( 1, segment_id )
+#                  : base_q_idx. Not the same as Lossless: a segment can have qindex 0 with a non-zero
+#                  DeltaQ* (lossy, yet no tx_type is read), and Lossless needs both.
+fn av1_tile_block_setup(tile, fh, segment_id): i64 {
+    store64(tile + AV1TILE_CUR_QINDEX, av1_tile_block_qindex(tile, fh, segment_id));
+    store64(tile + AV1TILE_CUR_LOSSLESS, (load64(tile + AV1TILE_LOSSLESS_MASK) >> segment_id) & 1);
+    var txq = load64(tile + AV1TILE_BASE_Q);
+    if (fh != 0) {
+        if (av1_fh_segmentation_enabled(fh) != 0) { txq = av1_get_qindex_ignore_delta(fh, segment_id); }
+    }
+    store64(tile + AV1TILE_CUR_TXQ, txq);
+    return 0;
+}
 # HasChroma (5.11.5): mono / edge-4x4 chroma-sharing rules.
 fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
     if (dr_frame_num_planes(frame) <= 1) { return 0; }
@@ -382,21 +399,21 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
         avail_uc = 0;
         avail_lc = 0;
     }
-    var lossless = 0;
-    if (load64(tile + AV1TILE_BASE_Q) == 0) { lossless = 1; }
     var enable_fi = load64(tile + AV1TILE_ENABLE_FI);
     var nb = alloc(6 * 8);
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
     var mi = av1_modeinfo_new();
+    # the mode info gets LosslessArray (as a mask) and picks Lossless for its segment_id itself, because
+    # CfL's uv_mode CDF needs it before this function returns.
     av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
       avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
-      lossless, subx, suby, enable_fi, load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
-    # the block's dequant qindex (7.12.2 get_qindex(0, segment_id): CurrentQIndex after this block's
-    # delta_q read, plus the segment's ALT_Q), then the segid map stamp for later blocks' spatial
-    # prediction (0.7.125 D1).
+      load64(tile + AV1TILE_LOSSLESS_MASK), subx, suby, enable_fi, load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
+    # the block's dequant qindex, Lossless and tx-type read-gate qindex (av1_tile_block_setup), then the
+    # segid map stamp for later blocks' spatial prediction (0.7.125 D1).
     var seg_fh = load64(tile + AV1TILE_SEG_FH);
-    store64(tile + AV1TILE_CUR_QINDEX, av1_tile_block_qindex(tile, seg_fh, load64(mi + AV1MI_SEGID)));
+    av1_tile_block_setup(tile, seg_fh, load64(mi + AV1MI_SEGID));
+    var lossless = load64(tile + AV1TILE_CUR_LOSSLESS);
     if ((seg_fh != 0) && (av1_fh_segmentation_enabled(seg_fh) != 0)) {
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
           load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));
@@ -446,17 +463,18 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
     var avail_u = av1_is_inside(tile, r - 1, c);
     var avail_l = av1_is_inside(tile, r, c - 1);
-    var lossless = 0;
-    if (load64(tile + AV1TILE_BASE_Q) == 0) { lossless = 1; }
     var nb = alloc(6 * 8);
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
     var eme = av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
       avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
-      lossless, subx, suby, load64(tile + AV1TILE_ENABLE_FI), load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
+      load64(tile + AV1TILE_LOSSLESS_MASK), subx, suby, load64(tile + AV1TILE_ENABLE_FI),
+      load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
     if (eme != DR_OK) { return eme; }   # e.g. a skip block whose planned segment_id != the spatial pred
-    # stamp segment_id across the footprint (mirror of decode) for the encoder's later-block prediction.
+    # the same per-block derivation as decode: the tx-size write below must agree with the reader on Lossless.
     var eseg_fh = load64(tile + AV1TILE_SEG_FH);
+    av1_tile_block_setup(tile, eseg_fh, load64(mi + AV1MI_SEGID));
+    var lossless = load64(tile + AV1TILE_CUR_LOSSLESS);
     if ((eseg_fh != 0) && (av1_fh_segmentation_enabled(eseg_fh) != 0)) {
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
           load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));

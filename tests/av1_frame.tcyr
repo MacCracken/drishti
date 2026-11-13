@@ -382,9 +382,47 @@ fn test_seg_supported_gate() {
     store64(fh + AV1FH_SEG_UPDATE_DATA, 0);
     assert_eq(av1_seg_supported(fh), 0, "update_data=0 -> unsupported");
     store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
-    # a lossless-boundary-crossing segment (base_q 40 non-lossless, seg1 ALT_Q=-40 -> q0 lossless).
+    # a lossless-boundary-crossing segment (base_q 40 non-lossless, seg1 ALT_Q=-40 -> q0 lossless) DECODES
+    # as of 0.8.2 — per-block Lossless = LosslessArray[ segment_id ] — so it is no longer a reject.
     store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);
-    assert_eq(av1_seg_supported(fh), 0, "lossless-crossing segment -> unsupported");
+    assert_eq(av1_seg_supported(fh), 1, "lossless-crossing segment -> supported (0.8.2)");
+    assert_eq(av1_fh_lossless_mask(fh), 2, "LosslessArray: only segment 1 (q 40 - 40 = 0) is lossless");
+    return 0;
+}
+
+# LosslessArray (5.9.2): get_qindex( 1, s ) == 0 AND all five DeltaQ* == 0. KATs straight from that line.
+fn test_lossless_array() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_BASE_Q_IDX, 0);
+    assert_eq(av1_fh_lossless_mask(fh), 255, "base_q 0, no segmentation, deltas 0: every segment lossless");
+    # each DeltaQ* on its own makes a base_q-0 frame LOSSY — the old per-block base_q == 0 shortcut missed this.
+    var offs = alloc(5 * 8);
+    store64(offs + 0, AV1FH_DELTA_Q_Y_DC);  store64(offs + 8, AV1FH_DELTA_Q_U_DC);
+    store64(offs + 16, AV1FH_DELTA_Q_U_AC); store64(offs + 24, AV1FH_DELTA_Q_V_DC);
+    store64(offs + 32, AV1FH_DELTA_Q_V_AC);
+    var k = 0;
+    while (k < 5) {
+        store64(fh + load64(offs + (k * 8)), 0 - 1);
+        assert_eq(av1_fh_lossless_mask(fh), 0, "a single non-zero DeltaQ* makes base_q 0 lossy");
+        assert_eq(av1_fh_seg_lossless(fh, 0), 0, "...per segment too");
+        store64(fh + load64(offs + (k * 8)), 0);
+        k = k + 1;
+    }
+    # mixed segments around a lossy base: seg 2 ALT_Q -50 on base 50 -> 0 (lossless); seg 5 ALT_Q -49 -> 1.
+    store64(fh + AV1FH_BASE_Q_IDX, 50);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((2 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((2 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 50);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((5 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((5 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 49);
+    assert_eq(av1_fh_lossless_mask(fh), 4, "mixed: only segment 2 lossless (bit 2); seg 5 at q1 is lossy");
+    # ALT_Q clipping to 0 counts (Clip3(0, 255, 50 - 90) = 0).
+    store64(fh + AV1FH_FEATURE_DATA + ((5 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 90);
+    assert_eq(av1_fh_lossless_mask(fh), 4 + 32, "ALT_Q clipped to 0 is lossless (bits 2 and 5)");
+    # and CodedLossless stays the AND over all eight.
+    av1_compute_lossless(fh);
+    assert_eq(av1_fh_coded_lossless(fh), 0, "mixed segments: CodedLossless = 0");
     return 0;
 }
 
@@ -756,6 +794,7 @@ fn main() {
     test_av1_fh_segmentation();
     test_seg_id_pre_skip_derivation();
     test_seg_supported_gate();
+    test_lossless_array();
     test_av1_fh_tile_multi_impl(fx_seq_reduced(1024, 64, 0, 0, 0, 0, 0));
     test_group("av1 frame header — full path");
     test_av1_fh_full_key();

@@ -153,7 +153,15 @@ enum Av1TileOff {
     #     Zero-initialised with the other grids, which is exactly DeltaLFs when delta_lf is absent. ---
     AV1TILE_DCTX      = 600;  # Av1DeltaCtx pointer (0 = no deltas)
     AV1TILE_DLF       = 608;  # [4] DeltaLFs grids -> 640
-    AV1TILE_SIZE      = 640;
+    # --- per-block lossless (0.8.2): LosslessArray as a bitmask (bit s = segment s lossless; set by the
+    #     frame driver, defaulted from base_q), and the two per-block values av1_tile_block_setup derives
+    #     after a block's mode info, beside AV1TILE_CUR_QINDEX: Lossless = LosslessArray[ segment_id ],
+    #     and the qindex transform_type's read gate compares to 0 (segmentation_enabled ?
+    #     get_qindex( 1, segment_id ) : base_q_idx — NOT the same thing as Lossless). ---
+    AV1TILE_LOSSLESS_MASK = 640;
+    AV1TILE_CUR_LOSSLESS  = 648;
+    AV1TILE_CUR_TXQ       = 656;
+    AV1TILE_SIZE          = 664;
 }
 fn av1_tile_dctx(tile): i64 {
     if (tile == 0) { return 0; }
@@ -253,6 +261,13 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_DLF + 8, 0);
     store64(tile + AV1TILE_DLF + 16, 0);
     store64(tile + AV1TILE_DLF + 24, 0);
+    # without a frame header the lossless cascade is exactly the old base_q-driven one: every segment
+    # lossless iff base_q == 0 (the frame driver overrides with the header's LosslessArray).
+    var lmask = 0;
+    if (base_q == 0) { lmask = 255; }
+    store64(tile + AV1TILE_LOSSLESS_MASK, lmask);
+    store64(tile + AV1TILE_CUR_LOSSLESS, (base_q == 0));
+    store64(tile + AV1TILE_CUR_TXQ, base_q);
     # frame-addressed grids default to the tile dims (single tile spans the frame);
     # a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new.
     store64(tile + AV1TILE_FMI_COLS, mi_cols);
@@ -743,7 +758,7 @@ fn av1_residual(tile, blk): i64 {
     store64(ttx + AV1TTC_FI_MODE, load64(mi + AV1MI_FI_MODE));
     store64(ttx + AV1TTC_IS_INTER, 0);
     store64(ttx + AV1TTC_LOSSLESS, lossless);
-    store64(ttx + AV1TTC_BASE_Q, load64(tile + AV1TILE_BASE_Q));
+    store64(ttx + AV1TTC_BASE_Q, load64(tile + AV1TILE_CUR_TXQ));   # the per-block read-gate qindex
     store64(ttx + AV1TTC_REDUCED_TX, load64(tile + AV1TILE_REDUCED_TX));
 
     var subx = load64(tile + AV1TILE_SUBX);

@@ -2645,7 +2645,7 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # read_cdef, the deltas and the intra fork are all wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids, dctx): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, segids, dctx): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -2703,8 +2703,10 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
         # Av1ModeInfo. Reconstruction (intra predict + residual) is the coupled follow-on (roadmap.md C2).
         store64((out + AV1FB_IB) + AV1IB_REF0, AV1_INTRA_FRAME);
         store64((out + AV1FB_IB) + AV1IB_REF1, AV1_REF_NONE);
+        # Lossless = LosslessArray[ segment_id ] (5.11.18) — the final segment_id, read above.
         return av1_read_intra_block_mode_info(sd, ncc, out + AV1FB_MI, mi_size, has_chroma,
-          enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
+          enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s),
+          (lossless_mask >> segment_id) & 1);
     }
     return av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out + AV1FB_IB,
       ctx, nb, ws, fh, refs, s, skip_mode, segment_id, fwd_eq_bck);
@@ -2713,7 +2715,7 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
   ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids, dctx): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, segids, dctx): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
@@ -2770,7 +2772,8 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
     if (is_inter == 0) {
         # intra_block_mode_info (5.11.24) inverse — write the intra mode-info from the embedded Av1ModeInfo.
         return av1_write_intra_block_mode_info(enc, ncc, blk + AV1FB_MI, mi_size, has_chroma,
-          enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s), lossless);
+          enable_filter_intra, av1_seq_subsampling_x(s), av1_seq_subsampling_y(s),
+          (lossless_mask >> segid) & 1);
     }
     return av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv,
       blk + AV1FB_IB, ctx, nb, ws, fh, refs, s, skip_mode, segid, fwd_eq_bck);
