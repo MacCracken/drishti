@@ -632,7 +632,8 @@ fn test_block_setup_kat() {
     # the tile default without a header is the old base_q-driven cascade.
     var t0 = av1_tile_new(frame, 16, 16, 0, 1, 0, 1);
     assert_eq(load64(t0 + AV1TILE_LOSSLESS_MASK), 255, "default mask, base_q 0: every segment lossless");
-    assert_eq(load64(tile + AV1TILE_SIZE - 8) == load64(tile + AV1TILE_CUR_TXQ), 1, "CUR_TXQ is the last field");
+    assert_eq(AV1TILE_CUR_TXQ + 8, AV1TILE_SEGCTX, "CUR_TXQ is followed by SEGCTX (0.8.2)");
+    assert_eq(AV1TILE_SEGCTX + 8, AV1TILE_SIZE, "SEGCTX is the last field");
     return 0;
 }
 # THE INTRA-KEYFRAME LOSSLESS WITNESS: an 8x8 skip block in a LOSSLESS segment of a LOSSY frame (base_q 40;

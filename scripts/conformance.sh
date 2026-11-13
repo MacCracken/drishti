@@ -52,8 +52,18 @@ SB_CASES="64 128"
 DELTA_CASES="dqlf_352x288_sb64 dqlf_352x288_sb128 dqonly_352x288_sb64"
 # mixed lossless / lossy segments, WxH_sbN (0.8.2).
 LL_CASES="ll_352x288_sb64 ll_352x288_sb128 ll_160x136_sb64"
-# segmentation on INTER frames, seg_aqA_cqQ_fF at 352x288 sb64 (0.8.2).
-SEGI_CASES="seg_aq1_cq1_f3 seg_aq2_cq20_f3"
+# segmentation on INTER frames, seg_aqA_cqQ_fF at 352x288 sb64 (0.8.2): variance / complexity AQ, whose
+# later frames COPY the map and inherit the feature data (update_map 0, update_data 0).
+SEGI_CASES="seg_aq1_cq1_f6 seg_aq2_cq20_f6"
+# TEMPORAL segmentation, tseg_WxH_bKBPS_cCPU (0.8.2): realtime cyclic-refresh AQ, 9 frames, at least one
+# with segmentation_temporal_update = 1 (the seg_id_predicted read against PrevSegmentIds).
+TSEG_CASES="tseg_352x288_b150_c8 tseg_160x136_b400_c8 tseg_200x104_b150_c9"
+# OTHER ENCODERS, judged against aomdec (+ the dav1d guard) like every other case (0.8.2). libaom's AQ never
+# inherits a non-trivial segmentation: its copied maps carry no features. rav1e does — every inter frame
+# inherits the keyframe's ALT_Q features through update_data 0 — so it is the external witness for
+# load_previous. SVT-AV1's variance AQ re-codes its features on inter frames with a primary reference.
+RAV1E_CASES="rav1e_352x288_s6_q100"
+SVT_CASES="svt_352x288_p8_crf35"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
@@ -73,6 +83,9 @@ skip_external() { # reason
     for c in $DELTA_CASES; do skip_case "$c" "$1"; done
     for c in $LL_CASES; do skip_case "$c" "$1"; done
     for c in $SEGI_CASES; do skip_case "$c" "$1"; done
+    for c in $TSEG_CASES; do skip_case "$c" "$1"; done
+    for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
+    for c in $SVT_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -553,33 +566,17 @@ llcase() { # name = ll_WxH_sbN
 echo "--- mixed lossless segments (LosslessArray[ segment_id ]; every frame hard) ---"
 for c in $LL_CASES; do llcase "$c"; done
 
-# ---- SEGMENTATION ON INTER FRAMES (0.8.2) — libaom variance AQ (1) and cyclic refresh (3) ----
+# ---- SEGMENTATION ON INTER FRAMES (0.8.2) — libaom variance AQ (1/2) and cyclic refresh (3) ----
 # The generated corpus encodes --aq-mode=0, so until 0.8.2 no external stream had ever exercised
 # segmentation on an inter frame. The first one (seg_aq1_cq1_f3) diverged on frame 3 — not in
 # segmentation at all, but in the tx_depth context of an INTRA block inside an inter frame, which used
-# the keyframe form and ignored an inter neighbour (av1_tx_depth_ctx_inter). Each case proves its stream
-# carries segmentation on an inter frame, and refuses a reference dav1d disagrees with. (Longer variance-AQ
-# runs copy the segment map from a reference — update_map 0 — which drishti still rejects; that is the
-# temporal-segmentation item, roadmap.md 0.8.2.)
-segicase() { # name = seg_aqA_cqQ_fF
-    local n="$1" aqx cqx frx
-    IFS=_ read -r _ aqx cqx frx <<< "$n"
-    local aq="${aqx#aq}" cq="${cqx#cq}" fr="${frx#f}" w=352 h=288
-    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
-    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
-        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
-        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
-    aomenc --codec=av1 -w $w -h $h --i420 --sb-size=64 --cpu-used=8 --end-usage=q --cq-level="$cq" \
-        --aq-mode="$aq" --deltaq-mode=0 --enable-restoration=0 --tune-content=default --enable-palette=0 \
-        --enable-intrabc=0 --limit="$fr" --lag-in-frames=0 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
-    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
-    rm -f build/conformance-input.ivf
-    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
-    # an inter frame (frame_type != 0) with segmentation_enabled=1: the property the case exists for.
-    if ! ./build/drishti-vector-probe 2>&1 | awk '/frame_type=/{ft=$0} /segmentation_enabled=1/{ if (ft !~ /frame_type=0/) f=1 } END{exit !f}'; then
-        echo "  $n: SETUP FAILED (no inter frame carries segmentation — the case would prove nothing)"
-        fail=$((fail+1)); return
-    fi
+# the keyframe form and ignored an inter neighbour (av1_tx_depth_ctx_inter). Frames 4+ of the variance-AQ
+# runs COPY the map from a reference (update_map 0) and inherit its feature data (update_data 0), and the
+# realtime cyclic-refresh runs code seg_id_predicted (temporal_update 1); all three rejected until the
+# temporal-segmentation bite (load_previous + PrevSegmentIds + 7.20 SavedSegmentIds). Each case proves its
+# stream carries the property it exists for, and refuses a reference dav1d disagrees with.
+seg_judge() { # n w h fr — decode, reference, dav1d guard, per-frame compare (every frame hard)
+    local n="$1" w="$2" h="$3" fr="$4"
     run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
     aomdec --rawvideo -o "$WORK/$n.ref" "$WORK/$n.ivf" 2>/dev/null
     if command -v dav1d >/dev/null 2>&1; then
@@ -605,8 +602,110 @@ segicase() { # name = seg_aqA_cqQ_fF
     done
     echo "$line"
 }
-echo "--- segmentation on inter frames (libaom AQ; every frame hard) ---"
+# the per-frame segmentation flags the probe prints, reduced to: does SOME inter frame (frame_type != 0) with
+# segmentation_enabled = 1 match `want` — "seg" (any), "copy" (update_map 0 AND update_data 0), "temporal"
+# (temporal_update 1) or "inherit" (update_data 0 with a NON-EMPTY inherited feature set: the probe tracks the
+# ref state, so segmentation_active_mask is what load_previous brought in)? The probe prints the flags in that
+# order after each frame_type line.
+seg_property() { # want
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" '
+        /frame_type=/ { inter = ($0 !~ /frame_type=0/); en = 0; um0 = 0; ud0 = 0 }
+        /segmentation_enabled=1/ { en = 1; if (inter && want == "seg") f = 1 }
+        /segmentation_update_map=0/ { um0 = 1 }
+        /segmentation_temporal_update=1/ { if (inter && en && want == "temporal") f = 1 }
+        /segmentation_update_data=0/ { ud0 = 1; if (inter && en && um0 && want == "copy") f = 1 }
+        /segmentation_active_mask=/ { if (inter && en && ud0 && $0 !~ /=0$/ && want == "inherit") f = 1 }
+        END { exit !f }'
+}
+segicase() { # name = seg_aqA_cqQ_fF
+    local n="$1" aqx cqx frx
+    IFS=_ read -r _ aqx cqx frx <<< "$n"
+    local aq="${aqx#aq}" cq="${cqx#cq}" fr="${frx#f}" w=352 h=288
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w $w -h $h --i420 --sb-size=64 --cpu-used=8 --end-usage=q --cq-level="$cq" \
+        --aq-mode="$aq" --deltaq-mode=0 --enable-restoration=0 --tune-content=default --enable-palette=0 \
+        --enable-intrabc=0 --limit="$fr" --lag-in-frames=0 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    if ! seg_property seg; then
+        echo "  $n: SETUP FAILED (no inter frame carries segmentation — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    if ! seg_property copy; then
+        echo "  $n: SETUP FAILED (no inter frame copies the map + feature data — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
+tsegcase() { # name = tseg_WxH_bKBPS_cCPU (9 frames: CONF_MAX_FRAMES)
+    local n="$1" geo bx cx
+    IFS=_ read -r _ geo bx cx <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" br="${bx#b}" cpu="${cx#c}" fr=9
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w $w -h $h --i420 --sb-size=64 --rt --cpu-used="$cpu" --aq-mode=3 --end-usage=cbr \
+        --target-bitrate="$br" --deltaq-mode=0 --enable-restoration=0 --tune-content=default --enable-palette=0 \
+        --enable-intrabc=0 --limit="$fr" --lag-in-frames=0 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    if ! seg_property temporal; then
+        echo "  $n: SETUP FAILED (no inter frame codes temporal_update = 1 — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
+rav1ecase() { # name = rav1e_WxH_sSPEED_qQUANT (9 frames)
+    local n="$1" geo sx qx
+    IFS=_ read -r _ geo sx qx <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" sp="${sx#s}" qu="${qx#q}" fr=9
+    if ! command -v rav1e >/dev/null 2>&1; then skip_case "$n" "rav1e not on PATH"; return; fi
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.y4m" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p "$WORK/$n.y4m" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    rav1e "$WORK/$n.y4m" -o "$WORK/$n.ivf" --speed "$sp" --quantizer "$qu" -l "$fr" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (rav1e produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    if ! seg_property inherit; then
+        echo "  $n: SETUP FAILED (no inter frame inherits a non-empty feature set — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
+svtcase() { # name = svt_WxH_pPRESET_crfCRF (9 frames, --aq-mode 1)
+    local n="$1" geo px cx
+    IFS=_ read -r _ geo px cx <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" pr="${px#p}" crf="${cx#crf}" fr=9
+    if ! command -v SvtAv1EncApp >/dev/null 2>&1; then skip_case "$n" "SvtAv1EncApp not on PATH"; return; fi
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    SvtAv1EncApp -i "$WORK/$n.yuv" -w "$w" -h "$h" --fps-num 30 --fps-denom 1 -n "$fr" --preset "$pr" \
+        --aq-mode 1 --crf "$crf" --keyint 60 -b "$WORK/$n.ivf" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (SVT-AV1 produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    if ! seg_property seg; then
+        echo "  $n: SETUP FAILED (no inter frame carries segmentation — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
+echo "--- segmentation on inter frames (libaom AQ; copied map + inherited data; every frame hard) ---"
 for c in $SEGI_CASES; do segicase "$c"; done
+echo "--- temporal segmentation (libaom realtime cyclic refresh; seg_id_predicted; every frame hard) ---"
+for c in $TSEG_CASES; do tsegcase "$c"; done
+echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); every frame hard ---"
+for c in $RAV1E_CASES; do rav1ecase "$c"; done
+for c in $SVT_CASES; do svtcase "$c"; done
 
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done

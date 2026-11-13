@@ -4,6 +4,127 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.2 bite 5: temporal and copied segmentation (`load_previous`, `PrevSegmentIds`, `seg_id_predicted`)
+
+Every segmentation map config now decodes: the spatial read, the temporal read (`temporal_update` 1),
+the copied map (`update_map` 0) and inherited feature data (`update_data` 0). The last three rejected
+until now, and stock encoders write all three:
+- libaom's variance and complexity AQ copy the map on every other inter frame of a longer run;
+- libaom's realtime cyclic refresh codes `seg_id_predicted`;
+- rav1e inherits its keyframe's segment features on every inter frame.
+
+**All of them now decode bit-exact on every frame against aomdec, with dav1d agreeing, and seven such
+streams from three encoders are hard gates in `make conformance`.**
+
+Spec-literal from the AV1 spec text: `load_previous`, `setup_past_independence` and
+`load_previous_segment_ids` (5.9.2 semantics), `segmentation_params` (5.9.14), `inter_segment_id` /
+`get_segment_id` (5.11.10), the `seg_id_predicted` CDF and context (8.3.2, additional tables), 7.4
+step 7, and the 7.20 / 7.21 saves and loads. Cross-checked against libaom `decodemv.c`
+(`read_inter_segment_id`), `decodeframe.c` (`last_frame_seg_map`) and `entropymode.c`.
+
+What changed:
+- **`load_previous` in the header (`av1_frame_past_state`)**, at the spec's position after
+  `disable_frame_end_update_cdf`. It loads FeatureEnabled / FeatureData and the loop-filter ref and mode
+  deltas from `ref_frame_idx[primary_ref_frame]`, or runs `setup_past_independence` for
+  PRIMARY_REF_NONE. **This also fixes a silent loop-filter bug:** `loop_filter_params` reset the
+  deltas to their defaults on every frame, so a frame that inherited non-default deltas without
+  re-coding them deblocked with the wrong strength. The defaults are now written only where the spec
+  writes them, in the `CodedLossless` / `allow_intrabc` branch.
+- **A segmentation-off frame zeroes its features explicitly** (5.9.14's else branch). The header's
+  memset no longer covers it, since `load_previous` runs first.
+- **The per-slot save (7.20)**: `AV1REF` grows to 13,120 bytes. Each refreshed slot saves its
+  FeatureEnabled / FeatureData, its lf deltas and a `SavedSegmentIds` map pointer. A show_existing
+  KEY_FRAME loads the shown slot's values (7.21) and re-saves them, map included, into every slot.
+- **`PrevSegmentIds` (`av1_frame_prev_segids`)**: the primary reference's saved map, used only when
+  segmentation is on and `RefMiCols` / `RefMiRows` match; otherwise all zero. Each tile carries it
+  in a new `Av1SegCtx`, with the two `seg_id_predicted` context strips. The strips are
+  frame-absolute and cleared by `clear_above_context` / `clear_left_context`.
+- **`inter_segment_id` transcribed branch for branch, on both lanes.** `inter_segment_id(1)` is now
+  called unconditionally, as in the spec, so a copied map hands its predicted id to `skip_mode`. A
+  skip block takes the spatial prediction and zeroes the strips. A temporal frame reads
+  `seg_id_predicted`. The encoder writes `seg_id_predicted` = 1 exactly when the plan's id equals the
+  prediction (libaom's rule), and refuses with `DR_ERR_BOUNDS` any id the bitstream cannot carry.
+- **The frame-end map save folds in 7.4 step 7**: a frame that kept its map saves `PrevSegmentIds`
+  itself, not the per-block minimums its decode stamped. Those minimums are what its own deblocker
+  reads, since step 7 runs after the loop filter.
+- **`Default_Segment_Id_Predicted_Cdf`** (three `{128 * 128, 32768, 0}` rows) sits at the end of the
+  non-coeff blob, @1905. `AV1_NCDF_N` grows 1905 -> 1914 and the cross-frame bundle 7274 -> 7283; both
+  layouts are pinned as literals.
+- **`av1_seg_supported` now gates only what drishti parses but does not apply.** That is
+  `SEG_LVL_ALT_LF_Y_V + i` (the per-segment deblock level, 7.14.4) and `SEG_LVL_SKIP` (`read_skip` does
+  not force skip, 5.11.11). Both used to mis-decode silently, and now REJECT. No libaom AQ mode tried
+  enables either; both remain 0.8.2 items.
+
+Evidence:
+- **Conformance, 114 / 0 / 0 / 0 (was 63):**
+  - the variance and complexity AQ cases run 6 frames instead of 3, frames 3, 4 and 6 copying the map;
+  - a new temporal section of three realtime cyclic-refresh streams (352x288, 160x136, 200x104), 9
+    frames each, with up to three `temporal_update` frames per stream;
+  - a new other-encoders section, the first non-libaom streams in the gate: **rav1e**, whose inter
+    frames all inherit the keyframe's ALT_Q features (-5 / -3 / 2 / 14 / 25) over hundreds of non-skip
+    blocks, and **SVT-AV1** variance AQ. Both are judged against aomdec with the dav1d guard.
+  Each case proves its property through `vector-probe`: a copied map, a temporal frame, or a
+  non-empty INHERITED feature set. Each guard was seen to refuse a stream without that property.
+- **`vector-probe` now runs the 7.20 header update after every frame.** It used to parse every header
+  against an empty ref state, so `load_previous`, `frame_size_with_refs` and the order hints all read
+  zeros. It also prints `segmentation_active_mask`, the segments with any enabled feature after
+  `load_previous`.
+- **Sweep, outside the gate:** 27 realtime streams (3 geometries x 3 bitrates x 3 speeds) and a
+  lag-19 variance-AQ run, every frame bit-exact.
+- **Unit tests:**
+  - `load_previous` through real parsed headers: a keyframe saves non-default features and deltas;
+    then inherit, segmentation-off and PRIMARY_REF_NONE frames follow, and a show_existing KEY
+    re-saves into every slot;
+  - the `PrevSegmentIds` lookup (slot selection, both dims checks);
+  - `get_segment_id` against a hand oracle, including the frame-edge clip;
+  - the context strips and their clears;
+  - temporal and copied round trips, the SegIdPreSkip path, and the encoder's refusals;
+  - the gate over all eight features;
+  - the frame-path copied-map witness, the strip clears, and the CodedLossless deltas (see below).
+
+**What the external streams can and cannot prove.** An instrumented scratch decoder showed that
+libaom's segmentation inheritance is trivial in every config tried:
+- its copied maps inherit an all-zero or feature-less map, so every block is segment 0;
+- its realtime encoder codes `seg_id_predicted` = 0 on every block, always in context 0. libaom's
+  `write_inter_segment_id` writes `mbmi->seg_id_predicted`, which its encoder only ever zeroes
+  (`bitstream.c`).
+
+So a decoder that ignored `PrevSegmentIds` entirely still decodes every libaom stream bit-exact.
+rav1e is what witnesses `load_previous` externally. The p = 1 path, contexts 1 and 2, and the context
+strips are witnessed by unit tests only: a spec-literal transcription, cross-checked against libaom's
+decoder.
+
+**Mutation-verified**, 25 mutations in an isolated copy of the tree, every source file restored
+byte-exact:
+
+| Mutation | Unit suites | External streams |
+|---|---|---|
+| `load_previous` never loads | red | red (rav1e, 8/9 frames) |
+| 7.20 does not save FeatureData | red | red (rav1e, 8/9) |
+| a seg-off frame keeps the loaded features; lf deltas reset every frame (the old bug); show_existing KEY skips the 7.21 load / the map re-save | red | green |
+| `PrevSegmentIds`: dims check dropped; slot indexed by `primary_ref_frame` | red | green |
+| frame end saves the stamped map (7.4 step 7 dropped); the driver attaches an all-zero map | red | green |
+| `get_segment_id`: top-left entry instead of the minimum; no column clip | red | green |
+| `seg_id_predicted` context always 0; skip path leaves the strips; either clear leaves its strip | red | green (every libaom read is context 0) |
+| decoder inverts `seg_id_predicted`; always stores 1; ignores `temporal_update` | red | red (all 3 temporal streams) |
+| the predicted-CDF value | red | red |
+| the predicted-CDF stride | red | green |
+| post-skip `inter_segment_id` sees skip = 0 | red | red (all six) |
+| a copied map yields 0, not the prediction | red | green |
+| the lossless branch keeps the loaded deltas | red | green |
+| the gate admits SEG_LVL_ALT_LF | red | green |
+
+The first run left five of these green in BOTH layers: the frame-end save, the driver attach, both
+strip clears, and the lossless-branch deltas. The KATs tested the helpers, not that the frame driver
+and the tile clears call them. Three tests close them:
+- a frame-path copied-map witness, where `PrevSegmentIds` differs inside the block footprint, so the
+  stamp and the saved map differ;
+- the tile clear-context test, extended to the segmentation strips;
+- a CodedLossless inter header parsed after non-default deltas.
+
+**Gates:** 38 suites, **30,692** assertions (+145); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`. `make conformance` is **114 matched / 0 / 0 / 0 skipped** (was 63).
+
 ### Fixed — 0.8.2 bite 4: an intra block in an inter frame read `tx_depth` with the wrong context
 
 Filed in bite 3 as a "spatial-segmentation inter divergence", because it was found on the first

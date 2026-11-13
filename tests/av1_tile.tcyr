@@ -34,6 +34,17 @@ fn test_clear_context() {
     assert_eq(load64(load64(tile + AV1TILE_ADC) + (5 * 8)), 0, "above dc cleared");
     assert_eq(load64(load64(tile + AV1TILE_LLVL) + (3 * 8)), 0, "left lvl cleared");
     assert_eq(load64(load64(tile + AV1TILE_LDC) + 0), 0, "left dc cleared");
+    # 0.8.2: the tile's seg_id_predicted strips are cleared by the SAME two calls (5.11.2: AboveSegPredContext
+    # per tile, LeftSegPredContext per superblock row) — each clear touches only its own strip.
+    av1_tile_grids_new(tile);
+    var sc = av1_tile_segctx(tile);
+    assert_eq(sc != 0, 1, "the tile has an Av1SegCtx (attached on first use)");
+    av1_segpred_store(sc, 3, 6, 2, 2, 1);
+    assert_eq(av1_segpred_ctx(sc, 3, 6), 2, "seg-pred strips dirtied");
+    av1_clear_above_context(tile, 1);
+    assert_eq(av1_segpred_ctx(sc, 3, 6), 1, "clear_above_context: AboveSegPredContext cleared, left kept");
+    av1_clear_left_context(tile, 1);
+    assert_eq(av1_segpred_ctx(sc, 3, 6), 0, "clear_left_context: LeftSegPredContext cleared");
     return 0;
 }
 

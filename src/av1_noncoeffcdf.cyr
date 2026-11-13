@@ -16,10 +16,11 @@
 # (feature-gated, roadmap.md 0.8.4): intrabc and palette CDFs.
 
 # The blob length in i64, named ONCE: av1_ncdf_new, the cross-frame CDF bundle (av1_intertile.cyr)
-# and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows; when
-# it was a literal in seven places, growing it meant finding all seven.
+# and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows and
+# 1905 -> 1914 for the three seg_id_predicted rows; when it was a literal in seven places, growing it meant
+# finding all seven.
 enum Av1NcdfSize {
-    AV1_NCDF_N = 1905;
+    AV1_NCDF_N = 1914;
 }
 
 var Av1_NCdf = 0;
@@ -320,8 +321,7 @@ fn av1_noncoeff_cdf_blob(): i64 {
     # ids). 8-symbol CDF = 8 cumulative freqs (ending 32768) + a 0 adaptation count. From the AV1 spec
     # additional-tables annex (10.additional.tables.md), the same source as every CDF above; extraction
     # validated against the committed Default_Cfl_Sign_Cdf @952 (byte-identical re-fetch). The TEMPORAL
-    # Default_Segment_Id_Predicted_Cdf is NOT added — the temporal-predicted map read needs PrevSegmentIds
-    # (a DPB-saved seg map), rejected as a follow-on (roadmap.md D1 temporal follow-on).
+    # Default_Segment_Id_Predicted_Cdf is at the blob's end, @1905 (0.8.2).
     store64(t + (1812 * 8), 5622);  store64(t + (1813 * 8), 7893);  store64(t + (1814 * 8), 16093);
     store64(t + (1815 * 8), 18233); store64(t + (1816 * 8), 27809); store64(t + (1817 * 8), 28373);
     store64(t + (1818 * 8), 32533); store64(t + (1819 * 8), 32768); store64(t + (1820 * 8), 0);
@@ -356,11 +356,20 @@ fn av1_noncoeff_cdf_blob(): i64 {
     # tables annex {28160, 32120, 32677, 32768, 0}, cross-checked against libaom av1/common/entropymode.c
     # default_delta_q_cdf / default_delta_lf_cdf / default_delta_lf_multi_cdf = AOM_CDF4(28160, 32120, 32677).
     var dr = 1875;
-    while (dr < AV1_NCDF_N) {
+    while (dr < 1905) {   # the six delta rows end where the seg_id_predicted rows begin
         store64(t + ((dr + 0) * 8), 28160); store64(t + ((dr + 1) * 8), 32120);
         store64(t + ((dr + 2) * 8), 32677); store64(t + ((dr + 3) * 8), 32768);
         store64(t + ((dr + 4) * 8), 0);
         dr = dr + 5;
+    }
+    # Default_Segment_Id_Predicted_Cdf[SEGMENT_ID_PREDICTED_CONTEXTS = 3] @ 1905..1913 — three 2-symbol rows,
+    # stride 3 = { 128 * 128, 32768, count }. Spec additional-tables annex; cross-checked against libaom
+    # av1/common/entropymode.c default_segment_pred_cdf = { AOM_CDF2(128 * 128) } x 3. All three are equal.
+    var pr = 1905;
+    while (pr < AV1_NCDF_N) {
+        store64(t + ((pr + 0) * 8), 16384); store64(t + ((pr + 1) * 8), 32768);
+        store64(t + ((pr + 2) * 8), 0);
+        pr = pr + 3;
     }
     Av1_NCdf = t;
     return t;
@@ -405,6 +414,9 @@ fn av1_ncdf_filter_intra_mode(cc): i64 { return cc + (1129 * 8); }
 fn av1_ncdf_delta_q(cc): i64 { return cc + (1875 * 8); }
 fn av1_ncdf_delta_lf(cc): i64 { return cc + (1880 * 8); }
 fn av1_ncdf_delta_lf_multi(cc, i): i64 { return cc + ((1885 + (i * 5)) * 8); }
+# seg_id_predicted (5.11.10, temporal segmentation): TileSegmentIdPredictedCdf[ ctx ], ctx = LeftSegPredContext[
+# MiRow ] + AboveSegPredContext[ MiCol ] (0..2). Stride 3.
+fn av1_ncdf_seg_id_predicted(cc, ctx): i64 { return cc + ((1905 + (ctx * 3)) * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }
 fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }

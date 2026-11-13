@@ -38,7 +38,7 @@ fn av1_coeff_cdf_qbucket(base_q_idx): i64 {
 }
 
 # clear_above_context (5.11.2): zero AboveLevelContext / AboveDcContext per plane
-# (the whole allocated strip, covering the tile's plane 4x4 columns + padding).
+# (the whole allocated strip, covering the tile's plane 4x4 columns + padding), and AboveSegPredContext.
 fn av1_clear_above_context(tile, num_planes): i64 {
     var n = load64(tile + AV1TILE_MI_COLS) + 32;
     var plane = 0;
@@ -53,9 +53,10 @@ fn av1_clear_above_context(tile, num_planes): i64 {
         }
         plane = plane + 1;
     }
+    av1_segctx_clear_above(load64(tile + AV1TILE_SEGCTX));   # AboveSegPredContext (0 = no record: no-op)
     return 0;
 }
-# clear_left_context (5.11.2): zero LeftLevelContext / LeftDcContext per plane.
+# clear_left_context (5.11.2): zero LeftLevelContext / LeftDcContext per plane, and LeftSegPredContext.
 fn av1_clear_left_context(tile, num_planes): i64 {
     var n = load64(tile + AV1TILE_MI_ROWS) + 32;
     var plane = 0;
@@ -70,6 +71,7 @@ fn av1_clear_left_context(tile, num_planes): i64 {
         }
         plane = plane + 1;
     }
+    av1_segctx_clear_left(load64(tile + AV1TILE_SEGCTX));    # LeftSegPredContext
     return 0;
 }
 

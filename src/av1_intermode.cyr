@@ -2640,33 +2640,31 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # grid; ctx carries the block geometry as for 5.11.23. above_skip/left_skip and
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
 # cdef_ctx is the intra path's splice record (0 to skip); dctx is the tile's Av1DeltaCtx for
-# read_delta_qindex / read_delta_lf (0 = no deltas). A non-spatial segmentation config
-# (av1_seg_supported) still gates hard rather than desync (roadmap.md 0.8.2). Segment-id reads,
-# read_cdef, the deltas and the intra fork are all wired below.
+# read_delta_qindex / read_delta_lf (0 = no deltas); sctx is the tile's Av1SegCtx (SegmentIds +
+# PrevSegmentIds + the seg_id_predicted strips; 0 is fine when segmentation is off). A segment FEATURE
+# drishti does not implement (av1_seg_supported) gates hard rather than desync. Segment-id reads (spatial,
+# temporal, copied), read_cdef, the deltas and the intra fork are all wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, segids, dctx): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
+    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
-    if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the map grid
+    if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the Av1SegCtx
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
     var mi_col = load64(ctx + AV1MVC_MI_COL);
     var fmi_cols = load64(ctx + AV1MVC_FMI_COLS);
     # the 5.11.15 preamble: the neighbour reference cache.
     av1_nbctx_setup(nb, load64(ctx + AV1MVC_GRID), fmi_cols, mi_row, mi_col, avail_u, avail_l);
-    # inter_segment_id(1) (5.11.10): a SegIdPreSkip frame reads the segment BEFORE skip (skip=0 then);
-    # otherwise the read happens in the inter_segment_id(0) call after skip. Only the decodable spatial
-    # config reaches here (av1_seg_supported gated temporal / !update_map / !update_data upstream).
+    # inter_segment_id( 1 ) (5.11.10), called unconditionally as the spec does (skip = 0 at this point): a
+    # SegIdPreSkip frame reads the segment here; a copied map (update_map 0) yields the PREDICTED id here,
+    # before skip_mode / skip see it; any other frame yields 0 and reads in inter_segment_id( 0 ) below.
     var seg_pre = 0;
     if (seg_enabled != 0) { seg_pre = av1_fh_seg_id_pre_skip(fh); }
-    var segment_id = 0;
-    if ((seg_enabled != 0) && (seg_pre != 0)) {
-        segment_id = av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0);
-    }
+    var segment_id = av1_inter_segment_id(sd, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 1, 0);
     store64(out + AV1FB_SEGID, segment_id);
     var skip_mode = av1_read_skip_mode(sd, cc_ref, skip_mode_ctx, fh, segment_id, mi_size);
     store64(out + AV1FB_SKIPMODE, skip_mode);
@@ -2675,12 +2673,12 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
         skip = av1_read_skip(sd, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip));
     }
     store64(out + AV1FB_SKIP, skip);
-    # inter_segment_id(0) (5.11.10): the !SegIdPreSkip case reads the segment AFTER skip (read_segment_id
-    # short-circuits to pred when skip). is_inter / ref_frames below then see the FINAL segment_id — the
+    # inter_segment_id( 0 ) (5.11.10) when !SegIdPreSkip: the segment AFTER skip (a skip block takes the
+    # spatial prediction, no symbol). is_inter / ref_frames below then see the FINAL segment_id — the
     # features they consult (SKIP/REF_FRAME/GLOBALMV, all j>=SEG_LVL_REF_FRAME) force SegIdPreSkip=1, so a
     # !SegIdPreSkip frame has none of them active and segment_id=0 for those reads is equivalent.
     if ((seg_enabled != 0) && (seg_pre == 0)) {
-        segment_id = av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip);
+        segment_id = av1_inter_segment_id(sd, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 0, skip);
         store64(out + AV1FB_SEGID, segment_id);
     }
     # Lossless is tile-layer state, exactly as on the intra path. read_cdef (5.11.56) splice:
@@ -2715,27 +2713,29 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
   ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, segids, dctx): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
+    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
-    if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }
+    if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
     var mi_col = load64(ctx + AV1MVC_MI_COL);
     var fmi_cols = load64(ctx + AV1MVC_FMI_COLS);
     av1_nbctx_setup(nb, load64(ctx + AV1MVC_GRID), fmi_cols, mi_row, mi_col, avail_u, avail_l);
-    # inter_segment_id (5.11.10) mirror — same SegIdPreSkip ordering as decode. seg_before is the value
-    # the skip_mode/is_inter feature gates see (segid iff SegIdPreSkip, else 0 — equivalent, as those
-    # gates only consult j>=SEG_LVL_REF_FRAME features which force SegIdPreSkip=1).
+    # inter_segment_id (5.11.10) mirror — same call order as decode. seg_before is the value the decoder
+    # holds after inter_segment_id( 1 ), which the skip_mode feature gate sees: the plan's id under
+    # SegIdPreSkip or a copied map (the copy is checked == predicted), else 0 — equivalent, as those gates
+    # only consult j>=SEG_LVL_REF_FRAME features which force SegIdPreSkip=1.
     var seg_pre = 0;
     if (seg_enabled != 0) { seg_pre = av1_fh_seg_id_pre_skip(fh); }
     var segid = load64(blk + AV1FB_SEGID);
     var seg_before = 0;
-    if (seg_pre != 0) { seg_before = segid; }
-    if ((seg_enabled != 0) && (seg_pre != 0)) {
-        var sp = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0, segid);
+    if ((seg_enabled != 0) && ((seg_pre != 0) || (av1_fh_segmentation_update_map(fh) == 0))) { seg_before = segid; }
+    if (seg_enabled != 0) {
+        var sp = av1_write_inter_segment_id(enc, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 1, 0,
+          segid);
         if (sp != DR_OK) { return sp; }
     }
     var skip_mode = load64(blk + AV1FB_SKIPMODE);
@@ -2749,7 +2749,7 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
           load64(blk + AV1FB_SKIP));
     }
     if ((seg_enabled != 0) && (seg_pre == 0)) {
-        var sp0 = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l,
+        var sp0 = av1_write_inter_segment_id(enc, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 0,
           load64(blk + AV1FB_SKIP), segid);
         if (sp0 != DR_OK) { return sp0; }
     }

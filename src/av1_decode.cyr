@@ -361,10 +361,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
         store64(out_err, DR_ERR_UNSUPPORTED);
         return 0;
     }
-    # segmentation (0.7.125 D1): the DECODABLE configs (spatial map read, per-segment qindex) now
-    # decode on BOTH lanes (av1_intra_segment_id / av1_inter_segment_id). av1_seg_supported gates the
-    # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) —
-    # which still REJECT cleanly (trust no input byte). Mixed lossless / lossy segments decode (0.8.2). The
+    # segmentation: every MAP config decodes on BOTH lanes — spatial (0.7.125 D1), and the temporal
+    # seg_id_predicted read, the copied map and inherited feature data (0.8.2, PrevSegmentIds attached per
+    # tile below). Mixed lossless / lossy segments decode (0.8.2). av1_seg_supported now gates only the segment
+    # FEATURES drishti parses but does not apply (ALT_LF, SKIP), which REJECT cleanly (trust no input byte). The
     # per-superblock delta_q / delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile
     # loop below); they used to reject here because reading neither desynced the intra path.
     if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
@@ -485,6 +485,11 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         } else {
             av1_tile_share_grids(tile, tile0);
         }
+        # temporal segmentation (0.8.2): each tile's Av1SegCtx, carrying PrevSegmentIds — the primary
+        # reference's saved map when load_previous_segment_ids (5.9.2) finds one, else all zero.
+        if (av1_tile_seg_attach(tile, av1_frame_prev_segids(fh, load64(fdc + AV1FDEC_REFS))) != DR_OK) {
+            store64(out_err, DR_ERR_OOM); return 0 - 1;
+        }
         av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
         var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
         if (ar != DR_OK) { store64(out_err, ar); return 0 - 1; }
@@ -546,6 +551,25 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                     i = i + 1;
                 }
             }
+        }
+    }
+    # SavedSegmentIds (7.20), with the 7.4 step-7 copy folded in. A frame that kept its map (segmentation_enabled
+    # && !segmentation_update_map) ENDS with SegmentIds = PrevSegmentIds exactly, so its slots save
+    # PrevSegmentIds itself (aliased — never mutated) rather than the per-block minimums the decode stamped:
+    # those minimums are what THIS frame's deblocker reads, and step 7 runs after the loop filter. An
+    # unsegmented frame's map is all zero (every block's segment_id is 0), saved as 0. One map pointer is
+    # aliased into every refreshed slot; the decode grid is per frame and never written after this.
+    if (refs != 0) {
+        var save_ids = 0;
+        if (av1_fh_segmentation_enabled(fh) != 0) {
+            save_ids = load64(tile0 + AV1TILE_SEGIDS);
+            if (av1_fh_segmentation_update_map(fh) == 0) { save_ids = av1_frame_prev_segids(fh, refs); }
+        }
+        var srff = av1_fh_refresh_frame_flags(fh);
+        var si = 0;
+        while (si < 8) {
+            if (((srff >> si) & 1) != 0) { av1_ref_set_saved_segids(refs, si, save_ids); }
+            si = si + 1;
         }
     }
     # CDF SAVE (C1, 7.20): save the frame's exit CDF context into every refreshed DPB slot, so a future

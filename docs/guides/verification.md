@@ -184,6 +184,27 @@ geometries.
 > bit depth — and sweep it against the external reference before believing the green. A
 > conformance pass bounds the corpus; only a sweep bounds the decoder.
 
+### A stream that sets a flag does not exercise the feature
+
+The 0.8.2 temporal-segmentation cases each proved, through `vector-probe`, that their stream
+carried the property they were added for: a copied segment map, `temporal_update` = 1. All
+decoded bit-exact. Then the mutation run broke `load_previous`, the frame-end map save and
+`PrevSegmentIds` itself, and **every one of those streams stayed green.** An instrumented
+scratch decoder showed why. libaom's copied maps inherit an EMPTY feature set, so every block is
+segment 0 whatever the map says. And libaom's encoder never codes `seg_id_predicted` = 1: its
+`write_inter_segment_id` writes a field the encoder only ever zeroes. The flag was set and the
+semantics were never reached.
+
+The fix was a different encoder. rav1e's inter frames inherit five non-zero ALT_Q features
+over hundreds of non-skip blocks. With that stream in the gate, breaking `load_previous` reddens
+8 of 9 frames. The p = 1 path stays unit-witnessed, because no available encoder writes it.
+
+> **Do:** a property guard must test the CONSEQUENCE, not the flag. Say "some inter frame
+> inherits a non-empty feature set", not "`update_data` is 0". Before trusting a feature's
+> external witness, mutate the feature and check that the stream goes red. If it stays green,
+> instrument the decoder (a scratch copy, never `src/`) to see what the stream actually
+> exercises, and look for another encoder that exercises more.
+
 ### A spec-literal reference port is necessary and NOT sufficient
 
 The loop above says known answers come from a port in `scripts/refs/`, never from the Cyrius.

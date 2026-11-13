@@ -161,13 +161,40 @@ enum Av1TileOff {
     AV1TILE_LOSSLESS_MASK = 640;
     AV1TILE_CUR_LOSSLESS  = 648;
     AV1TILE_CUR_TXQ       = 656;
-    AV1TILE_SIZE          = 664;
+    # --- temporal segmentation (0.8.2): the tile's Av1SegCtx (av1_modeinfo.cyr) — PrevSegmentIds + the
+    #     seg_id_predicted context strips inter_segment_id needs. Per TILE (the strips are cleared per tile /
+    #     per SB row); 0 until av1_tile_seg_attach or the first av1_tile_segctx. ---
+    AV1TILE_SEGCTX        = 664;
+    AV1TILE_SIZE          = 672;
 }
 fn av1_tile_dctx(tile): i64 {
     if (tile == 0) { return 0; }
     return load64(tile + AV1TILE_DCTX);
 }
 fn av1_tile_set_dctx(tile, d): i64 { store64(tile + AV1TILE_DCTX, d); return 0; }
+# attach a fresh Av1SegCtx carrying PrevSegmentIds `prev` (0 = all zero). Call after the SegmentIds grid
+# exists (av1_tile_grids_new / av1_tile_share_grids). Returns DR_OK or DR_ERR_OOM.
+fn av1_tile_seg_attach(tile, prev): i64 {
+    var sc = av1_segctx_new(load64(tile + AV1TILE_SEGIDS), prev, load64(tile + AV1TILE_FMI_COLS),
+      load64(tile + AV1TILE_FMI_ROWS));
+    if (sc == 0) { return DR_ERR_OOM; }
+    store64(tile + AV1TILE_SEGCTX, sc);
+    return DR_OK;
+}
+# the tile's Av1SegCtx for inter_segment_id. A tile nobody attached one to (a tile-level caller) gets one
+# with an all-zero PrevSegmentIds on first use. The map pointer is refreshed from the tile every call, so a
+# grid shared AFTER the attach is still the one read. 0 when the tile has no SegmentIds grid.
+fn av1_tile_segctx(tile): i64 {
+    var segids = load64(tile + AV1TILE_SEGIDS);
+    if (segids == 0) { return 0; }
+    var sc = load64(tile + AV1TILE_SEGCTX);
+    if (sc == 0) {
+        if (av1_tile_seg_attach(tile, 0) != DR_OK) { return 0; }
+        sc = load64(tile + AV1TILE_SEGCTX);
+    }
+    store64(sc + AV1SC_SEGIDS, segids);
+    return sc;
+}
 # DeltaLFs[ r ][ c ][ i ] — 0 when the grids were never allocated (a tile-level test without grids).
 fn av1_dlf_get(tile, i, r, c): i64 {
     if (load64(tile + AV1TILE_DLF + (i * 8)) == 0) { return 0; }
@@ -257,6 +284,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_ICDEF, 0);
     store64(tile + AV1TILE_IERR, 0);
     store64(tile + AV1TILE_DCTX, 0);              # no deltas unless the driver attaches an Av1DeltaCtx
+    store64(tile + AV1TILE_SEGCTX, 0);            # Av1SegCtx: attached by the frame driver, or on first use
     store64(tile + AV1TILE_DLF + 0, 0);           # DeltaLFs grids: allocated by av1_tile_grids_new
     store64(tile + AV1TILE_DLF + 8, 0);
     store64(tile + AV1TILE_DLF + 16, 0);

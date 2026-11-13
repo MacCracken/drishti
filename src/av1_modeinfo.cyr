@@ -181,9 +181,8 @@ fn av1_modeinfo_new(): i64 {
 # ================================================================
 # Segment-id map coding (5.11.9 / 5.11.10 / 5.11.11 + neg_deinterleave) — the SPATIAL predictor,
 # shared by the intra (keyframe) and inter mode-info drivers. Raw grid pointer + stride (fmi_cols),
-# so this stays independent of the tile struct (defined in a LATER module). The temporal predictor
-# (segmentation_temporal_update) and the whole-map copy (!segmentation_update_map) need PrevSegmentIds
-# and are rejected upstream (av1_seg_supported); only the plain spatial read reaches here.
+# so this stays independent of the tile struct (defined in a LATER module). The inter lane's TEMPORAL
+# half (PrevSegmentIds, seg_id_predicted, the copied map) is the Av1SegCtx record below (0.8.2).
 # ================================================================
 fn av1_segid_at(segids, fmi_cols, r, c): i64 {
     return load64(segids + (((r * fmi_cols) + c) * 8));
@@ -304,6 +303,145 @@ fn av1_segid_store(segids, fmi_cols, fmi_rows, mi_row, mi_col, bw4, bh4, segment
         y = y + 1;
     }
     return 0;
+}
+
+# ================================================================
+# Av1SegCtx (0.8.2) — what inter_segment_id (5.11.10) needs beyond the spatial map: PrevSegmentIds
+# (load_previous_segment_ids, 5.9.2 — the primary reference's saved map, or 0 = all zero) and the two
+# seg_id_predicted context strips. Both strips are indexed by FRAME-absolute MI coordinates, as the spec
+# indexes them (AboveSegPredContext[ MiCol + i ], LeftSegPredContext[ MiRow + i ]), with 32 entries of
+# slack so a block overhanging the frame edge writes inside the allocation. One record per TILE: the spec
+# clears the above strip at each tile start and the left strip at each superblock row (clear_*_context).
+# ================================================================
+enum Av1SegCtx {
+    AV1SC_SEGIDS   = 0;    # SegmentIds map (u64 per MI, stride FMI_COLS) — the spatial predictor's input
+    AV1SC_PREV     = 8;    # PrevSegmentIds map (same layout), 0 = all zero
+    AV1SC_ABOVE    = 16;   # AboveSegPredContext: FMI_COLS + 32 u64
+    AV1SC_LEFT     = 24;   # LeftSegPredContext: FMI_ROWS + 32 u64
+    AV1SC_FMI_COLS = 32;   # MiCols (frame)
+    AV1SC_FMI_ROWS = 40;   # MiRows (frame)
+    AV1SC_SIZE     = 48;   # bytes
+}
+fn av1_segctx_new(segids, prev, fmi_cols, fmi_rows): i64 {
+    var sc = alloc(AV1SC_SIZE);   # AV1SC_SIZE bytes
+    if (sc == 0) { return 0; }
+    var above = alloc((fmi_cols + 32) * 8);   # (FMI_COLS + 32) u64
+    var left = alloc((fmi_rows + 32) * 8);    # (FMI_ROWS + 32) u64
+    if ((above == 0) || (left == 0)) { return 0; }
+    memset(above, 0, (fmi_cols + 32) * 8);   # alloc does not zero
+    memset(left, 0, (fmi_rows + 32) * 8);
+    store64(sc + AV1SC_SEGIDS, segids);
+    store64(sc + AV1SC_PREV, prev);
+    store64(sc + AV1SC_ABOVE, above);
+    store64(sc + AV1SC_LEFT, left);
+    store64(sc + AV1SC_FMI_COLS, fmi_cols);
+    store64(sc + AV1SC_FMI_ROWS, fmi_rows);
+    return sc;
+}
+# clear_above_context / clear_left_context (5.11.2 semantics): AboveSegPredContext / LeftSegPredContext = 0.
+fn av1_segctx_clear_above(sc): i64 {
+    if (sc == 0) { return 0; }
+    memset(load64(sc + AV1SC_ABOVE), 0, (load64(sc + AV1SC_FMI_COLS) + 32) * 8);
+    return 0;
+}
+fn av1_segctx_clear_left(sc): i64 {
+    if (sc == 0) { return 0; }
+    memset(load64(sc + AV1SC_LEFT), 0, (load64(sc + AV1SC_FMI_ROWS) + 32) * 8);
+    return 0;
+}
+# get_segment_id( ) (5.11.10 helper): the minimum PrevSegmentIds value over the block footprint, clipped to
+# the frame (xMis = Min( MiCols - MiCol, bw4 ), yMis likewise). seg starts at 7 as in the spec; an all-zero
+# PrevSegmentIds (prev == 0) yields 0 without a walk.
+fn av1_get_segment_id(sc, mi_row, mi_col, bw4, bh4): i64 {
+    var prev = load64(sc + AV1SC_PREV);
+    if (prev == 0) { return 0; }
+    var fmi_cols = load64(sc + AV1SC_FMI_COLS);
+    var x_mis = av1_min(fmi_cols - mi_col, bw4);
+    var y_mis = av1_min(load64(sc + AV1SC_FMI_ROWS) - mi_row, bh4);
+    var seg = 7;
+    var y = 0;
+    while (y < y_mis) {
+        var x = 0;
+        while (x < x_mis) {
+            seg = av1_min(seg, av1_segid_at(prev, fmi_cols, mi_row + y, mi_col + x));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return seg;
+}
+# the seg_id_predicted ctx (8.3.2): LeftSegPredContext[ MiRow ] + AboveSegPredContext[ MiCol ].
+fn av1_segpred_ctx(sc, mi_row, mi_col): i64 {
+    return load64(load64(sc + AV1SC_LEFT) + (mi_row * 8)) + load64(load64(sc + AV1SC_ABOVE) + (mi_col * 8));
+}
+# AboveSegPredContext[ MiCol + i ] = v for i < bw4, LeftSegPredContext[ MiRow + i ] = v for i < bh4.
+fn av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, v): i64 {
+    var above = load64(sc + AV1SC_ABOVE);
+    var left = load64(sc + AV1SC_LEFT);
+    var i = 0;
+    while (i < bw4) { store64(above + ((mi_col + i) * 8), v); i = i + 1; }
+    var j = 0;
+    while (j < bh4) { store64(left + ((mi_row + j) * 8), v); j = j + 1; }
+    return 0;
+}
+# inter_segment_id( preSkip ) (5.11.10), transcribed branch for branch. sc carries the spatial map, so
+# read_segment_id (5.11.9) runs off AV1SC_SEGIDS; skip is the already-read skip (0 on the preSkip call).
+fn av1_inter_segment_id(sd, ncc, fh, sc, mi_row, mi_col, mi_size, avail_u, avail_l, pre_skip, skip): i64 {
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 0; }
+    var bw4 = av1_num_4x4_w(mi_size);
+    var bh4 = av1_num_4x4_h(mi_size);
+    var predicted = av1_get_segment_id(sc, mi_row, mi_col, bw4, bh4);
+    if (av1_fh_segmentation_update_map(fh) == 0) { return predicted; }
+    if ((pre_skip != 0) && (av1_fh_seg_id_pre_skip(fh) == 0)) { return 0; }
+    var segids = load64(sc + AV1SC_SEGIDS);
+    var fmi_cols = load64(sc + AV1SC_FMI_COLS);
+    if ((pre_skip == 0) && (skip != 0)) {
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, 0);   # seg_id_predicted = 0
+        return av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 1);
+    }
+    if (av1_fh_segmentation_temporal_update(fh) != 0) {
+        var p = av1_sym_read_symbol(sd, av1_ncdf_seg_id_predicted(ncc, av1_segpred_ctx(sc, mi_row, mi_col)), 2);
+        var seg = predicted;
+        if (p == 0) {
+            seg = av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0);
+        }
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, p);
+        return seg;
+    }
+    return av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0);
+}
+# the encode mirror. Returns DR_OK, or DR_ERR_BOUNDS for a segment_id the bitstream cannot carry: a copied
+# map (update_map == 0) DERIVES the predicted id, and a skip block derives the spatial prediction, so a
+# plan claiming anything else would decode differently. seg_id_predicted is coded 1 exactly when the plan's
+# id equals the temporal prediction (libaom's encoder rule; the spec allows 0 there too, so 1 is a choice).
+fn av1_write_inter_segment_id(enc, ncc, fh, sc, mi_row, mi_col, mi_size, avail_u, avail_l, pre_skip, skip,
+  segment_id): i64 {
+    if (av1_fh_segmentation_enabled(fh) == 0) { return DR_OK; }
+    var bw4 = av1_num_4x4_w(mi_size);
+    var bh4 = av1_num_4x4_h(mi_size);
+    var predicted = av1_get_segment_id(sc, mi_row, mi_col, bw4, bh4);
+    if (av1_fh_segmentation_update_map(fh) == 0) {
+        if (segment_id != predicted) { return DR_ERR_BOUNDS; }
+        return DR_OK;
+    }
+    if ((pre_skip != 0) && (av1_fh_seg_id_pre_skip(fh) == 0)) { return DR_OK; }
+    var segids = load64(sc + AV1SC_SEGIDS);
+    var fmi_cols = load64(sc + AV1SC_FMI_COLS);
+    if ((pre_skip == 0) && (skip != 0)) {
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, 0);
+        return av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 1, segment_id);
+    }
+    if (av1_fh_segmentation_temporal_update(fh) != 0) {
+        var p = (segment_id == predicted);
+        av1_sym_encode_symbol(enc, av1_ncdf_seg_id_predicted(ncc, av1_segpred_ctx(sc, mi_row, mi_col)), 2, p);
+        var rc = DR_OK;
+        if (p == 0) {
+            rc = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0, segment_id);
+        }
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, p);
+        return rc;
+    }
+    return av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0, segment_id);
 }
 
 # ================================================================

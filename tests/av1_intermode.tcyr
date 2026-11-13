@@ -3354,17 +3354,18 @@ fn test_inter_frame_mode_info() {
     av1_sym_encode_literal(mk, 165, 8);
     var mkl = 0;
     var mkb = av1_sym_enc_finish(mk, &mkl);
-    # an UNSUPPORTED segmentation config (temporal-predicted map needs PrevSegmentIds — a follow-on) still
-    # gates UNSUPPORTED, consuming nothing. The SUPPORTED spatial config decodes (witnessed separately).
+    # an UNSUPPORTED segment feature (a per-segment loop-filter level, parsed but not applied — 0.8.2) still
+    # gates UNSUPPORTED, consuming nothing. Every map config decodes (witnessed separately).
     var fh_sg = fb_fh(1, 0, 0);
     store64(fh_sg + AV1FH_SEG_ENABLED, 1);
     store64(fh_sg + AV1FH_SEG_UPDATE_MAP, 1);
     store64(fh_sg + AV1FH_SEG_TEMPORAL_UPDATE, 1);
+    store64(fh_sg + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_ALT_LF_Y_V) * 8), 1);
     var sd = av1_sym_dec_init(mkb, mkl, 1);
     assert_eq(av1_inter_frame_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
         av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
         av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0),
-      DR_ERR_UNSUPPORTED, "unsupported seg config (temporal) gates UNSUPPORTED");
+      DR_ERR_UNSUPPORTED, "unsupported seg feature (ALT_LF) gates UNSUPPORTED");
     assert_eq(av1_sym_read_literal(sd, 8), 165, "the segmentation gate consumed NOTHING");
     # 0.8.2: delta_q / delta_lf are no longer a reject — the tile's Av1DeltaCtx drives the splice. An
     # inter-level round trip: four DISTINCT delta_lf values (a direct symbol, the escape boundary 3, zero,
@@ -3550,6 +3551,7 @@ fn test_inter_frame_hardening() {
     # the writer's feature gates mirror the reader's (feature-gated list; roadmap.md).
     var fh_sg = fb_fh(1, 0, 0);
     store64(fh_sg + AV1FH_SEG_ENABLED, 1);
+    store64(fh_sg + AV1FH_FEATURE_ENABLED + ((2 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);   # unimplemented feature
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
         fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg, refs, s0,
         1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");

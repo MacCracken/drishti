@@ -1760,15 +1760,23 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - **block-level lossless from `LosslessArray[segment_id]`, both lanes:** libaom mixed-lossless streams
 >   are bit-exact;
 > - **the "segmentation" inter divergence:** it was the intra-in-inter `tx_depth` context ignoring inter
->   neighbours. libaom AQ streams with segmented inter frames are now bit-exact, and `make conformance`
->   is 63 / 0 / 0 / 0.
+>   neighbours. libaom AQ streams with segmented inter frames are now bit-exact;
+> - **temporal / copied segmentation:** `load_previous` (segment features and loop-filter deltas from the
+>   primary reference), `PrevSegmentIds` + a per-slot `SavedSegmentIds`, the `seg_id_predicted` read, and
+>   the copied map. libaom variance-AQ runs (copied map + inherited data), realtime cyclic-refresh runs
+>   (`temporal_update` 1), rav1e (inherited features) and SVT-AV1 are bit-exact on every frame, and
+>   `make conformance` is **114 / 0 / 0 / 0** — the first gate with non-libaom encoders. CAVEAT: libaom's
+>   inheritance is semantically trivial (empty inherited features; its encoder never codes
+>   `seg_id_predicted` = 1), so the p = 1 path is unit-witnessed only, and rav1e is the external
+>   `load_previous` witness;
 >
 > The rest of the batch:
-> - temporal / copied segmentation, the first item below: longer libaom AQ runs set `update_map` 0 /
->   `update_data` 0 on inter frames, and drishti rejects those cleanly today;
-> - the segment `SEG_LVL_ALT_LF` filter-level add (7.14.5 step 3, missing from `av1_lf_strength`);
-> - temporal segmentation (`PrevSegmentIds` + the DPB-saved map);
-> - the cross-frame CDF-inheritance follow-ons (`context_update_tile_id` for multi-tile);
+> - the segment `SEG_LVL_ALT_LF_Y_V + i` filter-level add (7.14.4, missing from `av1_lf_strength`), and
+>   `read_skip` forcing skip for `SEG_LVL_SKIP` (5.11.11). Both now REJECT through `av1_seg_supported`;
+>   neither is used by any libaom AQ mode tried;
+> - the cross-frame CDF-inheritance follow-ons: `context_update_tile_id` for multi-tile, the
+>   `disable_frame_end_update_cdf` witness, and a show_existing KEY_FRAME re-saving the shown slot's CDF
+>   bundle into every slot (7.21 `load_cdfs`, then the 7.20 save; drishti leaves the other slots' bundles);
 > - bounding the `av1_read_cdef` / `av1_write_cdef` fill loops, which are unbounded on both axes
 >   and safe today only by the forced-partition invariant.
 >

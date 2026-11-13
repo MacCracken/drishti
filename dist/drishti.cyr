@@ -2205,12 +2205,13 @@ fn av1_seq_op_dm_present(s, i): i64 { return load64(s + AV1_SEQ_OP_DM + (i * 8))
 #
 # SCOPE (0.7.x frame-header bite): the header is parsed and every field
 # stored or (for film-grain point/AR-coefficient arrays) consumed
-# bit-exactly. Cross-frame CDF / loop-filter-delta / segment-id
-# inheritance via load_previous (primary_ref_frame != PRIMARY_REF_NONE)
-# is a decode-state concern (deferred; docs/development/roadmap.md 0.7.x).
-# The ref state machine tracks the dimension/order-hint/gm slots the
-# header itself consults, which is what set_frame_refs and
-# frame_size_with_refs need.
+# bit-exactly. load_previous (primary_ref_frame != PRIMARY_REF_NONE) brings
+# the segment features and loop-filter deltas in from the primary reference
+# at the 5.9.2 split (av1_frame_past_state); the CDF and segment-MAP halves of
+# the same inheritance are decode state (av1_frame_dec_*, av1_frame_prev_segids).
+# The ref state machine tracks the dimension/order-hint/gm slots the header
+# itself consults (set_frame_refs, frame_size_with_refs) plus the per-slot
+# 7.20 saves those two loads read back.
 
 # ================================================================
 # Spec constants (5.9 semantics + section 3 symbols).
@@ -2264,6 +2265,7 @@ enum Av1FrameConst {
     AV1_MAX_SEGMENTS                = 8;
     AV1_SEG_LVL_MAX                 = 8;
     AV1_SEG_LVL_ALT_Q               = 0;
+    AV1_SEG_LVL_ALT_LF_Y_V          = 1;
     AV1_SEG_LVL_REF_FRAME           = 5;
     AV1_SEG_LVL_SKIP                = 6;
     AV1_SEG_LVL_GLOBALMV            = 7;
@@ -2408,7 +2410,14 @@ enum Av1RefOff {
     AV1REF_SAVED_GM           = 1408;   # [8][7][6] -> 4096
     AV1REF_SAVED_MF           = 4096;    # [8] i64 pointers to each slot's saved motion field (0.7.102) -> 4160
     AV1REF_SAVED_CDF          = 4160;    # [8] i64 pointers to each slot's saved CDF bundle (7.20/7.21, C1) -> 4224
-    AV1REF_SIZE               = 4224;
+    # save_segmentation_params / save_loop_filter_params / SavedSegmentIds (7.20), read back by
+    # load_previous (5.9.2) and the show_existing 7.21 load (0.8.2 temporal segmentation):
+    AV1REF_SAVED_SEGIDS       = 4224;    # [8] i64 pointers to each slot's SavedSegmentIds map (0 = all zero) -> 4288
+    AV1REF_SAVED_FEAT_EN      = 4288;    # [8 slot][8 seg][8 lvl] FeatureEnabled   -> 8384
+    AV1REF_SAVED_FEAT_DATA    = 8384;    # [8 slot][8 seg][8 lvl] FeatureData      -> 12480
+    AV1REF_SAVED_LF_REF       = 12480;   # [8 slot][8] loop_filter_ref_deltas      -> 12992
+    AV1REF_SAVED_LF_MODE      = 12992;   # [8 slot][2] loop_filter_mode_deltas     -> 13120
+    AV1REF_SIZE               = 13120;
 }
 
 # ================================================================
@@ -2555,6 +2564,19 @@ fn av1_ref_set_saved_cdf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_CDF + (i * 8
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }
+# SavedSegmentIds[ i ] (7.20): the per-slot pointer to slot i's saved segmentation map — frame-addressed u64
+# per MI, stride RefMiCols[ i ]; 0 = all-zero (an unsegmented or never-refreshed slot). Never mutated after
+# it is saved (the decoder aliases it; a later frame copies out of it), so one buffer serves many slots.
+fn av1_ref_saved_segids(r, i): i64 { return load64(r + AV1REF_SAVED_SEGIDS + (i * 8)); }
+fn av1_ref_set_saved_segids(r, i, ptr): i64 { store64(r + AV1REF_SAVED_SEGIDS + (i * 8), ptr); return 0; }
+fn av1_ref_saved_feature_enabled(r, i, seg, j): i64 {
+    return load64(r + AV1REF_SAVED_FEAT_EN + ((((i * 8) + seg) * 8 + j) * 8));
+}
+fn av1_ref_saved_feature_data(r, i, seg, j): i64 {
+    return load64(r + AV1REF_SAVED_FEAT_DATA + ((((i * 8) + seg) * 8 + j) * 8));
+}
+fn av1_ref_saved_lf_ref_delta(r, i, j): i64 { return load64(r + AV1REF_SAVED_LF_REF + (((i * 8) + j) * 8)); }
+fn av1_ref_saved_lf_mode_delta(r, i, j): i64 { return load64(r + AV1REF_SAVED_LF_MODE + (((i * 2) + j) * 8)); }
 
 # ================================================================
 # is_scaled (spec 5.11.27) — does refFrame use a scaled reference? The stored ref's
@@ -2814,10 +2836,11 @@ fn av1_read_interpolation_filter(br, fh): i64 {
 # ================================================================
 # 5.9.11 loop_filter_params.
 # ================================================================
-fn av1_loop_filter_params(br, s, fh): i64 {
-    # setup_past_independence / lossless defaults for the ref/mode deltas
-    # (identical in both spec branches): INTRA 1, GOLDEN/ALTREF/ALTREF2 -1,
-    # the rest 0.
+# The default loop-filter ref/mode deltas: INTRA 1, GOLDEN/ALTREF/ALTREF2 -1, the rest 0. Written by
+# setup_past_independence AND by loop_filter_params' CodedLossless / allow_intrabc branch — the only two
+# places. Every other frame STARTS from the deltas load_previous brought in from its primary reference
+# (5.9.11 semantics: "If this syntax element is not present, it maintains its previous value").
+fn av1_lf_default_deltas(fh): i64 {
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_INTRA_FRAME * 8), 1);
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST_FRAME * 8), 0);
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST2_FRAME * 8), 0);
@@ -2828,9 +2851,81 @@ fn av1_loop_filter_params(br, s, fh): i64 {
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_ALTREF2_FRAME * 8), 0 - 1);
     store64(fh + AV1FH_LF_MODE_DELTAS + 0, 0);
     store64(fh + AV1FH_LF_MODE_DELTAS + 8, 0);
+    return 0;
+}
+
+# setup_past_independence (5.9.2 semantics), the frame-header half: FeatureData / FeatureEnabled = 0,
+# loop_filter_delta_enabled = 1, and the default ref/mode deltas. PrevGmParams is av1_prev_gm_param (it is
+# derived at its single use) and PrevSegmentIds is decode state (av1_frame_prev_segids is 0, all zero, here).
+fn av1_setup_past_independence(fh): i64 {
+    var i = 0;
+    while (i < (AV1_MAX_SEGMENTS * AV1_SEG_LVL_MAX)) {
+        store64(fh + AV1FH_FEATURE_ENABLED + (i * 8), 0);
+        store64(fh + AV1FH_FEATURE_DATA + (i * 8), 0);
+        i = i + 1;
+    }
+    store64(fh + AV1FH_LF_DELTA_ENABLED, 1);
+    av1_lf_default_deltas(fh);
+    return 0;
+}
+
+# load_loop_filter_params( slot ) + load_segmentation_params( slot ) (7.21): the deltas and the segment
+# feature arrays saved by 7.20 come back into the current frame header. Used by load_previous (5.9.2) and by
+# the show_existing_frame KEY_FRAME load, which re-saves them into every slot it refreshes.
+fn av1_ref_load_seg_lf(refs, slot, fh): i64 {
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        var j = 0;
+        while (j < AV1_SEG_LVL_MAX) {
+            store64(fh + AV1FH_FEATURE_ENABLED + ((seg * 8 + j) * 8),
+              av1_ref_saved_feature_enabled(refs, slot, seg, j));
+            store64(fh + AV1FH_FEATURE_DATA + ((seg * 8 + j) * 8),
+              av1_ref_saved_feature_data(refs, slot, seg, j));
+            j = j + 1;
+        }
+        seg = seg + 1;
+    }
+    var k = 0;
+    while (k < 8) {   # TOTAL_REFS_PER_FRAME
+        store64(fh + AV1FH_LF_REF_DELTAS + (k * 8), av1_ref_saved_lf_ref_delta(refs, slot, k));
+        k = k + 1;
+    }
+    store64(fh + AV1FH_LF_MODE_DELTAS + 0, av1_ref_saved_lf_mode_delta(refs, slot, 0));
+    store64(fh + AV1FH_LF_MODE_DELTAS + 8, av1_ref_saved_lf_mode_delta(refs, slot, 1));
+    return 0;
+}
+
+# load_previous_segment_ids( ) (5.9.2 semantics): PrevSegmentIds = SavedSegmentIds[ prevFrame ] when
+# segmentation_enabled and RefMiCols / RefMiRows [ prevFrame ] equal MiCols / MiRows; otherwise all zero
+# (returned as 0). PRIMARY_REF_NONE is setup_past_independence's all-zero map. The returned map is the slot's
+# saved buffer itself — read-only to every consumer (get_segment_id, the 7.4 copy).
+fn av1_frame_prev_segids(fh, refs): i64 {
+    if (refs == 0) { return 0; }
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 0; }
+    var pr = av1_fh_primary_ref_frame(fh);
+    if (pr == AV1_PRIMARY_REF_NONE) { return 0; }
+    var slot = av1_fh_ref_frame_idx(fh, pr);
+    if ((av1_ref_mi_cols(refs, slot) != av1_fh_mi_cols(fh)) || (av1_ref_mi_rows(refs, slot) != av1_fh_mi_rows(fh))) {
+        return 0;
+    }
+    return av1_ref_saved_segids(refs, slot);
+}
+
+# The 5.9.2 split after disable_frame_end_update_cdf: PRIMARY_REF_NONE -> setup_past_independence, else
+# load_previous (prevFrame = ref_frame_idx[ primary_ref_frame ]; PrevGmParams is av1_prev_gm_param). The
+# CDF half of the same split (init_non_coeff_cdfs / load_cdfs) is the frame decoder's. A null refs is a
+# header-only caller with no history to load: independence is the only meaningful answer there.
+fn av1_frame_past_state(fh, refs): i64 {
+    var pr = av1_fh_primary_ref_frame(fh);
+    if ((pr == AV1_PRIMARY_REF_NONE) || (refs == 0)) { return av1_setup_past_independence(fh); }
+    return av1_ref_load_seg_lf(refs, av1_fh_ref_frame_idx(fh, pr), fh);
+}
+
+fn av1_loop_filter_params(br, s, fh): i64 {
     if (av1_fh_coded_lossless(fh) || av1_fh_allow_intrabc(fh)) {
         store64(fh + AV1FH_LF_LEVEL + 0, 0);
         store64(fh + AV1FH_LF_LEVEL + 8, 0);
+        av1_lf_default_deltas(fh);
         return DR_OK;
     }
     var lvl0 = dr_br_read_bits(br, 6);   # loop_filter_level[0] f(6)
@@ -2977,9 +3072,18 @@ fn av1_segmentation_params(br, fh): i64 {
             }
         }
     }
-    # FeatureEnabled/FeatureData for the not-updated case default to 0
-    # (memset). SegIdPreSkip / LastActiveSegId are derived-only and not
-    # stored (no bit dependency in the header).
+    if (enabled == 0) {
+        # segmentation off: FeatureEnabled / FeatureData = 0 (5.9.14 else-branch). NOT the memset — on a
+        # primary_ref frame load_previous has already filled them from the reference.
+        var z = 0;
+        while (z < (AV1_MAX_SEGMENTS * AV1_SEG_LVL_MAX)) {
+            store64(fh + AV1FH_FEATURE_ENABLED + (z * 8), 0);
+            store64(fh + AV1FH_FEATURE_DATA + (z * 8), 0);
+            z = z + 1;
+        }
+    }
+    # enabled with segmentation_update_data == 0 keeps what load_previous loaded (5.9.14: the arrays are
+    # only written under update_data). SegIdPreSkip / LastActiveSegId are derived-only and not stored.
     return dr_br_err(br);
 }
 
@@ -3097,19 +3201,27 @@ fn av1_fh_seg_id_pre_skip(fh): i64 {
     return 0;
 }
 
-# av1_seg_supported — is this frame's segmentation config DECODABLE by the D1 spatial map reader?
-# 1 = decode it; 0 = reject cleanly (trust no input byte — never silently mis-decode). Rejects the
-# configs that need PrevSegmentIds (a DPB-saved seg map, a follow-on): the temporal-predicted map
-# (temporal_update), the whole-map copy (!update_map), and feature-data inheritance (!update_data).
-# A keyframe / PRIMARY_REF_NONE frame forces update_map=1, temporal=0, update_data=1, so it always
-# passes. Mixed lossless and lossy segments DECODE as of 0.8.2 (Lossless = LosslessArray[segment_id]
-# per block, av1_tile_block_setup); they used to reject here because the lossless cascade was
-# base_q-driven.
+# av1_seg_supported — does this frame use only segment FEATURES drishti implements? 1 = decode it; 0 = reject
+# cleanly (trust no input byte — a feature that is parsed but not applied mis-decodes SILENTLY). Every map
+# config decodes as of 0.8.2: the spatial read, the temporal seg_id_predicted read (temporal_update), the
+# copied map (!update_map) and the inherited feature data (!update_data, via load_previous). Mixed lossless
+# and lossy segments decode too (Lossless = LosslessArray[ segment_id ], av1_tile_block_setup). Two features
+# remain unimplemented and reject:
+#  - SEG_LVL_ALT_LF_Y_V + i (i = 0..3): the deblocker's per-segment level add (7.14.4) is not applied.
+#  - SEG_LVL_SKIP: read_skip (5.11.11) does not force skip = 1 for it, so the skip symbol it omits is read.
+# Both are roadmap.md 0.8.2 items.
 fn av1_seg_supported(fh): i64 {
     if (av1_fh_segmentation_enabled(fh) == 0) { return 1; }
-    if (av1_fh_segmentation_temporal_update(fh) != 0) { return 0; }
-    if (av1_fh_segmentation_update_map(fh) == 0) { return 0; }
-    if (av1_fh_segmentation_update_data(fh) == 0) { return 0; }
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        var j = AV1_SEG_LVL_ALT_LF_Y_V;
+        while (j < (AV1_SEG_LVL_ALT_LF_Y_V + 4)) {   # SEG_LVL_ALT_LF_Y_V + i, i < FRAME_LF_COUNT (7.14.4)
+            if (av1_fh_feature_enabled(fh, seg, j) != 0) { return 0; }
+            j = j + 1;
+        }
+        if (av1_fh_feature_enabled(fh, seg, AV1_SEG_LVL_SKIP) != 0) { return 0; }
+        seg = seg + 1;
+    }
     return 1;
 }
 
@@ -3921,6 +4033,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             store64(fh + AV1FH_MI_COLS, av1_ref_mi_cols(refs, idx));
             store64(fh + AV1FH_MI_ROWS, av1_ref_mi_rows(refs, idx));
             store64(fh + AV1FH_ORDER_HINT, av1_ref_order_hint(refs, idx));
+            if (ft == AV1_KEY_FRAME) {
+                # 7.21 load_loop_filter_params / load_segmentation_params: the shown KEY frame's deltas and
+                # feature arrays, which update_refs then saves into every slot (refresh = allFrames).
+                av1_ref_load_seg_lf(refs, idx, fh);
+            }
             store64(fh + AV1FH_FRAME_IS_INTRA, 1);
             if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
             store64(fh + AV1FH_BITS_CONSUMED, dr_br_bit_pos(br));
@@ -4118,6 +4235,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
     } else {
         store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, dr_br_read_bit(br));   # disable_frame_end_update_cdf f(1)
     }
+    av1_frame_past_state(fh, refs);   # setup_past_independence( ) / load_previous( ) (5.9.2)
 
     var rct = av1_tile_info(br, s, fh);
     if (rct != DR_OK) { store64(out_err, rct); return 0; }
@@ -4167,6 +4285,12 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 # ================================================================
 fn av1_frame_update_refs(refs, s, fh): i64 {
     var flags = av1_fh_refresh_frame_flags(fh);
+    # a show_existing KEY_FRAME re-saves the SHOWN slot's segmentation map (7.21 loads SegmentIds from it,
+    # 7.20 saves them back into every refreshed slot). Read before the loop — the shown slot is refreshed
+    # too. A decoded frame's map is saved by the frame decoder (av1_frame_dec_finish), not here.
+    var shown_segids = 0;
+    var from_shown = av1_fh_show_existing_frame(fh);
+    if (from_shown != 0) { shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh)); }
     var i = 0;
     while (i < AV1_NUM_REF_FRAMES) {
         if ((flags >> i) & 1) {
@@ -4201,6 +4325,27 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
                 }
                 ref = ref + 1;
             }
+            # save_segmentation_params( i ) + save_loop_filter_params( i ) (7.20).
+            var sg = 0;
+            while (sg < AV1_MAX_SEGMENTS) {
+                var sj = 0;
+                while (sj < AV1_SEG_LVL_MAX) {
+                    store64(refs + AV1REF_SAVED_FEAT_EN + ((((i * 8) + sg) * 8 + sj) * 8),
+                      av1_fh_feature_enabled(fh, sg, sj));
+                    store64(refs + AV1REF_SAVED_FEAT_DATA + ((((i * 8) + sg) * 8 + sj) * 8),
+                      av1_fh_feature_data(fh, sg, sj));
+                    sj = sj + 1;
+                }
+                sg = sg + 1;
+            }
+            var lk = 0;
+            while (lk < 8) {   # TOTAL_REFS_PER_FRAME
+                store64(refs + AV1REF_SAVED_LF_REF + (((i * 8) + lk) * 8), av1_fh_loop_filter_ref_delta(fh, lk));
+                lk = lk + 1;
+            }
+            store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
+            store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
+            if (from_shown != 0) { av1_ref_set_saved_segids(refs, i, shown_segids); }
         }
         i = i + 1;
     }
@@ -9872,10 +10017,11 @@ fn av1_coeff_br_cdf(q, txsz_ctx, ptype, ctx): i64 {
 # (feature-gated, roadmap.md 0.8.4): intrabc and palette CDFs.
 
 # The blob length in i64, named ONCE: av1_ncdf_new, the cross-frame CDF bundle (av1_intertile.cyr)
-# and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows; when
-# it was a literal in seven places, growing it meant finding all seven.
+# and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows and
+# 1905 -> 1914 for the three seg_id_predicted rows; when it was a literal in seven places, growing it meant
+# finding all seven.
 enum Av1NcdfSize {
-    AV1_NCDF_N = 1905;
+    AV1_NCDF_N = 1914;
 }
 
 var Av1_NCdf = 0;
@@ -10176,8 +10322,7 @@ fn av1_noncoeff_cdf_blob(): i64 {
     # ids). 8-symbol CDF = 8 cumulative freqs (ending 32768) + a 0 adaptation count. From the AV1 spec
     # additional-tables annex (10.additional.tables.md), the same source as every CDF above; extraction
     # validated against the committed Default_Cfl_Sign_Cdf @952 (byte-identical re-fetch). The TEMPORAL
-    # Default_Segment_Id_Predicted_Cdf is NOT added — the temporal-predicted map read needs PrevSegmentIds
-    # (a DPB-saved seg map), rejected as a follow-on (roadmap.md D1 temporal follow-on).
+    # Default_Segment_Id_Predicted_Cdf is at the blob's end, @1905 (0.8.2).
     store64(t + (1812 * 8), 5622);  store64(t + (1813 * 8), 7893);  store64(t + (1814 * 8), 16093);
     store64(t + (1815 * 8), 18233); store64(t + (1816 * 8), 27809); store64(t + (1817 * 8), 28373);
     store64(t + (1818 * 8), 32533); store64(t + (1819 * 8), 32768); store64(t + (1820 * 8), 0);
@@ -10212,11 +10357,20 @@ fn av1_noncoeff_cdf_blob(): i64 {
     # tables annex {28160, 32120, 32677, 32768, 0}, cross-checked against libaom av1/common/entropymode.c
     # default_delta_q_cdf / default_delta_lf_cdf / default_delta_lf_multi_cdf = AOM_CDF4(28160, 32120, 32677).
     var dr = 1875;
-    while (dr < AV1_NCDF_N) {
+    while (dr < 1905) {   # the six delta rows end where the seg_id_predicted rows begin
         store64(t + ((dr + 0) * 8), 28160); store64(t + ((dr + 1) * 8), 32120);
         store64(t + ((dr + 2) * 8), 32677); store64(t + ((dr + 3) * 8), 32768);
         store64(t + ((dr + 4) * 8), 0);
         dr = dr + 5;
+    }
+    # Default_Segment_Id_Predicted_Cdf[SEGMENT_ID_PREDICTED_CONTEXTS = 3] @ 1905..1913 — three 2-symbol rows,
+    # stride 3 = { 128 * 128, 32768, count }. Spec additional-tables annex; cross-checked against libaom
+    # av1/common/entropymode.c default_segment_pred_cdf = { AOM_CDF2(128 * 128) } x 3. All three are equal.
+    var pr = 1905;
+    while (pr < AV1_NCDF_N) {
+        store64(t + ((pr + 0) * 8), 16384); store64(t + ((pr + 1) * 8), 32768);
+        store64(t + ((pr + 2) * 8), 0);
+        pr = pr + 3;
     }
     Av1_NCdf = t;
     return t;
@@ -10261,6 +10415,9 @@ fn av1_ncdf_filter_intra_mode(cc): i64 { return cc + (1129 * 8); }
 fn av1_ncdf_delta_q(cc): i64 { return cc + (1875 * 8); }
 fn av1_ncdf_delta_lf(cc): i64 { return cc + (1880 * 8); }
 fn av1_ncdf_delta_lf_multi(cc, i): i64 { return cc + ((1885 + (i * 5)) * 8); }
+# seg_id_predicted (5.11.10, temporal segmentation): TileSegmentIdPredictedCdf[ ctx ], ctx = LeftSegPredContext[
+# MiRow ] + AboveSegPredContext[ MiCol ] (0..2). Stride 3.
+fn av1_ncdf_seg_id_predicted(cc, ctx): i64 { return cc + ((1905 + (ctx * 3)) * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }
 fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }
@@ -10465,9 +10622,8 @@ fn av1_modeinfo_new(): i64 {
 # ================================================================
 # Segment-id map coding (5.11.9 / 5.11.10 / 5.11.11 + neg_deinterleave) — the SPATIAL predictor,
 # shared by the intra (keyframe) and inter mode-info drivers. Raw grid pointer + stride (fmi_cols),
-# so this stays independent of the tile struct (defined in a LATER module). The temporal predictor
-# (segmentation_temporal_update) and the whole-map copy (!segmentation_update_map) need PrevSegmentIds
-# and are rejected upstream (av1_seg_supported); only the plain spatial read reaches here.
+# so this stays independent of the tile struct (defined in a LATER module). The inter lane's TEMPORAL
+# half (PrevSegmentIds, seg_id_predicted, the copied map) is the Av1SegCtx record below (0.8.2).
 # ================================================================
 fn av1_segid_at(segids, fmi_cols, r, c): i64 {
     return load64(segids + (((r * fmi_cols) + c) * 8));
@@ -10588,6 +10744,145 @@ fn av1_segid_store(segids, fmi_cols, fmi_rows, mi_row, mi_col, bw4, bh4, segment
         y = y + 1;
     }
     return 0;
+}
+
+# ================================================================
+# Av1SegCtx (0.8.2) — what inter_segment_id (5.11.10) needs beyond the spatial map: PrevSegmentIds
+# (load_previous_segment_ids, 5.9.2 — the primary reference's saved map, or 0 = all zero) and the two
+# seg_id_predicted context strips. Both strips are indexed by FRAME-absolute MI coordinates, as the spec
+# indexes them (AboveSegPredContext[ MiCol + i ], LeftSegPredContext[ MiRow + i ]), with 32 entries of
+# slack so a block overhanging the frame edge writes inside the allocation. One record per TILE: the spec
+# clears the above strip at each tile start and the left strip at each superblock row (clear_*_context).
+# ================================================================
+enum Av1SegCtx {
+    AV1SC_SEGIDS   = 0;    # SegmentIds map (u64 per MI, stride FMI_COLS) — the spatial predictor's input
+    AV1SC_PREV     = 8;    # PrevSegmentIds map (same layout), 0 = all zero
+    AV1SC_ABOVE    = 16;   # AboveSegPredContext: FMI_COLS + 32 u64
+    AV1SC_LEFT     = 24;   # LeftSegPredContext: FMI_ROWS + 32 u64
+    AV1SC_FMI_COLS = 32;   # MiCols (frame)
+    AV1SC_FMI_ROWS = 40;   # MiRows (frame)
+    AV1SC_SIZE     = 48;   # bytes
+}
+fn av1_segctx_new(segids, prev, fmi_cols, fmi_rows): i64 {
+    var sc = alloc(AV1SC_SIZE);   # AV1SC_SIZE bytes
+    if (sc == 0) { return 0; }
+    var above = alloc((fmi_cols + 32) * 8);   # (FMI_COLS + 32) u64
+    var left = alloc((fmi_rows + 32) * 8);    # (FMI_ROWS + 32) u64
+    if ((above == 0) || (left == 0)) { return 0; }
+    memset(above, 0, (fmi_cols + 32) * 8);   # alloc does not zero
+    memset(left, 0, (fmi_rows + 32) * 8);
+    store64(sc + AV1SC_SEGIDS, segids);
+    store64(sc + AV1SC_PREV, prev);
+    store64(sc + AV1SC_ABOVE, above);
+    store64(sc + AV1SC_LEFT, left);
+    store64(sc + AV1SC_FMI_COLS, fmi_cols);
+    store64(sc + AV1SC_FMI_ROWS, fmi_rows);
+    return sc;
+}
+# clear_above_context / clear_left_context (5.11.2 semantics): AboveSegPredContext / LeftSegPredContext = 0.
+fn av1_segctx_clear_above(sc): i64 {
+    if (sc == 0) { return 0; }
+    memset(load64(sc + AV1SC_ABOVE), 0, (load64(sc + AV1SC_FMI_COLS) + 32) * 8);
+    return 0;
+}
+fn av1_segctx_clear_left(sc): i64 {
+    if (sc == 0) { return 0; }
+    memset(load64(sc + AV1SC_LEFT), 0, (load64(sc + AV1SC_FMI_ROWS) + 32) * 8);
+    return 0;
+}
+# get_segment_id( ) (5.11.10 helper): the minimum PrevSegmentIds value over the block footprint, clipped to
+# the frame (xMis = Min( MiCols - MiCol, bw4 ), yMis likewise). seg starts at 7 as in the spec; an all-zero
+# PrevSegmentIds (prev == 0) yields 0 without a walk.
+fn av1_get_segment_id(sc, mi_row, mi_col, bw4, bh4): i64 {
+    var prev = load64(sc + AV1SC_PREV);
+    if (prev == 0) { return 0; }
+    var fmi_cols = load64(sc + AV1SC_FMI_COLS);
+    var x_mis = av1_min(fmi_cols - mi_col, bw4);
+    var y_mis = av1_min(load64(sc + AV1SC_FMI_ROWS) - mi_row, bh4);
+    var seg = 7;
+    var y = 0;
+    while (y < y_mis) {
+        var x = 0;
+        while (x < x_mis) {
+            seg = av1_min(seg, av1_segid_at(prev, fmi_cols, mi_row + y, mi_col + x));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return seg;
+}
+# the seg_id_predicted ctx (8.3.2): LeftSegPredContext[ MiRow ] + AboveSegPredContext[ MiCol ].
+fn av1_segpred_ctx(sc, mi_row, mi_col): i64 {
+    return load64(load64(sc + AV1SC_LEFT) + (mi_row * 8)) + load64(load64(sc + AV1SC_ABOVE) + (mi_col * 8));
+}
+# AboveSegPredContext[ MiCol + i ] = v for i < bw4, LeftSegPredContext[ MiRow + i ] = v for i < bh4.
+fn av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, v): i64 {
+    var above = load64(sc + AV1SC_ABOVE);
+    var left = load64(sc + AV1SC_LEFT);
+    var i = 0;
+    while (i < bw4) { store64(above + ((mi_col + i) * 8), v); i = i + 1; }
+    var j = 0;
+    while (j < bh4) { store64(left + ((mi_row + j) * 8), v); j = j + 1; }
+    return 0;
+}
+# inter_segment_id( preSkip ) (5.11.10), transcribed branch for branch. sc carries the spatial map, so
+# read_segment_id (5.11.9) runs off AV1SC_SEGIDS; skip is the already-read skip (0 on the preSkip call).
+fn av1_inter_segment_id(sd, ncc, fh, sc, mi_row, mi_col, mi_size, avail_u, avail_l, pre_skip, skip): i64 {
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 0; }
+    var bw4 = av1_num_4x4_w(mi_size);
+    var bh4 = av1_num_4x4_h(mi_size);
+    var predicted = av1_get_segment_id(sc, mi_row, mi_col, bw4, bh4);
+    if (av1_fh_segmentation_update_map(fh) == 0) { return predicted; }
+    if ((pre_skip != 0) && (av1_fh_seg_id_pre_skip(fh) == 0)) { return 0; }
+    var segids = load64(sc + AV1SC_SEGIDS);
+    var fmi_cols = load64(sc + AV1SC_FMI_COLS);
+    if ((pre_skip == 0) && (skip != 0)) {
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, 0);   # seg_id_predicted = 0
+        return av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 1);
+    }
+    if (av1_fh_segmentation_temporal_update(fh) != 0) {
+        var p = av1_sym_read_symbol(sd, av1_ncdf_seg_id_predicted(ncc, av1_segpred_ctx(sc, mi_row, mi_col)), 2);
+        var seg = predicted;
+        if (p == 0) {
+            seg = av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0);
+        }
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, p);
+        return seg;
+    }
+    return av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0);
+}
+# the encode mirror. Returns DR_OK, or DR_ERR_BOUNDS for a segment_id the bitstream cannot carry: a copied
+# map (update_map == 0) DERIVES the predicted id, and a skip block derives the spatial prediction, so a
+# plan claiming anything else would decode differently. seg_id_predicted is coded 1 exactly when the plan's
+# id equals the temporal prediction (libaom's encoder rule; the spec allows 0 there too, so 1 is a choice).
+fn av1_write_inter_segment_id(enc, ncc, fh, sc, mi_row, mi_col, mi_size, avail_u, avail_l, pre_skip, skip,
+  segment_id): i64 {
+    if (av1_fh_segmentation_enabled(fh) == 0) { return DR_OK; }
+    var bw4 = av1_num_4x4_w(mi_size);
+    var bh4 = av1_num_4x4_h(mi_size);
+    var predicted = av1_get_segment_id(sc, mi_row, mi_col, bw4, bh4);
+    if (av1_fh_segmentation_update_map(fh) == 0) {
+        if (segment_id != predicted) { return DR_ERR_BOUNDS; }
+        return DR_OK;
+    }
+    if ((pre_skip != 0) && (av1_fh_seg_id_pre_skip(fh) == 0)) { return DR_OK; }
+    var segids = load64(sc + AV1SC_SEGIDS);
+    var fmi_cols = load64(sc + AV1SC_FMI_COLS);
+    if ((pre_skip == 0) && (skip != 0)) {
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, 0);
+        return av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 1, segment_id);
+    }
+    if (av1_fh_segmentation_temporal_update(fh) != 0) {
+        var p = (segment_id == predicted);
+        av1_sym_encode_symbol(enc, av1_ncdf_seg_id_predicted(ncc, av1_segpred_ctx(sc, mi_row, mi_col)), 2, p);
+        var rc = DR_OK;
+        if (p == 0) {
+            rc = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0, segment_id);
+        }
+        av1_segpred_store(sc, mi_row, mi_col, bw4, bh4, p);
+        return rc;
+    }
+    return av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0, segment_id);
 }
 
 # ================================================================
@@ -12363,13 +12658,40 @@ enum Av1TileOff {
     AV1TILE_LOSSLESS_MASK = 640;
     AV1TILE_CUR_LOSSLESS  = 648;
     AV1TILE_CUR_TXQ       = 656;
-    AV1TILE_SIZE          = 664;
+    # --- temporal segmentation (0.8.2): the tile's Av1SegCtx (av1_modeinfo.cyr) — PrevSegmentIds + the
+    #     seg_id_predicted context strips inter_segment_id needs. Per TILE (the strips are cleared per tile /
+    #     per SB row); 0 until av1_tile_seg_attach or the first av1_tile_segctx. ---
+    AV1TILE_SEGCTX        = 664;
+    AV1TILE_SIZE          = 672;
 }
 fn av1_tile_dctx(tile): i64 {
     if (tile == 0) { return 0; }
     return load64(tile + AV1TILE_DCTX);
 }
 fn av1_tile_set_dctx(tile, d): i64 { store64(tile + AV1TILE_DCTX, d); return 0; }
+# attach a fresh Av1SegCtx carrying PrevSegmentIds `prev` (0 = all zero). Call after the SegmentIds grid
+# exists (av1_tile_grids_new / av1_tile_share_grids). Returns DR_OK or DR_ERR_OOM.
+fn av1_tile_seg_attach(tile, prev): i64 {
+    var sc = av1_segctx_new(load64(tile + AV1TILE_SEGIDS), prev, load64(tile + AV1TILE_FMI_COLS),
+      load64(tile + AV1TILE_FMI_ROWS));
+    if (sc == 0) { return DR_ERR_OOM; }
+    store64(tile + AV1TILE_SEGCTX, sc);
+    return DR_OK;
+}
+# the tile's Av1SegCtx for inter_segment_id. A tile nobody attached one to (a tile-level caller) gets one
+# with an all-zero PrevSegmentIds on first use. The map pointer is refreshed from the tile every call, so a
+# grid shared AFTER the attach is still the one read. 0 when the tile has no SegmentIds grid.
+fn av1_tile_segctx(tile): i64 {
+    var segids = load64(tile + AV1TILE_SEGIDS);
+    if (segids == 0) { return 0; }
+    var sc = load64(tile + AV1TILE_SEGCTX);
+    if (sc == 0) {
+        if (av1_tile_seg_attach(tile, 0) != DR_OK) { return 0; }
+        sc = load64(tile + AV1TILE_SEGCTX);
+    }
+    store64(sc + AV1SC_SEGIDS, segids);
+    return sc;
+}
 # DeltaLFs[ r ][ c ][ i ] — 0 when the grids were never allocated (a tile-level test without grids).
 fn av1_dlf_get(tile, i, r, c): i64 {
     if (load64(tile + AV1TILE_DLF + (i * 8)) == 0) { return 0; }
@@ -12459,6 +12781,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_ICDEF, 0);
     store64(tile + AV1TILE_IERR, 0);
     store64(tile + AV1TILE_DCTX, 0);              # no deltas unless the driver attaches an Av1DeltaCtx
+    store64(tile + AV1TILE_SEGCTX, 0);            # Av1SegCtx: attached by the frame driver, or on first use
     store64(tile + AV1TILE_DLF + 0, 0);           # DeltaLFs grids: allocated by av1_tile_grids_new
     store64(tile + AV1TILE_DLF + 8, 0);
     store64(tile + AV1TILE_DLF + 16, 0);
@@ -14515,7 +14838,7 @@ fn av1_coeff_cdf_qbucket(base_q_idx): i64 {
 }
 
 # clear_above_context (5.11.2): zero AboveLevelContext / AboveDcContext per plane
-# (the whole allocated strip, covering the tile's plane 4x4 columns + padding).
+# (the whole allocated strip, covering the tile's plane 4x4 columns + padding), and AboveSegPredContext.
 fn av1_clear_above_context(tile, num_planes): i64 {
     var n = load64(tile + AV1TILE_MI_COLS) + 32;
     var plane = 0;
@@ -14530,9 +14853,10 @@ fn av1_clear_above_context(tile, num_planes): i64 {
         }
         plane = plane + 1;
     }
+    av1_segctx_clear_above(load64(tile + AV1TILE_SEGCTX));   # AboveSegPredContext (0 = no record: no-op)
     return 0;
 }
-# clear_left_context (5.11.2): zero LeftLevelContext / LeftDcContext per plane.
+# clear_left_context (5.11.2): zero LeftLevelContext / LeftDcContext per plane, and LeftSegPredContext.
 fn av1_clear_left_context(tile, num_planes): i64 {
     var n = load64(tile + AV1TILE_MI_ROWS) + 32;
     var plane = 0;
@@ -14547,6 +14871,7 @@ fn av1_clear_left_context(tile, num_planes): i64 {
         }
         plane = plane + 1;
     }
+    av1_segctx_clear_left(load64(tile + AV1TILE_SEGCTX));    # LeftSegPredContext
     return 0;
 }
 
@@ -22390,33 +22715,31 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # grid; ctx carries the block geometry as for 5.11.23. above_skip/left_skip and
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
 # cdef_ctx is the intra path's splice record (0 to skip); dctx is the tile's Av1DeltaCtx for
-# read_delta_qindex / read_delta_lf (0 = no deltas). A non-spatial segmentation config
-# (av1_seg_supported) still gates hard rather than desync (roadmap.md 0.8.2). Segment-id reads,
-# read_cdef, the deltas and the intra fork are all wired below.
+# read_delta_qindex / read_delta_lf (0 = no deltas); sctx is the tile's Av1SegCtx (SegmentIds +
+# PrevSegmentIds + the seg_id_predicted strips; 0 is fine when segmentation is off). A segment FEATURE
+# drishti does not implement (av1_seg_supported) gates hard rather than desync. Segment-id reads (spatial,
+# temporal, copied), read_cdef, the deltas and the intra fork are all wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, segids, dctx): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
+    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
-    if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the map grid
+    if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the Av1SegCtx
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
     var mi_col = load64(ctx + AV1MVC_MI_COL);
     var fmi_cols = load64(ctx + AV1MVC_FMI_COLS);
     # the 5.11.15 preamble: the neighbour reference cache.
     av1_nbctx_setup(nb, load64(ctx + AV1MVC_GRID), fmi_cols, mi_row, mi_col, avail_u, avail_l);
-    # inter_segment_id(1) (5.11.10): a SegIdPreSkip frame reads the segment BEFORE skip (skip=0 then);
-    # otherwise the read happens in the inter_segment_id(0) call after skip. Only the decodable spatial
-    # config reaches here (av1_seg_supported gated temporal / !update_map / !update_data upstream).
+    # inter_segment_id( 1 ) (5.11.10), called unconditionally as the spec does (skip = 0 at this point): a
+    # SegIdPreSkip frame reads the segment here; a copied map (update_map 0) yields the PREDICTED id here,
+    # before skip_mode / skip see it; any other frame yields 0 and reads in inter_segment_id( 0 ) below.
     var seg_pre = 0;
     if (seg_enabled != 0) { seg_pre = av1_fh_seg_id_pre_skip(fh); }
-    var segment_id = 0;
-    if ((seg_enabled != 0) && (seg_pre != 0)) {
-        segment_id = av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0);
-    }
+    var segment_id = av1_inter_segment_id(sd, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 1, 0);
     store64(out + AV1FB_SEGID, segment_id);
     var skip_mode = av1_read_skip_mode(sd, cc_ref, skip_mode_ctx, fh, segment_id, mi_size);
     store64(out + AV1FB_SKIPMODE, skip_mode);
@@ -22425,12 +22748,12 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
         skip = av1_read_skip(sd, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip));
     }
     store64(out + AV1FB_SKIP, skip);
-    # inter_segment_id(0) (5.11.10): the !SegIdPreSkip case reads the segment AFTER skip (read_segment_id
-    # short-circuits to pred when skip). is_inter / ref_frames below then see the FINAL segment_id — the
+    # inter_segment_id( 0 ) (5.11.10) when !SegIdPreSkip: the segment AFTER skip (a skip block takes the
+    # spatial prediction, no symbol). is_inter / ref_frames below then see the FINAL segment_id — the
     # features they consult (SKIP/REF_FRAME/GLOBALMV, all j>=SEG_LVL_REF_FRAME) force SegIdPreSkip=1, so a
     # !SegIdPreSkip frame has none of them active and segment_id=0 for those reads is equivalent.
     if ((seg_enabled != 0) && (seg_pre == 0)) {
-        segment_id = av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip);
+        segment_id = av1_inter_segment_id(sd, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 0, skip);
         store64(out + AV1FB_SEGID, segment_id);
     }
     # Lossless is tile-layer state, exactly as on the intra path. read_cdef (5.11.56) splice:
@@ -22465,27 +22788,29 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
   ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, segids, dctx): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
+    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
-    if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }
+    if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
     var mi_col = load64(ctx + AV1MVC_MI_COL);
     var fmi_cols = load64(ctx + AV1MVC_FMI_COLS);
     av1_nbctx_setup(nb, load64(ctx + AV1MVC_GRID), fmi_cols, mi_row, mi_col, avail_u, avail_l);
-    # inter_segment_id (5.11.10) mirror — same SegIdPreSkip ordering as decode. seg_before is the value
-    # the skip_mode/is_inter feature gates see (segid iff SegIdPreSkip, else 0 — equivalent, as those
-    # gates only consult j>=SEG_LVL_REF_FRAME features which force SegIdPreSkip=1).
+    # inter_segment_id (5.11.10) mirror — same call order as decode. seg_before is the value the decoder
+    # holds after inter_segment_id( 1 ), which the skip_mode feature gate sees: the plan's id under
+    # SegIdPreSkip or a copied map (the copy is checked == predicted), else 0 — equivalent, as those gates
+    # only consult j>=SEG_LVL_REF_FRAME features which force SegIdPreSkip=1.
     var seg_pre = 0;
     if (seg_enabled != 0) { seg_pre = av1_fh_seg_id_pre_skip(fh); }
     var segid = load64(blk + AV1FB_SEGID);
     var seg_before = 0;
-    if (seg_pre != 0) { seg_before = segid; }
-    if ((seg_enabled != 0) && (seg_pre != 0)) {
-        var sp = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, 0, segid);
+    if ((seg_enabled != 0) && ((seg_pre != 0) || (av1_fh_segmentation_update_map(fh) == 0))) { seg_before = segid; }
+    if (seg_enabled != 0) {
+        var sp = av1_write_inter_segment_id(enc, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 1, 0,
+          segid);
         if (sp != DR_OK) { return sp; }
     }
     var skip_mode = load64(blk + AV1FB_SKIPMODE);
@@ -22499,7 +22824,7 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
           load64(blk + AV1FB_SKIP));
     }
     if ((seg_enabled != 0) && (seg_pre == 0)) {
-        var sp0 = av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l,
+        var sp0 = av1_write_inter_segment_id(enc, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 0,
           load64(blk + AV1FB_SKIP), segid);
         if (sp0 != DR_OK) { return sp0; }
     }
@@ -22894,10 +23219,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
         store64(out_err, DR_ERR_UNSUPPORTED);
         return 0;
     }
-    # segmentation (0.7.125 D1): the DECODABLE configs (spatial map read, per-segment qindex) now
-    # decode on BOTH lanes (av1_intra_segment_id / av1_inter_segment_id). av1_seg_supported gates the
-    # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) —
-    # which still REJECT cleanly (trust no input byte). Mixed lossless / lossy segments decode (0.8.2). The
+    # segmentation: every MAP config decodes on BOTH lanes — spatial (0.7.125 D1), and the temporal
+    # seg_id_predicted read, the copied map and inherited feature data (0.8.2, PrevSegmentIds attached per
+    # tile below). Mixed lossless / lossy segments decode (0.8.2). av1_seg_supported now gates only the segment
+    # FEATURES drishti parses but does not apply (ALT_LF, SKIP), which REJECT cleanly (trust no input byte). The
     # per-superblock delta_q / delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile
     # loop below); they used to reject here because reading neither desynced the intra path.
     if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
@@ -23018,6 +23343,11 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         } else {
             av1_tile_share_grids(tile, tile0);
         }
+        # temporal segmentation (0.8.2): each tile's Av1SegCtx, carrying PrevSegmentIds — the primary
+        # reference's saved map when load_previous_segment_ids (5.9.2) finds one, else all zero.
+        if (av1_tile_seg_attach(tile, av1_frame_prev_segids(fh, load64(fdc + AV1FDEC_REFS))) != DR_OK) {
+            store64(out_err, DR_ERR_OOM); return 0 - 1;
+        }
         av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
         var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
         if (ar != DR_OK) { store64(out_err, ar); return 0 - 1; }
@@ -23079,6 +23409,25 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                     i = i + 1;
                 }
             }
+        }
+    }
+    # SavedSegmentIds (7.20), with the 7.4 step-7 copy folded in. A frame that kept its map (segmentation_enabled
+    # && !segmentation_update_map) ENDS with SegmentIds = PrevSegmentIds exactly, so its slots save
+    # PrevSegmentIds itself (aliased — never mutated) rather than the per-block minimums the decode stamped:
+    # those minimums are what THIS frame's deblocker reads, and step 7 runs after the loop filter. An
+    # unsegmented frame's map is all zero (every block's segment_id is 0), saved as 0. One map pointer is
+    # aliased into every refreshed slot; the decode grid is per frame and never written after this.
+    if (refs != 0) {
+        var save_ids = 0;
+        if (av1_fh_segmentation_enabled(fh) != 0) {
+            save_ids = load64(tile0 + AV1TILE_SEGIDS);
+            if (av1_fh_segmentation_update_map(fh) == 0) { save_ids = av1_frame_prev_segids(fh, refs); }
+        }
+        var srff = av1_fh_refresh_frame_flags(fh);
+        var si = 0;
+        while (si < 8) {
+            if (((srff >> si) & 1) != 0) { av1_ref_set_saved_segids(refs, si, save_ids); }
+            si = si + 1;
         }
     }
     # CDF SAVE (C1, 7.20): save the frame's exit CDF context into every refreshed DPB slot, so a future
@@ -24633,7 +24982,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
       load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
       load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
       load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      load64(tile + AV1TILE_LOSSLESS_MASK), load64(tile + AV1TILE_SEGIDS), av1_tile_dctx(tile));
+      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # per-segment dequant (0.7.125 D1): resolve this block's qindex from its segment_id so residual()
     # dequantizes at the right quantizer. == base_q when segmentation is disabled / segment inactive. Also
@@ -25102,7 +25451,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
       load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
       load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
       load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      load64(tile + AV1TILE_LOSSLESS_MASK), load64(tile + AV1TILE_SEGIDS), av1_tile_dctx(tile));
+      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # mirror of decode: the per-block Lossless / tx-type gate the tx-size and residual writes below use.
     av1_tile_block_setup(tile, fh, av1_fb_segment_id(fb));
@@ -25206,22 +25555,23 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
 # ================================================================
 # C1: cross-frame CDF inheritance (spec 7.20 save / 7.21 load).
 # A saved-CDF bundle is ONE flat alloc holding COPIES of all six adaptive-CDF families back to back
-# (ncc AV1_NCDF_N = 1905, cc 3999, ref 177, im 341, ii 566, mv 286 = 7274 i64). The symbol coder adapts
+# (ncc AV1_NCDF_N = 1914, cc 3999, ref 177, im 341, ii 566, mv 286 = 7283 i64). The symbol coder adapts
 # the per-tile copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future
 # frame whose primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families
 # are flat and pointer-free, so a plain word copy is a full copy. ncc grew 1839 -> 1875 for
-# Default_Partition_W128_Cdf (0.7.126) and 1875 -> 1905 for the delta_q / delta_lf CDFs (0.8.2); the
+# Default_Partition_W128_Cdf (0.7.126), 1875 -> 1905 for the delta_q / delta_lf CDFs and 1905 -> 1914 for
+# seg_id_predicted (both 0.8.2); the
 # offsets are NAMED here because each growth used to mean re-typing twenty literals across save,
 # defaults and load. tests/av1_intertile.tcyr pins every one of them as a literal.
 # ================================================================
 enum Av1CdfBundle {
-    AV1CB_NCC = 0;       # AV1_NCDF_N  (1905)
-    AV1CB_CC  = 1905;    # 3999
-    AV1CB_REF = 5904;    # 177
-    AV1CB_IM  = 6081;    # 341
-    AV1CB_II  = 6422;    # 566
-    AV1CB_MV  = 6988;    # 286
-    AV1CB_N   = 7274;
+    AV1CB_NCC = 0;       # AV1_NCDF_N  (1914)
+    AV1CB_CC  = 1914;    # 3999
+    AV1CB_REF = 5913;    # 177
+    AV1CB_IM  = 6090;    # 341
+    AV1CB_II  = 6431;    # 566
+    AV1CB_MV  = 6997;    # 286
+    AV1CB_N   = 7283;
 }
 fn av1_cdf_bundle_new(): i64 { return alloc(AV1CB_N * 8); }
 # Reset the per-row ADAPTATION COUNTERS in a saved bundle (libaom av1_reset_cdf_symbol_counters,

@@ -1228,6 +1228,23 @@ fn dec_reject(mutate_field, value, tag): i64 {
     return 0;
 }
 
+# segmentation on (spatial map) + FeatureEnabled[ 3 ][ j ] = 1 on the reject-control keyframe: rejected,
+# DR_ERR_UNSUPPORTED, before a single symbol is read.
+fn dec_reject_seg_feature(j, tag): i64 {
+    var olen = 0;
+    var out = frame_enc_keyframe(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((3 * 8 + j) * 8), 1);
+    var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
+    assert_eq(frame, 0, tag);
+    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, tag);
+    return 0;
+}
+
 # C1 (7.20): decoding a frame through the frame path SAVES its CDFs into every DPB slot its
 # refresh_frame_flags marks (and leaves the others null), so a future frame can inherit them.
 # Witnesses the av1_frame_dec_finish save loop + its refresh_frame_flags gating + the one-bundle
@@ -1260,7 +1277,7 @@ fn test_cdf_save_populates_slots() {
     var cceq = 1;
     var wj = 0;
     while (wj < 3999) {
-        if (load64(b + ((1905 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
+        if (load64(b + ((1914 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
         wj = wj + 1;
     }
     assert_eq(cceq, 1, "CDF save: disable_frame_end_update_cdf=1 saves the INITIAL (default) coeff CDFs");
@@ -1290,9 +1307,12 @@ fn test_silent_misdecode_rejects() {
     var oe = alloc(8);
     assert_eq(av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe) != 0, 1,
       "reject control: the unflagged stream still decodes");
-    # segmentation with update_map=0 (the memset default here) needs PrevSegmentIds — an unsupported
-    # config, still rejected. A SUPPORTED spatial-map keyframe now DECODES (witnessed in av1_partition.tcyr).
-    dec_reject(AV1FH_SEG_ENABLED, 1, "segmentation update_map=0 rejected (needs PrevSegmentIds)");
+    # every segmentation MAP config decodes as of 0.8.2 (spatial / temporal / copied / inherited); the two
+    # segment FEATURES drishti parses but does not apply still reject — a per-segment loop-filter level and
+    # SEG_LVL_SKIP. A segmentation-on keyframe with neither DECODES (witnessed in av1_partition.tcyr).
+    dec_reject_seg_feature(AV1_SEG_LVL_ALT_LF_Y_V, "SEG_LVL_ALT_LF_Y_V rejected (7.14.4 level add unimplemented)");
+    dec_reject_seg_feature(AV1_SEG_LVL_ALT_LF_Y_V + 3, "SEG_LVL_ALT_LF_Y_V + 3 rejected (the V-plane level)");
+    dec_reject_seg_feature(AV1_SEG_LVL_SKIP, "SEG_LVL_SKIP rejected (read_skip does not force skip)");
     dec_reject(AV1FH_ALLOW_INTRABC, 1, "allow_intrabc rejected (5.11.6 unimplemented)");
     dec_reject(AV1FH_ALLOW_SCT, 1, "allow_screen_content_tools rejected (palette unimplemented)");
     # primary_ref_frame only binds on a NON-intra frame; the spec forces PRIMARY_REF_NONE on

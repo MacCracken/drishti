@@ -36,12 +36,13 @@
 #
 # SCOPE (0.7.x frame-header bite): the header is parsed and every field
 # stored or (for film-grain point/AR-coefficient arrays) consumed
-# bit-exactly. Cross-frame CDF / loop-filter-delta / segment-id
-# inheritance via load_previous (primary_ref_frame != PRIMARY_REF_NONE)
-# is a decode-state concern (deferred; docs/development/roadmap.md 0.7.x).
-# The ref state machine tracks the dimension/order-hint/gm slots the
-# header itself consults, which is what set_frame_refs and
-# frame_size_with_refs need.
+# bit-exactly. load_previous (primary_ref_frame != PRIMARY_REF_NONE) brings
+# the segment features and loop-filter deltas in from the primary reference
+# at the 5.9.2 split (av1_frame_past_state); the CDF and segment-MAP halves of
+# the same inheritance are decode state (av1_frame_dec_*, av1_frame_prev_segids).
+# The ref state machine tracks the dimension/order-hint/gm slots the header
+# itself consults (set_frame_refs, frame_size_with_refs) plus the per-slot
+# 7.20 saves those two loads read back.
 
 # ================================================================
 # Spec constants (5.9 semantics + section 3 symbols).
@@ -95,6 +96,7 @@ enum Av1FrameConst {
     AV1_MAX_SEGMENTS                = 8;
     AV1_SEG_LVL_MAX                 = 8;
     AV1_SEG_LVL_ALT_Q               = 0;
+    AV1_SEG_LVL_ALT_LF_Y_V          = 1;
     AV1_SEG_LVL_REF_FRAME           = 5;
     AV1_SEG_LVL_SKIP                = 6;
     AV1_SEG_LVL_GLOBALMV            = 7;
@@ -239,7 +241,14 @@ enum Av1RefOff {
     AV1REF_SAVED_GM           = 1408;   # [8][7][6] -> 4096
     AV1REF_SAVED_MF           = 4096;    # [8] i64 pointers to each slot's saved motion field (0.7.102) -> 4160
     AV1REF_SAVED_CDF          = 4160;    # [8] i64 pointers to each slot's saved CDF bundle (7.20/7.21, C1) -> 4224
-    AV1REF_SIZE               = 4224;
+    # save_segmentation_params / save_loop_filter_params / SavedSegmentIds (7.20), read back by
+    # load_previous (5.9.2) and the show_existing 7.21 load (0.8.2 temporal segmentation):
+    AV1REF_SAVED_SEGIDS       = 4224;    # [8] i64 pointers to each slot's SavedSegmentIds map (0 = all zero) -> 4288
+    AV1REF_SAVED_FEAT_EN      = 4288;    # [8 slot][8 seg][8 lvl] FeatureEnabled   -> 8384
+    AV1REF_SAVED_FEAT_DATA    = 8384;    # [8 slot][8 seg][8 lvl] FeatureData      -> 12480
+    AV1REF_SAVED_LF_REF       = 12480;   # [8 slot][8] loop_filter_ref_deltas      -> 12992
+    AV1REF_SAVED_LF_MODE      = 12992;   # [8 slot][2] loop_filter_mode_deltas     -> 13120
+    AV1REF_SIZE               = 13120;
 }
 
 # ================================================================
@@ -386,6 +395,19 @@ fn av1_ref_set_saved_cdf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_CDF + (i * 8
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }
+# SavedSegmentIds[ i ] (7.20): the per-slot pointer to slot i's saved segmentation map — frame-addressed u64
+# per MI, stride RefMiCols[ i ]; 0 = all-zero (an unsegmented or never-refreshed slot). Never mutated after
+# it is saved (the decoder aliases it; a later frame copies out of it), so one buffer serves many slots.
+fn av1_ref_saved_segids(r, i): i64 { return load64(r + AV1REF_SAVED_SEGIDS + (i * 8)); }
+fn av1_ref_set_saved_segids(r, i, ptr): i64 { store64(r + AV1REF_SAVED_SEGIDS + (i * 8), ptr); return 0; }
+fn av1_ref_saved_feature_enabled(r, i, seg, j): i64 {
+    return load64(r + AV1REF_SAVED_FEAT_EN + ((((i * 8) + seg) * 8 + j) * 8));
+}
+fn av1_ref_saved_feature_data(r, i, seg, j): i64 {
+    return load64(r + AV1REF_SAVED_FEAT_DATA + ((((i * 8) + seg) * 8 + j) * 8));
+}
+fn av1_ref_saved_lf_ref_delta(r, i, j): i64 { return load64(r + AV1REF_SAVED_LF_REF + (((i * 8) + j) * 8)); }
+fn av1_ref_saved_lf_mode_delta(r, i, j): i64 { return load64(r + AV1REF_SAVED_LF_MODE + (((i * 2) + j) * 8)); }
 
 # ================================================================
 # is_scaled (spec 5.11.27) — does refFrame use a scaled reference? The stored ref's
@@ -645,10 +667,11 @@ fn av1_read_interpolation_filter(br, fh): i64 {
 # ================================================================
 # 5.9.11 loop_filter_params.
 # ================================================================
-fn av1_loop_filter_params(br, s, fh): i64 {
-    # setup_past_independence / lossless defaults for the ref/mode deltas
-    # (identical in both spec branches): INTRA 1, GOLDEN/ALTREF/ALTREF2 -1,
-    # the rest 0.
+# The default loop-filter ref/mode deltas: INTRA 1, GOLDEN/ALTREF/ALTREF2 -1, the rest 0. Written by
+# setup_past_independence AND by loop_filter_params' CodedLossless / allow_intrabc branch — the only two
+# places. Every other frame STARTS from the deltas load_previous brought in from its primary reference
+# (5.9.11 semantics: "If this syntax element is not present, it maintains its previous value").
+fn av1_lf_default_deltas(fh): i64 {
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_INTRA_FRAME * 8), 1);
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST_FRAME * 8), 0);
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_LAST2_FRAME * 8), 0);
@@ -659,9 +682,81 @@ fn av1_loop_filter_params(br, s, fh): i64 {
     store64(fh + AV1FH_LF_REF_DELTAS + (AV1_ALTREF2_FRAME * 8), 0 - 1);
     store64(fh + AV1FH_LF_MODE_DELTAS + 0, 0);
     store64(fh + AV1FH_LF_MODE_DELTAS + 8, 0);
+    return 0;
+}
+
+# setup_past_independence (5.9.2 semantics), the frame-header half: FeatureData / FeatureEnabled = 0,
+# loop_filter_delta_enabled = 1, and the default ref/mode deltas. PrevGmParams is av1_prev_gm_param (it is
+# derived at its single use) and PrevSegmentIds is decode state (av1_frame_prev_segids is 0, all zero, here).
+fn av1_setup_past_independence(fh): i64 {
+    var i = 0;
+    while (i < (AV1_MAX_SEGMENTS * AV1_SEG_LVL_MAX)) {
+        store64(fh + AV1FH_FEATURE_ENABLED + (i * 8), 0);
+        store64(fh + AV1FH_FEATURE_DATA + (i * 8), 0);
+        i = i + 1;
+    }
+    store64(fh + AV1FH_LF_DELTA_ENABLED, 1);
+    av1_lf_default_deltas(fh);
+    return 0;
+}
+
+# load_loop_filter_params( slot ) + load_segmentation_params( slot ) (7.21): the deltas and the segment
+# feature arrays saved by 7.20 come back into the current frame header. Used by load_previous (5.9.2) and by
+# the show_existing_frame KEY_FRAME load, which re-saves them into every slot it refreshes.
+fn av1_ref_load_seg_lf(refs, slot, fh): i64 {
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        var j = 0;
+        while (j < AV1_SEG_LVL_MAX) {
+            store64(fh + AV1FH_FEATURE_ENABLED + ((seg * 8 + j) * 8),
+              av1_ref_saved_feature_enabled(refs, slot, seg, j));
+            store64(fh + AV1FH_FEATURE_DATA + ((seg * 8 + j) * 8),
+              av1_ref_saved_feature_data(refs, slot, seg, j));
+            j = j + 1;
+        }
+        seg = seg + 1;
+    }
+    var k = 0;
+    while (k < 8) {   # TOTAL_REFS_PER_FRAME
+        store64(fh + AV1FH_LF_REF_DELTAS + (k * 8), av1_ref_saved_lf_ref_delta(refs, slot, k));
+        k = k + 1;
+    }
+    store64(fh + AV1FH_LF_MODE_DELTAS + 0, av1_ref_saved_lf_mode_delta(refs, slot, 0));
+    store64(fh + AV1FH_LF_MODE_DELTAS + 8, av1_ref_saved_lf_mode_delta(refs, slot, 1));
+    return 0;
+}
+
+# load_previous_segment_ids( ) (5.9.2 semantics): PrevSegmentIds = SavedSegmentIds[ prevFrame ] when
+# segmentation_enabled and RefMiCols / RefMiRows [ prevFrame ] equal MiCols / MiRows; otherwise all zero
+# (returned as 0). PRIMARY_REF_NONE is setup_past_independence's all-zero map. The returned map is the slot's
+# saved buffer itself — read-only to every consumer (get_segment_id, the 7.4 copy).
+fn av1_frame_prev_segids(fh, refs): i64 {
+    if (refs == 0) { return 0; }
+    if (av1_fh_segmentation_enabled(fh) == 0) { return 0; }
+    var pr = av1_fh_primary_ref_frame(fh);
+    if (pr == AV1_PRIMARY_REF_NONE) { return 0; }
+    var slot = av1_fh_ref_frame_idx(fh, pr);
+    if ((av1_ref_mi_cols(refs, slot) != av1_fh_mi_cols(fh)) || (av1_ref_mi_rows(refs, slot) != av1_fh_mi_rows(fh))) {
+        return 0;
+    }
+    return av1_ref_saved_segids(refs, slot);
+}
+
+# The 5.9.2 split after disable_frame_end_update_cdf: PRIMARY_REF_NONE -> setup_past_independence, else
+# load_previous (prevFrame = ref_frame_idx[ primary_ref_frame ]; PrevGmParams is av1_prev_gm_param). The
+# CDF half of the same split (init_non_coeff_cdfs / load_cdfs) is the frame decoder's. A null refs is a
+# header-only caller with no history to load: independence is the only meaningful answer there.
+fn av1_frame_past_state(fh, refs): i64 {
+    var pr = av1_fh_primary_ref_frame(fh);
+    if ((pr == AV1_PRIMARY_REF_NONE) || (refs == 0)) { return av1_setup_past_independence(fh); }
+    return av1_ref_load_seg_lf(refs, av1_fh_ref_frame_idx(fh, pr), fh);
+}
+
+fn av1_loop_filter_params(br, s, fh): i64 {
     if (av1_fh_coded_lossless(fh) || av1_fh_allow_intrabc(fh)) {
         store64(fh + AV1FH_LF_LEVEL + 0, 0);
         store64(fh + AV1FH_LF_LEVEL + 8, 0);
+        av1_lf_default_deltas(fh);
         return DR_OK;
     }
     var lvl0 = dr_br_read_bits(br, 6);   # loop_filter_level[0] f(6)
@@ -808,9 +903,18 @@ fn av1_segmentation_params(br, fh): i64 {
             }
         }
     }
-    # FeatureEnabled/FeatureData for the not-updated case default to 0
-    # (memset). SegIdPreSkip / LastActiveSegId are derived-only and not
-    # stored (no bit dependency in the header).
+    if (enabled == 0) {
+        # segmentation off: FeatureEnabled / FeatureData = 0 (5.9.14 else-branch). NOT the memset — on a
+        # primary_ref frame load_previous has already filled them from the reference.
+        var z = 0;
+        while (z < (AV1_MAX_SEGMENTS * AV1_SEG_LVL_MAX)) {
+            store64(fh + AV1FH_FEATURE_ENABLED + (z * 8), 0);
+            store64(fh + AV1FH_FEATURE_DATA + (z * 8), 0);
+            z = z + 1;
+        }
+    }
+    # enabled with segmentation_update_data == 0 keeps what load_previous loaded (5.9.14: the arrays are
+    # only written under update_data). SegIdPreSkip / LastActiveSegId are derived-only and not stored.
     return dr_br_err(br);
 }
 
@@ -928,19 +1032,27 @@ fn av1_fh_seg_id_pre_skip(fh): i64 {
     return 0;
 }
 
-# av1_seg_supported — is this frame's segmentation config DECODABLE by the D1 spatial map reader?
-# 1 = decode it; 0 = reject cleanly (trust no input byte — never silently mis-decode). Rejects the
-# configs that need PrevSegmentIds (a DPB-saved seg map, a follow-on): the temporal-predicted map
-# (temporal_update), the whole-map copy (!update_map), and feature-data inheritance (!update_data).
-# A keyframe / PRIMARY_REF_NONE frame forces update_map=1, temporal=0, update_data=1, so it always
-# passes. Mixed lossless and lossy segments DECODE as of 0.8.2 (Lossless = LosslessArray[segment_id]
-# per block, av1_tile_block_setup); they used to reject here because the lossless cascade was
-# base_q-driven.
+# av1_seg_supported — does this frame use only segment FEATURES drishti implements? 1 = decode it; 0 = reject
+# cleanly (trust no input byte — a feature that is parsed but not applied mis-decodes SILENTLY). Every map
+# config decodes as of 0.8.2: the spatial read, the temporal seg_id_predicted read (temporal_update), the
+# copied map (!update_map) and the inherited feature data (!update_data, via load_previous). Mixed lossless
+# and lossy segments decode too (Lossless = LosslessArray[ segment_id ], av1_tile_block_setup). Two features
+# remain unimplemented and reject:
+#  - SEG_LVL_ALT_LF_Y_V + i (i = 0..3): the deblocker's per-segment level add (7.14.4) is not applied.
+#  - SEG_LVL_SKIP: read_skip (5.11.11) does not force skip = 1 for it, so the skip symbol it omits is read.
+# Both are roadmap.md 0.8.2 items.
 fn av1_seg_supported(fh): i64 {
     if (av1_fh_segmentation_enabled(fh) == 0) { return 1; }
-    if (av1_fh_segmentation_temporal_update(fh) != 0) { return 0; }
-    if (av1_fh_segmentation_update_map(fh) == 0) { return 0; }
-    if (av1_fh_segmentation_update_data(fh) == 0) { return 0; }
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        var j = AV1_SEG_LVL_ALT_LF_Y_V;
+        while (j < (AV1_SEG_LVL_ALT_LF_Y_V + 4)) {   # SEG_LVL_ALT_LF_Y_V + i, i < FRAME_LF_COUNT (7.14.4)
+            if (av1_fh_feature_enabled(fh, seg, j) != 0) { return 0; }
+            j = j + 1;
+        }
+        if (av1_fh_feature_enabled(fh, seg, AV1_SEG_LVL_SKIP) != 0) { return 0; }
+        seg = seg + 1;
+    }
     return 1;
 }
 
@@ -1752,6 +1864,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             store64(fh + AV1FH_MI_COLS, av1_ref_mi_cols(refs, idx));
             store64(fh + AV1FH_MI_ROWS, av1_ref_mi_rows(refs, idx));
             store64(fh + AV1FH_ORDER_HINT, av1_ref_order_hint(refs, idx));
+            if (ft == AV1_KEY_FRAME) {
+                # 7.21 load_loop_filter_params / load_segmentation_params: the shown KEY frame's deltas and
+                # feature arrays, which update_refs then saves into every slot (refresh = allFrames).
+                av1_ref_load_seg_lf(refs, idx, fh);
+            }
             store64(fh + AV1FH_FRAME_IS_INTRA, 1);
             if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
             store64(fh + AV1FH_BITS_CONSUMED, dr_br_bit_pos(br));
@@ -1949,6 +2066,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
     } else {
         store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, dr_br_read_bit(br));   # disable_frame_end_update_cdf f(1)
     }
+    av1_frame_past_state(fh, refs);   # setup_past_independence( ) / load_previous( ) (5.9.2)
 
     var rct = av1_tile_info(br, s, fh);
     if (rct != DR_OK) { store64(out_err, rct); return 0; }
@@ -1998,6 +2116,12 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 # ================================================================
 fn av1_frame_update_refs(refs, s, fh): i64 {
     var flags = av1_fh_refresh_frame_flags(fh);
+    # a show_existing KEY_FRAME re-saves the SHOWN slot's segmentation map (7.21 loads SegmentIds from it,
+    # 7.20 saves them back into every refreshed slot). Read before the loop — the shown slot is refreshed
+    # too. A decoded frame's map is saved by the frame decoder (av1_frame_dec_finish), not here.
+    var shown_segids = 0;
+    var from_shown = av1_fh_show_existing_frame(fh);
+    if (from_shown != 0) { shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh)); }
     var i = 0;
     while (i < AV1_NUM_REF_FRAMES) {
         if ((flags >> i) & 1) {
@@ -2032,6 +2156,27 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
                 }
                 ref = ref + 1;
             }
+            # save_segmentation_params( i ) + save_loop_filter_params( i ) (7.20).
+            var sg = 0;
+            while (sg < AV1_MAX_SEGMENTS) {
+                var sj = 0;
+                while (sj < AV1_SEG_LVL_MAX) {
+                    store64(refs + AV1REF_SAVED_FEAT_EN + ((((i * 8) + sg) * 8 + sj) * 8),
+                      av1_fh_feature_enabled(fh, sg, sj));
+                    store64(refs + AV1REF_SAVED_FEAT_DATA + ((((i * 8) + sg) * 8 + sj) * 8),
+                      av1_fh_feature_data(fh, sg, sj));
+                    sj = sj + 1;
+                }
+                sg = sg + 1;
+            }
+            var lk = 0;
+            while (lk < 8) {   # TOTAL_REFS_PER_FRAME
+                store64(refs + AV1REF_SAVED_LF_REF + (((i * 8) + lk) * 8), av1_fh_loop_filter_ref_delta(fh, lk));
+                lk = lk + 1;
+            }
+            store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
+            store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
+            if (from_shown != 0) { av1_ref_set_saved_segids(refs, i, shown_segids); }
         }
         i = i + 1;
     }

@@ -373,20 +373,37 @@ fn test_seg_supported_gate() {
     store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
     store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 30);
     assert_eq(av1_seg_supported(fh), 1, "spatial ALT_Q config -> supported");
+    # 0.8.2: every MAP config decodes — the temporal read, the copied map, inherited feature data.
     store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 1);
-    assert_eq(av1_seg_supported(fh), 0, "temporal_update -> unsupported");
+    assert_eq(av1_seg_supported(fh), 1, "temporal_update -> supported (0.8.2)");
     store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
     store64(fh + AV1FH_SEG_UPDATE_MAP, 0);
-    assert_eq(av1_seg_supported(fh), 0, "update_map=0 -> unsupported");
+    assert_eq(av1_seg_supported(fh), 1, "update_map=0 -> supported (0.8.2)");
     store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
     store64(fh + AV1FH_SEG_UPDATE_DATA, 0);
-    assert_eq(av1_seg_supported(fh), 0, "update_data=0 -> unsupported");
+    assert_eq(av1_seg_supported(fh), 1, "update_data=0 -> supported (0.8.2)");
     store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
     # a lossless-boundary-crossing segment (base_q 40 non-lossless, seg1 ALT_Q=-40 -> q0 lossless) DECODES
     # as of 0.8.2 — per-block Lossless = LosslessArray[ segment_id ] — so it is no longer a reject.
     store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);
     assert_eq(av1_seg_supported(fh), 1, "lossless-crossing segment -> supported (0.8.2)");
     assert_eq(av1_fh_lossless_mask(fh), 2, "LosslessArray: only segment 1 (q 40 - 40 = 0) is lossless");
+    # the features drishti parses but does NOT apply reject, on ANY segment: each of the four per-segment
+    # loop-filter levels (SEG_LVL_ALT_LF_Y_V + i) and SEG_LVL_SKIP. The implemented ones pass.
+    var j = 0;
+    while (j < AV1_SEG_LVL_MAX) {
+        store64(fh + AV1FH_FEATURE_ENABLED + ((7 * 8 + j) * 8), 1);
+        var want = 1;
+        if ((j >= AV1_SEG_LVL_ALT_LF_Y_V) && (j < (AV1_SEG_LVL_ALT_LF_Y_V + 4))) { want = 0; }
+        if (j == AV1_SEG_LVL_SKIP) { want = 0; }
+        assert_eq(av1_seg_supported(fh), want, "feature j on segment 7: ALT_LF_* / SKIP reject, the rest pass");
+        store64(fh + AV1FH_FEATURE_ENABLED + ((7 * 8 + j) * 8), 0);
+        j = j + 1;
+    }
+    # the feature only matters with segmentation ON (FeatureEnabled is zeroed when off, but be explicit).
+    store64(fh + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);
+    store64(fh + AV1FH_SEG_ENABLED, 0);
+    assert_eq(av1_seg_supported(fh), 1, "segmentation off -> supported whatever FeatureEnabled holds");
     return 0;
 }
 
@@ -668,6 +685,234 @@ fn test_av1_fh_show_existing() {
     return 0;
 }
 
+# ---- 0.8.2 load_previous (5.9.2) + save/load_segmentation_params / save/load_loop_filter_params (7.20/7.21) ----
+# An INTER header up to and including the quantization params, primary_ref_frame / refresh_frame_flags
+# parameterised; every ref_frame_idx = slot 0. The caller writes segmentation_params onward.
+fn lp_inter_head(bw, order_hint, primary_ref, refresh) {
+    return lp_inter_head_q(bw, order_hint, primary_ref, refresh, 40);   # base_q_idx 40
+}
+fn lp_inter_head_q(bw, order_hint, primary_ref, refresh, base_q) {
+    dr_bw_put_bit(bw, 0);        # show_existing_frame = 0
+    dr_bw_put_bits(bw, 1, 2);    # frame_type = INTER
+    dr_bw_put_bit(bw, 1);        # show_frame = 1
+    dr_bw_put_bit(bw, 0);        # error_resilient_mode = 0
+    dr_bw_put_bit(bw, 0);        # disable_cdf_update
+    dr_bw_put_bit(bw, 1);        # frame_size_override_flag = 1
+    dr_bw_put_bits(bw, order_hint, 7);   # order_hint
+    dr_bw_put_bits(bw, primary_ref, 3);  # primary_ref_frame
+    dr_bw_put_bits(bw, refresh, 8);      # refresh_frame_flags
+    dr_bw_put_bit(bw, 0);        # frame_refs_short_signaling = 0
+    var i = 0;
+    while (i < 7) { dr_bw_put_bits(bw, 0, 3); i = i + 1; }   # ref_frame_idx[i] = 0
+    dr_bw_put_bit(bw, 1);        # found_ref (i=0) = 1 -> slot 0 dims
+    dr_bw_put_bit(bw, 0);        # allow_high_precision_mv
+    dr_bw_put_bit(bw, 0);        # is_filter_switchable
+    dr_bw_put_bits(bw, 0, 2);    # interpolation_filter
+    dr_bw_put_bit(bw, 0);        # is_motion_mode_switchable
+    dr_bw_put_bit(bw, 0);        # disable_frame_end_update_cdf
+    dr_bw_put_bit(bw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(bw, base_q, 8);   # base_q_idx
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);   # dq delta_coded x3
+    dr_bw_put_bit(bw, 0);        # using_qmatrix
+    return 0;
+}
+# delta_q_present = 0, then loop_filter_params with level 0/0, sharpness 0, delta_enabled = 1 and
+# delta_update = 0 (no delta is coded — every delta must come from load_previous / setup_past_independence),
+# then the inter tail: tx_mode_select, reference_select, reduced_tx_set, is_global x7.
+fn lp_inter_tail(bw) {
+    dr_bw_put_bit(bw, 0);        # delta_q_present
+    dr_bw_put_bits(bw, 0, 6); dr_bw_put_bits(bw, 0, 6); dr_bw_put_bits(bw, 0, 3);   # lf levels 0/0, sharpness 0
+    dr_bw_put_bit(bw, 1);        # loop_filter_delta_enabled = 1
+    dr_bw_put_bit(bw, 0);        # loop_filter_delta_update = 0
+    dr_bw_put_bit(bw, 0);        # tx_mode_select
+    dr_bw_put_bit(bw, 0);        # reference_select
+    dr_bw_put_bit(bw, 0);        # reduced_tx_set
+    var g = 0;
+    while (g < 7) { dr_bw_put_bit(bw, 0); g = g + 1; }   # is_global = 0
+    return 0;
+}
+fn lp_parse(s, refs, bw, what): i64 {
+    var nbits = dr_bw_bit_pos(bw);
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var fh = av1_frame_parse_uncompressed_header(s, refs, 0, 0, dr_bw_buf(bw), n, &e);
+    assert(fh != 0, what);
+    assert_eq(e, DR_OK, "header parses clean");
+    assert_eq(av1_fh_bits_consumed(fh), nbits, "consumed exactly the header bits");
+    return fh;
+}
+fn test_av1_fh_load_previous() {
+    var s = fx_seq_full(64, 64, 1, 6, 0, 0, 0, 0, 0, 0);
+    var refs = av1_ref_state_new();
+    # --- KEY frame: segment 2 ALT_Q = -12, loop_filter_ref_deltas[LAST] = 3, mode_deltas[1] = -2 ---
+    var kbw = dr_bw_init(64);
+    dr_bw_put_bit(kbw, 0);        # show_existing_frame = 0
+    dr_bw_put_bits(kbw, 0, 2);    # frame_type = KEY
+    dr_bw_put_bit(kbw, 1);        # show_frame = 1 (refresh = allFrames)
+    dr_bw_put_bit(kbw, 0);        # disable_cdf_update
+    dr_bw_put_bit(kbw, 0);        # frame_size_override_flag
+    dr_bw_put_bits(kbw, 3, 7);    # order_hint = 3
+    dr_bw_put_bit(kbw, 0);        # render_and_frame_size_different
+    dr_bw_put_bit(kbw, 0);        # disable_frame_end_update_cdf
+    dr_bw_put_bit(kbw, 1);        # uniform_tile_spacing_flag
+    dr_bw_put_bits(kbw, 32, 8);   # base_q_idx = 32
+    dr_bw_put_bit(kbw, 0); dr_bw_put_bit(kbw, 0); dr_bw_put_bit(kbw, 0);  # dq delta_coded x3
+    dr_bw_put_bit(kbw, 0);        # using_qmatrix
+    dr_bw_put_bit(kbw, 1);        # segmentation_enabled = 1 (PRIMARY_REF_NONE: map/data forced, no bits)
+    var si = 0;
+    while (si < 8) {
+        var sj = 0;
+        while (sj < 8) {
+            if ((si == 2) && (sj == AV1_SEG_LVL_ALT_Q)) {
+                dr_bw_put_bit(kbw, 1);          # feature_enabled[2][ALT_Q] = 1
+                dr_bw_put_bits(kbw, 500, 9);    # feature_value su(1+8): 512 - 12 = 500 -> -12
+            } else {
+                dr_bw_put_bit(kbw, 0);          # feature_enabled = 0
+            }
+            sj = sj + 1;
+        }
+        si = si + 1;
+    }
+    dr_bw_put_bit(kbw, 0);        # delta_q_present
+    dr_bw_put_bits(kbw, 0, 6); dr_bw_put_bits(kbw, 0, 6); dr_bw_put_bits(kbw, 0, 3);  # lf levels 0/0, sharpness
+    dr_bw_put_bit(kbw, 1);        # loop_filter_delta_enabled = 1
+    dr_bw_put_bit(kbw, 1);        # loop_filter_delta_update = 1
+    var ri = 0;
+    while (ri < 8) {
+        if (ri == AV1_LAST_FRAME) {
+            dr_bw_put_bit(kbw, 1);          # update_ref_delta[LAST] = 1
+            dr_bw_put_bits(kbw, 3, 7);      # loop_filter_ref_deltas[LAST] su(1+6) = 3
+        } else {
+            dr_bw_put_bit(kbw, 0);          # update_ref_delta = 0
+        }
+        ri = ri + 1;
+    }
+    dr_bw_put_bit(kbw, 0);        # update_mode_delta[0] = 0
+    dr_bw_put_bit(kbw, 1);        # update_mode_delta[1] = 1
+    dr_bw_put_bits(kbw, 126, 7);  # loop_filter_mode_deltas[1] su(1+6): 128 - 2 = 126 -> -2
+    dr_bw_put_bit(kbw, 1);        # tx_mode_select
+    dr_bw_put_bit(kbw, 0);        # reduced_tx_set
+    var kfh = lp_parse(s, refs, kbw, "key frame parses");
+    assert_eq(av1_fh_feature_data(kfh, 2, AV1_SEG_LVL_ALT_Q), 0 - 12, "key: seg2 ALT_Q -12");
+    assert_eq(av1_fh_loop_filter_ref_delta(kfh, AV1_LAST_FRAME), 3, "key: ref delta LAST 3");
+    assert_eq(av1_fh_loop_filter_ref_delta(kfh, AV1_GOLDEN_FRAME), 0 - 1, "key: GOLDEN keeps its default -1");
+    assert_eq(av1_fh_loop_filter_mode_delta(kfh, 1), 0 - 2, "key: mode delta 1 = -2");
+    av1_frame_update_refs(refs, s, kfh);
+    # 7.20 saved them into every refreshed slot (a shown KEY refreshes all 8).
+    assert_eq(av1_ref_saved_feature_enabled(refs, 5, 2, AV1_SEG_LVL_ALT_Q), 1, "slot 5 saved FeatureEnabled");
+    assert_eq(av1_ref_saved_feature_data(refs, 5, 2, AV1_SEG_LVL_ALT_Q), 0 - 12, "slot 5 saved FeatureData");
+    assert_eq(av1_ref_saved_lf_ref_delta(refs, 5, AV1_LAST_FRAME), 3, "slot 5 saved ref delta");
+    assert_eq(av1_ref_saved_lf_ref_delta(refs, 5, AV1_INTRA_FRAME), 1, "slot 5 saved INTRA default");
+    assert_eq(av1_ref_saved_lf_mode_delta(refs, 5, 1), 0 - 2, "slot 5 saved mode delta");
+
+    # --- INTER, primary_ref_frame 0, segmentation on with update_map = 0 / update_data = 0: load_previous ---
+    var bw1 = dr_bw_init(64);
+    lp_inter_head(bw1, 5, 0, 2);   # refresh slot 1 only
+    dr_bw_put_bit(bw1, 1);        # segmentation_enabled = 1
+    dr_bw_put_bit(bw1, 0);        # segmentation_update_map = 0 (no temporal_update bit)
+    dr_bw_put_bit(bw1, 0);        # segmentation_update_data = 0 (no feature bits)
+    lp_inter_tail(bw1);
+    var fh1 = lp_parse(s, refs, bw1, "inherit frame parses");
+    assert_eq(av1_fh_segmentation_update_map(fh1), 0, "update_map 0");
+    assert_eq(av1_fh_segmentation_update_data(fh1), 0, "update_data 0");
+    assert_eq(av1_fh_feature_enabled(fh1, 2, AV1_SEG_LVL_ALT_Q), 1, "inherit: FeatureEnabled from slot 0");
+    assert_eq(av1_fh_feature_data(fh1, 2, AV1_SEG_LVL_ALT_Q), 0 - 12, "inherit: FeatureData from slot 0");
+    assert_eq(av1_fh_loop_filter_ref_delta(fh1, AV1_LAST_FRAME), 3, "inherit: ref delta LAST from slot 0");
+    assert_eq(av1_fh_loop_filter_ref_delta(fh1, AV1_ALTREF_FRAME), 0 - 1, "inherit: ALTREF -1");
+    assert_eq(av1_fh_loop_filter_mode_delta(fh1, 1), 0 - 2, "inherit: mode delta from slot 0");
+    # the inherited ALT_Q reaches the qindex: segment 2 = clip(40 - 12) = 28.
+    assert_eq(av1_get_qindex_ignore_delta(fh1, 2), 28, "inherited feature drives get_qindex");
+
+    # --- INTER, primary_ref_frame 0, segmentation OFF: the features are zeroed, the lf deltas still load ---
+    var bw2 = dr_bw_init(64);
+    lp_inter_head(bw2, 6, 0, 2);
+    dr_bw_put_bit(bw2, 0);        # segmentation_enabled = 0
+    lp_inter_tail(bw2);
+    var fh2 = lp_parse(s, refs, bw2, "seg-off frame parses");
+    assert_eq(av1_fh_feature_enabled(fh2, 2, AV1_SEG_LVL_ALT_Q), 0, "seg off: FeatureEnabled zeroed");
+    assert_eq(av1_fh_feature_data(fh2, 2, AV1_SEG_LVL_ALT_Q), 0, "seg off: FeatureData zeroed");
+    assert_eq(av1_fh_loop_filter_ref_delta(fh2, AV1_LAST_FRAME), 3, "seg off: lf deltas still inherited");
+    av1_frame_update_refs(refs, s, fh2);   # slot 1 now holds zero features (and the inherited deltas)
+    assert_eq(av1_ref_saved_feature_enabled(refs, 1, 2, AV1_SEG_LVL_ALT_Q), 0, "slot 1 saved the zeroed features");
+    assert_eq(av1_ref_saved_feature_enabled(refs, 0, 2, AV1_SEG_LVL_ALT_Q), 1, "slot 0 untouched (not refreshed)");
+
+    # --- INTER, PRIMARY_REF_NONE: setup_past_independence — default deltas, nothing inherited ---
+    var bw3 = dr_bw_init(64);
+    lp_inter_head(bw3, 7, 7, 0);
+    dr_bw_put_bit(bw3, 0);        # segmentation_enabled = 0
+    lp_inter_tail(bw3);
+    var fh3 = lp_parse(s, refs, bw3, "independent frame parses");
+    assert_eq(av1_fh_loop_filter_ref_delta(fh3, AV1_LAST_FRAME), 0, "independence: LAST default 0");
+    assert_eq(av1_fh_loop_filter_ref_delta(fh3, AV1_INTRA_FRAME), 1, "independence: INTRA default 1");
+    assert_eq(av1_fh_loop_filter_ref_delta(fh3, AV1_GOLDEN_FRAME), 0 - 1, "independence: GOLDEN default -1");
+    assert_eq(av1_fh_loop_filter_mode_delta(fh3, 1), 0, "independence: mode delta default 0");
+
+    # --- INTER, primary_ref_frame 0, CodedLossless (base_q_idx 0): loop_filter_params' lossless branch writes
+    #     the DEFAULT deltas over the loaded ones (5.9.11) — so the slot it refreshes saves defaults ---
+    var bwl = dr_bw_init(64);
+    lp_inter_head_q(bwl, 8, 0, 4, 0);   # base_q_idx 0, refresh slot 2
+    dr_bw_put_bit(bwl, 0);        # segmentation_enabled = 0
+    # CodedLossless: no delta_q_present (base_q_idx 0), no loop_filter_params, no cdef/lr bits, no tx_mode bit.
+    dr_bw_put_bit(bwl, 0);        # reference_select
+    dr_bw_put_bit(bwl, 0);        # reduced_tx_set
+    var lg = 0;
+    while (lg < 7) { dr_bw_put_bit(bwl, 0); lg = lg + 1; }   # is_global = 0
+    var fhl = lp_parse(s, refs, bwl, "lossless inter frame parses");
+    assert_eq(av1_fh_coded_lossless(fhl), 1, "CodedLossless");
+    assert_eq(av1_fh_loop_filter_ref_delta(fhl, AV1_LAST_FRAME), 0, "lossless: LAST back to its default 0");
+    assert_eq(av1_fh_loop_filter_mode_delta(fhl, 1), 0, "lossless: mode delta back to its default 0");
+    assert_eq(av1_fh_loop_filter_ref_delta(fhl, AV1_GOLDEN_FRAME), 0 - 1, "lossless: GOLDEN default -1");
+
+    # --- show_existing of the KEY in slot 0: 7.21 loads its state, 7.20 re-saves it into ALL slots ---
+    av1_ref_set_saved_segids(refs, 0, 4096);   # sentinels: the shown slot's map, and a stale one elsewhere
+    av1_ref_set_saved_segids(refs, 1, 8192);
+    var bw4 = dr_bw_init(8);
+    dr_bw_put_bit(bw4, 1);        # show_existing_frame = 1
+    dr_bw_put_bits(bw4, 0, 3);    # frame_to_show_map_idx = 0
+    var fh4 = lp_parse(s, refs, bw4, "show_existing parses");
+    assert_eq(av1_fh_feature_data(fh4, 2, AV1_SEG_LVL_ALT_Q), 0 - 12, "7.21: shown KEY's features loaded");
+    assert_eq(av1_fh_loop_filter_mode_delta(fh4, 1), 0 - 2, "7.21: shown KEY's deltas loaded");
+    av1_frame_update_refs(refs, s, fh4);
+    assert_eq(av1_ref_saved_feature_enabled(refs, 1, 2, AV1_SEG_LVL_ALT_Q), 1, "slot 1 re-saved from the shown KEY");
+    assert_eq(av1_ref_saved_lf_mode_delta(refs, 1, 1), 0 - 2, "slot 1 deltas re-saved");
+    assert_eq(av1_ref_saved_segids(refs, 1), 4096, "slot 1 map = the shown slot's map");
+    assert_eq(av1_ref_saved_segids(refs, 7), 4096, "slot 7 map = the shown slot's map");
+    assert_eq(av1_ref_saved_segids(refs, 0), 4096, "the shown slot keeps its own map");
+    return 0;
+}
+
+# load_previous_segment_ids (5.9.2): PrevSegmentIds = SavedSegmentIds[ ref_frame_idx[ primary_ref_frame ] ] only
+# when segmentation is on AND the slot's RefMiCols / RefMiRows equal this frame's; otherwise all zero (0).
+fn test_frame_prev_segids() {
+    var refs = av1_ref_state_new();
+    store64(refs + AV1REF_MI_COLS + (3 * 8), 10);
+    store64(refs + AV1REF_MI_ROWS + (3 * 8), 8);
+    av1_ref_set_saved_segids(refs, 3, 4096);   # sentinel map pointer in slot 3
+    av1_ref_set_saved_segids(refs, 2, 8192);   # a decoy in slot 2
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, 2);
+    store64(fh + AV1FH_REF_FRAME_IDX + (2 * 8), 3);   # primary_ref_frame 2 -> slot 3 (NOT slot 2)
+    store64(fh + AV1FH_MI_COLS, 10);
+    store64(fh + AV1FH_MI_ROWS, 8);
+    assert_eq(av1_frame_prev_segids(fh, refs), 4096, "slot ref_frame_idx[ primary_ref_frame ] = 3's map");
+    store64(fh + AV1FH_MI_COLS, 12);
+    assert_eq(av1_frame_prev_segids(fh, refs), 0, "RefMiCols != MiCols -> all zero");
+    store64(fh + AV1FH_MI_COLS, 10);
+    store64(fh + AV1FH_MI_ROWS, 6);
+    assert_eq(av1_frame_prev_segids(fh, refs), 0, "RefMiRows != MiRows -> all zero");
+    store64(fh + AV1FH_MI_ROWS, 8);
+    store64(fh + AV1FH_SEG_ENABLED, 0);
+    assert_eq(av1_frame_prev_segids(fh, refs), 0, "segmentation off -> all zero");
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+    assert_eq(av1_frame_prev_segids(fh, refs), 0, "PRIMARY_REF_NONE -> all zero (setup_past_independence)");
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, 2);
+    assert_eq(av1_frame_prev_segids(fh, 0), 0, "no ref state -> all zero");
+    return 0;
+}
+
 # Adversarial: a hostile non-uniform tiling of 1-superblock tiles must be
 # rejected before the tile count overruns the fixed MiColStarts array
 # (the 64-tile MAX_TILE_COLS cap is a conformance requirement the ns()
@@ -802,6 +1047,8 @@ fn main() {
     test_sign_bias_derivation();
     test_av1_fh_inter_refstate();
     test_av1_fh_show_existing();
+    test_av1_fh_load_previous();
+    test_frame_prev_segids();
     test_group("av1 frame header — global motion / arithmetic shift");
     test_av1_fh_gm_arith_shift();
     test_group("av1 frame header — adversarial");

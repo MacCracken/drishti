@@ -962,6 +962,177 @@ fn test_delta_resets() {
     return 0;
 }
 
+# ---- 0.8.2 temporal segmentation: Av1SegCtx, get_segment_id, the seg_id_predicted strips, inter_segment_id ----
+# A 6x5-MI PrevSegmentIds map inside a 64-entry ZEROED allocation, so a reader that forgets the frame clip walks
+# into zeros past the frame and returns 0 instead of the footprint minimum (the clip is what the KAT pins).
+fn tseg_prev(): i64 {
+    var g = alloc(64 * 8);
+    memset(g, 0, 64 * 8);
+    var r = 0;
+    while (r < 5) {
+        var c = 0;
+        while (c < 6) { store64(g + (((r * 6) + c) * 8), 7); c = c + 1; }   # in-frame default 7
+        r = r + 1;
+    }
+    store64(g + (((0 * 6) + 0) * 8), 3); store64(g + (((0 * 6) + 1) * 8), 5);
+    store64(g + (((1 * 6) + 0) * 8), 4); store64(g + (((1 * 6) + 1) * 8), 2);   # 8x8 at (0,0): {3,5;4,2}
+    store64(g + (((4 * 6) + 4) * 8), 6); store64(g + (((4 * 6) + 5) * 8), 5);   # bottom-right corner: 6, 5
+    return g;
+}
+fn test_get_segment_id() {
+    var g = tseg_prev();
+    var sc = av1_segctx_new(0, g, 6, 5);
+    assert_eq(av1_get_segment_id(sc, 0, 0, 2, 2), 2, "8x8 at (0,0): min{3,5,4,2} = 2");
+    assert_eq(av1_get_segment_id(sc, 0, 0, 1, 1), 3, "4x4 at (0,0): the single entry 3");
+    assert_eq(av1_get_segment_id(sc, 0, 1, 1, 2), 2, "4x8 at (0,1): min{5,2} = 2");
+    # 16x16 at (4,4) overhangs both edges: xMis = Min(6 - 4, 4) = 2, yMis = Min(5 - 4, 4) = 1 -> min{6,5} = 5.
+    # Without either clip the walk leaves the frame into the zeroed slack and returns 0.
+    assert_eq(av1_get_segment_id(sc, 4, 4, 4, 4), 5, "overhanging 16x16 at (4,4): clipped to {6,5} -> 5");
+    assert_eq(av1_get_segment_id(sc, 2, 2, 2, 2), 7, "all-7 footprint -> 7 (the seg = 7 start)");
+    var sc0 = av1_segctx_new(0, 0, 6, 5);
+    assert_eq(av1_get_segment_id(sc0, 0, 0, 2, 2), 0, "PrevSegmentIds all zero (prev = 0) -> 0");
+    return 0;
+}
+# LeftSegPredContext[ MiRow ] + AboveSegPredContext[ MiCol ], the per-block store, and the two clears.
+fn test_segpred_ctx_store() {
+    var sc = av1_segctx_new(0, 0, 8, 8);
+    assert_eq(av1_segpred_ctx(sc, 2, 3), 0, "fresh strips -> ctx 0");
+    av1_segpred_store(sc, 2, 3, 2, 1, 1);   # an 8x4 block at (2,3) coded seg_id_predicted = 1
+    assert_eq(av1_segpred_ctx(sc, 2, 3), 2, "left[2] + above[3] = 2");
+    assert_eq(av1_segpred_ctx(sc, 2, 4), 2, "above[4] covered by the 2-wide store");
+    assert_eq(av1_segpred_ctx(sc, 2, 5), 1, "above[5] untouched -> left only");
+    assert_eq(av1_segpred_ctx(sc, 3, 3), 1, "left[3] untouched (1 high) -> above only");
+    av1_segctx_clear_above(sc);
+    assert_eq(av1_segpred_ctx(sc, 2, 3), 1, "clear_above: only left[2] remains");
+    av1_segctx_clear_left(sc);
+    assert_eq(av1_segpred_ctx(sc, 2, 3), 0, "clear_left: both strips zero");
+    # a block hanging past the frame edge stores inside the +32 slack (no OOB) — 32 wide at the last column.
+    av1_segpred_store(sc, 7, 7, 32, 32, 1);
+    assert_eq(av1_segpred_ctx(sc, 7, 7), 2, "edge block stored");
+    return 0;
+}
+# temporal fh: segmentation on, update_map 1, temporal_update 1, LastActiveSegId 3 (ALT_Q on segment 3, so
+# SegIdPreSkip 0 — the read happens after skip).
+fn tseg_fh(update_map, temporal): i64 {
+    var fh = seg_fh_last(3);
+    store64(fh + AV1FH_SEG_UPDATE_MAP, update_map);
+    store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, temporal);
+    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+    return fh;
+}
+# the five-block plan: (row, col, skip, segment_id) on an 8x8-MI frame, BLOCK_8X8 each. PrevSegmentIds (tseg_prev
+# is 6 wide, so use a fresh 8x8 one here): every entry 1 except the block at (0,4), whose footprint min is 3.
+fn tseg_prev8(): i64 {
+    var g = alloc(64 * 8);
+    var i = 0;
+    while (i < 64) { store64(g + (i * 8), 1); i = i + 1; }
+    store64(g + (((0 * 8) + 4) * 8), 3); store64(g + (((0 * 8) + 5) * 8), 3);
+    store64(g + (((1 * 8) + 4) * 8), 3); store64(g + (((1 * 8) + 5) * 8), 3);
+    return g;
+}
+fn tseg_plan(): i64 {
+    var p = alloc(5 * 4 * 8);
+    # (r, c, skip, seg):
+    store64(p + 0, 0);   store64(p + 8, 0);   store64(p + 16, 0); store64(p + 24, 1);    # == temporal pred 1
+    store64(p + 32, 0);  store64(p + 40, 2);  store64(p + 48, 0); store64(p + 56, 2);    # != pred 1 -> spatial
+    store64(p + 64, 0);  store64(p + 72, 4);  store64(p + 80, 0); store64(p + 88, 3);    # == pred 3
+    store64(p + 96, 2);  store64(p + 104, 0); store64(p + 112, 1); store64(p + 120, 1);  # SKIP: spatial pred (above 1)
+    store64(p + 128, 2); store64(p + 136, 2); store64(p + 144, 0); store64(p + 152, 0);  # != pred 1 -> spatial 0
+    return p;
+}
+fn test_inter_segment_id_temporal_rt() {
+    var fh = tseg_fh(1, 1);
+    var plan = tseg_plan();
+    var prev = tseg_prev8();
+    var eg = alloc(64 * 8); memset(eg, 0, 64 * 8);   # each lane its own SegmentIds map + strips
+    var dg = alloc(64 * 8); memset(dg, 0, 64 * 8);
+    var esc = av1_segctx_new(eg, prev, 8, 8);
+    var dsc = av1_segctx_new(dg, prev, 8, 8);
+    var ncc_e = av1_ncdf_new();
+    var ncc_d = av1_ncdf_new();
+    var enc = av1_sym_enc_init(256, 0);   # ADAPTING, so a ctx mix-up between the lanes also desyncs
+    var b = 0;
+    while (b < 5) {
+        var r = load64(plan + (b * 32)); var c = load64(plan + (b * 32) + 8);
+        var sk = load64(plan + (b * 32) + 16); var sg = load64(plan + (b * 32) + 24);
+        assert_eq(av1_write_inter_segment_id(enc, ncc_e, fh, esc, r, c, AV1_BLOCK_8X8, r > 0, c > 0, 0, sk, sg),
+          DR_OK, "temporal write ok");
+        av1_segid_store(eg, 8, 8, r, c, 2, 2, sg);
+        b = b + 1;
+    }
+    av1_sym_encode_literal(enc, 165, 8);   # marker: the reader consumed exactly what was written
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var b2 = 0;
+    while (b2 < 5) {
+        var r2 = load64(plan + (b2 * 32)); var c2 = load64(plan + (b2 * 32) + 8);
+        var sk2 = load64(plan + (b2 * 32) + 16);
+        var got = av1_inter_segment_id(sd, ncc_d, fh, dsc, r2, c2, AV1_BLOCK_8X8, r2 > 0, c2 > 0, 0, sk2);
+        assert_eq(got, load64(plan + (b2 * 32) + 24), "temporal read == plan");
+        av1_segid_store(dg, 8, 8, r2, c2, 2, 2, got);
+        b2 = b2 + 1;
+    }
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "temporal marker");
+    # the strips record seg_id_predicted per block: (0,0) 1, (0,2) 0, (0,4) 1, skip (2,0) 0, (2,2) 0.
+    assert_eq(load64(load64(dsc + AV1SC_ABOVE) + (0 * 8)), 0, "above[0]: last writer (2,0) skip -> 0");
+    assert_eq(load64(load64(dsc + AV1SC_ABOVE) + (4 * 8)), 1, "above[4]: (0,4) predicted -> 1");
+    assert_eq(load64(load64(dsc + AV1SC_LEFT) + (0 * 8)), 1, "left[0]: last writer (0,4) predicted -> 1");
+    assert_eq(load64(load64(dsc + AV1SC_LEFT) + (2 * 8)), 0, "left[2]: last writer (2,2) -> 0");
+    return 0;
+}
+# the copied map (update_map 0): NO symbol, segment_id = the PrevSegmentIds footprint minimum on both calls;
+# the writer refuses a plan that claims anything else (the decoder would derive the prediction).
+fn test_inter_segment_id_copy() {
+    var fh = tseg_fh(0, 0);
+    var prev = tseg_prev8();
+    var g = alloc(64 * 8); memset(g, 0, 64 * 8);
+    var sc = av1_segctx_new(g, prev, 8, 8);
+    var sd = av1_sym_dec_init(alloc(8), 8, 1);
+    assert_eq(av1_inter_segment_id(sd, av1_ncdf_new(), fh, sc, 0, 4, AV1_BLOCK_8X8, 0, 1, 1, 0), 3,
+      "copy, preSkip call: the predicted id (3), before skip is known");
+    assert_eq(av1_inter_segment_id(sd, av1_ncdf_new(), fh, sc, 0, 4, AV1_BLOCK_8X8, 0, 1, 0, 1), 3,
+      "copy, post-skip call on a skip block: still the predicted id, not the spatial one");
+    assert_eq(av1_inter_segment_id(sd, av1_ncdf_new(), fh, sc, 0, 2, 6, 0, 1, 0, 0), 1,   # 6 = BLOCK_16X16
+      "copy: 16x16 over {1,1,3,3 ...} -> min 1");
+    assert_eq(av1_sym_read_literal(sd, 8), 0, "copy consumed no symbol (the all-zero stream is untouched)");
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_inter_segment_id(enc, av1_ncdf_new(), fh, sc, 0, 4, AV1_BLOCK_8X8, 0, 1, 0, 0, 3), DR_OK,
+      "copy writer: the predicted id -> ok");
+    assert_eq(av1_write_inter_segment_id(enc, av1_ncdf_new(), fh, sc, 0, 4, AV1_BLOCK_8X8, 0, 1, 0, 0, 2),
+      DR_ERR_BOUNDS, "copy writer: any other id is unrepresentable -> bounds");
+    return 0;
+}
+# SegIdPreSkip (a SEG_LVL_REF_FRAME feature) + temporal: the read happens in the preSkip call, BEFORE skip — so
+# a block that turns out to skip still coded seg_id_predicted (and a temporal-predicted id), unlike the
+# !SegIdPreSkip skip path above. And a !SegIdPreSkip frame's preSkip call yields 0 without reading.
+fn test_inter_segment_id_preskip() {
+    var fh = tseg_fh(1, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((2 * 8 + AV1_SEG_LVL_REF_FRAME) * 8), 1);   # SegIdPreSkip = 1
+    assert_eq(av1_fh_seg_id_pre_skip(fh), 1, "REF_FRAME feature -> SegIdPreSkip");
+    var prev = tseg_prev8();
+    var eg = alloc(64 * 8); memset(eg, 0, 64 * 8);
+    var dg = alloc(64 * 8); memset(dg, 0, 64 * 8);
+    var esc = av1_segctx_new(eg, prev, 8, 8);
+    var dsc = av1_segctx_new(dg, prev, 8, 8);
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_inter_segment_id(enc, av1_ncdf_new(), fh, esc, 0, 4, AV1_BLOCK_8X8, 0, 1, 1, 0, 3), DR_OK,
+      "preSkip write: temporal-predicted 3");
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    assert_eq(av1_inter_segment_id(sd, av1_ncdf_new(), fh, dsc, 0, 4, AV1_BLOCK_8X8, 0, 1, 1, 0), 3,
+      "preSkip read: the temporal prediction");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "preSkip marker");
+    assert_eq(load64(load64(dsc + AV1SC_ABOVE) + (4 * 8)), 1, "preSkip path stored seg_id_predicted = 1");
+    var fh0 = tseg_fh(1, 1);   # no REF_FRAME feature: SegIdPreSkip 0
+    var sd0 = av1_sym_dec_init(alloc(8), 8, 1);
+    assert_eq(av1_inter_segment_id(sd0, av1_ncdf_new(), fh0, dsc, 0, 4, AV1_BLOCK_8X8, 0, 1, 1, 0), 0,
+      "!SegIdPreSkip preSkip call -> 0, no read");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("block-size conversion tables");
@@ -991,6 +1162,11 @@ fn main() {
     test_segid_pred_ctx();
     test_read_segment_id_rt();
     test_read_segment_id_hostile_clamp();
+    test_get_segment_id();
+    test_segpred_ctx_store();
+    test_inter_segment_id_temporal_rt();
+    test_inter_segment_id_copy();
+    test_inter_segment_id_preskip();
     test_write_segment_id_skip_mirror();
     test_group("cdef index syntax (read_cdef / write_cdef / clear_cdef)");
     test_cdef_rt_two_units();
