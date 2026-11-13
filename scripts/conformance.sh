@@ -52,6 +52,8 @@ SB_CASES="64 128"
 DELTA_CASES="dqlf_352x288_sb64 dqlf_352x288_sb128 dqonly_352x288_sb64"
 # mixed lossless / lossy segments, WxH_sbN (0.8.2).
 LL_CASES="ll_352x288_sb64 ll_352x288_sb128 ll_160x136_sb64"
+# segmentation on INTER frames, seg_aqA_cqQ_fF at 352x288 sb64 (0.8.2).
+SEGI_CASES="seg_aq1_cq1_f3 seg_aq2_cq20_f3"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
@@ -70,6 +72,7 @@ skip_external() { # reason
     for c in $SB_CASES; do skip_case "sbrepro_sb$c" "$1"; done
     for c in $DELTA_CASES; do skip_case "$c" "$1"; done
     for c in $LL_CASES; do skip_case "$c" "$1"; done
+    for c in $SEGI_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -549,6 +552,61 @@ llcase() { # name = ll_WxH_sbN
 }
 echo "--- mixed lossless segments (LosslessArray[ segment_id ]; every frame hard) ---"
 for c in $LL_CASES; do llcase "$c"; done
+
+# ---- SEGMENTATION ON INTER FRAMES (0.8.2) — libaom variance AQ (1) and cyclic refresh (3) ----
+# The generated corpus encodes --aq-mode=0, so until 0.8.2 no external stream had ever exercised
+# segmentation on an inter frame. The first one (seg_aq1_cq1_f3) diverged on frame 3 — not in
+# segmentation at all, but in the tx_depth context of an INTRA block inside an inter frame, which used
+# the keyframe form and ignored an inter neighbour (av1_tx_depth_ctx_inter). Each case proves its stream
+# carries segmentation on an inter frame, and refuses a reference dav1d disagrees with. (Longer variance-AQ
+# runs copy the segment map from a reference — update_map 0 — which drishti still rejects; that is the
+# temporal-segmentation item, roadmap.md 0.8.2.)
+segicase() { # name = seg_aqA_cqQ_fF
+    local n="$1" aqx cqx frx
+    IFS=_ read -r _ aqx cqx frx <<< "$n"
+    local aq="${aqx#aq}" cq="${cqx#cq}" fr="${frx#f}" w=352 h=288
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w $w -h $h --i420 --sb-size=64 --cpu-used=8 --end-usage=q --cq-level="$cq" \
+        --aq-mode="$aq" --deltaq-mode=0 --enable-restoration=0 --tune-content=default --enable-palette=0 \
+        --enable-intrabc=0 --limit="$fr" --lag-in-frames=0 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    # an inter frame (frame_type != 0) with segmentation_enabled=1: the property the case exists for.
+    if ! ./build/drishti-vector-probe 2>&1 | awk '/frame_type=/{ft=$0} /segmentation_enabled=1/{ if (ft !~ /frame_type=0/) f=1 } END{exit !f}'; then
+        echo "  $n: SETUP FAILED (no inter frame carries segmentation — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    aomdec --rawvideo -o "$WORK/$n.ref" "$WORK/$n.ivf" 2>/dev/null
+    if command -v dav1d >/dev/null 2>&1; then
+        dav1d -q -i "$WORK/$n.ivf" -o "$WORK/$n.dav1d.yuv" >/dev/null 2>&1
+        if ! cmp -s "$WORK/$n.ref" "$WORK/$n.dav1d.yuv"; then
+            echo "  $n: SETUP FAILED (dav1d disagrees with aomdec — the reference cannot be trusted)"
+            fail=$((fail+1)); return
+        fi
+    fi
+    local fs=$(( (w * h) + (2 * ((w + 1) / 2) * ((h + 1) / 2)) ))
+    local refsz; refsz=$(stat -c %s "$WORK/$n.ref" 2>/dev/null || echo 0)
+    if [ "$refsz" -ne $(( fs * fr )) ]; then
+        echo "  $n: SETUP FAILED (reference holds $refsz bytes, not $fr frames of $fs)"; fail=$((fail+1)); return
+    fi
+    local line="  $n:" k=1
+    while [ "$k" -le "$fr" ]; do
+        local a b
+        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
+        else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
+        k=$((k+1))
+    done
+    echo "$line"
+}
+echo "--- segmentation on inter frames (libaom AQ; every frame hard) ---"
+for c in $SEGI_CASES; do segicase "$c"; done
 
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done

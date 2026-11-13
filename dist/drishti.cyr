@@ -23978,6 +23978,39 @@ fn av1_get_left_tx_height(tile, row, col, mi_col, avail_l): i64 {
     }
     return av1_tx_height(av1_grid_get(tile, AV1TILE_INTERTX, row, col - 1));
 }
+# tx_depth's cdf context (9.3) for a block on the INTER lane — i.e. an intra block inside an inter frame,
+# the only block there that reads tx_depth — whose neighbours may be INTER blocks:
+#   aboveW = AvailU && IsInters[ MiRow - 1 ][ MiCol ] ? Block_Width[ MiSizes[ MiRow - 1 ][ MiCol ] ]
+#          : AvailU ? get_above_tx_width( MiRow, MiCol ) : 0          (leftH likewise, by height)
+#   ctx = ( aboveW >= Tx_Width[ maxRectTxSize ] ) + ( leftH >= Tx_Height[ maxRectTxSize ] )
+# The intra fork used the KEYFRAME form (av1_tx_depth_ctx: the neighbour's tx width, always), which is
+# right only when every neighbour is intra. Next to an inter block whose transform is smaller than the
+# block, it picked the wrong context and the frame desynced on the next symbol — first seen on a libaom
+# variance-AQ stream (0.8.2), where it surfaced as a "segmentation" divergence it had nothing to do with.
+fn av1_tx_depth_ctx_inter(tile, r, c, avail_u, avail_l, max_rect_tx): i64 {
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var fmi = load64(tile + AV1TILE_FMI_COLS);
+    var above_w = 0;
+    if (avail_u != 0) {
+        if (load64(av1_mv_grid_cell(grid, fmi, r - 1, c) + AV1MIR_ISINTER) != 0) {
+            above_w = av1_block_width(av1_grid_get(tile, AV1TILE_MISIZES, r - 1, c));
+        } else {
+            above_w = av1_get_above_tx_width(tile, r, c, r, avail_u);
+        }
+    }
+    var left_h = 0;
+    if (avail_l != 0) {
+        if (load64(av1_mv_grid_cell(grid, fmi, r, c - 1) + AV1MIR_ISINTER) != 0) {
+            left_h = av1_block_height(av1_grid_get(tile, AV1TILE_MISIZES, r, c - 1));
+        } else {
+            left_h = av1_get_left_tx_height(tile, r, c, c, avail_l);
+        }
+    }
+    var ctx = 0;
+    if (above_w >= av1_tx_width(max_rect_tx)) { ctx = ctx + 1; }
+    if (left_h >= av1_tx_height(max_rect_tx)) { ctx = ctx + 1; }
+    return ctx;
+}
 # txfm_split ctx (spec 9.3): ctx = (Tx_Size_Sqr_Up[txSz] != maxTxSz)*3 +
 # (TX_SIZES-1-maxTxSz)*6 + above + left, maxTxSz = the block's largest square tx.
 fn av1_txfm_split_ctx(tile, row, col, tx_sz, mi_size, mi_row, mi_col, avail_u, avail_l): i64 {
@@ -24632,7 +24665,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         if (inb == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
         av1_block_neighbours(tile, r, c, iavu, iavl, inb);
         var iloss = load64(tile + AV1TILE_CUR_LOSSLESS);
-        var itxc = av1_tx_depth_ctx(iavu, load64(inb + 32), iavl, load64(inb + 40), av1_max_tx_size_rect(sub_size));
+        var itxc = av1_tx_depth_ctx_inter(tile, r, c, iavu, iavl, av1_max_tx_size_rect(sub_size));   # inter-aware (9.3)
         var itx = av1_read_tx_size(sd, load64(tile + AV1TILE_NCC), sub_size, iloss,
           load64(tile + AV1TILE_TX_MODE), 1, itxc);
         if (av1_fb_skip(fb) != 0) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
@@ -25091,7 +25124,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         var eloss = load64(tile + AV1TILE_CUR_LOSSLESS);
         var etx = av1_max_tx_size_rect(sub_size);
         if (eloss != 0) { etx = 0; }   # Lossless -> TX_4X4, matching the decode's av1_read_tx_size result
-        var etxc = av1_tx_depth_ctx(eavu, load64(enb + 32), eavl, load64(enb + 40), av1_max_tx_size_rect(sub_size));
+        var etxc = av1_tx_depth_ctx_inter(tile, r, c, eavu, eavl, av1_max_tx_size_rect(sub_size));   # mirror of decode
         av1_write_tx_size(enc, load64(tile + AV1TILE_NCC), sub_size, eloss,
           load64(tile + AV1TILE_TX_MODE), 1, etxc, etx);
         if (av1_fb_skip(fb) != 0) {

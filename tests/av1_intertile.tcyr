@@ -6025,12 +6025,128 @@ fn test_seg_lossless_block_inter() {
     return 0;
 }
 
+# tx_depth's cdf context on the inter lane (9.3), the 0.8.2 fix. KATs from the spec text, with the
+# neighbour placed where the KEYFRAME form and the spec disagree: an INTER 32x32 neighbour whose own
+# transform is TX_8X8. For a 32x32 block (maxRectTxSize TX_32X32) the spec takes the neighbour's BLOCK
+# width (32 >= 32 -> counts); the keyframe form took its TX width (8 < 32 -> did not). Above and left
+# are poisoned separately, so a fix applied to one side only is caught.
+fn txd_tile(): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(f, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(t);
+    store64(t + AV1TILE_MVGRID, av1_mv_grid_new(16, 16));
+    return t;
+}
+# mark MI (r, c) as a block of `size` with InterTxSizes `tx`, inter or intra.
+fn txd_nb(t, r, c, size, tx, is_inter): i64 {
+    av1_grid_set(t, AV1TILE_MISIZES, r, c, size);
+    av1_grid_set(t, AV1TILE_INTERTX, r, c, tx);
+    av1_grid_set(t, AV1TILE_SKIPS, r, c, 0);
+    store64(av1_mv_grid_cell(load64(t + AV1TILE_MVGRID), 16, r, c) + AV1MIR_ISINTER, is_inter);
+    return 0;
+}
+fn test_tx_depth_ctx_inter() {
+    # block at MI (8, 8); above neighbour at (7, 8), left at (8, 7).
+    var t = txd_tile();
+    txd_nb(t, 7, 8, AV1_BLOCK_32X32, AV1_TX_8X8, 1);
+    txd_nb(t, 8, 7, AV1_BLOCK_32X32, AV1_TX_8X8, 0);
+    assert_eq(av1_tx_depth_ctx_inter(t, 8, 8, 1, 1, AV1_TX_32X32), 1,
+      "inter ABOVE counts by its block width (32); intra LEFT by its tx height (8) does not");
+    assert_eq(av1_tx_depth_ctx(1, AV1_TX_8X8, 1, AV1_TX_8X8, AV1_TX_32X32), 0,
+      "the keyframe form counts neither (both tx 8) -- the disagreement the fix is about");
+    var t2 = txd_tile();
+    txd_nb(t2, 7, 8, AV1_BLOCK_32X32, AV1_TX_8X8, 0);
+    txd_nb(t2, 8, 7, AV1_BLOCK_32X32, AV1_TX_8X8, 1);
+    assert_eq(av1_tx_depth_ctx_inter(t2, 8, 8, 1, 1, AV1_TX_32X32), 1, "inter LEFT counts by its block height");
+    var t3 = txd_tile();
+    txd_nb(t3, 7, 8, AV1_BLOCK_32X32, AV1_TX_8X8, 1);
+    txd_nb(t3, 8, 7, AV1_BLOCK_32X32, AV1_TX_8X8, 1);
+    assert_eq(av1_tx_depth_ctx_inter(t3, 8, 8, 1, 1, AV1_TX_32X32), 2, "both inter: ctx 2");
+    assert_eq(av1_tx_depth_ctx_inter(t3, 8, 8, 0, 0, AV1_TX_32X32), 0, "unavailable neighbours: 0, not 64");
+    # an intra neighbour keeps the tx width, and a big enough tx counts.
+    var t4 = txd_tile();
+    txd_nb(t4, 7, 8, AV1_BLOCK_32X32, AV1_TX_32X32, 0);
+    txd_nb(t4, 8, 7, AV1_BLOCK_32X32, AV1_TX_16X16, 0);
+    assert_eq(av1_tx_depth_ctx_inter(t4, 8, 8, 1, 1, AV1_TX_32X32), 1, "intra neighbours: by tx dims (32 yes, 16 no)");
+    return 0;
+}
+
+# THE INTRA-FORK USES THE INTER-AWARE tx_depth CONTEXT — end to end through both lanes. A 64x32 inter frame,
+# one superblock SPLIT into two 32x32 blocks: left, an INTER block with var-tx leaves of TX_8X8 (block
+# height 32, InterTxSizes height 8); right, a skip INTRA block (the intra fork) that reads tx_depth with
+# maxRectTxSize TX_32X32. Its context is 1 by the spec (inter left neighbour -> its BLOCK height 32 >= 32;
+# above unavailable) and was 0 by the keyframe form (tx height 8 < 32). With CDF adaptation ON, exactly one
+# Tx32x32 row adapts, and it must be ctx 1 — a check a round trip cannot make, since a writer sharing the
+# keyframe form would agree with the reader.
+fn test_intra_fork_tx_depth_ctx_e2e() {
+    var ref = ir_ref(64, 32, 1, 0, 0);
+    var fh = ir_fh(64, 32, 16, 8, AV1_TX_MODE_SELECT);
+    var refs = ir_refs(64, 32);
+    var seq = ir_seq(1, 0, 0);
+    var target = alloc(64 * 8);
+    var i = 0;
+    while (i < 64) { store64(target + (i * 8), 1); i = i + 1; }   # all TX_8X8
+    var leaves = alloc(16 * 3 * 8);
+    i = 0;
+    while (i < 16) {
+        store64(leaves + ((i * 3 + 0) * 8), AV1_DCT_DCT);
+        store64(leaves + ((i * 3 + 1) * 8), 1);
+        store64(leaves + ((i * 3 + 2) * 8), ir_leaf_coeff(30, 0));
+        i = i + 1;
+    }
+    var vplan = alloc(8 * 8);
+    memset(vplan, 0, 8 * 8);
+    store64(vplan + 0, target);
+    store64(vplan + (2 * 8), 16);
+    store64(vplan + (3 * 8), leaves);
+    var binter = ir_blk(16, 8, 0);
+    av1_fb_set_vartx(binter, vplan);
+    var bintra = its_intra_blk(AV1_DC_PRED, 0);
+    store64(bintra + AV1FB_SKIP, 1);
+    store64((bintra + AV1FB_MI) + AV1MI_SKIP, 1);
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var oe = alloc(8);
+    var ef = dr_frame_new(64, 32, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(et);
+    av1_tile_set_inter_ctx(et, fh, refs, seq, dpb);
+    var pp = alloc(3 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);
+    store64(pp + 16, AV1_PARTITION_NONE);
+    var pf = alloc(2 * 8);
+    store64(pf + 0, binter);
+    store64(pf + 8, bintra);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 0, &tlen);   # disable_cdf 0: adaptation ON
+    assert_eq(tlen > 0, 1, "tx_depth e2e: encoded");
+    # the ENCODER must pick the same context: its own adapted row says which CDF it coded tx_depth with (a
+    # writer on the wrong row can still produce a stream the reader decodes, so the decode alone misses it).
+    var encc = load64(et + AV1TILE_NCC);
+    assert_eq(load64(av1_ncdf_tx32(encc, 1) + (3 * 8)), 1, "tx_depth e2e: the ENCODER coded with the ctx-1 row");
+    assert_eq(load64(av1_ncdf_tx32(encc, 0) + (3 * 8)), 0, "tx_depth e2e: ...not the ctx-0 row");
+    var df = dr_frame_new(64, 32, 1, 0, 0, 8, 8, oe);
+    var dt = av1_tile_new(df, 16, 8, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    av1_tile_set_inter_ctx(dt, fh, refs, seq, dpb);
+    assert_eq(av1_decode_inter_tile(dt, tb, tlen, 0), DR_OK, "tx_depth e2e: decodes");
+    assert_eq(av1_grid_get(dt, AV1TILE_INTERTX, 0, 7), 1, "tx_depth e2e: left neighbour's tx is TX_8X8");
+    var ncc = load64(dt + AV1TILE_NCC);
+    assert_eq(load64(av1_ncdf_tx32(ncc, 1) + (3 * 8)), 1, "tx_depth e2e: the ctx-1 Tx32x32 row adapted (spec)");
+    assert_eq(load64(av1_ncdf_tx32(ncc, 0) + (3 * 8)), 0, "tx_depth e2e: the ctx-0 row (keyframe form) did not");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
     test_inter_tile_e2e();
     test_cdf_bundle_layout();
     test_seg_lossless_block_inter();
+    test_tx_depth_ctx_inter();
+    test_intra_fork_tx_depth_ctx_e2e();
     test_inter_tile_subpel();
     test_inter_tile_two_sb();
     test_inter_tile_signbias_negation();

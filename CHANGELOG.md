@@ -4,6 +4,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.2 bite 4: an intra block in an inter frame read `tx_depth` with the wrong context
+
+Filed in bite 3 as a "spatial-segmentation inter divergence", because it was found on the first
+libaom segmentation stream ever checked (`--aq-mode=1 --cq-level=1`, frame 3 differs from aomdec,
+dav1d agrees with aomdec). **It had nothing to do with segmentation.**
+
+The two-sided symbol trace located it. libaom `inspect` logs `AOMSYM`, and drishti's matching
+`DRSYM` trace lives in a scratch copy only. They parted at frame 3, symbol 12,219: the same value
+from different CDFs, so a context. The symbols before it identify an intra block inside an inter
+frame (`is_inter = 0`, `y_mode = V_PRED`, then its angle and uv mode), so filter-intra was not
+allowed and the symbol was its `tx_depth`.
+
+The defect:
+- **The spec (9.3)** takes an **inter** neighbour's *block* width or height
+  (`Block_Width[MiSizes[above]]`), and an intra neighbour's `get_above_tx_width`.
+- **The intra fork** used `av1_tx_depth_ctx`, the keyframe form, which always takes the
+  neighbour's tx width. That is right only when every neighbour is intra.
+- **The trigger:** an inter neighbour whose transform is smaller than its block (here var-tx
+  leaves), which gave the wrong context and desynced the next symbol.
+
+The fix is `av1_tx_depth_ctx_inter`, on both the decode and encode intra-fork sites. It reuses the
+existing `av1_get_above_tx_width` / `av1_get_left_tx_height`, which already read `IsInters` from the
+shared MV grid. The keyframe lane keeps `av1_tx_depth_ctx`, since every keyframe neighbour is intra.
+
+Evidence:
+- **Conformance**: a new "segmentation on inter frames" section, with libaom variance AQ
+  (`seg_aq1_cq1_f3`, the reproducer) and complexity AQ (`seg_aq2_cq20_f3`). Every frame is
+  bit-exact, and dav1d agrees with aomdec on both. Each case proves that an inter frame carries
+  segmentation, and the guard was seen to fire: cyclic refresh at these settings never segments an
+  inter frame, and its case was refused.
+- **Unit tests**:
+  - context KATs with the neighbour placed where the two forms disagree (an inter 32x32 block with
+    TX_8X8), above and left poisoned separately;
+  - an end-to-end witness: a var-tx inter block beside a skip intra block, with CDF adaptation on.
+    The `Tx32x32` row for context 1 must adapt, **on the encoder and on the decoder**.
+
+**Mutation-verified**, every source file restored byte-exact:
+
+| Mutation | Unit suites | libaom stream |
+|---|---|---|
+| fix reverted on both sides (keyframe context) | red | red |
+| fix reverted on the decode side only | red | red |
+| fix reverted on the encode side only | red | — (decode-only gate) |
+| above: inter branch dropped | red | green (the stream has no above case) |
+| left: inter branch dropped | red | red |
+| block width used for intra neighbours too | red | red |
+
+The first run left the suites green on the first two and the encode-only revert. The KAT tested the
+function, not that the intra fork calls it, and a writer on the wrong CDF row can still produce a
+stream the reader decodes. The end-to-end witness closes both: the decode-side and encode-side
+counters.
+
+Also characterised, not fixed: the 160x136 `--lag-in-frames=19` frame-3 divergence (roadmap 0.8.3).
+Its symbol stream matches libaom exactly, and the difference is chroma-only, 1 LSB, in the last five
+chroma rows, a reconstruction difference at the `MiRows % 4 == 2` geometry. Longer libaom AQ runs
+also showed that libaom writes `update_map` 0 / `update_data` 0 (a copied segment map) on alternate
+inter frames, which drishti rejects cleanly. That is the temporal-segmentation item, next in 0.8.2.
+
+**Gates:** 38 suites, **30,547** assertions (+13); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`. `make conformance` is **63 matched / 0 / 0 / 0 skipped** (was 57).
+
 ### Added — 0.8.2 bite 3: block-level lossless from `LosslessArray[segment_id]`, both lanes
 
 A frame whose segments are partly lossless and partly lossy now decodes. Until now

@@ -1758,13 +1758,14 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - **per-superblock delta-q / delta-lf, both lanes:** libaom delta streams are bit-exact on every
 >   frame;
 > - **block-level lossless from `LosslessArray[segment_id]`, both lanes:** libaom mixed-lossless streams
->   are bit-exact, and `make conformance` is 57 / 0 / 0 / 0.
+>   are bit-exact;
+> - **the "segmentation" inter divergence:** it was the intra-in-inter `tx_depth` context ignoring inter
+>   neighbours. libaom AQ streams with segmented inter frames are now bit-exact, and `make conformance`
+>   is 63 / 0 / 0 / 0.
 >
 > The rest of the batch:
-> - the spatial-segmentation INTER divergence: libaom `--aq-mode=1 --cq-level=1`, frame 3 vs aomdec,
->   with dav1d agreeing with aomdec. It is pre-0.8.2, and it is the first external segmentation stream
->   ever checked, since the corpus encodes `--aq-mode=0`. Start here: the symbol-diff harness from
->   this bite (an `AOMSYM` / `DRSYM` trace) localises it;
+> - temporal / copied segmentation, the first item below: longer libaom AQ runs set `update_map` 0 /
+>   `update_data` 0 on inter frames, and drishti rejects those cleanly today;
 > - the segment `SEG_LVL_ALT_LF` filter-level add (7.14.5 step 3, missing from `av1_lf_strength`);
 > - temporal segmentation (`PrevSegmentIds` + the DPB-saved map);
 > - the cross-frame CDF-inheritance follow-ons (`context_update_tile_id` for multi-tile);
