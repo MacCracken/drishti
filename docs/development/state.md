@@ -6,6 +6,16 @@
 
 ## Version
 
+**0.8.1** — cut 2026-11-13, not yet tagged (user's git). **Toolchain patch: cyrius 6.7.9 -> 6.7.18, and
+`lib/` re-synced to the 6.7.18 bundled snapshot** (plain `cyrius lib sync --full`; no `--relock` this
+time, because 6.7.18 refuses the build BEFORE touching the lock when the pin moved and `lib/` is stale).
+- `lib/` is byte-identical to the snapshot: 66 files changed, 8 of the 12 undeclared bundles moved.
+- No decoder logic changed. `drishti_version()` = 8001.
+- The undeclared bundles are proven inert: dropping all twelve leaves the smoke binary byte-identical.
+- **ALL gates green:** 38 suites with **30,301** suite + **7,410** fuzz assertions, bench, vet, lint,
+  fmt-check, version-check, `distlib --check`, and `make conformance` (strict: **33 / 0 / 0**).
+- The roadmap is not refreshed in this cut.
+
 **0.8.0** — cut 2026-11-13, not yet tagged (user's git). **Toolchain release: cyrius 6.6.20 -> 6.7.9 (the
 6.7.x language minor), and `lib/` re-synced to the 6.7.9 bundled snapshot** (`cyrius lib sync --relock
 --full`). `lib/` is byte-identical to the snapshot: 67 files changed, the twelve undeclared bundles current.
@@ -1405,9 +1415,11 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`). History:
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`). History:
   6.4.46 at 0.7.7 (when `>>>` landed), 6.4.78 at 0.7.128, 6.6.2 at 0.7.130,
-  6.6.20 at 0.7.131, 6.7.9 at 0.8.0. 6.7.x is a language minor: `const`,
+  6.6.20 at 0.7.131, 6.7.9 at 0.8.0, 6.7.18 at 0.8.1. From 6.7.10 on, a
+  moved pin with a stale `lib/` STOPS the build (`cyrius lib sync --full`
+  fixes it). 6.7.x is a language minor: `const`,
   `bool`, `elif`, if-expressions, default and named arguments, `dyn`. It also
   makes a wrong argument count a hard compile error. drishti uses none of the
   new features. Under the 6.6.x+ wrapper the pin **selects** the

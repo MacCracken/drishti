@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-13
+
+Toolchain patch: **cyrius 6.7.9 → 6.7.18**, with `lib/` re-synced to the 6.7.18
+bundled snapshot. No decoder logic changed, and no source change was needed.
+`drishti_version()` returns **8001**. **Every gate is green**: all **30,301
+assertions** across 38 suites, **7,410** fuzz assertions, bench, `vet`, `lint`,
+`fmt-check`, `version-check`, `distlib --check`, all three programs building,
+and `make conformance` (strict) at **33 matched / 0 known-gap / 0 regressed**.
+
+### Changed — cyrius 6.7.9 → 6.7.18
+
+- `cyrius.cyml [package].cyrius` = `6.7.18`.
+- Smoke binary: 1,258,216 → **1,258,240 bytes**.
+- **A moved pin now hard-stops the build** when `lib/` still holds the old
+  snapshot's files. The first 6.7.18 `cyrius build` refused, naming 48 files,
+  and left `cyrius.lock` untouched. Under 6.7.9 the same situation was only a
+  warning plus a lock rewrite.
+- Because the lock was untouched, the fix the tool names (plain
+  `cyrius lib sync --full`) was enough. **`--relock` was not needed this time**,
+  unlike 0.7.131 and 0.8.0.
+
+### Changed — `lib/` re-synced to the 6.7.18 bundled versions
+
+`cyrius lib sync --full`. `lib/` is byte-identical to
+`~/.cyrius/versions/6.7.18/lib` (107 entries, 113 `.cyr` files, none added or
+removed, 66 changed), and `cyrius deps --verify` reports 113 verified, 0 failed.
+
+Eight of the twelve undeclared bundles moved: bayan 1.5.13→1.11.1, sakshi
+2.5.8→2.5.10, sigil 3.13.11→3.13.15, sandhi 1.10.9→1.13.7, yukti
+2.3.16→2.3.18, patra 1.16.0→1.16.6, sankoch 2.8.3→2.8.9, yantra
+1.0.10→1.0.11. ganita, niyama, vani and mabda are byte-unchanged.
+
+**The bundles are still inert.** With no pre-sync build possible, the check is
+different from last time: in a throwaway copy, all twelve were dropped the way
+the tool suggests (`rm <file> && cyrius deps`), and the smoke binary came out
+byte-identical to the full-`lib/` build.
+
 ## [0.8.0] - 2026-11-13
 
 Toolchain release: **cyrius 6.6.20 → 6.7.9**, the 6.7.x language minor, with
