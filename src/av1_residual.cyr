@@ -479,13 +479,13 @@ fn av1_cdefidx_set(tile, r, c, v): i64 {
 }
 # Build the CDEF read context (7 i64) the mode-info splice consumes: the frame-
 # level flags + the CdefIdx grid pointer/stride + a `plan` grid (encode source of
-# cdef_idx; 0 on decode). Call after av1_tile_grids_new. Layout: [0]enable_cdef
-# [1]cdef_bits [2]coded_lossless [3]allow_intrabc [4]grid [5]stride [6]plan.
+# cdef_idx; 0 on decode). Call after av1_tile_grids_new. Layout: the Av1CdefCtx enum (av1_modeinfo.cyr) —
+# [0]enable_cdef [1]cdef_bits [2]coded_lossless [3]allow_intrabc [4]grid [5]stride [6]plan [7]rows.
 fn av1_tile_set_cdef_ctx(tile, enable_cdef, cdef_bits, coded_lossless, allow_intrabc, plan): i64 {
     # Must run after av1_tile_grids_new: we capture the CdefIdx grid pointer, so a
     # null grid here would give read_cdef a null deref. Fail fast instead.
     if (load64(tile + AV1TILE_CDEFIDX) == 0) { return DR_ERR_BOUNDS; }
-    var ctx = alloc(7 * 8);
+    var ctx = alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
     if (ctx == 0) { return DR_ERR_OOM; }
     store64(ctx + 0, enable_cdef);
     store64(ctx + 8, cdef_bits);
@@ -494,6 +494,7 @@ fn av1_tile_set_cdef_ctx(tile, enable_cdef, cdef_bits, coded_lossless, allow_int
     store64(ctx + 32, load64(tile + AV1TILE_CDEFIDX));
     store64(ctx + 40, load64(tile + AV1TILE_FMI_COLS));   # CdefIdx stride = frame MiCols
     store64(ctx + 48, plan);
+    store64(ctx + AV1CDC_ROWS, load64(tile + AV1TILE_FMI_ROWS));   # CdefIdx rows = frame MiRows
     store64(tile + AV1TILE_CDEF_CTX, ctx);
     return DR_OK;
 }

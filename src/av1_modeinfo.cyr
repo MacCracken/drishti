@@ -700,22 +700,31 @@ fn av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, palette
 # the wiring can reach. cdefSize4 = Num_4x4_Blocks_Wide[BLOCK_64X64] = 16;
 # cdefMask4 = ~(cdefSize4-1) = ~15, so (r & ~15) == (r>>4)<<4 for r >= 0.
 # ================================================================
-# read_cdef (5.11.56): read cdef_idx once per 64x64 (guarded by grid[r1][c1]==-1)
-# into `grid` (row stride `stride` i64), filling the block's 4x4 extent. Gated off
-# (reads nothing) on skip / coded_lossless / !enable_cdef / allow_intrabc.
-fn av1_read_cdef(sd, grid, stride, mi_row, mi_col, mi_size, skip,
-  enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
-    if (skip || coded_lossless || (enable_cdef == 0) || allow_intrabc) { return 0; }
-    var r1 = (mi_row >> 4) << 4;
-    var c1 = (mi_col >> 4) << 4;
-    if (load64(grid + (((r1 * stride) + c1) * 8)) != (0 - 1)) { return 0; }
-    var idx = av1_sym_read_literal(sd, cdef_bits);
-    var w4 = av1_num_4x4_w(mi_size);
-    var h4 = av1_num_4x4_h(mi_size);
+# The CDEF read-context record the mode-info splices consume (built by av1_tile_set_cdef_ctx and, for the inter
+# lane, av1_tile_set_inter_ctx). ROWS is the CdefIdx grid's row count (frame MiRows): the grid is flattened to
+# exactly ROWS * STRIDE i64, so the fill below must stay inside it.
+enum Av1CdefCtx {
+    AV1CDC_ENABLE   = 0;    # enable_cdef
+    AV1CDC_BITS     = 8;    # cdef_bits
+    AV1CDC_LOSSLESS = 16;   # CodedLossless
+    AV1CDC_INTRABC  = 24;   # allow_intrabc
+    AV1CDC_GRID     = 32;   # CdefIdx grid (u64 per MI)
+    AV1CDC_STRIDE   = 40;   # its row stride (frame MiCols)
+    AV1CDC_PLAN     = 48;   # encode-side cdef_idx plan (0 on decode)
+    AV1CDC_ROWS     = 56;   # its row count (frame MiRows)
+    AV1CDC_SIZE     = 64;   # bytes
+}
+# the 64x64 anchors (r1 + 16 m, c1 + 16 n) a block of w4 x h4 covers, clipped to the grid: the spec's fill loop
+# (5.11.56) writes a conceptual 2-D array, but drishti's is FLAT (rows * stride i64), so an anchor at row >= rows
+# would store past the object and one at column >= stride would alias into the next row. Clipping is
+# output-equivalent: the CDEF filter (7.15) and every later read_cdef only index anchors inside the frame.
+# Decoded partitions never reach the clip today (a 128-wide block needs its half inside the frame, 5.11.4), but
+# that is the CALLER's invariant, and these two functions must be memory-safe on their own.
+fn av1_cdef_fill(grid, stride, rows, r1, c1, w4, h4, idx): i64 {
     var i = r1;
-    while (i < (r1 + h4)) {
+    while ((i < (r1 + h4)) && (i < rows)) {
         var j = c1;
-        while (j < (c1 + w4)) {
+        while ((j < (c1 + w4)) && (j < stride)) {
             store64(grid + (((i * stride) + j) * 8), idx);
             j = j + 16;
         }
@@ -723,29 +732,32 @@ fn av1_read_cdef(sd, grid, stride, mi_row, mi_col, mi_size, skip,
     }
     return 0;
 }
-# write_cdef: the encode mirror. Emits `plan[r1][c1]` via L(cdef_bits) once per
-# 64x64 (same grid==-1 guard, `grid` tracking the emitted units), and fills the
-# extent — so a decode with read_cdef reconstructs `plan` into its grid.
-fn av1_write_cdef(enc, grid, plan, stride, mi_row, mi_col, mi_size, skip,
+# read_cdef (5.11.56): read cdef_idx once per 64x64 (guarded by grid[r1][c1]==-1)
+# into `grid` (row stride `stride`, `rows` rows, i64), filling the block's 4x4 extent. Gated off
+# (reads nothing) on skip / coded_lossless / !enable_cdef / allow_intrabc.
+fn av1_read_cdef(sd, grid, stride, rows, mi_row, mi_col, mi_size, skip,
   enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
     if (skip || coded_lossless || (enable_cdef == 0) || allow_intrabc) { return 0; }
     var r1 = (mi_row >> 4) << 4;
     var c1 = (mi_col >> 4) << 4;
+    if ((r1 >= rows) || (c1 >= stride)) { return 0; }   # an anchor outside the grid (never a decoded block)
+    if (load64(grid + (((r1 * stride) + c1) * 8)) != (0 - 1)) { return 0; }
+    var idx = av1_sym_read_literal(sd, cdef_bits);
+    return av1_cdef_fill(grid, stride, rows, r1, c1, av1_num_4x4_w(mi_size), av1_num_4x4_h(mi_size), idx);
+}
+# write_cdef: the encode mirror. Emits `plan[r1][c1]` via L(cdef_bits) once per
+# 64x64 (same grid==-1 guard, `grid` tracking the emitted units), and fills the
+# extent — so a decode with read_cdef reconstructs `plan` into its grid.
+fn av1_write_cdef(enc, grid, plan, stride, rows, mi_row, mi_col, mi_size, skip,
+  enable_cdef, cdef_bits, coded_lossless, allow_intrabc): i64 {
+    if (skip || coded_lossless || (enable_cdef == 0) || allow_intrabc) { return 0; }
+    var r1 = (mi_row >> 4) << 4;
+    var c1 = (mi_col >> 4) << 4;
+    if ((r1 >= rows) || (c1 >= stride)) { return 0; }   # mirror of read_cdef
     if (load64(grid + (((r1 * stride) + c1) * 8)) != (0 - 1)) { return 0; }
     var idx = load64(plan + (((r1 * stride) + c1) * 8));
     av1_sym_encode_literal(enc, idx, cdef_bits);
-    var w4 = av1_num_4x4_w(mi_size);
-    var h4 = av1_num_4x4_h(mi_size);
-    var i = r1;
-    while (i < (r1 + h4)) {
-        var j = c1;
-        while (j < (c1 + w4)) {
-            store64(grid + (((i * stride) + j) * 8), idx);
-            j = j + 16;
-        }
-        i = i + 16;
-    }
-    return 0;
+    return av1_cdef_fill(grid, stride, rows, r1, c1, av1_num_4x4_w(mi_size), av1_num_4x4_h(mi_size), idx);
 }
 # clear_cdef: reset a superblock's cdef_idx to -1 at the start of each SB (5.11.2).
 # For a 128x128 SB (use_128), the three other 64x64 sub-units are cleared too.
@@ -1026,7 +1038,7 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         var ci = load64(cdef_ctx + 24);
         var cg = load64(cdef_ctx + 32);
         var cs = load64(cdef_ctx + 40);
-        av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
+        av1_read_cdef(sd, cg, cs, load64(cdef_ctx + AV1CDC_ROWS), mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
     }
     # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.7), straight after read_cdef.
     av1_read_deltas(sd, ncc, av1_tile_dctx(tile), mi_size, skip);
@@ -1084,7 +1096,8 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
         var cg = load64(cdef_ctx + 32);
         var cs = load64(cdef_ctx + 40);
         var cp = load64(cdef_ctx + 48);
-        av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size, load64(mi + AV1MI_SKIP), ce, cb, cl, ci);
+        av1_write_cdef(enc, cg, cp, cs, load64(cdef_ctx + AV1CDC_ROWS), mi_row, mi_col, mi_size,
+          load64(mi + AV1MI_SKIP), ce, cb, cl, ci);
     }
     var ewd = av1_write_deltas(enc, ncc, av1_tile_dctx(tile), mi_size, load64(mi + AV1MI_SKIP), mi_row, mi_col);
     if (ewd != DR_OK) { return ewd; }

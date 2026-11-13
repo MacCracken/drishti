@@ -1784,12 +1784,16 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   **196 / 4 known-gap / 0 / 0**. CAVEAT: no libaom config tried emits a show_existing KEY, so that save is
 >   unit-witnessed only;
 >
-> The rest of the batch:
-> - bounding the `av1_read_cdef` / `av1_write_cdef` fill loops, which are unbounded on both axes
->   and safe today only by the forced-partition invariant.
+> - **the cdef fill loops are bounded** (`av1_cdef_fill`, both lanes): memory-safe on their own, no longer
+>   only by the forced-partition invariant. Output-neutral: `make conformance` stays 196 / 4 / 0 / 0.
 >
-> None of these needs diagnosis. They are all implementation against a clean gate, which is the
-> best position this arc has been in.
+> **Every planned 0.8.2 item is done, but the batch's acceptance line is NOT fully met.** "No
+> `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset": libaom's DEFAULT screen-content detector
+> sets `allow_screen_content_tools = 1` on ordinary content (a 640x360 mandelbrot at default settings;
+> `--tune-content=default` does not stop it), and drishti rejects that wholesale. Decoding such a frame needs
+> at least the palette mode-info read (`has_palette_y` / `has_palette_uv` are coded whenever the tools are
+> allowed), which the roadmap schedules for 0.8.4. Either pull that into 0.8.2 or re-word the acceptance
+> line — a decision for the cut.
 >
 > **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

@@ -79,7 +79,7 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
     var cctx = load64(tile + AV1TILE_CDEF_CTX);
     var cgrid = load64(tile + AV1TILE_CDEFIDX);
     if ((cctx != 0) && (cgrid != 0)) {
-        var ic = alloc(56);
+        var ic = alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
         if (ic == 0) { return DR_ERR_OOM; }
         store64(ic + 0, load64(cctx + 0));       # enable_cdef
         store64(ic + 8, load64(cctx + 8));       # cdef_bits
@@ -88,6 +88,7 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
         store64(ic + 32, cgrid);
         store64(ic + 40, fmi_cols);
         store64(ic + 48, load64(cctx + 48));     # plan slot (write side; 0 on decode)
+        store64(ic + AV1CDC_ROWS, load64(tile + AV1TILE_FMI_ROWS));   # CdefIdx rows (frame MiRows)
         store64(tile + AV1TILE_ICDEF, ic);
     }
     # Temporal-MV field (spec 7.9): when use_ref_frame_mvs, build MotionFieldMvs from the DPB's saved motion

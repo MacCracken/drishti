@@ -3476,7 +3476,8 @@ fn test_inter_frame_mode_info() {
 # the 0.7.83 review hardening: the cdef splice exercised for REAL, the driver-writer
 # desync guards, the writer UNSUPPORTED gates, and the record-layout pins.
 fn fb_cdef_ctx(grid, plan): i64 {
-    var c = alloc(56);
+    var c = alloc(AV1CDC_SIZE);
+    store64(c + AV1CDC_ROWS, 16);   # rows (the 16 x 16 grid below)
     store64(c + 0, 1);        # enable_cdef
     store64(c + 8, 3);        # cdef_bits
     store64(c + 16, 0);       # coded_lossless

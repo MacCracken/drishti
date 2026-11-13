@@ -2689,7 +2689,7 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
         var ci = load64(cdef_ctx + 24);
         var cg = load64(cdef_ctx + 32);
         var cs = load64(cdef_ctx + 40);
-        av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
+        av1_read_cdef(sd, cg, cs, load64(cdef_ctx + AV1CDC_ROWS), mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
     }
     # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.18), straight after read_cdef and
     # before is_inter — so an intra block inside an inter frame reads its deltas here too.
@@ -2761,7 +2761,7 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
         var cg = load64(cdef_ctx + 32);
         var cs = load64(cdef_ctx + 40);
         var cp = load64(cdef_ctx + 48);
-        av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size,
+        av1_write_cdef(enc, cg, cp, cs, load64(cdef_ctx + AV1CDC_ROWS), mi_row, mi_col, mi_size,
           load64(blk + AV1FB_SKIP), ce, cb, cl, ci);
     }
     var ewd = av1_write_deltas(enc, ncc, dctx, mi_size, load64(blk + AV1FB_SKIP), mi_row, mi_col);

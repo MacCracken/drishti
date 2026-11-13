@@ -4,6 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.2 bite 9: the cdef_idx fill loops are bounded
+
+`av1_read_cdef` / `av1_write_cdef` fill `cdef_idx` at every 64x64 anchor the block covers (5.11.56). The
+spec's array is conceptual and 2-D, but drishti's CdefIdx grid is FLAT (`MiRows × MiCols` u64). So an anchor
+at row ≥ MiRows stores past the object, and one at column ≥ MiCols aliases into the next row, the class of
+defect behind the 0.7.128 heap overflow. They were safe only by the caller's invariant: a decoded 128-wide
+block needs its half inside the frame (5.11.4). Now:
+- **`av1_cdef_fill`** clips both loops to the grid. The record carries the row count in a new slot,
+  `AV1CDC_ROWS`; the layout is now a named enum, `Av1CdefCtx`, and both builders fill it.
+- **An anchor outside the grid reads nothing and writes nothing**, on both lanes. Before, it was an
+  out-of-bounds read, and a symbol read if that memory happened to hold -1.
+
+Output-neutral: the CDEF filter (7.15) and every later read only index anchors inside the frame, and
+`make conformance` is unchanged at 196 / 4 / 0 / 0.
+
+Evidence:
+- **A canary-guarded witness**: a BLOCK_128X128 at (0,0) of a 16x16-MI grid, both lanes. The 48-entry canary
+  after the grid spans every unbounded store (flat 16, 256 and 272). The out-of-grid case sets the post-grid
+  memory to -1, the value an unguarded reader takes for an unread anchor.
+- **Mutation-verified, 4 mutations, all red:** the row bound dropped, the column bound dropped, and each
+  lane's out-of-grid check dropped. The first run left both out-of-grid checks green: the out-of-bounds
+  read landed on the canary value 777, not -1, so the function returned anyway. Setting that memory to -1
+  closed it.
+
+**0.8.2 batch status:** every planned item is done, but the acceptance line ("no `DR_ERR_UNSUPPORTED` on a
+stock `aomenc` stream at any preset") is not fully met. libaom's default screen-content detector sets
+`allow_screen_content_tools` on ordinary content (a 640x360 mandelbrot), which still rejects. The palette
+mode-info read it needs is roadmap 0.8.4.
+
+**Gates:** 38 suites, **30,767** assertions (+8); 7,410 fuzz; bench; vet; lint; fmt-check; version-check;
+`distlib --check`. `make conformance` is **196 matched / 4 known-gap / 0 / 0 skipped**.
+
 ### Fixed — 0.8.2 bite 8: multi-tile streams decode (the context tile, the shared `REF0S` grid); show_existing KEY re-saves its state
 
 **A stock libaom multi-tile stream (`--tile-columns=1`) used to reject on every frame.** libaom names
