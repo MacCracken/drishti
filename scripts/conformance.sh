@@ -62,6 +62,10 @@ TSEG_CASES="tseg_352x288_b150_c8 tseg_160x136_b400_c8 tseg_200x104_b150_c9"
 # inherits a non-trivial segmentation: its copied maps carry no features. rav1e does — every inter frame
 # inherits the keyframe's ALT_Q features through update_data 0 — so it is the external witness for
 # load_previous. SVT-AV1's variance AQ re-codes its features on inter frames with a primary reference.
+# QUANTIZER MATRICES (0.8.2): qm15 signals matrices at the flat level 15 (must decode bit-exact: no matrix
+# applies); qmon uses libaom's default levels, which drishti does not implement — it must REJECT, never
+# mis-decode (each rejected frame is a known gap until roadmap 0.8.4).
+QM_CASES="qm15_176x144 qmon_176x144"
 RAV1E_CASES="rav1e_352x288_s6_q100"
 SVT_CASES="svt_352x288_p8_crf35"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
@@ -84,6 +88,7 @@ skip_external() { # reason
     for c in $LL_CASES; do skip_case "$c" "$1"; done
     for c in $SEGI_CASES; do skip_case "$c" "$1"; done
     for c in $TSEG_CASES; do skip_case "$c" "$1"; done
+    for c in $QM_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
@@ -711,6 +716,54 @@ echo "--- segmentation on inter frames (libaom AQ; copied map + inherited data; 
 for c in $SEGI_CASES; do segicase "$c"; done
 echo "--- temporal segmentation (libaom realtime cyclic refresh; seg_id_predicted; every frame hard) ---"
 for c in $TSEG_CASES; do tsegcase "$c"; done
+qmcase() { # name = qm15_WxH (hard) | qmon_WxH (must reject); 4 frames
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=4 qmargs="--enable-qm=1"
+    [ "$kind" = "qm15" ] && qmargs="--enable-qm=1 --qm-min=15 --qm-max=15"
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w $w -h $h --i420 --cpu-used=8 --end-usage=q --cq-level=30 --limit="$fr" \
+        --lag-in-frames=0 --enable-restoration=0 --enable-palette=0 --enable-intrabc=0 $qmargs \
+        --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local probe; probe=$(./build/drishti-vector-probe 2>&1)
+    if ! echo "$probe" | grep -q 'using_qmatrix=1'; then
+        echo "  $n: SETUP FAILED (no frame signals using_qmatrix — the case would prove nothing)"; fail=$((fail+1)); return
+    fi
+    if [ "$kind" = "qm15" ] && echo "$probe" | grep -q 'qmatrix_applies=1'; then
+        echo "  $n: SETUP FAILED (a frame applies a matrix — not the flat-level case)"; fail=$((fail+1)); return
+    fi
+    if [ "$kind" = "qmon" ] && ! echo "$probe" | grep -q 'qmatrix_applies=1'; then
+        echo "  $n: SETUP FAILED (no frame applies a matrix — the reject would prove nothing)"; fail=$((fail+1)); return
+    fi
+    if [ "$kind" = "qm15" ]; then seg_judge "$n" "$w" "$h" "$fr"; return; fi
+    run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    aomdec --rawvideo -o "$WORK/$n.ref" "$WORK/$n.ivf" 2>/dev/null
+    local fs=$(( (w * h) + (2 * ((w + 1) / 2) * ((h + 1) / 2)) ))
+    local line="  $n:" k=1
+    while [ "$k" -le "$fr" ]; do
+        local a b
+        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
+        if [ -z "$a" ] && grep -q "frame $k DECODE-FAILED err=7" "$WORK/$n.log"; then
+            line="$line f$k=rejected(known-gap)"; xfail=$((xfail+1))
+        elif [ -n "$a" ] && [ "$a" = "$b" ]; then
+            line="$line f$k=DECODES(promote-to-hard)"; fail=$((fail+1))
+        else
+            line="$line f$k=REGRESSED(mis-decode)"; fail=$((fail+1))
+        fi
+        k=$((k+1))
+    done
+    echo "$line"
+}
+echo "--- quantizer matrices: the flat level decodes, a real matrix is REJECTED (never mis-decoded) ---"
+for c in $QM_CASES; do qmcase "$c"; done
 echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); every frame hard ---"
 for c in $RAV1E_CASES; do rav1ecase "$c"; done
 for c in $SVT_CASES; do svtcase "$c"; done

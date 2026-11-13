@@ -1774,6 +1774,8 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   `av1_seg_supported` is gone. libaom realtime ROI-skip streams (SKIP + ALT_LF -63, API-only) are
 >   committed as `tests/repro/roi-skip-*` and bit-exact. CAVEAT: their ALT_LF is invisible (smooth skipped
 >   copies), so the level add is unit-witnessed only;
+> - **quantizer matrices now REJECT** where one could apply (they decoded silently wrong): `make conformance`
+>   is **142 / 4 known-gap / 0 / 0**, the 4 being the `qmon` frames held until roadmap 0.8.4 implements them;
 >
 > The rest of the batch:
 > - the cross-frame CDF-inheritance follow-ons: `context_update_tile_id` for multi-tile, the

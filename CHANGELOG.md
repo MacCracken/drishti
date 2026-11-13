@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.2 bite 7: a stream with quantizer matrices now REJECTS instead of decoding silently wrong
+
+drishti parses `using_qmatrix` / `qm_y` / `qm_u` / `qm_v` but does not implement the matrices: 7.12.3
+step 1b has `q2 == q` in `av1_recon.cyr`, and `av1_fh_using_qmatrix` had no caller. Nothing rejected
+such a stream. **A libaom `--enable-qm=1` stream decoded 4/4 frames with no error, and every frame was
+wrong**, which is exactly what "trust no input byte" forbids.
+
+`av1_frame_dec_new` now rejects with `DR_ERR_UNSUPPORTED` exactly the frames where a matrix could
+apply (`av1_fh_qm_applies`). That is spec-literal from 7.12.3 step 1b and `SegQMLevel` (5.9.2):
+- `using_qmatrix` = 1;
+- some segment is lossy, since a lossless segment's level is forced to 15;
+- and a present plane's level is below 15.
+
+Level 15 is the flat matrix, so a stream coded at level 15 is not rejected; it decodes bit-exact
+without one. The transform-type condition (`< IDTX`) is per block, so this is the exact frame-level
+test. `vector-probe` reports the levels and a `qmatrix_applies` gate. Implementing the matrices is
+roadmap 0.8.4.
+
+Evidence:
+- **Conformance, 142 matched / 4 known-gap / 0 / 0.** A new quantizer-matrix section:
+  - `qm15_176x144` (`--enable-qm=1 --qm-min=15 --qm-max=15`) is a hard case, bit-exact on every frame.
+    That externally confirms level 15 needs no reject.
+  - `qmon_176x144` (`--enable-qm=1`, levels 5 and 7) must reject. Each frame counts as a known gap
+    only if drishti refused it with the unsupported-feature error. A frame decoded wrong is
+    REGRESSED, and one decoded right fails with "promote to hard", for when 0.8.4 lands.
+  - Each case proves its property through `vector-probe`.
+- **Unit tests:** a KAT over the condition (each plane, mono vs chroma, CodedLossless, the flat level);
+  the decoder reject; and a level-15 control that still decodes.
+- **Mutation-verified, 5 mutations, all red:**
+  - the reject removed (the unit suite; on the stream it becomes the 4/4 silent mis-decode above);
+  - CodedLossless not exempted;
+  - level 15 treated as a matrix (unit suites, and the qm15 stream 4/4);
+  - chroma levels checked on a mono stream;
+  - only luma checked.
+
+**Gates:** 38 suites, **30,723** assertions (+11); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`.
+
 ### Added — 0.8.2 bite 6: the last two segment features (`SEG_LVL_ALT_LF`, `SEG_LVL_SKIP`); segmentation gates nothing
 
 Every segment feature is now applied, so `av1_seg_supported` is gone and segmentation is no longer a

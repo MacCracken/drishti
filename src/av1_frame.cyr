@@ -986,6 +986,22 @@ fn av1_fh_lossless_mask(fh): i64 {
     }
     return m;
 }
+# Would 7.12.3 step 1b scale ANY coefficient by a quantizer matrix? q2 = Round2( q * Quantizer_Matrix[ SegQMLevel ]
+# ... ) when using_qmatrix == 1, PlaneTxType < IDTX and SegQMLevel[ plane ][ segment_id ] < 15, where SegQMLevel
+# (5.9.2) is 15 for a LOSSLESS segment and qm_y / qm_u / qm_v otherwise. So a matrix can apply iff using_qmatrix,
+# some segment is lossy (!CodedLossless), and a present plane's level is below 15 (15 is the flat matrix: a stream
+# coded at level 15 decodes identically without one). The tx-type condition is per block, so this is the exact
+# FRAME-level question. drishti does not implement the matrices (src/av1_recon.cyr: q2 == q), so the frame decoder
+# rejects when this returns 1 — they used to be parsed and ignored, a silent mis-decode (roadmap.md 0.8.4).
+fn av1_fh_qm_applies(fh, num_planes): i64 {
+    if (av1_fh_using_qmatrix(fh) == 0) { return 0; }
+    if (av1_fh_coded_lossless(fh) != 0) { return 0; }
+    if (av1_fh_qm_y(fh) < 15) { return 1; }
+    if (num_planes > 1) {
+        if ((av1_fh_qm_u(fh) < 15) || (av1_fh_qm_v(fh) < 15)) { return 1; }
+    }
+    return 0;
+}
 fn av1_compute_lossless(fh): i64 {
     var coded_lossless = 1;
     var seg = 0;

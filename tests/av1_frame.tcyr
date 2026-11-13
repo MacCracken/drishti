@@ -378,6 +378,35 @@ fn test_seg_lossless_crossing() {
     return 0;
 }
 
+# quantizer matrices (7.12.3 step 1b): a matrix can scale a coefficient iff using_qmatrix, some segment is lossy,
+# and a PRESENT plane's SegQMLevel is below 15. drishti rejects exactly that (not implemented); level 15 is flat.
+fn test_qm_applies() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_QM_Y, 5);
+    store64(fh + AV1FH_QM_U, 5);
+    store64(fh + AV1FH_QM_V, 5);
+    assert_eq(av1_fh_qm_applies(fh, 3), 0, "using_qmatrix 0 -> no matrix, whatever the levels");
+    store64(fh + AV1FH_USING_QMATRIX, 1);
+    assert_eq(av1_fh_qm_applies(fh, 3), 1, "using_qmatrix, lossy, levels 5 -> applies");
+    store64(fh + AV1FH_QM_Y, 15);
+    store64(fh + AV1FH_QM_U, 15);
+    store64(fh + AV1FH_QM_V, 15);
+    assert_eq(av1_fh_qm_applies(fh, 3), 0, "every level 15 (flat) -> no matrix");
+    store64(fh + AV1FH_QM_Y, 14);
+    assert_eq(av1_fh_qm_applies(fh, 1), 1, "luma level 14 -> applies (mono too)");
+    store64(fh + AV1FH_QM_Y, 15);
+    store64(fh + AV1FH_QM_V, 0);
+    assert_eq(av1_fh_qm_applies(fh, 3), 1, "V level 0 -> applies with chroma");
+    assert_eq(av1_fh_qm_applies(fh, 1), 0, "...but a mono stream has no V plane");
+    store64(fh + AV1FH_QM_U, 3);
+    store64(fh + AV1FH_QM_V, 15);
+    assert_eq(av1_fh_qm_applies(fh, 3), 1, "U level 3 -> applies");
+    store64(fh + AV1FH_CODED_LOSSLESS, 1);
+    assert_eq(av1_fh_qm_applies(fh, 3), 0, "CodedLossless: every SegQMLevel is 15 -> no matrix");
+    return 0;
+}
+
 # LosslessArray (5.9.2): get_qindex( 1, s ) == 0 AND all five DeltaQ* == 0. KATs straight from that line.
 fn test_lossless_array() {
     var fh = alloc(AV1FH_SIZE);
@@ -1010,6 +1039,7 @@ fn main() {
     test_av1_fh_segmentation();
     test_seg_id_pre_skip_derivation();
     test_seg_lossless_crossing();
+    test_qm_applies();
     test_lossless_array();
     test_av1_fh_tile_multi_impl(fx_seq_reduced(1024, 64, 0, 0, 0, 0, 0));
     test_group("av1 frame header — full path");

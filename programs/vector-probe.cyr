@@ -73,7 +73,7 @@ fn probe_seq(seq): i64 {
     return 0;
 }
 
-fn probe_fh(fh): i64 {
+fn probe_fh(fh, seq): i64 {
     probe_puts(" FRAME HEADER\n");
     probe_kv("frame_type", load64(fh + AV1FH_FRAME_TYPE));
     probe_kv("frame_is_intra", load64(fh + AV1FH_FRAME_IS_INTRA));
@@ -92,6 +92,12 @@ fn probe_fh(fh): i64 {
     probe_puts(" --- drishti reject gates ---\n");
     probe_gate("allow_screen_content_tools", load64(fh + AV1FH_ALLOW_SCT), 1);
     probe_gate("allow_intrabc", load64(fh + AV1FH_ALLOW_INTRABC), 1);
+    # quantizer matrices: parsed, not applied — reject when one could scale a coefficient (0.8.2).
+    probe_kv("using_qmatrix", load64(fh + AV1FH_USING_QMATRIX));
+    probe_kv("qm_y", load64(fh + AV1FH_QM_Y));
+    probe_kv("qm_u", load64(fh + AV1FH_QM_U));
+    probe_kv("qm_v", load64(fh + AV1FH_QM_V));
+    probe_gate("qmatrix_applies", av1_fh_qm_applies(fh, av1_seq_num_planes(seq)), 1);
     # per-superblock deltas decode as of 0.8.2: reported, no longer gates.
     probe_kv("delta_q_present", load64(fh + AV1FH_DELTA_Q_PRESENT));
     probe_kv("delta_q_res", load64(fh + AV1FH_DELTA_Q_RES));
@@ -181,7 +187,7 @@ fn main() {
                             probe_puts(dr_err_name(ferr));
                             probe_puts(")\n");
                         } else {
-                            probe_fh(fh);
+                            probe_fh(fh, seq);
                             # 7.20, header half: later headers' load_previous / frame_size_with_refs / order
                             # hints read the slots this frame refreshes (no pixels — this is a header probe).
                             av1_frame_update_refs(refs, seq, fh);
