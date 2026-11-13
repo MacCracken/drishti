@@ -6,6 +6,21 @@
 
 ## Version
 
+**0.8.0** — cut 2026-11-13, not yet tagged (user's git). **Toolchain release: cyrius 6.6.20 -> 6.7.9 (the
+6.7.x language minor), and `lib/` re-synced to the 6.7.9 bundled snapshot** (`cyrius lib sync --relock
+--full`). `lib/` is byte-identical to the snapshot: 67 files changed, the twelve undeclared bundles current.
+No decoder logic changed, and the toolchain needed no source change.
+- The whole tree compiles clean under 6.7.9, which now refuses a wrong argument count. That makes it the
+  first build to PROVE every call site's arity across src/, programs/ and all 41 harnesses.
+- **ALL gates green:** 38 suites with **30,301** suite + **7,410** fuzz assertions, bench, vet, lint,
+  fmt-check, version-check, `distlib --check`, and `make conformance` (strict: **33 matched / 0 known-gap /
+  0 regressed**).
+- **API: `drishti_version()` is WIDENED to `MAJOR*1000000 + MINOR*1000 + PATCH`** (each 0..999), so 0.8.0
+  returns 8000. The old `*10000 + *100` form overflowed at PATCH 100 and would have returned 800 here,
+  BELOW 0.7.131's 831. Ordering holds across the change, since the old maximum was 831. version-check now
+  refuses a component past 999.
+- The roadmap is not refreshed in this cut.
+
 **0.7.131** — cut 2026-11-13, not yet tagged (user's git). **Toolchain patch: cyrius 6.6.2 -> 6.6.20, and
 `lib/` re-synced to the 6.6.20 bundled snapshot** (`cyrius lib sync --relock --full`: byte-identical to the
 snapshot, and the twelve held-back undeclared bundles are current). No decoder logic changed.
@@ -1390,9 +1405,12 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`). History:
+- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`). History:
   6.4.46 at 0.7.7 (when `>>>` landed), 6.4.78 at 0.7.128, 6.6.2 at 0.7.130,
-  6.6.20 at 0.7.131. Under the 6.6.x wrapper the pin **selects** the
+  6.6.20 at 0.7.131, 6.7.9 at 0.8.0. 6.7.x is a language minor: `const`,
+  `bool`, `elif`, if-expressions, default and named arguments, `dyn`. It also
+  makes a wrong argument count a hard compile error. drishti uses none of the
+  new features. Under the 6.6.x+ wrapper the pin **selects** the
   toolchain: `cyrius --version` reports `manifest-pin`, and that exact
   version runs, regardless of the newer wrapper at `~/.cyrius/bin`. Build,
   test and lint run with no pin-drift or lib-shadow warnings at this pin.
@@ -1410,7 +1428,7 @@ completion. The remaining distance to 1.0 is inter + conformance + the encode-la
 
 | Module | Family | Surface |
 |--------|--------|---------|
-| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 806, format sniff |
+| `src/drishti.cyr` | core `dr_` | error record + code bands, `drishti_version()` → 8000 (`MAJOR*1000000 + MINOR*1000 + PATCH`), format sniff |
 | `src/bits.cyr` | core `dr_` | MSB-first bitreader/bitwriter, leb128/uvlc/ue/se + su/ns read + write, FloorLog2, bit-skip, sticky-latch seam |
 | `src/ivf.cyr` | core `dr_ivf_` | IVF read/write (AV01/VP80/VP90) |
 | `src/frame.cyr` | core `dr_frame_` | shared YUV planar-frame buffer (DrFrame): 1/3 planes, 16-bit samples, subsampling, border, dr_clip1 |

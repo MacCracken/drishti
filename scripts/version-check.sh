@@ -39,11 +39,23 @@ if [ -f README.md ] && grep -q "^Version:" README.md; then
     fi
 fi
 
-# drishti_version() in src/drishti.cyr packs MAJOR*10000 + MINOR*100 + PATCH —
-# keep it in lockstep with the VERSION file.
-PACKED=$(echo "$FILE_VERSION" | awk -F. '{ print $1*10000 + $2*100 + $3 }')
-CODE_PACKED=$(grep -A1 'fn drishti_version' src/drishti.cyr | grep -oE 'return [0-9]+' | awk '{print $2}')
-if [ -n "$CODE_PACKED" ] && [ "$PACKED" != "$CODE_PACKED" ]; then
+# drishti_version() in src/drishti.cyr packs MAJOR*1000000 + MINOR*1000 + PATCH,
+# each component 0..999 — keep it in lockstep with the VERSION file. (Widened at
+# 0.8.0: the old MAJOR*10000 + MINOR*100 + PATCH overflowed once PATCH hit 100.)
+# A component past 999 would overflow into its neighbour again, so refuse it.
+if ! echo "$FILE_VERSION" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+    echo "  FAIL: VERSION ($FILE_VERSION) must be MAJOR.MINOR.PATCH with each component 0..999"
+    echo "        (drishti_version() packs MAJOR*1000000 + MINOR*1000 + PATCH)"
+    fail=1
+fi
+PACKED=$(echo "$FILE_VERSION" | awk -F. '{ print $1*1000000 + $2*1000 + $3 }')
+# `|| true`: without it a failed grep trips `set -e` + pipefail and the script
+# exits 1 with NO message, so the branch below could never say why.
+CODE_PACKED=$(grep -A1 'fn drishti_version' src/drishti.cyr | grep -oE 'return [0-9]+' | awk '{print $2}' || true)
+if [ -z "$CODE_PACKED" ]; then
+    echo "  FAIL: could not read 'return N;' on the line after 'fn drishti_version' in src/drishti.cyr"
+    fail=1
+elif [ "$PACKED" != "$CODE_PACKED" ]; then
     echo "  FAIL: drishti_version() returns $CODE_PACKED but VERSION $FILE_VERSION packs to $PACKED"
     fail=1
 fi

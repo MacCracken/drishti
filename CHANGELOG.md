@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-13
+
+Toolchain release: **cyrius 6.6.20 → 6.7.9**, the 6.7.x language minor, with
+`lib/` re-synced to the 6.7.9 bundled snapshot. No decoder logic changed. The
+toolchain needed no source change; the one API change is a **widened
+`drishti_version()` packing** (below). **Every gate is green**: all **30,301
+assertions** across 38 suites, **7,410** fuzz assertions, bench, `vet`, `lint`,
+`fmt-check`, `version-check`, `distlib --check`, and `make conformance`
+(strict) at **33 matched / 0 known-gap / 0 regressed**.
+
+### Changed — cyrius 6.6.20 → 6.7.9
+
+- `cyrius.cyml [package].cyrius` = `6.7.9`.
+- 6.7.0–6.7.9 add traits and `dyn`, `const` / `const fn`, `bool` / `true` /
+  `false`, `elif` and if-expressions, `loop` / `do … while`, compound
+  assignment, tuples, and default and named arguments. drishti uses none of
+  them, and none of its identifiers collide with the new reserved words.
+- **A wrong argument count is now a HARD compile error**, for forward and
+  backward calls alike (verified with a small probe). The whole tree builds
+  clean: all three programs (smoke, conformance, vector-probe) and all 38 `.tcyr`, 2 `.fcyr` and
+  1 `.bcyr` harnesses. That is the first proof that every call site's arity is
+  right. CLAUDE.md's "a wrong ARG COUNT does not hard-fail" is corrected.
+- Duplicate `fn` names are still warn-only (last definition wins), so the
+  `uniq -d` rule in CLAUDE.md stands.
+- Smoke binary: 1,258,208 → **1,258,216 bytes**.
+
+### Changed — `lib/` re-synced to the 6.7.9 bundled versions
+
+Same procedure as 0.7.131: `cyrius lib sync --relock --full`. The first 6.7.9
+build had relocked the declared stdlib under the new pin, so a plain `--full`
+refused 52 rows. `lib/` is byte-identical to `~/.cyrius/versions/6.7.9/lib`
+(107 entries, 113 `.cyr` files, none added or removed, 67 changed), and
+`cyrius deps --verify` reports 113 verified, 0 failed. The twelve undeclared
+bundles moved together: bayan 1.5.12→1.5.13, ganita 1.2.14→1.2.15, sakshi
+2.5.7→2.5.8, niyama 1.0.13→1.1.0, sigil 3.13.10→3.13.11, sandhi
+1.10.8→1.10.9, yukti 2.3.15→2.3.16, patra 1.15.2→1.16.0, vani 1.2.9→1.2.10,
+mabda 4.1.7→4.2.0, sankoch 2.8.1→2.8.3, yantra 1.0.8→1.0.10. The smoke binary
+is byte-identical before and after the sync, because drishti reaches none of
+them.
+
+### Changed — `drishti_version()` packing widened (API)
+
+**`drishti_version()` now returns `MAJOR*1000000 + MINOR*1000 + PATCH`**, each
+component 0..999, so 0.8.0 returns **8000**.
+
+- **Why:** the old `MAJOR*10000 + MINOR*100 + PATCH` overflowed once PATCH
+  reached 100 at 0.7.100. 0.7.131 packed to 831, so 0.8.0 would have packed to
+  800, going BACKWARDS, and a future 0.8.31 would have collided with 0.7.131.
+- **Ordering holds across the change.** The old form's largest value ever was
+  831, so every widened value from 0.8.0 on sits above every old one. A
+  consumer's `>=` check stays correct across the switch.
+- **Consumers:** tarang, jalwa and aethersafta (the ones checked out locally)
+  never call `drishti_version()`. tazama was not available to check.
+
+`tests/drishti.tcyr` pins 8000 as a hand-derived known answer, and adds an
+assertion that the value sits above 831.
+
+`scripts/version-check.sh` changes in three ways:
+- It uses the new formula.
+- It **refuses** any VERSION that is not `MAJOR.MINOR.PATCH` with each
+  component 0..999, so the overflow cannot come back silently.
+- It names its failure when it cannot read `return N;` after
+  `fn drishti_version`. Before, the failed grep tripped `set -e` + pipefail,
+  and the script exited 1 with **no message**.
+
+Mutation-verified, each case restored byte-exact afterwards:
+
+| Mutation | Gate | Suite |
+|---|---|---|
+| code returns the old 800 | FAILS | FAILS (2 asserts) |
+| a reshaped `return (8000);` | FAILS and names it (the old gate: exit 1, silent) | — |
+| VERSION `0.8.1000` | FAILS (range) | — |
+| VERSION `0.8` | FAILS (shape) | — |
+
 ## [0.7.131] - 2026-11-13
 
 Toolchain patch: **cyrius 6.6.2 → 6.6.20**, with `lib/` re-synced to the 6.6.20

@@ -71,8 +71,9 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - Cyrius **silently shadows duplicate `fn` names** (last-def-wins, warn-only) — there is no
   module-private scoping, so grep before naming a driver over an existing leaf; the
   convention is leaf = `_sym` suffix, driver = plain name. `grep -hoE '^fn [a-z0-9_]+'
-  src/*.cyr | sort | uniq -d` must be empty. A wrong ARG COUNT also does not hard-fail —
-  changing a signature needs every call site checked by hand
+  src/*.cyr | sort | uniq -d` must be empty. A wrong ARG COUNT, by contrast, IS a hard
+  compile error since cyrius 6.7.x (forward and backward calls alike), so a changed
+  signature with a missed call site fails the build
 - Hand-built test vectors comment EVERY field's bit packing; anything with a writer gets a round-trip test; adversarial cases (truncation, lying sizes, forbidden bits) are part of the definition of done
 - **A test you have not seen fail is not evidence** — mutation-verify: break the code on purpose, confirm the suite goes red, restore. Known answers come from a spec-literal port in `scripts/refs/`, never from the Cyrius. See [`docs/guides/verification.md`](docs/guides/verification.md) for the loop and the failure modes (circular tests, aliased fixtures, digest blindness, silent name shadowing)
 
