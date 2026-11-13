@@ -3201,30 +3201,6 @@ fn av1_fh_seg_id_pre_skip(fh): i64 {
     return 0;
 }
 
-# av1_seg_supported — does this frame use only segment FEATURES drishti implements? 1 = decode it; 0 = reject
-# cleanly (trust no input byte — a feature that is parsed but not applied mis-decodes SILENTLY). Every map
-# config decodes as of 0.8.2: the spatial read, the temporal seg_id_predicted read (temporal_update), the
-# copied map (!update_map) and the inherited feature data (!update_data, via load_previous). Mixed lossless
-# and lossy segments decode too (Lossless = LosslessArray[ segment_id ], av1_tile_block_setup). Two features
-# remain unimplemented and reject:
-#  - SEG_LVL_ALT_LF_Y_V + i (i = 0..3): the deblocker's per-segment level add (7.14.4) is not applied.
-#  - SEG_LVL_SKIP: read_skip (5.11.11) does not force skip = 1 for it, so the skip symbol it omits is read.
-# Both are roadmap.md 0.8.2 items.
-fn av1_seg_supported(fh): i64 {
-    if (av1_fh_segmentation_enabled(fh) == 0) { return 1; }
-    var seg = 0;
-    while (seg < AV1_MAX_SEGMENTS) {
-        var j = AV1_SEG_LVL_ALT_LF_Y_V;
-        while (j < (AV1_SEG_LVL_ALT_LF_Y_V + 4)) {   # SEG_LVL_ALT_LF_Y_V + i, i < FRAME_LF_COUNT (7.14.4)
-            if (av1_fh_feature_enabled(fh, seg, j) != 0) { return 0; }
-            j = j + 1;
-        }
-        if (av1_fh_feature_enabled(fh, seg, AV1_SEG_LVL_SKIP) != 0) { return 0; }
-        seg = seg + 1;
-    }
-    return 1;
-}
-
 # tile_info() — 5.9.15 (+ 5.9.3 tile_log2). Writes MiColStarts/MiRowStarts
 # and the tile-count/log2/size-bytes fields.
 fn av1_tile_info(br, s, fh): i64 {
@@ -10904,6 +10880,28 @@ fn av1_read_skip(sd, ncc, ctx): i64 {
 fn av1_write_skip(enc, ncc, ctx, skip): i64 {
     return av1_sym_encode_symbol(enc, av1_ncdf_skip(ncc, ctx), 2, skip);
 }
+# read_skip (5.11.11): `SegIdPreSkip && seg_feature_active( SEG_LVL_SKIP )` sets skip = 1 with NO symbol, for the
+# segment_id known at that point (the preSkip read). libaom read_skip_txfm agrees (SEG_LVL_SKIP forces
+# SegIdPreSkip, so it tests the feature alone). fh = 0 (a caller without a header) is never forced.
+fn av1_skip_forced(fh, segment_id): i64 {
+    if (fh == 0) { return 0; }
+    if (av1_fh_seg_id_pre_skip(fh) == 0) { return 0; }
+    return av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0;
+}
+fn av1_read_skip_seg(sd, ncc, ctx, fh, segment_id): i64 {
+    if (av1_skip_forced(fh, segment_id) != 0) { return 1; }
+    return av1_read_skip(sd, ncc, ctx);
+}
+# the mirror: a forced skip writes nothing, and a plan claiming skip = 0 there is unrepresentable (the decoder
+# derives 1) -> DR_ERR_BOUNDS. Otherwise the skip symbol, DR_OK.
+fn av1_write_skip_seg(enc, ncc, ctx, fh, segment_id, skip): i64 {
+    if (av1_skip_forced(fh, segment_id) != 0) {
+        if (skip == 0) { return DR_ERR_BOUNDS; }
+        return DR_OK;
+    }
+    av1_write_skip(enc, ncc, ctx, skip);
+    return DR_OK;
+}
 
 # intra_frame_y_mode (9.3): cdf = TileIntraFrameYModeCdf[abovemode][leftmode]
 # where {above,left}mode = Intra_Mode_Context[ avail ? neighbourYMode : DC_PRED ].
@@ -11427,7 +11425,7 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, 0);
     }
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
-    var skip = av1_read_skip(sd, ncc, sctx);
+    var skip = av1_read_skip_seg(sd, ncc, sctx, av1_tile_seg_fh(tile), segment_id);   # 5.11.11 (SEG_LVL_SKIP)
     store64(mi + AV1MI_SKIP, skip);
     if (seg_pre == 0) {
         segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, skip);
@@ -11485,7 +11483,10 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
         if (isp != DR_OK) { return isp; }
     }
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
-    av1_write_skip(enc, ncc, sctx, load64(mi + AV1MI_SKIP));
+    var pre_seg = 0;   # the segment_id the decoder holds at read_skip: the preSkip read's, else 0
+    if (seg_pre != 0) { pre_seg = segment_id; }
+    var wsk = av1_write_skip_seg(enc, ncc, sctx, av1_tile_seg_fh(tile), pre_seg, load64(mi + AV1MI_SKIP));
+    if (wsk != DR_OK) { return wsk; }
     if (seg_pre == 0) {
         var isp0 = av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l,
           load64(mi + AV1MI_SKIP), segment_id);
@@ -13693,6 +13694,11 @@ fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
 # leaves. The keyframe tile carries its fh in AV1TILE_SEG_FH (NOT AV1TILE_FH, which stays 0 to keep the
 # encode-lane dispatch intact); these read it there. A tile with no SEG_FH / segmentation disabled is a
 # no-op returning segment_id 0 — so the widely-called mode-info functions keep working with tile = 0.
+# the fh segmentation lookups use on both lanes (AV1TILE_SEG_FH; 0 for a tile without one).
+fn av1_tile_seg_fh(tile): i64 {
+    if (tile == 0) { return 0; }
+    return load64(tile + AV1TILE_SEG_FH);
+}
 fn av1_tile_seg_id_pre_skip(tile): i64 {
     if (tile == 0) { return 0; }
     var fh = load64(tile + AV1TILE_SEG_FH);
@@ -15064,14 +15070,20 @@ fn av1_lf_mode_type(y_mode): i64 {
     return 1;
 }
 
-# adaptive filter strength selection (7.14.5): the filter level for this edge.
-# For the intra keyframe baseline ref = INTRA_FRAME, mode_type = 0, delta_lf = 0,
-# and segmentation is inactive; the ref/mode deltas apply when delta_enabled.
-fn av1_lf_strength(fh, plane, pass, ref, mode_type, delta_lf): i64 {
+# adaptive filter strength selection (7.14.5): the filter level for this edge, step for step.
+# i = plane == 0 ? pass : plane + 1 picks loop_filter_level[ i ] AND the segment feature
+# SEG_LVL_ALT_LF_Y_V + i (Y_V, Y_H, U, V); `segment` is SegmentIds[ row ][ col ] (7.14.4). The ref/mode deltas
+# apply when delta_enabled. Cross-checked against libaom av1_get_filter_level / av1_loop_filter_frame_init
+# (seg_lvl_lf_lut: U and V use their own feature for BOTH passes).
+fn av1_lf_strength(fh, plane, pass, segment, ref, mode_type, delta_lf): i64 {
     var i = pass;
     if (plane > 0) { i = plane + 1; }
     var lvl = av1_clip3(0, AV1_MAX_LOOP_FILTER, delta_lf + av1_fh_loop_filter_level(fh, i));
-    # (segmentation SEG_LVL_ALT_LF deferred, roadmap.md — no per-segment add.)
+    # step 3: the per-segment level (seg_feature_active_idx( segment, SEG_LVL_ALT_LF_Y_V + i )).
+    var feature = AV1_SEG_LVL_ALT_LF_Y_V + i;
+    if (av1_seg_feature_active(fh, segment, feature) != 0) {
+        lvl = av1_clip3(0, AV1_MAX_LOOP_FILTER, av1_fh_feature_data(fh, segment, feature) + lvl);
+    }
     if (av1_fh_loop_filter_delta_enabled(fh)) {
         var nshift = lvl >> 5;
         if (ref == AV1_INTRA_FRAME) {
@@ -15275,6 +15287,12 @@ fn av1_lf_delta(tile, fh, plane, pass, row, col): i64 {
     }
     return av1_dlf_get(tile, i, row, col);
 }
+# SegmentIds[ row ][ col ] for 7.14.4: the per-block ids the decode stamped (the deblock runs BEFORE the 7.4
+# step-7 copy). 0 when the tile has no SegmentIds grid (a deblock-level test without grids).
+fn av1_lf_segment(tile, row, col): i64 {
+    if (load64(tile + AV1TILE_SEGIDS) == 0) { return 0; }
+    return av1_grid_get(tile, AV1TILE_SEGIDS, row, col);
+}
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var subx = 0;
@@ -15337,12 +15355,12 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     # PREVIOUS block (an edge between a zero-level and a non-zero-level block is still
     # filtered, at the neighbour's level). av1_lf_strength already implemented the ref/mode
     # deltas — it was simply never handed a real ref or mode_type.
-    var lvl = av1_lf_strength(fh, plane, pass, ref0,
+    var lvl = av1_lf_strength(fh, plane, pass, av1_lf_segment(tile, arow, acol), ref0,
       av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)),
       av1_lf_delta(tile, fh, plane, pass, arow, acol));
     if (lvl == 0) {
-        # the fallback re-derives EVERYTHING at the previous block, its deltaLF included.
-        lvl = av1_lf_strength(fh, plane, pass, prev_ref0,
+        # the fallback re-derives EVERYTHING at the previous block, its segment and deltaLF included.
+        lvl = av1_lf_strength(fh, plane, pass, av1_lf_segment(tile, prev_row, prev_col), prev_ref0,
           av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)),
           av1_lf_delta(tile, fh, plane, pass, prev_row, prev_col));
     }
@@ -22716,9 +22734,9 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
 # cdef_ctx is the intra path's splice record (0 to skip); dctx is the tile's Av1DeltaCtx for
 # read_delta_qindex / read_delta_lf (0 = no deltas); sctx is the tile's Av1SegCtx (SegmentIds +
-# PrevSegmentIds + the seg_id_predicted strips; 0 is fine when segmentation is off). A segment FEATURE
-# drishti does not implement (av1_seg_supported) gates hard rather than desync. Segment-id reads (spatial,
-# temporal, copied), read_cdef, the deltas and the intra fork are all wired below.
+# PrevSegmentIds + the seg_id_predicted strips; 0 is fine when segmentation is off). Segment-id reads
+# (spatial, temporal, copied), the SEG_LVL_SKIP skip force, read_cdef, the deltas and the intra fork are all
+# wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
   fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx): i64 {
@@ -22726,7 +22744,6 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the Av1SegCtx
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -22745,7 +22762,8 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
     store64(out + AV1FB_SKIPMODE, skip_mode);
     var skip = 1;
     if (skip_mode == 0) {
-        skip = av1_read_skip(sd, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip));
+        skip = av1_read_skip_seg(sd, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip), fh,
+          segment_id);   # 5.11.11: SEG_LVL_SKIP forces skip = 1 with no symbol
     }
     store64(out + AV1FB_SKIP, skip);
     # inter_segment_id( 0 ) (5.11.10) when !SegIdPreSkip: the segment AFTER skip (a skip block takes the
@@ -22792,7 +22810,6 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -22820,8 +22837,9 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
     var e = av1_write_skip_mode(enc, cc_ref, skip_mode_ctx, fh, seg_before, mi_size, skip_mode);
     if (e != DR_OK) { return e; }
     if (skip_mode == 0) {
-        av1_write_skip(enc, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip),
-          load64(blk + AV1FB_SKIP));
+        var ws = av1_write_skip_seg(enc, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip), fh,
+          seg_before, load64(blk + AV1FB_SKIP));
+        if (ws != DR_OK) { return ws; }
     }
     if ((seg_enabled != 0) && (seg_pre == 0)) {
         var sp0 = av1_write_inter_segment_id(enc, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 0,
@@ -23219,13 +23237,13 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
         store64(out_err, DR_ERR_UNSUPPORTED);
         return 0;
     }
-    # segmentation: every MAP config decodes on BOTH lanes — spatial (0.7.125 D1), and the temporal
-    # seg_id_predicted read, the copied map and inherited feature data (0.8.2, PrevSegmentIds attached per
-    # tile below). Mixed lossless / lossy segments decode (0.8.2). av1_seg_supported now gates only the segment
-    # FEATURES drishti parses but does not apply (ALT_LF, SKIP), which REJECT cleanly (trust no input byte). The
-    # per-superblock delta_q / delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile
-    # loop below); they used to reject here because reading neither desynced the intra path.
-    if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    # segmentation is no longer a reject (0.8.2): every MAP config decodes on BOTH lanes — spatial (0.7.125
+    # D1), the temporal seg_id_predicted read, the copied map and inherited feature data (PrevSegmentIds attached
+    # per tile below) — and every FEATURE is applied: ALT_Q (dequant, LosslessArray), ALT_LF_* (the deblock
+    # level, 7.14.5), REF_FRAME / GLOBALMV (the inter mode info) and SKIP (read_skip, 5.11.11). The gate that
+    # used to stand here (av1_seg_supported) went when its last two features did. The per-superblock delta_q /
+    # delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile loop below); they used to
+    # reject here because reading neither desynced the intra path.
     # allow_intrabc (5.11.6) and the palette tools gated by allow_screen_content_tools
     # (5.11.46) are read by neither path; a screen-content stream would desync.
     if (av1_fh_allow_intrabc(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }

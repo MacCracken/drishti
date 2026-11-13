@@ -115,7 +115,6 @@ fn probe_fh(fh): i64 {
         as = as + 1;
     }
     probe_kv("segmentation_active_mask", am);
-    probe_gate("seg_supported", av1_seg_supported(fh), 0);
     probe_kv("lossless_mask", av1_fh_lossless_mask(fh));   # LosslessArray, bit s = segment s
     probe_kv("disable_cdf_update", load64(fh + AV1FH_DISABLE_CDF_UPDATE));   # drives symbol adaptation
     probe_kv("disable_frame_end_update_cdf", load64(fh + AV1FH_DISABLE_FE_UPDATE_CDF));

@@ -1133,6 +1133,51 @@ fn test_inter_segment_id_preskip() {
     return 0;
 }
 
+# read_skip (5.11.11), 0.8.2: SegIdPreSkip && seg_feature_active( SEG_LVL_SKIP ) -> skip = 1 with NO symbol.
+fn test_read_skip_seg_force() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((2 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);   # segment 2: SKIP
+    assert_eq(av1_fh_seg_id_pre_skip(fh), 1, "SEG_LVL_SKIP forces SegIdPreSkip");
+    assert_eq(av1_skip_forced(fh, 2), 1, "segment 2 forced");
+    assert_eq(av1_skip_forced(fh, 1), 0, "segment 1 not forced");
+    assert_eq(av1_skip_forced(0, 2), 0, "no header -> never forced");
+    var blob = av1_noncoeff_cdf_blob();
+    # forced: a marker-only stream — the read returns 1 and consumes nothing.
+    var me = av1_sym_enc_init(16, 1);
+    av1_sym_encode_literal(me, 165, 8);
+    var ml = 0;
+    var mb = av1_sym_enc_finish(me, &ml);
+    var sd = av1_sym_dec_init(mb, ml, 1);
+    assert_eq(av1_read_skip_seg(sd, blob, 0, fh, 2), 1, "forced read -> 1");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "forced read consumed NO symbol");
+    # not forced: the coded skip (0) is read.
+    var ne = av1_sym_enc_init(16, 1);
+    av1_write_skip(ne, blob, 0, 0);
+    av1_sym_encode_literal(ne, 165, 8);
+    var nl = 0;
+    var nb = av1_sym_enc_finish(ne, &nl);
+    var sd2 = av1_sym_dec_init(nb, nl, 1);
+    assert_eq(av1_read_skip_seg(sd2, blob, 0, fh, 1), 0, "segment 1 reads the coded skip (0)");
+    assert_eq(av1_sym_read_literal(sd2, 8), 165, "...and exactly one symbol");
+    # segmentation off: the feature is inert, the symbol is read.
+    store64(fh + AV1FH_SEG_ENABLED, 0);
+    var sd3 = av1_sym_dec_init(nb, nl, 1);
+    assert_eq(av1_read_skip_seg(sd3, blob, 0, fh, 2), 0, "segmentation off: segment 2 reads the symbol");
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    # the writer: a forced skip writes nothing (the marker decodes first), skip = 0 there is unrepresentable.
+    var we = av1_sym_enc_init(16, 1);
+    assert_eq(av1_write_skip_seg(we, blob, 0, fh, 2, 1), DR_OK, "forced write ok");
+    av1_sym_encode_literal(we, 165, 8);
+    var wl = 0;
+    var wb = av1_sym_enc_finish(we, &wl);
+    assert_eq(av1_sym_read_literal(av1_sym_dec_init(wb, wl, 1), 8), 165, "forced write emitted no symbol");
+    assert_eq(av1_write_skip_seg(av1_sym_enc_init(16, 1), blob, 0, fh, 2, 0), DR_ERR_BOUNDS,
+      "skip = 0 in a forced segment -> bounds");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("block-size conversion tables");
@@ -1167,6 +1212,7 @@ fn main() {
     test_inter_segment_id_temporal_rt();
     test_inter_segment_id_copy();
     test_inter_segment_id_preskip();
+    test_read_skip_seg_force();
     test_write_segment_id_skip_mirror();
     test_group("cdef index syntax (read_cdef / write_cdef / clear_cdef)");
     test_cdef_rt_two_units();

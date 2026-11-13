@@ -2641,9 +2641,9 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
 # cdef_ctx is the intra path's splice record (0 to skip); dctx is the tile's Av1DeltaCtx for
 # read_delta_qindex / read_delta_lf (0 = no deltas); sctx is the tile's Av1SegCtx (SegmentIds +
-# PrevSegmentIds + the seg_id_predicted strips; 0 is fine when segmentation is off). A segment FEATURE
-# drishti does not implement (av1_seg_supported) gates hard rather than desync. Segment-id reads (spatial,
-# temporal, copied), read_cdef, the deltas and the intra fork are all wired below.
+# PrevSegmentIds + the seg_id_predicted strips; 0 is fine when segmentation is off). Segment-id reads
+# (spatial, temporal, copied), the SEG_LVL_SKIP skip force, read_cdef, the deltas and the intra fork are all
+# wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
   fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx): i64 {
@@ -2651,7 +2651,6 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the Av1SegCtx
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -2670,7 +2669,8 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
     store64(out + AV1FB_SKIPMODE, skip_mode);
     var skip = 1;
     if (skip_mode == 0) {
-        skip = av1_read_skip(sd, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip));
+        skip = av1_read_skip_seg(sd, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip), fh,
+          segment_id);   # 5.11.11: SEG_LVL_SKIP forces skip = 1 with no symbol
     }
     store64(out + AV1FB_SKIP, skip);
     # inter_segment_id( 0 ) (5.11.10) when !SegIdPreSkip: the segment AFTER skip (a skip block takes the
@@ -2717,7 +2717,6 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
-    if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # an unimplemented segment feature
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (sctx == 0)) { return DR_ERR_BOUNDS; }
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -2745,8 +2744,9 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
     var e = av1_write_skip_mode(enc, cc_ref, skip_mode_ctx, fh, seg_before, mi_size, skip_mode);
     if (e != DR_OK) { return e; }
     if (skip_mode == 0) {
-        av1_write_skip(enc, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip),
-          load64(blk + AV1FB_SKIP));
+        var ws = av1_write_skip_seg(enc, ncc, av1_skip_ctx(avail_u, above_skip, avail_l, left_skip), fh,
+          seg_before, load64(blk + AV1FB_SKIP));
+        if (ws != DR_OK) { return ws; }
     }
     if ((seg_enabled != 0) && (seg_pre == 0)) {
         var sp0 = av1_write_inter_segment_id(enc, ncc, fh, sctx, mi_row, mi_col, mi_size, avail_u, avail_l, 0,

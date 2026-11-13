@@ -1032,30 +1032,6 @@ fn av1_fh_seg_id_pre_skip(fh): i64 {
     return 0;
 }
 
-# av1_seg_supported — does this frame use only segment FEATURES drishti implements? 1 = decode it; 0 = reject
-# cleanly (trust no input byte — a feature that is parsed but not applied mis-decodes SILENTLY). Every map
-# config decodes as of 0.8.2: the spatial read, the temporal seg_id_predicted read (temporal_update), the
-# copied map (!update_map) and the inherited feature data (!update_data, via load_previous). Mixed lossless
-# and lossy segments decode too (Lossless = LosslessArray[ segment_id ], av1_tile_block_setup). Two features
-# remain unimplemented and reject:
-#  - SEG_LVL_ALT_LF_Y_V + i (i = 0..3): the deblocker's per-segment level add (7.14.4) is not applied.
-#  - SEG_LVL_SKIP: read_skip (5.11.11) does not force skip = 1 for it, so the skip symbol it omits is read.
-# Both are roadmap.md 0.8.2 items.
-fn av1_seg_supported(fh): i64 {
-    if (av1_fh_segmentation_enabled(fh) == 0) { return 1; }
-    var seg = 0;
-    while (seg < AV1_MAX_SEGMENTS) {
-        var j = AV1_SEG_LVL_ALT_LF_Y_V;
-        while (j < (AV1_SEG_LVL_ALT_LF_Y_V + 4)) {   # SEG_LVL_ALT_LF_Y_V + i, i < FRAME_LF_COUNT (7.14.4)
-            if (av1_fh_feature_enabled(fh, seg, j) != 0) { return 0; }
-            j = j + 1;
-        }
-        if (av1_fh_feature_enabled(fh, seg, AV1_SEG_LVL_SKIP) != 0) { return 0; }
-        seg = seg + 1;
-    }
-    return 1;
-}
-
 # tile_info() — 5.9.15 (+ 5.9.3 tile_log2). Writes MiColStarts/MiRowStarts
 # and the tile-count/log2/size-bytes fields.
 fn av1_tile_info(br, s, fh): i64 {

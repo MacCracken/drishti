@@ -210,7 +210,8 @@ fn test_lr_activation_from_fh() {
     assert_eq(olen > 0, 1, "encoded keyframe tile with LR bits");
     # DECODE tile: build a frame header (UsesLr, WIENER luma, unit 64) + sequence,
     # derive the LR params FROM the header, and activate — the production wiring.
-    var fh = alloc(1200);
+    var fh = alloc(AV1FH_SIZE);   # the WHOLE header, zeroed: readers go past offset 1200 (features @1632)
+    memset(fh, 0, AV1FH_SIZE);
     store64(fh + AV1FH_USES_LR, 1);
     store64(fh + AV1FH_FRAME_RESTORATION_TYPE + 0, AV1_RESTORE_WIENER);
     store64(fh + AV1FH_LR_SIZE + 0, 64);
@@ -219,7 +220,8 @@ fn test_lr_activation_from_fh() {
     store64(fh + AV1FH_ALLOW_INTRABC, 0);
     store64(fh + AV1FH_USE_SUPERRES, 0);
     store64(fh + AV1FH_SUPERRES_DENOM, 8);
-    var seq = alloc(256);
+    var seq = alloc(AV1_SEQ_SIZE);   # the whole record, zeroed
+    memset(seq, 0, AV1_SEQ_SIZE);
     store64(seq + AV1_SEQ_ENABLE_CDEF, 0);   # CDEF off: focus on LR activation
     var doe = alloc(8);
     var dframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, doe);

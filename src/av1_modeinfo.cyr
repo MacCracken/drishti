@@ -463,6 +463,28 @@ fn av1_read_skip(sd, ncc, ctx): i64 {
 fn av1_write_skip(enc, ncc, ctx, skip): i64 {
     return av1_sym_encode_symbol(enc, av1_ncdf_skip(ncc, ctx), 2, skip);
 }
+# read_skip (5.11.11): `SegIdPreSkip && seg_feature_active( SEG_LVL_SKIP )` sets skip = 1 with NO symbol, for the
+# segment_id known at that point (the preSkip read). libaom read_skip_txfm agrees (SEG_LVL_SKIP forces
+# SegIdPreSkip, so it tests the feature alone). fh = 0 (a caller without a header) is never forced.
+fn av1_skip_forced(fh, segment_id): i64 {
+    if (fh == 0) { return 0; }
+    if (av1_fh_seg_id_pre_skip(fh) == 0) { return 0; }
+    return av1_seg_feature_active(fh, segment_id, AV1_SEG_LVL_SKIP) != 0;
+}
+fn av1_read_skip_seg(sd, ncc, ctx, fh, segment_id): i64 {
+    if (av1_skip_forced(fh, segment_id) != 0) { return 1; }
+    return av1_read_skip(sd, ncc, ctx);
+}
+# the mirror: a forced skip writes nothing, and a plan claiming skip = 0 there is unrepresentable (the decoder
+# derives 1) -> DR_ERR_BOUNDS. Otherwise the skip symbol, DR_OK.
+fn av1_write_skip_seg(enc, ncc, ctx, fh, segment_id, skip): i64 {
+    if (av1_skip_forced(fh, segment_id) != 0) {
+        if (skip == 0) { return DR_ERR_BOUNDS; }
+        return DR_OK;
+    }
+    av1_write_skip(enc, ncc, ctx, skip);
+    return DR_OK;
+}
 
 # intra_frame_y_mode (9.3): cdf = TileIntraFrameYModeCdf[abovemode][leftmode]
 # where {above,left}mode = Intra_Mode_Context[ avail ? neighbourYMode : DC_PRED ].
@@ -986,7 +1008,7 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, 0);
     }
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
-    var skip = av1_read_skip(sd, ncc, sctx);
+    var skip = av1_read_skip_seg(sd, ncc, sctx, av1_tile_seg_fh(tile), segment_id);   # 5.11.11 (SEG_LVL_SKIP)
     store64(mi + AV1MI_SKIP, skip);
     if (seg_pre == 0) {
         segment_id = av1_read_intra_segment_id(tile, sd, ncc, mi_row, mi_col, avail_u, avail_l, skip);
@@ -1044,7 +1066,10 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
         if (isp != DR_OK) { return isp; }
     }
     var sctx = av1_skip_ctx(avail_u, above_skip, avail_l, left_skip);
-    av1_write_skip(enc, ncc, sctx, load64(mi + AV1MI_SKIP));
+    var pre_seg = 0;   # the segment_id the decoder holds at read_skip: the preSkip read's, else 0
+    if (seg_pre != 0) { pre_seg = segment_id; }
+    var wsk = av1_write_skip_seg(enc, ncc, sctx, av1_tile_seg_fh(tile), pre_seg, load64(mi + AV1MI_SKIP));
+    if (wsk != DR_OK) { return wsk; }
     if (seg_pre == 0) {
         var isp0 = av1_write_intra_segment_id(enc, tile, ncc, mi_row, mi_col, avail_u, avail_l,
           load64(mi + AV1MI_SKIP), segment_id);

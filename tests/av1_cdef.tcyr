@@ -127,7 +127,8 @@ fn test_filter_flat() {
 # ---- driver: CDEF process (7.15) + block process (7.15.1) ----
 # A fake frame header carrying just the CDEF fields the block process reads.
 fn mk_cdef_fh(damping, ypri0, ysec0, uvpri0, uvsec0): i64 {
-    var fh = alloc(1200);
+    var fh = alloc(AV1FH_SIZE);   # the WHOLE header, zeroed: readers go past offset 1200 (features @1632)
+    memset(fh, 0, AV1FH_SIZE);
     store64(fh + AV1FH_CDEF_DAMPING, damping);
     store64(fh + AV1FH_CDEF_Y_PRI, ypri0);
     store64(fh + AV1FH_CDEF_Y_SEC, ysec0);

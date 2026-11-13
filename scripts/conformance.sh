@@ -186,6 +186,14 @@ echo "--- committed reproducers (no libaom required) ---"
 repro_case e2d-160x160 match
 repro_case e2d-192x160 match   # the CDEF-grid heap overflow: was xfail until av1_clear_cdef was bounded
 repro_seq  inter-6frame 6 6   # ALL SIX frames bit-exact vs aomdec (hard)
+# SEG_LVL_SKIP + SEG_LVL_ALT_LF (0.8.2): libaom's REALTIME ROI map (AOME_SET_ROI_MAP, speed 8, skip[1] = 1 on
+# a middle square) enables SEG_LVL_SKIP plus all four ALT_LF features (data -63) on segment 1 of every inter
+# frame. No aomenc flag reaches that encoder path — it is API-only — so these were made once with a scratch
+# libaom program and committed with their aomdec MD5s (dav1d agreed on every frame). Geometries 96x64,
+# 176x144 and 160x136 (MiRows % 4 == 2), 8 frames each, every frame hard.
+repro_seq  roi-skip-96x64 8 8
+repro_seq  roi-skip-176x144 8 8
+repro_seq  roi-skip-160x136 8 8
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"

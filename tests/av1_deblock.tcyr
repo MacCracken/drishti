@@ -51,15 +51,54 @@ fn mk_fh(lvl0, lvl1, lvl2, lvl3, sharp, delta_en, intra_ref_delta): i64 {
 fn test_strength() {
     var fh = mk_fh(10, 12, 14, 16, 0, 0, 1);
     # intra, delta disabled -> loop_filter_level[i], i = pass (luma) / plane+1 (chroma).
-    assert_eq(av1_lf_strength(fh, 0, 0, AV1_INTRA_FRAME, 0, 0), 10, "luma pass0 -> lvl[0]");
-    assert_eq(av1_lf_strength(fh, 0, 1, AV1_INTRA_FRAME, 0, 0), 12, "luma pass1 -> lvl[1]");
-    assert_eq(av1_lf_strength(fh, 1, 0, AV1_INTRA_FRAME, 0, 0), 14, "U -> lvl[2]");
-    assert_eq(av1_lf_strength(fh, 2, 0, AV1_INTRA_FRAME, 0, 0), 16, "V -> lvl[3]");
+    assert_eq(av1_lf_strength(fh, 0, 0, 0, AV1_INTRA_FRAME, 0, 0), 10, "luma pass0 -> lvl[0]");
+    assert_eq(av1_lf_strength(fh, 0, 1, 0, AV1_INTRA_FRAME, 0, 0), 12, "luma pass1 -> lvl[1]");
+    assert_eq(av1_lf_strength(fh, 1, 0, 0, AV1_INTRA_FRAME, 0, 0), 14, "U -> lvl[2]");
+    assert_eq(av1_lf_strength(fh, 2, 0, 0, AV1_INTRA_FRAME, 0, 0), 16, "V -> lvl[3]");
     # delta_lf adds; clamped to [0,63].
-    assert_eq(av1_lf_strength(fh, 0, 0, AV1_INTRA_FRAME, 0, 5), 15, "luma + deltaLF 5");
+    assert_eq(av1_lf_strength(fh, 0, 0, 0, AV1_INTRA_FRAME, 0, 5), 15, "luma + deltaLF 5");
     # delta enabled: intra ref delta 1, nshift = lvl>>5 = 0 -> +1.
     var fh2 = mk_fh(10, 12, 14, 16, 0, 1, 1);
-    assert_eq(av1_lf_strength(fh2, 0, 0, AV1_INTRA_FRAME, 0, 0), 11, "luma + intra ref delta");
+    assert_eq(av1_lf_strength(fh2, 0, 0, 0, AV1_INTRA_FRAME, 0, 0), 11, "luma + intra ref delta");
+    return 0;
+}
+# SEG_LVL_ALT_LF_Y_V + i (7.14.5 step 3): segment 2 carries all four features with distinct data, so a wrong i
+# (plane/pass -> feature) picks a different value. Hand-computed from the spec's ordered steps.
+fn lf_seg_fh(l0, l1, l2, l3, delta_en): i64 {
+    var fh = mk_fh(l0, l1, l2, l3, 0, delta_en, 1);
+    store64(fh + AV1FH_SEG_ENABLED, 1);
+    var data = alloc(4 * 8);
+    store64(data + 0, 7);          # SEG_LVL_ALT_LF_Y_V: +7
+    store64(data + 8, 0 - 20);     # SEG_LVL_ALT_LF_Y_H: -20
+    store64(data + 16, 60);        # SEG_LVL_ALT_LF_U: +60
+    store64(data + 24, 0 - 63);    # SEG_LVL_ALT_LF_V: -63
+    var k = 0;
+    while (k < 4) {
+        store64(fh + AV1FH_FEATURE_ENABLED + ((2 * 8 + (AV1_SEG_LVL_ALT_LF_Y_V + k)) * 8), 1);
+        store64(fh + AV1FH_FEATURE_DATA + ((2 * 8 + (AV1_SEG_LVL_ALT_LF_Y_V + k)) * 8), load64(data + (k * 8)));
+        k = k + 1;
+    }
+    return fh;
+}
+fn test_strength_segment() {
+    var fh = lf_seg_fh(10, 12, 14, 16, 0);
+    assert_eq(av1_lf_strength(fh, 0, 0, 2, AV1_INTRA_FRAME, 0, 0), 17, "luma pass 0: lvl[0] 10 + Y_V 7");
+    assert_eq(av1_lf_strength(fh, 0, 1, 2, AV1_INTRA_FRAME, 0, 0), 0, "luma pass 1: 12 - 20 clips to 0");
+    assert_eq(av1_lf_strength(fh, 1, 0, 2, AV1_INTRA_FRAME, 0, 0), 63, "U pass 0: 14 + 60 clips to 63");
+    assert_eq(av1_lf_strength(fh, 1, 1, 2, AV1_INTRA_FRAME, 0, 0), 63, "U pass 1: the SAME feature (ALT_LF_U)");
+    assert_eq(av1_lf_strength(fh, 2, 1, 2, AV1_INTRA_FRAME, 0, 0), 0, "V: 16 - 63 clips to 0");
+    assert_eq(av1_lf_strength(fh, 0, 0, 1, AV1_INTRA_FRAME, 0, 0), 10, "segment 1 has no feature: lvl[0]");
+    # baseFilterLevel is clipped BEFORE the segment add: 60 + deltaLF 10 -> 63, then + Y_V... use Y_H (-20):
+    # 63 - 20 = 43 (an unclipped 70 - 20 would give 50).
+    var fhc = lf_seg_fh(10, 60, 14, 16, 0);
+    assert_eq(av1_lf_strength(fhc, 0, 1, 2, AV1_INTRA_FRAME, 0, 10), 43, "clip(60 + 10) = 63, then - 20 = 43");
+    # nShift is taken AFTER the segment add: 10 + 7 = 17 -> nShift 0 -> + 1 = 18; with lvl[0] 30: 37 -> nShift 1
+    # -> + (1 << 1) = 39 (a pre-add nShift, 30 >> 5 = 0, would give 38).
+    var fhd = lf_seg_fh(30, 12, 14, 16, 1);
+    assert_eq(av1_lf_strength(fhd, 0, 0, 2, AV1_INTRA_FRAME, 0, 0), 39, "nShift from lvlSeg 37: + (1 << 1) = 39");
+    # segmentation OFF: the features are inert (seg_feature_active needs segmentation_enabled).
+    store64(fh + AV1FH_SEG_ENABLED, 0);
+    assert_eq(av1_lf_strength(fh, 0, 0, 2, AV1_INTRA_FRAME, 0, 0), 10, "segmentation off: lvl[0]");
     return 0;
 }
 
@@ -512,6 +551,7 @@ fn main() {
     test_filter_size();
     test_limits();
     test_strength();
+    test_strength_segment();
     test_group("deblock sample filters");
     test_narrow();
     test_wide();

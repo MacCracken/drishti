@@ -46,14 +46,20 @@ fn av1_lf_mode_type(y_mode): i64 {
     return 1;
 }
 
-# adaptive filter strength selection (7.14.5): the filter level for this edge.
-# For the intra keyframe baseline ref = INTRA_FRAME, mode_type = 0, delta_lf = 0,
-# and segmentation is inactive; the ref/mode deltas apply when delta_enabled.
-fn av1_lf_strength(fh, plane, pass, ref, mode_type, delta_lf): i64 {
+# adaptive filter strength selection (7.14.5): the filter level for this edge, step for step.
+# i = plane == 0 ? pass : plane + 1 picks loop_filter_level[ i ] AND the segment feature
+# SEG_LVL_ALT_LF_Y_V + i (Y_V, Y_H, U, V); `segment` is SegmentIds[ row ][ col ] (7.14.4). The ref/mode deltas
+# apply when delta_enabled. Cross-checked against libaom av1_get_filter_level / av1_loop_filter_frame_init
+# (seg_lvl_lf_lut: U and V use their own feature for BOTH passes).
+fn av1_lf_strength(fh, plane, pass, segment, ref, mode_type, delta_lf): i64 {
     var i = pass;
     if (plane > 0) { i = plane + 1; }
     var lvl = av1_clip3(0, AV1_MAX_LOOP_FILTER, delta_lf + av1_fh_loop_filter_level(fh, i));
-    # (segmentation SEG_LVL_ALT_LF deferred, roadmap.md — no per-segment add.)
+    # step 3: the per-segment level (seg_feature_active_idx( segment, SEG_LVL_ALT_LF_Y_V + i )).
+    var feature = AV1_SEG_LVL_ALT_LF_Y_V + i;
+    if (av1_seg_feature_active(fh, segment, feature) != 0) {
+        lvl = av1_clip3(0, AV1_MAX_LOOP_FILTER, av1_fh_feature_data(fh, segment, feature) + lvl);
+    }
     if (av1_fh_loop_filter_delta_enabled(fh)) {
         var nshift = lvl >> 5;
         if (ref == AV1_INTRA_FRAME) {
@@ -257,6 +263,12 @@ fn av1_lf_delta(tile, fh, plane, pass, row, col): i64 {
     }
     return av1_dlf_get(tile, i, row, col);
 }
+# SegmentIds[ row ][ col ] for 7.14.4: the per-block ids the decode stamped (the deblock runs BEFORE the 7.4
+# step-7 copy). 0 when the tile has no SegmentIds grid (a deblock-level test without grids).
+fn av1_lf_segment(tile, row, col): i64 {
+    if (load64(tile + AV1TILE_SEGIDS) == 0) { return 0; }
+    return av1_grid_get(tile, AV1TILE_SEGIDS, row, col);
+}
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var subx = 0;
@@ -319,12 +331,12 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     # PREVIOUS block (an edge between a zero-level and a non-zero-level block is still
     # filtered, at the neighbour's level). av1_lf_strength already implemented the ref/mode
     # deltas — it was simply never handed a real ref or mode_type.
-    var lvl = av1_lf_strength(fh, plane, pass, ref0,
+    var lvl = av1_lf_strength(fh, plane, pass, av1_lf_segment(tile, arow, acol), ref0,
       av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)),
       av1_lf_delta(tile, fh, plane, pass, arow, acol));
     if (lvl == 0) {
-        # the fallback re-derives EVERYTHING at the previous block, its deltaLF included.
-        lvl = av1_lf_strength(fh, plane, pass, prev_ref0,
+        # the fallback re-derives EVERYTHING at the previous block, its segment and deltaLF included.
+        lvl = av1_lf_strength(fh, plane, pass, av1_lf_segment(tile, prev_row, prev_col), prev_ref0,
           av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)),
           av1_lf_delta(tile, fh, plane, pass, prev_row, prev_col));
     }

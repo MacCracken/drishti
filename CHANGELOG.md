@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.2 bite 6: the last two segment features (`SEG_LVL_ALT_LF`, `SEG_LVL_SKIP`); segmentation gates nothing
+
+Every segment feature is now applied, so `av1_seg_supported` is gone and segmentation is no longer a
+reject of any kind. The two features it still rejected were parsed but not applied, so without the
+gate they would have mis-decoded silently:
+- **`SEG_LVL_ALT_LF_Y_V + i`, the per-segment deblock level** (7.14.5 step 3). `av1_lf_strength`
+  takes the edge's segment, `SegmentIds[row][col]` (7.14.4). That is the per-block stamp, since the
+  deblock runs before the 7.4 step-7 copy. The add sits between the clipped `baseFilterLevel` and
+  the ref/mode deltas, so nShift sees the segment-adjusted level. The zero-level fallback re-derives
+  the level at the previous block with that block's own segment. `i` selects both
+  `loop_filter_level[i]` and the feature, so U and V use their own feature on both passes. This
+  matches libaom `av1_get_filter_level` / `seg_lvl_lf_lut`.
+- **`SEG_LVL_SKIP`'s skip force** (5.11.11): `SegIdPreSkip && seg_feature_active(SEG_LVL_SKIP)` makes
+  skip = 1 with no symbol. `av1_read_skip_seg` / `av1_write_skip_seg` apply it on all four paths
+  (intra and inter, decode and encode). The writer refuses with `DR_ERR_BOUNDS` a plan with skip = 0 in
+  such a segment. `read_skip` was the only one of the spec's four SEG_LVL_SKIP sites still missing:
+  `read_skip_mode`, the GLOBALMV force and `read_ref_frames` were already in.
+
+Also:
+- **Six undersized test fixtures fixed.** Four frame headers were `alloc(1200)` without a memset,
+  against `AV1FH_SIZE` 3712, and two sequence records were `alloc(256)` against 896. The deblocker
+  now reads `FeatureEnabled` at offset 1632, past such a header's end.
+- **Found and filed, not fixed (roadmap 0.8.4):** quantizer matrices. `using_qmatrix` is parsed and
+  ignored, and `av1_fh_using_qmatrix` has no caller. So an `--enable-qm=1` stream is a silent
+  mis-decode, not a reject. Its per-segment `SegQMLevel` is the last segmentation-dependent behaviour
+  drishti does not apply.
+
+Evidence:
+- **Conformance, 138 / 0 / 0 / 0 (was 114).** Three new committed reproducers,
+  `tests/repro/roi-skip-{96x64,176x144,160x136}` (8 frames, 4.5–6 KB each), run without libaom. libaom's
+  realtime ROI map (`AOME_SET_ROI_MAP`, speed 8, `skip[1] = 1`) enables SEG_LVL_SKIP plus all four
+  ALT_LF features (data -63) on segment 1 of every inter frame. That encoder path is API-only, so the
+  streams were made once with a scratch libaom program; dav1d agreed with aomdec on every frame.
+  Before this bite all three rejected.
+- **What those streams cannot prove.** An instrumented scratch decoder showed that **libaom codes no
+  block into the SKIP segment**, at any geometry tried (up to 352x288, with whole superblocks inside
+  the ROI square). They witness the frame-level config: SegIdPreSkip inter frames, the segment read
+  before skip with LastActiveSegId 1, and no reject. The block-level skip force and the ALT_LF level
+  are unit-witnessed only. libaom's other producer, the static-segmentation speed feature, is never
+  switched on, and SVT-AV1 and rav1e write neither feature.
+- **Unit tests:**
+  - **ALT_LF KATs** on all four features with distinct data: the per-plane / per-pass feature
+    choice, both clips, the clip of `baseFilterLevel` before the add, nShift after it, and an
+    inactive segment or segmentation off.
+  - **A whole-pipeline deblock witness** through `av1_apply_loop_filters`. It checks that "level 10
+    by segment" filters like "level 10 by base", that both sides at level 0 leave the edge
+    unfiltered, and that the fallback takes the previous block's segment.
+  - **The forced skip:** a KAT showing it consumes nothing; a round trip through each lane's
+    dispatcher with a marker (the inter one also checks the GLOBALMV / LAST force); and the writers'
+    refusals.
+
+**Mutation-verified**, 12 mutations in an isolated copy of the tree, every source file restored
+byte-exact. All twelve go red in the unit suites, and all twelve stay green on the external streams,
+for the reason above:
+
+| Mutation | Suites |
+|---|---|
+| the ALT_LF level step dropped; the deblocker reads segment 0 everywhere | red |
+| the zero-level fallback reuses the current block's segment | red |
+| the feature index ignores the plane; the segment add is not clipped | red |
+| the decoder's skip force dropped; the inter / intra decode lane forces on segment 0 / passes no header | red |
+| the writer codes a forced skip anyway; the intra / inter writer forces on segment 0 | red |
+| the force tests SEG_LVL_GLOBALMV instead of SEG_LVL_SKIP | red |
+
+**Gates:** 38 suites, **30,712** assertions (+20); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`. `make conformance` is **138 matched / 0 / 0 / 0 skipped** (was 114).
+
 ### Added — 0.8.2 bite 5: temporal and copied segmentation (`load_previous`, `PrevSegmentIds`, `seg_id_predicted`)
 
 Every segmentation map config now decodes: the spatial read, the temporal read (`temporal_update` 1),

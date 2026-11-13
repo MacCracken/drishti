@@ -348,6 +348,11 @@ fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
 # leaves. The keyframe tile carries its fh in AV1TILE_SEG_FH (NOT AV1TILE_FH, which stays 0 to keep the
 # encode-lane dispatch intact); these read it there. A tile with no SEG_FH / segmentation disabled is a
 # no-op returning segment_id 0 — so the widely-called mode-info functions keep working with tile = 0.
+# the fh segmentation lookups use on both lanes (AV1TILE_SEG_FH; 0 for a tile without one).
+fn av1_tile_seg_fh(tile): i64 {
+    if (tile == 0) { return 0; }
+    return load64(tile + AV1TILE_SEG_FH);
+}
 fn av1_tile_seg_id_pre_skip(tile): i64 {
     if (tile == 0) { return 0; }
     var fh = load64(tile + AV1TILE_SEG_FH);

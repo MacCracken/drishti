@@ -1769,11 +1769,13 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   inheritance is semantically trivial (empty inherited features; its encoder never codes
 >   `seg_id_predicted` = 1), so the p = 1 path is unit-witnessed only, and rav1e is the external
 >   `load_previous` witness;
+> - **the last two segment features:** the `SEG_LVL_ALT_LF_Y_V + i` deblock level (7.14.5) and the
+>   `SEG_LVL_SKIP` skip force (5.11.11) on both lanes. Segmentation now gates nothing, and
+>   `av1_seg_supported` is gone. libaom realtime ROI-skip streams (SKIP + ALT_LF -63, API-only) are
+>   committed as `tests/repro/roi-skip-*` and bit-exact. CAVEAT: their ALT_LF is invisible (smooth skipped
+>   copies), so the level add is unit-witnessed only;
 >
 > The rest of the batch:
-> - the segment `SEG_LVL_ALT_LF_Y_V + i` filter-level add (7.14.4, missing from `av1_lf_strength`), and
->   `read_skip` forcing skip for `SEG_LVL_SKIP` (5.11.11). Both now REJECT through `av1_seg_supported`;
->   neither is used by any libaom AQ mode tried;
 > - the cross-frame CDF-inheritance follow-ons: `context_update_tile_id` for multi-tile, the
 >   `disable_frame_end_update_cdf` witness, and a show_existing KEY_FRAME re-saving the shown slot's CDF
 >   bundle into every slot (7.21 `load_cdfs`, then the 7.20 save; drishti leaves the other slots' bundles);

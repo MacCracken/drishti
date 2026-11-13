@@ -255,6 +255,43 @@ fn test_intra_seg_per_segment_qindex() {
     return 0;
 }
 
+# SEG_LVL_SKIP on the INTRA (keyframe) lane, 0.8.2: segment 1 carries SKIP, so SegIdPreSkip reads the segment
+# first and read_skip (5.11.11) is FORCED to 1 with no symbol. Round trip through the keyframe mode-info pair with
+# a marker; and the writer refuses skip = 0 in that segment.
+fn test_intra_seg_skip_forced() {
+    var base_q = 40;
+    var ncc = av1_noncoeff_cdf_blob();
+    var fh = seg_kf_fh(base_q, 0);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_SEGID, 1);
+    var etile = mono_tile(4, 4, base_q);
+    store64(etile + AV1TILE_SEG_FH, fh);
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_intra_frame_mode_info_encode(enc, ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, etile),
+      DR_OK, "intra SEG_LVL_SKIP: write ok");
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dtile = mono_tile(4, 4, base_q);
+    store64(dtile + AV1TILE_SEG_FH, fh);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_modeinfo_new();
+    assert_eq(av1_intra_frame_mode_info_decode(sd, ncc, got, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, dtile),
+      DR_OK, "intra SEG_LVL_SKIP: read ok");
+    assert_eq(load64(got + AV1MI_SEGID), 1, "intra SEG_LVL_SKIP: segment 1");
+    assert_eq(load64(got + AV1MI_SKIP), 1, "intra SEG_LVL_SKIP: skip forced");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "intra SEG_LVL_SKIP: the marker decodes (no skip symbol)");
+    store64(mi + AV1MI_SKIP, 0);
+    var wrc = av1_intra_frame_mode_info_encode(av1_sym_enc_init(64, 1), ncc, mi, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, etile);
+    assert_eq(wrc, DR_ERR_BOUNDS, "intra writer: skip = 0 in a SEG_LVL_SKIP segment -> bounds");
+    return 0;
+}
+
 # ---- decode_partition round-trip: 16x16 SPLIT -> 4x 8x8 skip DC via encode lane ----
 fn test_decode_partition_tree() {
     var base_q = 40;
@@ -753,6 +790,7 @@ fn main() {
     test_decode_block();
     test_group("D1 segmentation: per-segment qindex on the keyframe path");
     test_intra_seg_per_segment_qindex();
+    test_intra_seg_skip_forced();
     test_group("E2a foundations: BLOCK_128X128 partition entropy + BD grid sizing");
     test_partition_w128_cdf();
     test_partition_bsl5_roundtrip();

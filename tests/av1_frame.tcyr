@@ -361,49 +361,20 @@ fn test_seg_id_pre_skip_derivation() {
     assert_eq(av1_fh_seg_id_pre_skip(fh), 1, "SEG_LVL_SKIP -> SegIdPreSkip 1");
     return 0;
 }
-fn test_seg_supported_gate() {
+# a lossless-boundary-crossing segment (base_q 40 non-lossless, seg1 ALT_Q = -40 -> q0 lossless): LosslessArray
+# marks only segment 1. (This config was a reject until 0.8.2, when segmentation stopped gating anything.)
+fn test_seg_lossless_crossing() {
     var fh = alloc(AV1FH_SIZE);
     memset(fh, 0, AV1FH_SIZE);
     store64(fh + AV1FH_BASE_Q_IDX, 40);
-    assert_eq(av1_seg_supported(fh), 1, "seg disabled -> supported");
-    # spatial config (update_map=1, temporal=0, update_data=1), seg1 ALT_Q=-30 (q10 non-lossless).
     store64(fh + AV1FH_SEG_ENABLED, 1);
     store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
     store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
     store64(fh + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
-    store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 30);
-    assert_eq(av1_seg_supported(fh), 1, "spatial ALT_Q config -> supported");
-    # 0.8.2: every MAP config decodes — the temporal read, the copied map, inherited feature data.
-    store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 1);
-    assert_eq(av1_seg_supported(fh), 1, "temporal_update -> supported (0.8.2)");
-    store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
-    store64(fh + AV1FH_SEG_UPDATE_MAP, 0);
-    assert_eq(av1_seg_supported(fh), 1, "update_map=0 -> supported (0.8.2)");
-    store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
-    store64(fh + AV1FH_SEG_UPDATE_DATA, 0);
-    assert_eq(av1_seg_supported(fh), 1, "update_data=0 -> supported (0.8.2)");
-    store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
-    # a lossless-boundary-crossing segment (base_q 40 non-lossless, seg1 ALT_Q=-40 -> q0 lossless) DECODES
-    # as of 0.8.2 — per-block Lossless = LosslessArray[ segment_id ] — so it is no longer a reject.
     store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 40);
-    assert_eq(av1_seg_supported(fh), 1, "lossless-crossing segment -> supported (0.8.2)");
     assert_eq(av1_fh_lossless_mask(fh), 2, "LosslessArray: only segment 1 (q 40 - 40 = 0) is lossless");
-    # the features drishti parses but does NOT apply reject, on ANY segment: each of the four per-segment
-    # loop-filter levels (SEG_LVL_ALT_LF_Y_V + i) and SEG_LVL_SKIP. The implemented ones pass.
-    var j = 0;
-    while (j < AV1_SEG_LVL_MAX) {
-        store64(fh + AV1FH_FEATURE_ENABLED + ((7 * 8 + j) * 8), 1);
-        var want = 1;
-        if ((j >= AV1_SEG_LVL_ALT_LF_Y_V) && (j < (AV1_SEG_LVL_ALT_LF_Y_V + 4))) { want = 0; }
-        if (j == AV1_SEG_LVL_SKIP) { want = 0; }
-        assert_eq(av1_seg_supported(fh), want, "feature j on segment 7: ALT_LF_* / SKIP reject, the rest pass");
-        store64(fh + AV1FH_FEATURE_ENABLED + ((7 * 8 + j) * 8), 0);
-        j = j + 1;
-    }
-    # the feature only matters with segmentation ON (FeatureEnabled is zeroed when off, but be explicit).
-    store64(fh + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);
-    store64(fh + AV1FH_SEG_ENABLED, 0);
-    assert_eq(av1_seg_supported(fh), 1, "segmentation off -> supported whatever FeatureEnabled holds");
+    store64(fh + AV1FH_FEATURE_DATA + ((1 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 0 - 30);
+    assert_eq(av1_fh_lossless_mask(fh), 0, "ALT_Q -30 (q 10): no segment lossless");
     return 0;
 }
 
@@ -1038,7 +1009,7 @@ fn main() {
     test_av1_fh_cdef_lf();
     test_av1_fh_segmentation();
     test_seg_id_pre_skip_derivation();
-    test_seg_supported_gate();
+    test_seg_lossless_crossing();
     test_lossless_array();
     test_av1_fh_tile_multi_impl(fx_seq_reduced(1024, 64, 0, 0, 0, 0, 0));
     test_group("av1 frame header — full path");

@@ -3346,27 +3346,47 @@ fn test_inter_frame_mode_info() {
     store64(ib4 + AV1IB_CT + AV1CT_COMPIDX, 1);
     fb_rt(fb_fh(1, 0, 0), s0, g, 1, 1, 1, 0, 0, 0, b4, AV1_REF_NONE, AV1_MM_SIMPLE,
       "F4 4x8 closes the skip_mode gate");
-    # gates: segmentation / delta-q / delta-lf -> UNSUPPORTED, consuming NOTHING (a
-    # marker-only stream distinguishes the gate from a downstream accident: a dropped
-    # gate decodes garbage and can land on UNSUPPORTED via the intra fork by luck —
-    # proven by mutation, D8/D9 survived the plain return-code asserts).
-    var mk = av1_sym_enc_init(16, 1);
-    av1_sym_encode_literal(mk, 165, 8);
-    var mkl = 0;
-    var mkb = av1_sym_enc_finish(mk, &mkl);
-    # an UNSUPPORTED segment feature (a per-segment loop-filter level, parsed but not applied — 0.8.2) still
-    # gates UNSUPPORTED, consuming nothing. Every map config decodes (witnessed separately).
+    # SEG_LVL_SKIP through BOTH dispatchers (0.8.2): segmentation no longer gates anything (every feature is
+    # applied). Segment 1 carries SEG_LVL_SKIP, which forces SegIdPreSkip, so the segment is read BEFORE skip;
+    # then skip = 1 with NO skip symbol (5.11.11), skip_mode 0 without a read (5.11.10), and the inter block is
+    # GLOBALMV from LAST with no mode / ref symbols (5.11.23 / 5.11.25). A marker after the block: the reader
+    # must consume exactly what the writer wrote. Each lane has its own SegmentIds map + Av1SegCtx.
     var fh_sg = fb_fh(1, 0, 0);
     store64(fh_sg + AV1FH_SEG_ENABLED, 1);
     store64(fh_sg + AV1FH_SEG_UPDATE_MAP, 1);
-    store64(fh_sg + AV1FH_SEG_TEMPORAL_UPDATE, 1);
-    store64(fh_sg + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_ALT_LF_Y_V) * 8), 1);
-    var sd = av1_sym_dec_init(mkb, mkl, 1);
-    assert_eq(av1_inter_frame_mode_info(sd, av1_refcdf_blob(), av1_imcdf_blob(),
-        av1_iicdf_blob(), av1_mvcdf_blob(), av1_ncdf_new(), av1_blockinfo_new(), ib_ctx(g, 6),
-        av1_nbctx_new(), av1_warp_new(), fh_sg, mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0),
-      DR_ERR_UNSUPPORTED, "unsupported seg feature (ALT_LF) gates UNSUPPORTED");
-    assert_eq(av1_sym_read_literal(sd, 8), 165, "the segmentation gate consumed NOTHING");
+    store64(fh_sg + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh_sg + AV1FH_FEATURE_ENABLED + ((1 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);
+    var sgw = alloc(256 * 8);   # 16 x 16 MI, u64
+    memset(sgw, 0, 256 * 8);
+    var sgr = alloc(256 * 8);
+    memset(sgr, 0, 256 * 8);
+    var sblk = fb_mk(0, 1, 1);
+    store64(sblk + AV1FB_SEGID, 1);
+    var sib = sblk + AV1FB_IB;
+    store64(sib + AV1IB_REF0, AV1_LAST_FRAME);
+    store64(sib + AV1IB_REF1, AV1_REF_NONE);
+    store64(sib + AV1IB_YMODE, AV1_GLOBALMV);
+    store64(sib + AV1IB_CT + AV1CT_COMPIDX, 1);
+    var senc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_inter_frame_mode_info(senc, av1_refcdf_blob(), av1_imcdf_blob(), av1_iicdf_blob(),
+        av1_mvcdf_blob(), av1_ncdf_new(), sblk, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg,
+        mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, av1_segctx_new(sgw, 0, 16, 16), 0),
+      DR_OK, "SEG_LVL_SKIP: inter write ok");
+    av1_sym_encode_literal(senc, 165, 8);
+    var slen = 0;
+    var sbuf = av1_sym_enc_finish(senc, &slen);
+    var ssd = av1_sym_dec_init(sbuf, slen, 1);
+    var sgot = av1_blockinfo_new();
+    assert_eq(av1_inter_frame_mode_info(ssd, av1_refcdf_blob(), av1_imcdf_blob(), av1_iicdf_blob(),
+        av1_mvcdf_blob(), av1_ncdf_new(), sgot, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg,
+        mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, av1_segctx_new(sgr, 0, 16, 16), 0),
+      DR_OK, "SEG_LVL_SKIP: inter read ok");
+    assert_eq(av1_sym_read_literal(ssd, 8), 165, "SEG_LVL_SKIP: the marker decodes (no skip symbol either side)");
+    assert_eq(av1_fb_segment_id(sgot), 1, "SEG_LVL_SKIP: segment 1 read before skip");
+    assert_eq(av1_fb_skip(sgot), 1, "SEG_LVL_SKIP: skip forced to 1");
+    assert_eq(av1_fb_skip_mode(sgot), 0, "SEG_LVL_SKIP: skip_mode forced to 0");
+    assert_eq(av1_ib_ymode(av1_fb_ib(sgot)), AV1_GLOBALMV, "SEG_LVL_SKIP: GLOBALMV");
+    assert_eq(av1_ib_ref(av1_fb_ib(sgot), 0), AV1_LAST_FRAME, "SEG_LVL_SKIP: LAST_FRAME");
     # 0.8.2: delta_q / delta_lf are no longer a reject — the tile's Av1DeltaCtx drives the splice. An
     # inter-level round trip: four DISTINCT delta_lf values (a direct symbol, the escape boundary 3, zero,
     # a larger escape) so an index swap cannot cancel, a delta_q that escapes, and a marker after the
@@ -3441,7 +3461,8 @@ fn test_inter_frame_mode_info() {
     assert_eq(load64((gotfb + AV1FB_MI) + AV1MI_YMODE), AV1_V_PRED, "intra fork: Y-mode round-trips");
     assert_eq(load64((gotfb + AV1FB_MI) + AV1MI_ANGLE_Y), 2, "intra fork: AngleDeltaY round-trips");
     assert_eq(load64((gotfb + AV1FB_IB) + AV1IB_REF0), AV1_INTRA_FRAME, "intra fork: RefFrame[0] = INTRA");
-    # hostile nulls + mi_size bounds (both edges).
+    # hostile nulls + mi_size bounds (both edges) — rejected before any read, so any decoder will do.
+    var sd = av1_sym_dec_init(alloc(8), 8, 1);
     assert_eq(av1_inter_frame_mode_info(sd, cc, av1_imcdf_blob(), av1_iicdf_blob(),
         av1_mvcdf_blob(), ncc, 0, ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(),
         fb_fh(1, 0, 0), mm_refs(64, 64), s0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0), DR_ERR_BOUNDS,
@@ -3548,13 +3569,19 @@ fn test_inter_frame_hardening() {
         fb_mk(1, 1, 1), ib_ctx(mm_grid(8, 8, 1, 7), 6), av1_nbctx_new(), av1_warp_new(),
         fb_fh(0, 1, 7), refs, s0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0), DR_ERR_BOUNDS,
       "skip_mode = 1 with present off -> surfaced, not silent");
-    # the writer's feature gates mirror the reader's (feature-gated list; roadmap.md).
-    var fh_sg = fb_fh(1, 0, 0);
-    store64(fh_sg + AV1FH_SEG_ENABLED, 1);
-    store64(fh_sg + AV1FH_FEATURE_ENABLED + ((2 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);   # unimplemented feature
+    # the writer refuses what the bitstream cannot carry: a block in a SEG_LVL_SKIP segment (0) whose plan says
+    # skip = 0 — the decoder would force skip = 1 and read none of what follows.
+    var fh_sk = fb_fh(1, 0, 0);
+    store64(fh_sk + AV1FH_SEG_ENABLED, 1);
+    store64(fh_sk + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(fh_sk + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(fh_sk + AV1FH_FEATURE_ENABLED + ((0 * 8 + AV1_SEG_LVL_SKIP) * 8), 1);
+    var skg = alloc(256 * 8);
+    memset(skg, 0, 256 * 8);
     assert_eq(av1_write_inter_frame_mode_info(enc3, ccr, ccim, ccii, ccmv, ncc,
-        fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sg, refs, s0,
-        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0), DR_ERR_UNSUPPORTED, "writer: segmentation gates UNSUPPORTED");
+        fb_mk(0, 0, 1), ib_ctx(g, 6), av1_nbctx_new(), av1_warp_new(), fh_sk, refs, s0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, av1_segctx_new(skg, 0, 16, 16), 0), DR_ERR_BOUNDS,
+      "writer: skip = 0 in a SEG_LVL_SKIP segment is unrepresentable");
     # 0.8.2: the writer refuses a reduced delta it cannot represent (|v| > 512), rather than truncating it.
     var dw = av1_dctx_new(1, 0, 0, 0, 0, 3, AV1_BLOCK_64X64, 100);
     var dwplan = alloc(16 * 16 * AV1_DQPLAN_W * 8);

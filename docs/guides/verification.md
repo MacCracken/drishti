@@ -205,6 +205,10 @@ over hundreds of non-skip blocks. With that stream in the gate, breaking `load_p
 > instrument the decoder (a scratch copy, never `src/`) to see what the stream actually
 > exercises, and look for another encoder that exercises more.
 
+The next bite hit the same wall one level down. libaom's realtime ROI map enables SEG_LVL_SKIP and
+ALT_LF on segment 1 of every inter frame, and codes no block into segment 1. A frame header that
+enables a feature says nothing about whether any block uses it. Count the blocks.
+
 ### A spec-literal reference port is necessary and NOT sufficient
 
 The loop above says known answers come from a port in `scripts/refs/`, never from the Cyrius.
