@@ -1777,10 +1777,14 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - **quantizer matrices now REJECT** where one could apply (they decoded silently wrong): `make conformance`
 >   is **142 / 4 known-gap / 0 / 0**, the 4 being the `qmon` frames held until roadmap 0.8.4 implements them;
 >
+> - **the cross-frame CDF follow-ons:** the context tile's CDFs are snapshotted (any `context_update_tile_id`,
+>   not just 0), a show_existing KEY re-saves its CDFs and gm params into every slot, and the `REF0S` grid is
+>   shared across tiles (tile >= 1 of an inter frame stored through an uninitialised pointer). libaom
+>   2/4/2x2-tile, 128-SB multi-tile and frame-parallel streams are bit-exact: `make conformance` is
+>   **196 / 4 known-gap / 0 / 0**. CAVEAT: no libaom config tried emits a show_existing KEY, so that save is
+>   unit-witnessed only;
+>
 > The rest of the batch:
-> - the cross-frame CDF-inheritance follow-ons: `context_update_tile_id` for multi-tile, the
->   `disable_frame_end_update_cdf` witness, and a show_existing KEY_FRAME re-saving the shown slot's CDF
->   bundle into every slot (7.21 `load_cdfs`, then the 7.20 save; drishti leaves the other slots' bundles);
 > - bounding the `av1_read_cdef` / `av1_write_cdef` fill loops, which are unbounded on both axes
 >   and safe today only by the forced-partition invariant.
 >

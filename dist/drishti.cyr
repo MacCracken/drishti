@@ -2911,6 +2911,22 @@ fn av1_frame_prev_segids(fh, refs): i64 {
     return av1_ref_saved_segids(refs, slot);
 }
 
+# gm_params[ ref ][ j ] = SavedGmParams[ slot ][ ref ][ j ] (7.21), for the show_existing KEY_FRAME load. Without it a
+# show_existing header's gm_params are all zero, which update_refs would save into every slot — and a later
+# frame's PrevGmParams (av1_prev_gm_param) would then read 0 where the identity model has 1 << 16.
+fn av1_ref_load_gm(refs, slot, fh): i64 {
+    var ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) {
+        var j = 0;
+        while (j < 6) {
+            store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + j) * 8), av1_ref_saved_gm(refs, slot, ref, j));
+            j = j + 1;
+        }
+        ref = ref + 1;
+    }
+    return 0;
+}
+
 # The 5.9.2 split after disable_frame_end_update_cdf: PRIMARY_REF_NONE -> setup_past_independence, else
 # load_previous (prevFrame = ref_frame_idx[ primary_ref_frame ]; PrevGmParams is av1_prev_gm_param). The
 # CDF half of the same split (init_non_coeff_cdfs / load_cdfs) is the frame decoder's. A null refs is a
@@ -3331,8 +3347,11 @@ fn av1_tile_info(br, s, fh): i64 {
     store64(fh + AV1FH_TILE_COLS_LOG2, tile_cols_log2);
     store64(fh + AV1FH_TILE_ROWS_LOG2, tile_rows_log2);
     if ((tile_cols_log2 > 0) || (tile_rows_log2 > 0)) {
-        store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID,
-          dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2));   # context_update_tile_id
+        var cuti = dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2);   # context_update_tile_id
+        # 5.9.15 semantics: a requirement of bitstream conformance that it is < TileCols * TileRows. A larger
+        # value names no tile, so the frame would have no context to save: refuse the header.
+        if (cuti >= (av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh))) { return DR_ERR_BAD_HEADER; }
+        store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, cuti);
         store64(fh + AV1FH_TILE_SIZE_BYTES, dr_br_read_bits(br, 2) + 1);   # tile_size_bytes_minus_1 f(2)
     } else {
         store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 0);
@@ -4026,9 +4045,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             store64(fh + AV1FH_MI_ROWS, av1_ref_mi_rows(refs, idx));
             store64(fh + AV1FH_ORDER_HINT, av1_ref_order_hint(refs, idx));
             if (ft == AV1_KEY_FRAME) {
-                # 7.21 load_loop_filter_params / load_segmentation_params: the shown KEY frame's deltas and
-                # feature arrays, which update_refs then saves into every slot (refresh = allFrames).
+                # 7.21 load_loop_filter_params / load_segmentation_params and gm_params = SavedGmParams[ idx ]:
+                # the shown KEY frame's deltas, feature arrays and global motion, which update_refs then saves
+                # into every slot (refresh = allFrames). (load_cdfs is the slot pointer copy in update_refs.)
                 av1_ref_load_seg_lf(refs, idx, fh);
+                av1_ref_load_gm(refs, idx, fh);
             }
             store64(fh + AV1FH_FRAME_IS_INTRA, 1);
             if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
@@ -4281,8 +4302,14 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
     # 7.20 saves them back into every refreshed slot). Read before the loop — the shown slot is refreshed
     # too. A decoded frame's map is saved by the frame decoder (av1_frame_dec_finish), not here.
     var shown_segids = 0;
+    var shown_cdf = 0;
     var from_shown = av1_fh_show_existing_frame(fh);
-    if (from_shown != 0) { shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh)); }
+    if (from_shown != 0) {
+        shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh));
+        # load_cdfs( frame_to_show_map_idx ) then save_cdfs( i ) (7.21 -> 7.20): every refreshed slot gets the
+        # shown slot's CDF bundle (aliased; bundles are never mutated after their save).
+        shown_cdf = av1_ref_saved_cdf(refs, av1_fh_frame_to_show(fh));
+    }
     var i = 0;
     while (i < AV1_NUM_REF_FRAMES) {
         if ((flags >> i) & 1) {
@@ -4337,7 +4364,10 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
             }
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
-            if (from_shown != 0) { av1_ref_set_saved_segids(refs, i, shown_segids); }
+            if (from_shown != 0) {
+                av1_ref_set_saved_segids(refs, i, shown_segids);
+                av1_ref_set_saved_cdf(refs, i, shown_cdf);
+            }
         }
         i = i + 1;
     }
@@ -12761,6 +12791,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_CUR_QINDEX, base_q);   # per-block dequant qindex; per-segment override at decode
     store64(tile + AV1TILE_SEG_FH, 0);            # set by the decode driver (both lanes) when fh is available
     store64(tile + AV1TILE_SEGIDS, 0);            # allocated by av1_tile_grids_new
+    store64(tile + AV1TILE_REF0S, 0);             # allocated by av1_tile_grids_new (or shared from tile0)
     store64(tile + AV1TILE_SB128, 0);             # 64x64 superblocks unless the driver says otherwise
     store64(tile + AV1TILE_ENABLE_EF, enable_ef);
     store64(tile + AV1TILE_IS_INTER, 0);
@@ -12890,6 +12921,10 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_MVGRID, load64(src + AV1TILE_MVGRID));
     store64(dst + AV1TILE_SKIPMODES, load64(src + AV1TILE_SKIPMODES));
     store64(dst + AV1TILE_SEGIDS, load64(src + AV1TILE_SEGIDS));   # shared SegmentIds map (0.7.125 D1)
+    # RefFrame[0] per MI (0.8.2): the deblocker runs once over the whole frame on tile0, so tile >= 1's inter
+    # stores must land in tile0's grid. It was neither shared nor initialised, so every tile after the first
+    # in an inter frame stored through an uninitialised pointer, and tile0's grid kept INTRA for those blocks.
+    store64(dst + AV1TILE_REF0S, load64(src + AV1TILE_REF0S));
     # DeltaLFs (0.8.2): the deblocker runs once over the whole frame on tile0, so every tile's
     # stores must land in tile0's grids.
     store64(dst + AV1TILE_DLF + 0, load64(src + AV1TILE_DLF + 0));
@@ -23215,7 +23250,8 @@ enum Av1FrameDec {
     AV1FDEC_TILES_DONE = 48;   # tiles decoded so far == next expected TileNum
     AV1FDEC_DPB        = 56;   # Av1Dpb (0 = intra-only decode; inter frames need it)
     AV1FDEC_REFS       = 64;   # Av1RefState (paired with DPB)
-    AV1FDEC_SIZE       = 72;
+    AV1FDEC_CTX_CDF    = 72;   # the context tile's final CDFs (9.2.4 exit_symbol; 0 until that tile decodes)
+    AV1FDEC_SIZE       = 80;
 }
 
 # av1_frame_dec_new — begin a frame decode: validate scope, create the reconstruction
@@ -23240,19 +23276,11 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # (CLAUDE.md) forbids. They are rejected at the one chokepoint every decode path shares.
     # Each is a tracked gap (roadmap.md), and each becomes an un-gating bite when implemented.
     #
-    # primary_ref_frame != NONE now INHERITS the ref slot's saved CDFs (C1, 7.20/7.21 — see
+    # primary_ref_frame != NONE INHERITS the ref slot's saved CDFs (C1, 7.20/7.21 — see
     # av1_tile_inherit_cdfs + the save in av1_frame_dec_finish). A primary_ref that selects a slot
-    # with no saved CDFs is caught at the tile inherit (malformed -> DR_ERR_UNSUPPORTED). One reject
-    # remains: an ADAPTING frame (disable_frame_end_update_cdf == 0, i.e. it saves its adapted CDFs)
-    # whose context_update_tile_id names a tile OTHER than tile0 cannot be saved correctly — the
-    # frame-decode context retains only tile0's adapted CDFs (roadmap.md C1 follow-on: retain the
-    # named context tile). A single-tile frame forces context_update_tile_id = 0, and a non-adapting
-    # frame's saved CDFs are its (tile-independent) initial context, so both are handled.
-    if ((av1_fh_disable_frame_end_update_cdf(fh) == 0)
-      && (av1_fh_context_update_tile_id(fh) != 0)) {
-        store64(out_err, DR_ERR_UNSUPPORTED);
-        return 0;
-    }
+    # with no saved CDFs is caught at the tile inherit (malformed -> DR_ERR_UNSUPPORTED). An adapting
+    # frame's saved context is the final CDFs of tile context_update_tile_id, whichever tile that is
+    # (snapshotted as that tile finishes, AV1FDEC_CTX_CDF; 0.8.2 — it used to reject any tile but tile0).
     # segmentation is no longer a reject (0.8.2): every MAP config decodes on BOTH lanes — spatial (0.7.125
     # D1), the temporal seg_id_predicted read, the copied map and inherited feature data (PrevSegmentIds attached
     # per tile below) — and every FEATURE is applied: ALT_Q (dequant, LosslessArray), ALT_LF_* (the deblock
@@ -23304,6 +23332,7 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     store64(fdc + AV1FDEC_TILES_DONE, 0);
     store64(fdc + AV1FDEC_DPB, 0);
     store64(fdc + AV1FDEC_REFS, 0);
+    store64(fdc + AV1FDEC_CTX_CDF, 0);
     return fdc;
 }
 # wire the reference state an INTER frame needs (0.7.84): the DPB the MC reads and
@@ -23399,13 +23428,22 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
             var dri = av1_decode_inter_tile(tile, buf + av1_tg_tile_offset(tg, tn),
               av1_tg_tile_size(tg, tn), disable_cdf);
             if (dri != DR_OK) { store64(out_err, dri); return 0 - 1; }
-            tn = tn + 1;
         } else {
             var dr = av1_decode_intra_tile(tile, buf + av1_tg_tile_offset(tg, tn),
               av1_tg_tile_size(tg, tn), disable_cdf);
             if (dr != DR_OK) { store64(out_err, dr); return 0 - 1; }
-            tn = tn + 1;
         }
+        # exit_symbol (9.2.4): when the frame adapts (disable_frame_end_update_cdf == 0) and this is tile
+        # context_update_tile_id, a copy of its FINAL CDFs is the frame's saved context. Taken now, while this
+        # tile's families still hold them; one bundle per frame, never mutated after.
+        if ((av1_fh_disable_frame_end_update_cdf(fh) == 0) && (tn == av1_fh_context_update_tile_id(fh))) {
+            var snap = av1_cdf_bundle_new();
+            if (snap == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
+            var sre = av1_cdf_bundle_save(snap, tile);
+            if (sre != DR_OK) { store64(out_err, sre); return 0 - 1; }
+            store64(fdc + AV1FDEC_CTX_CDF, snap);
+        }
+        tn = tn + 1;
     }
     store64(fdc + AV1FDEC_TILES_DONE, av1_tg_end(tg) + 1);
     if ((av1_tg_end(tg) + 1) == num_tiles) { return 1; }
@@ -23470,20 +23508,21 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
     }
     # CDF SAVE (C1, 7.20): save the frame's exit CDF context into every refreshed DPB slot, so a future
     # non-key frame whose primary_ref_frame selects one inherits it (7.21). Two cases per spec:
-    #  - disable_frame_end_update_cdf == 0: save the ADAPTED context tile (tile0; a non-tile0
-    #    context_update_tile_id is rejected in av1_frame_dec_new since only tile0 is retained).
+    #  - disable_frame_end_update_cdf == 0: save the ADAPTED context — the final CDFs of tile
+    #    context_update_tile_id, snapshotted by av1_frame_dec_group as that tile finished (AV1FDEC_CTX_CDF).
     #  - disable_frame_end_update_cdf == 1: save the frame's INITIAL CDFs, NOT the adapted ones — the
     #    q-bucketed defaults (primary_ref_frame == NONE) or the inherited source bundle (otherwise).
     #    Reconstructed here (tile-independent), so this needs no per-tile pre-decode snapshot.
     # Runs for intra + inter (a keyframe's CDFs are inheritable). One bundle is aliased into every
     # refreshed slot — never mutated after (the inherit COPIES out of it).
     if (refs != 0) {
-        var cdfb = av1_cdf_bundle_new();
-        if (cdfb == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        var cdfb = load64(fdc + AV1FDEC_CTX_CDF);
         var serr = DR_OK;
         if (av1_fh_disable_frame_end_update_cdf(fh) == 0) {
-            serr = av1_cdf_bundle_save(cdfb, tile0);
+            if (cdfb == 0) { serr = DR_ERR_BAD_HEADER; }   # the context tile never decoded (unreachable when complete)
         } else {
+            cdfb = av1_cdf_bundle_new();
+            if (cdfb == 0) { store64(out_err, DR_ERR_OOM); return 0; }
             var pr = av1_fh_primary_ref_frame(fh);
             if (pr == AV1_PRIMARY_REF_NONE) {
                 serr = av1_cdf_bundle_defaults(cdfb, av1_coeff_cdf_qbucket(load64(tile0 + AV1TILE_BASE_Q)));

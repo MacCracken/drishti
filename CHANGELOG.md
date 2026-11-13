@@ -4,6 +4,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.2 bite 8: multi-tile streams decode (the context tile, the shared `REF0S` grid); show_existing KEY re-saves its state
+
+**A stock libaom multi-tile stream (`--tile-columns=1`) used to reject on every frame.** libaom names
+its largest tile as `context_update_tile_id`, and drishti rejected any context tile but tile 0. Lifting
+that reject alone would have opened a memory-safety bug underneath. Three fixes, plus a header check:
+- **The context tile** (9.2.4 exit process; 7.4 frame-end update): when the frame adapts
+  (`disable_frame_end_update_cdf` 0), the tile numbered `context_update_tile_id` has its final CDFs
+  snapshotted as it finishes (`AV1FDEC_CTX_CDF`), on both lanes. The frame-end save aliases that
+  snapshot into every refreshed slot, instead of re-saving tile 0. The `DR_ERR_UNSUPPORTED` reject is
+  gone.
+- **`AV1TILE_REF0S` shared across tiles, and initialised.** `av1_tile_new` never set it and
+  `av1_tile_share_grids` never copied it. So **every tile after the first in an inter frame stored
+  `RefFrame[0]` through an uninitialised pointer.** Tile 0's grid, the one the whole-frame deblocker
+  reads, also kept INTRA for every tile ≥ 1 block. The roadmap had filed this for 0.8.3; it came
+  forward because the context-tile fix routes multi-tile inter frames straight into it.
+- **A show_existing KEY_FRAME re-saves the shown slot's CDF bundle and its gm params** (7.21
+  `load_cdfs` and `gm_params = SavedGmParams`, then the 7.20 refresh of all slots). Before, the other
+  slots kept stale CDFs, and they saved all-zero gm params, a show_existing header's memset, where the
+  identity model has `1 << 16`.
+- **`context_update_tile_id` must name a tile** (5.9.15 semantics: < TileCols × TileRows). A larger
+  value is codable whenever uniform spacing yields fewer than `1 << TileColsLog2` tiles. The parser
+  now refuses it with `DR_ERR_BAD_HEADER`, and the frame decoder refuses a frame whose context tile
+  never decoded.
+
+Evidence:
+- **Conformance, 196 matched / 4 known-gap / 0 / 0 (was 142).** A new cross-frame CDF-save section,
+  every frame hard:
+  - **multi-tile**: 2 columns (352x288), 2x2 (640x360, context tile 3), 2 columns at 128-px
+    superblocks, and 4-column realtime (context tiles 1 and 2);
+  - **frame-parallel** (`--frame-parallel=1`), single-tile and 2-column. These adapt inside the frame
+    but save the INITIAL context, the `disable_frame_end_update_cdf` witness the roadmap asked for.
+
+  Each case proves through `vector-probe` that an adapting frame saved a non-zero context tile (or an
+  initial context) AND that a later frame inherits those CDFs. The guard was canary-checked against
+  streams lacking each property. 640x360 mandelbrot trips libaom's screen-content detector, so those
+  cases add a little temporal noise.
+- **What is not externally witnessed:** a show_existing KEY_FRAME. No libaom configuration tried
+  (forward keyframes at several distances, with GF intervals pinned to match) emitted one within the
+  harness's 9-temporal-unit window. That save is unit-witnessed.
+- **Unit tests:**
+  - a content-pinned context-tile witness. Two adapting keyframe tiles with different partition plans:
+    `[A, B]` naming tile 1 saves EXACTLY what `[B, A]` naming tile 0 saves, and something different
+    from `[A, B]` naming tile 0;
+  - a two-tile INTER frame through the frame driver, where tile 1's `RefFrame[0]` must land in tile
+    0's grid;
+  - the frame-parallel save: adapting tiles, the INITIAL context saved;
+  - the show_existing KEY CDF and gm re-save, with sentinels;
+  - the header range check, and the refusal of a frame naming a tile it does not have.
+
+**Mutation-verified**, 8 mutations in an isolated copy of the tree, every source file restored byte-exact:
+
+| Mutation | Unit suites | libaom streams |
+|---|---|---|
+| `REF0S` not shared across tiles | red | red (every multi-tile stream) |
+| `REF0S` not initialised in `av1_tile_new` | green | green (defensive: sharing overwrites it) |
+| the snapshot always takes tile 0 | red | red (2-, 2x2- and 4-tile) |
+| the snapshot is off by one tile | red | red |
+| a frame-parallel frame saves its ADAPTED context | red | red (both frame-parallel streams, 7/9) |
+| show_existing KEY: no CDF re-save; no gm load | red | green (no stream has one) |
+| the `context_update_tile_id` range check dropped | red | green |
+
+**The first run left the frame-parallel mutation green in the suites**, caught only by the streams. No
+unit test adapted with `disable_frame_end_update_cdf` = 1. A frame-parallel case on the content-pinned
+context-tile witness closes it: the saved context must equal the default initial CDFs, not the
+context tile's.
+
+**Gates:** 38 suites, **30,759** assertions (+36); 7,410 fuzz; bench; vet; lint; fmt-check; version-check;
+`distlib --check`. `make conformance` is **196 matched / 4 known-gap / 0 / 0 skipped** (was 142).
+
 ### Fixed — 0.8.2 bite 7: a stream with quantizer matrices now REJECTS instead of decoding silently wrong
 
 drishti parses `using_qmatrix` / `qm_y` / `qm_u` / `qm_v` but does not implement the matrices: 7.12.3

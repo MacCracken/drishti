@@ -66,6 +66,11 @@ TSEG_CASES="tseg_352x288_b150_c8 tseg_160x136_b400_c8 tseg_200x104_b150_c9"
 # applies); qmon uses libaom's default levels, which drishti does not implement — it must REJECT, never
 # mis-decode (each rejected frame is a known gap until roadmap 0.8.4).
 QM_CASES="qm15_176x144 qmon_176x144"
+# CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
+# context_update_tile_id != 0 (libaom names its LARGEST tile), and frame-parallel streams that adapt inside the
+# frame but save the INITIAL context (disable_frame_end_update_cdf 1). Every case also has a later frame
+# inheriting those CDFs (primary_ref_frame != NONE) — the only place a wrong save shows.
+CDF_CASES="mt2c_352x288 mt2x2_640x360 mt2csb128_640x360 mt4crt_640x360 fp_352x288 fp2c_352x288"
 RAV1E_CASES="rav1e_352x288_s6_q100"
 SVT_CASES="svt_352x288_p8_crf35"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
@@ -89,6 +94,7 @@ skip_external() { # reason
     for c in $SEGI_CASES; do skip_case "$c" "$1"; done
     for c in $TSEG_CASES; do skip_case "$c" "$1"; done
     for c in $QM_CASES; do skip_case "$c" "$1"; done
+    for c in $CDF_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
@@ -764,6 +770,61 @@ qmcase() { # name = qm15_WxH (hard) | qmon_WxH (must reject); 4 frames
 }
 echo "--- quantizer matrices: the flat level decodes, a real matrix is REJECTED (never mis-decoded) ---"
 for c in $QM_CASES; do qmcase "$c"; done
+# does the probe show `want` — "ctxtile" (an adapting frame saving a tile other than 0) or "fp" (an adapting frame
+# with disable_frame_end_update_cdf 1) — AND a later frame inheriting CDFs (primary_ref_frame != 7)?
+cdf_property() { # want
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" '
+        function judge() {
+            if (seen && !se) {
+                if (want == "ctxtile" && dcu == 0 && dfe == 0 && cut != 0) { got = 1 }
+                if (want == "fp" && dcu == 0 && dfe == 1) { got = 1 }
+                if (got && pr != 7 && ft != 0 && saw_inherit_after) { inh = 1 }
+                if (got) { saw_inherit_after = 1 }
+            }
+        }
+        /^ *frame_type=/ { judge(); seen = 1; split($0, a, "="); ft = a[2] + 0; se = 0; pr = 7; dcu = 1; dfe = 1; cut = 0 }
+        /^ *show_existing_frame=/ { split($0, a, "="); se = a[2] + 0 }
+        /^ *primary_ref_frame=/ { split($0, a, "="); pr = a[2] + 0 }
+        /^ *disable_cdf_update=/ { split($0, a, "="); dcu = a[2] + 0 }
+        /^ *disable_frame_end_update_cdf=/ { split($0, a, "="); dfe = a[2] + 0 }
+        /^ *context_update_tile_id=/ { split($0, a, "="); cut = a[2] + 0 }
+        END { judge(); exit !(got && inh) }'
+}
+cdfcase() { # name = KIND_WxH
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=9 want="ctxtile" srcf="" args=""
+    case "$kind" in
+        mt2c)      args="--tile-columns=1" ;;
+        mt2x2)     args="--tile-columns=1 --tile-rows=1"; srcf=",noise=alls=12:allf=t" ;;
+        mt2csb128) args="--tile-columns=1 --sb-size=128"; srcf=",noise=alls=12:allf=t" ;;
+        mt4crt)    args="--tile-columns=2 --rt --cpu-used=9 --end-usage=cbr --target-bitrate=500"
+                   srcf=",noise=alls=12:allf=t" ;;
+        fp)        args="--frame-parallel=1"; want="fp" ;;
+        fp2c)      args="--frame-parallel=1 --tile-columns=1"; want="fp" ;;
+        *)         echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    # 640x360 mandelbrot trips libaom's screen-content detector (palette / intrabc, rejected by design); a
+    # little temporal noise keeps it natural content.
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30${srcf}" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w $w -h $h --i420 --cpu-used=8 --end-usage=q --cq-level=30 --limit="$fr" \
+        --lag-in-frames=0 --enable-restoration=0 --enable-palette=0 --enable-intrabc=0 $args \
+        --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    if ! cdf_property "$want"; then
+        echo "  $n: SETUP FAILED (no '$want' CDF save followed by an inheriting frame — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
+echo "--- cross-frame CDF save: the context tile, and the initial context (frame-parallel); every frame hard ---"
+for c in $CDF_CASES; do cdfcase "$c"; done
 echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); every frame hard ---"
 for c in $RAV1E_CASES; do rav1ecase "$c"; done
 for c in $SVT_CASES; do svtcase "$c"; done

@@ -1328,20 +1328,103 @@ fn test_cdf_save_populates_slots() {
     assert_eq(cceq, 1, "CDF save: disable_frame_end_update_cdf=1 saves the INITIAL (default) coeff CDFs");
     return 0;
 }
-# C1 gate: an ADAPTING frame (disable_frame_end_update_cdf=0) whose context_update_tile_id names a tile
-# other than tile0 cannot have the right tile's CDFs saved (only tile0 is retained) -> reject cleanly
-# rather than silently save tile0's context for a future inheritor.
-fn test_cdf_multitile_ctx_rejected() {
+# The CONTEXT TILE (9.2.4 exit_symbol, 0.8.2): an adapting frame (disable_frame_end_update_cdf 0) saves the final
+# CDFs of tile context_update_tile_id — whichever tile that is. (Until 0.8.2 only tile0 was kept, and any other id
+# rejected.) Two ADAPTING keyframe tiles with different partition plans adapt differently: A = SB0 SPLIT into
+# four 32x32 + SB1 64x64; B = two 64x64. Each is 32x16 MI, so a 256x64 frame holds two.
+fn ctx_enc_tile(split, out_len): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 5) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    if (split != 0) {
+        store64(pp + 0, AV1_PARTITION_SPLIT);
+        store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+        store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+        store64(pp + 40, AV1_PARTITION_NONE);
+        store64(pt + (4 * 8), 4);
+    } else {
+        store64(pp + 0, AV1_PARTITION_NONE);
+        store64(pp + 8, AV1_PARTITION_NONE);
+        store64(pt + 0, 4);
+        store64(pt + 8, 4);
+    }
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    return av1_encode_intra_tile(etile, pp, pm, pt, 0, out_len);   # disable_cdf = 0: ADAPTING
+}
+# decode [first, second] as one adapting 2-tile keyframe saving context tile `ctx` (disable_frame_end_update_cdf
+# = dfeuc); returns slot 0's bundle.
+fn ctx_decode(t0, l0, t1, l1, ctx, dfeuc): i64 {
+    var plen = 2 + l0 + l1;
+    var buf = alloc(plen);
+    store8(buf + 0, 0x00);                          # tile_start_and_end_present_flag = 0
+    store8(buf + 1, l0 - 1);                        # tile0 tile_size_minus_1 (le1)
+    var i = 0;
+    while (i < l0) { store8(buf + 2 + i, load8(t0 + i)); i = i + 1; }
+    i = 0;
+    while (i < l1) { store8(buf + 2 + l0 + i, load8(t1 + i)); i = i + 1; }
+    var fh = frame_mk_fh_2tile();
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 0);
+    store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, dfeuc);
+    store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, ctx);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);   # a keyframe: its initial context is the defaults
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    var refs = av1_ref_state_new();
+    var oe = alloc(8);
+    var frame = av1_decode_frame_ref(frame_mk_seq(0), fh, av1_dpb_new(), refs, buf, plen, oe);
+    assert_eq(load64(oe), DR_OK, "context tile: the adapting 2-tile keyframe decodes");
+    assert_eq(frame != 0, 1, "context tile: frame returned");
+    if (av1_ref_saved_cdf(refs, 0) == 0) { return av1_cdf_bundle_new(); }   # keep a failed decode from a null deref
+    assert_eq(av1_ref_saved_cdf(refs, 7), av1_ref_saved_cdf(refs, 0),
+      "context tile: one bundle aliased into all slots");
+    return av1_ref_saved_cdf(refs, 0);
+}
+fn ctx_bundles_equal(a, b): i64 {
+    var i = 0;
+    while (i < AV1CB_N) {
+        if (load64(a + (i * 8)) != load64(b + (i * 8))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+fn test_cdf_context_tile() {
+    var la = 0;
+    var ta = ctx_enc_tile(1, &la);
+    var lb = 0;
+    var tb = ctx_enc_tile(0, &lb);
+    var ab0 = ctx_decode(ta, la, tb, lb, 0, 0);   # [A, B], context tile 0 -> A's CDFs
+    var ab1 = ctx_decode(ta, la, tb, lb, 1, 0);   # [A, B], context tile 1 -> B's CDFs
+    var ba0 = ctx_decode(tb, lb, ta, la, 0, 0);   # [B, A], context tile 0 -> B's CDFs
+    assert_eq(ctx_bundles_equal(ab0, ab1), 0, "context tile: the two tiles adapted differently (the test can see)");
+    assert_eq(ctx_bundles_equal(ab1, ba0), 1, "context tile 1 of [A, B] saves EXACTLY tile B's final CDFs");
+    # disable_frame_end_update_cdf = 1 with adaptation ON (libaom --frame-parallel=1): the tiles still adapt, but
+    # the frame saves its INITIAL context — the q-bucketed defaults here (PRIMARY_REF_NONE) — not any tile's.
+    var fp = ctx_decode(ta, la, tb, lb, 1, 1);
+    var defs = av1_cdf_bundle_new();
+    av1_cdf_bundle_defaults(defs, av1_coeff_cdf_qbucket(40));
+    assert_eq(ctx_bundles_equal(fp, defs), 1, "frame-parallel: the saved context is the INITIAL (default) CDFs");
+    assert_eq(ctx_bundles_equal(fp, ab1), 0, "...not the context tile's adapted ones");
+    # a context tile the frame does not have (a 1-tile frame naming tile 1 — the parser refuses the header, this
+    # drives the decoder directly) has no context to save: refused, never a silent default.
     var olen = 0;
-    var out = frame_enc_keyframe(&olen);
+    var out = ctx_enc_tile(1, &olen);              # an ADAPTING single tile (the decode must not desync first)
     var oe = alloc(8);
     var fh = frame_mk_fh(1, 1, 0, 0);
-    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 0);          # adapting
-    store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, 0);       # ...and saving the adapted context
-    store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 1);      # ...from a NON-tile0 context tile
-    assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe), 0,
-      "adapting frame with context_update_tile_id != 0 rejected (context tile not retained)");
-    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "...with DR_ERR_UNSUPPORTED");
+    store64(fh + AV1FH_DISABLE_CDF_UPDATE, 0);
+    store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, 0);
+    store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    var frame = av1_decode_frame_ref(frame_mk_seq(0), fh, av1_dpb_new(), av1_ref_state_new(), out, olen, oe);
+    assert_eq(frame, 0, "a context tile the frame does not have -> refused");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "...with DR_ERR_BAD_HEADER");
     return 0;
 }
 
@@ -1499,7 +1582,7 @@ fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
     test_cdf_save_populates_slots();
-    test_cdf_multitile_ctx_rejected();
+    test_cdf_context_tile();
     test_silent_misdecode_rejects();
     test_tile_deltas_decode();
     test_frame_deltas_decode();

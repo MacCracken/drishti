@@ -296,6 +296,91 @@ fn test_frame_copied_segmap() {
     return 0;
 }
 
+# TWO-TILE INTER FRAME through the frame driver (0.8.2). A 128x64 frame, tile columns [0,16) and [16,32) (MI),
+# each one 64x64 NEWMV skip block. Tile >= 1 of an inter frame used to store RefFrame[0] through an
+# UNINITIALISED AV1TILE_REF0S pointer (neither set by av1_tile_new nor shared by av1_tile_share_grids), and tile0's
+# grid — the one the whole-frame deblocker reads — kept INTRA for every tile-1 block.
+fn mt_ref_frame(): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(128, 64, 1, 0, 0, 8, 8, oe);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 128) { dr_frame_set(f, 0, x, y, (x + (2 * y)) & 255); x = x + 1; }
+        y = y + 1;
+    }
+    return f;
+}
+fn mt_fh(): i64 {
+    var fh = it_fh();
+    store64(fh + AV1FH_FRAME_WIDTH, 128);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 128);
+    store64(fh + AV1FH_MI_COLS, 32);
+    store64(fh + AV1FH_TILE_COLS, 2);
+    store64(fh + AV1FH_TILE_COLS_LOG2, 1);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 2);
+    store64(fh + AV1FH_MI_COL_STARTS + 0, 0);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, 16);
+    store64(fh + AV1FH_MI_COL_STARTS + 16, 32);
+    return fh;
+}
+# encode the 64x64 tile at MI column col0 of the 128x64 frame (its own window + frame-sized grids).
+fn mt_enc_tile(dpb, refs, seq, fh, col0, blk, out_len): i64 {
+    var oe = alloc(8);
+    var ef = dr_frame_new(128, 64, 1, 0, 0, 8, 8, oe);
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    av1_tile_set_frame_mi(et, 32, 16);
+    av1_tile_grids_new(et);
+    av1_tile_set_window(et, col0, 0, col0 + 16, 16);
+    assert_eq(av1_tile_set_inter_ctx(et, fh, refs, seq, dpb), DR_OK, "2-tile: encode tile inter ctx");
+    var pp = alloc(8);
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    return av1_encode_inter_tile(et, pp, pf, 1, out_len);
+}
+fn test_inter_frame_two_tiles() {
+    var ref = mt_ref_frame();
+    var dpb = av1_dpb_new();
+    var fh = mt_fh();
+    av1_dpb_store(dpb, fh, ref);
+    var refs = it_refs();
+    store64(refs + AV1REF_UPSCALED_W + 0, 128);
+    store64(refs + AV1REF_FRAME_W + 0, 128);
+    var seq = it_seq();
+    var l0 = 0;
+    var t0 = mt_enc_tile(dpb, refs, seq, fh, 0, it_blk(16, 8), &l0);
+    var l1 = 0;
+    var t1 = mt_enc_tile(dpb, refs, seq, fh, 16, it_blk(8, 4), &l1);
+    # the tile group: tile_start_and_end_present_flag = 0 (1 bit, then byte-aligned), tile0 = 2-byte LE
+    # tile_size_minus_1 + data, tile1 = data (the last tile carries no size).
+    var plen = 1 + 2 + l0 + l1;
+    var buf = alloc(plen);
+    store8(buf + 0, 0x00);
+    store8(buf + 1, (l0 - 1) & 255);
+    store8(buf + 2, ((l0 - 1) >> 8) & 255);
+    var i = 0;
+    while (i < l0) { store8(buf + 3 + i, load8(t0 + i)); i = i + 1; }
+    i = 0;
+    while (i < l1) { store8(buf + 3 + l0 + i, load8(t1 + i)); i = i + 1; }
+    var oe = alloc(8);
+    var fdc = av1_frame_dec_new(seq, fh, oe);
+    assert_eq(fdc != 0, 1, "2-tile inter: frame decode context");
+    av1_frame_dec_set_inter(fdc, dpb, refs);
+    assert_eq(av1_frame_dec_group(fdc, buf, plen, oe), 1, "2-tile inter: the group completes the frame");
+    assert_eq(load64(oe), DR_OK, "2-tile inter: tiles decode clean");
+    var tile0 = load64(fdc + AV1FDEC_TILE0);
+    assert_eq(av1_grid_get(tile0, AV1TILE_REF0S, 4, 4), AV1_LAST_FRAME, "tile 0 block's RefFrame[0] in tile0's grid");
+    assert_eq(av1_grid_get(tile0, AV1TILE_REF0S, 4, 20), AV1_LAST_FRAME,
+      "tile 1 block's RefFrame[0] lands in tile0's grid (the deblocker's)");
+    var out = av1_frame_dec_finish(fdc, oe);
+    assert_eq(out != 0, 1, "2-tile inter: frame returned");
+    # MV (16, 8) in tile 0: out(x, y) = ref(x + 1, y + 2); MV (8, 4) in tile 1: out(x, y) = ref(x + 0.5, ...) —
+    # spot the integer one: at (10, 10) in tile 0, ref(11, 12) = 11 + 24 = 35.
+    assert_eq(dr_frame_get(out, 0, 10, 10), 35, "2-tile inter: tile 0 pixels are its MC prediction");
+    return 0;
+}
+
 # ================================================================
 # The BYTE-STREAM E2E: a real (non-still) sequence header + a KEY frame + an INTER
 # frame, every field's bit packing commented, through av1_decode_stream. The intra
@@ -6233,6 +6318,7 @@ fn main() {
     test_inter_tile_dual_filter();
     test_inter_frame_route();
     test_frame_copied_segmap();
+    test_inter_frame_two_tiles();
     test_tmvs_save_hook();
     test_group("the review hardening: chroma, ref selection, clamps, windows");
     test_inter_tile_chroma_e2e();

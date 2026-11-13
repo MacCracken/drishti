@@ -247,6 +247,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_CUR_QINDEX, base_q);   # per-block dequant qindex; per-segment override at decode
     store64(tile + AV1TILE_SEG_FH, 0);            # set by the decode driver (both lanes) when fh is available
     store64(tile + AV1TILE_SEGIDS, 0);            # allocated by av1_tile_grids_new
+    store64(tile + AV1TILE_REF0S, 0);             # allocated by av1_tile_grids_new (or shared from tile0)
     store64(tile + AV1TILE_SB128, 0);             # 64x64 superblocks unless the driver says otherwise
     store64(tile + AV1TILE_ENABLE_EF, enable_ef);
     store64(tile + AV1TILE_IS_INTER, 0);
@@ -376,6 +377,10 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_MVGRID, load64(src + AV1TILE_MVGRID));
     store64(dst + AV1TILE_SKIPMODES, load64(src + AV1TILE_SKIPMODES));
     store64(dst + AV1TILE_SEGIDS, load64(src + AV1TILE_SEGIDS));   # shared SegmentIds map (0.7.125 D1)
+    # RefFrame[0] per MI (0.8.2): the deblocker runs once over the whole frame on tile0, so tile >= 1's inter
+    # stores must land in tile0's grid. It was neither shared nor initialised, so every tile after the first
+    # in an inter frame stored through an uninitialised pointer, and tile0's grid kept INTRA for those blocks.
+    store64(dst + AV1TILE_REF0S, load64(src + AV1TILE_REF0S));
     # DeltaLFs (0.8.2): the deblocker runs once over the whole frame on tile0, so every tile's
     # stores must land in tile0's grids.
     store64(dst + AV1TILE_DLF + 0, load64(src + AV1TILE_DLF + 0));

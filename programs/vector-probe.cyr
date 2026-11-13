@@ -76,6 +76,7 @@ fn probe_seq(seq): i64 {
 fn probe_fh(fh, seq): i64 {
     probe_puts(" FRAME HEADER\n");
     probe_kv("frame_type", load64(fh + AV1FH_FRAME_TYPE));
+    probe_kv("show_existing_frame", load64(fh + AV1FH_SHOW_EXISTING));   # frame_type is the SHOWN slot's then
     probe_kv("frame_is_intra", load64(fh + AV1FH_FRAME_IS_INTRA));
     probe_kv("show_frame", load64(fh + AV1FH_SHOW_FRAME));
     probe_kv("mi_cols", load64(fh + AV1FH_MI_COLS));

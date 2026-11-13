@@ -742,6 +742,22 @@ fn av1_frame_prev_segids(fh, refs): i64 {
     return av1_ref_saved_segids(refs, slot);
 }
 
+# gm_params[ ref ][ j ] = SavedGmParams[ slot ][ ref ][ j ] (7.21), for the show_existing KEY_FRAME load. Without it a
+# show_existing header's gm_params are all zero, which update_refs would save into every slot — and a later
+# frame's PrevGmParams (av1_prev_gm_param) would then read 0 where the identity model has 1 << 16.
+fn av1_ref_load_gm(refs, slot, fh): i64 {
+    var ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) {
+        var j = 0;
+        while (j < 6) {
+            store64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + j) * 8), av1_ref_saved_gm(refs, slot, ref, j));
+            j = j + 1;
+        }
+        ref = ref + 1;
+    }
+    return 0;
+}
+
 # The 5.9.2 split after disable_frame_end_update_cdf: PRIMARY_REF_NONE -> setup_past_independence, else
 # load_previous (prevFrame = ref_frame_idx[ primary_ref_frame ]; PrevGmParams is av1_prev_gm_param). The
 # CDF half of the same split (init_non_coeff_cdfs / load_cdfs) is the frame decoder's. A null refs is a
@@ -1162,8 +1178,11 @@ fn av1_tile_info(br, s, fh): i64 {
     store64(fh + AV1FH_TILE_COLS_LOG2, tile_cols_log2);
     store64(fh + AV1FH_TILE_ROWS_LOG2, tile_rows_log2);
     if ((tile_cols_log2 > 0) || (tile_rows_log2 > 0)) {
-        store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID,
-          dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2));   # context_update_tile_id
+        var cuti = dr_br_read_bits(br, tile_rows_log2 + tile_cols_log2);   # context_update_tile_id
+        # 5.9.15 semantics: a requirement of bitstream conformance that it is < TileCols * TileRows. A larger
+        # value names no tile, so the frame would have no context to save: refuse the header.
+        if (cuti >= (av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh))) { return DR_ERR_BAD_HEADER; }
+        store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, cuti);
         store64(fh + AV1FH_TILE_SIZE_BYTES, dr_br_read_bits(br, 2) + 1);   # tile_size_bytes_minus_1 f(2)
     } else {
         store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 0);
@@ -1857,9 +1876,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             store64(fh + AV1FH_MI_ROWS, av1_ref_mi_rows(refs, idx));
             store64(fh + AV1FH_ORDER_HINT, av1_ref_order_hint(refs, idx));
             if (ft == AV1_KEY_FRAME) {
-                # 7.21 load_loop_filter_params / load_segmentation_params: the shown KEY frame's deltas and
-                # feature arrays, which update_refs then saves into every slot (refresh = allFrames).
+                # 7.21 load_loop_filter_params / load_segmentation_params and gm_params = SavedGmParams[ idx ]:
+                # the shown KEY frame's deltas, feature arrays and global motion, which update_refs then saves
+                # into every slot (refresh = allFrames). (load_cdfs is the slot pointer copy in update_refs.)
                 av1_ref_load_seg_lf(refs, idx, fh);
+                av1_ref_load_gm(refs, idx, fh);
             }
             store64(fh + AV1FH_FRAME_IS_INTRA, 1);
             if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
@@ -2112,8 +2133,14 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
     # 7.20 saves them back into every refreshed slot). Read before the loop — the shown slot is refreshed
     # too. A decoded frame's map is saved by the frame decoder (av1_frame_dec_finish), not here.
     var shown_segids = 0;
+    var shown_cdf = 0;
     var from_shown = av1_fh_show_existing_frame(fh);
-    if (from_shown != 0) { shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh)); }
+    if (from_shown != 0) {
+        shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh));
+        # load_cdfs( frame_to_show_map_idx ) then save_cdfs( i ) (7.21 -> 7.20): every refreshed slot gets the
+        # shown slot's CDF bundle (aliased; bundles are never mutated after their save).
+        shown_cdf = av1_ref_saved_cdf(refs, av1_fh_frame_to_show(fh));
+    }
     var i = 0;
     while (i < AV1_NUM_REF_FRAMES) {
         if ((flags >> i) & 1) {
@@ -2168,7 +2195,10 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
             }
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
-            if (from_shown != 0) { av1_ref_set_saved_segids(refs, i, shown_segids); }
+            if (from_shown != 0) {
+                av1_ref_set_saved_segids(refs, i, shown_segids);
+                av1_ref_set_saved_cdf(refs, i, shown_cdf);
+            }
         }
         i = i + 1;
     }
