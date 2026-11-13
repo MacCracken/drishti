@@ -165,13 +165,45 @@ enum Av1TileOff {
     #     seg_id_predicted context strips inter_segment_id needs. Per TILE (the strips are cleared per tile /
     #     per SB row); 0 until av1_tile_seg_attach or the first av1_tile_segctx. ---
     AV1TILE_SEGCTX        = 664;
-    AV1TILE_SIZE          = 672;
+    # --- palette (0.8.2, src/av1_palette.cyr): PaletteSizes[ 0 / 1 ] and the per-MI colour-copy pointer, three
+    #     frame-addressed grids shared across tiles like every MI grid; and the tile's Av1PalCtx (0 until the
+    #     first av1_tile_palctx). ---
+    AV1TILE_PALSZY        = 672;
+    AV1TILE_PALSZUV       = 680;
+    AV1TILE_PALPTR        = 688;
+    AV1TILE_PALCTX        = 696;
+    AV1TILE_SIZE          = 704;
 }
 fn av1_tile_dctx(tile): i64 {
     if (tile == 0) { return 0; }
     return load64(tile + AV1TILE_DCTX);
 }
 fn av1_tile_set_dctx(tile, d): i64 { store64(tile + AV1TILE_DCTX, d); return 0; }
+# the tile's Av1PalCtx (src/av1_palette.cyr): the three palette grids, the frame MI dims, allow_screen_content_tools
+# (from the segmentation-lookup fh, which every frame-driven tile carries; 0 without one) and BitDepth. Built on
+# first use; the grid pointers and the flag are refreshed every call (a grid shared after the build is still the
+# one read). 0 when the tile has no palette grids (a tile-level caller without grids: palette off).
+fn av1_tile_palctx(tile): i64 {
+    if (tile == 0) { return 0; }
+    if (load64(tile + AV1TILE_PALSZY) == 0) { return 0; }
+    var pc = load64(tile + AV1TILE_PALCTX);
+    if (pc == 0) {
+        pc = av1_palctx_new(0, 0, 0, 0, 0, 0, 0);
+        if (pc == 0) { return 0; }
+        store64(tile + AV1TILE_PALCTX, pc);
+    }
+    store64(pc + AV1PC_SZY, load64(tile + AV1TILE_PALSZY));
+    store64(pc + AV1PC_SZUV, load64(tile + AV1TILE_PALSZUV));
+    store64(pc + AV1PC_PTR, load64(tile + AV1TILE_PALPTR));
+    store64(pc + AV1PC_STRIDE, load64(tile + AV1TILE_FMI_COLS));
+    store64(pc + AV1PC_ROWS, load64(tile + AV1TILE_FMI_ROWS));
+    var allow = 0;
+    var sfh = load64(tile + AV1TILE_SEG_FH);
+    if (sfh != 0) { allow = av1_fh_allow_screen_content_tools(sfh); }
+    store64(pc + AV1PC_ALLOW, allow);
+    store64(pc + AV1PC_BD, load64(tile + AV1TILE_BIT_DEPTH));
+    return pc;
+}
 # attach a fresh Av1SegCtx carrying PrevSegmentIds `prev` (0 = all zero). Call after the SegmentIds grid
 # exists (av1_tile_grids_new / av1_tile_share_grids). Returns DR_OK or DR_ERR_OOM.
 fn av1_tile_seg_attach(tile, prev): i64 {
@@ -286,6 +318,10 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_IERR, 0);
     store64(tile + AV1TILE_DCTX, 0);              # no deltas unless the driver attaches an Av1DeltaCtx
     store64(tile + AV1TILE_SEGCTX, 0);            # Av1SegCtx: attached by the frame driver, or on first use
+    store64(tile + AV1TILE_PALSZY, 0);            # palette grids: allocated by av1_tile_grids_new (or shared)
+    store64(tile + AV1TILE_PALSZUV, 0);
+    store64(tile + AV1TILE_PALPTR, 0);
+    store64(tile + AV1TILE_PALCTX, 0);            # Av1PalCtx: built on first use (av1_tile_palctx)
     store64(tile + AV1TILE_DLF + 0, 0);           # DeltaLFs grids: allocated by av1_tile_grids_new
     store64(tile + AV1TILE_DLF + 8, 0);
     store64(tile + AV1TILE_DLF + 16, 0);
@@ -381,6 +417,11 @@ fn av1_tile_share_grids(dst, src): i64 {
     # stores must land in tile0's grid. It was neither shared nor initialised, so every tile after the first
     # in an inter frame stored through an uninitialised pointer, and tile0's grid kept INTRA for those blocks.
     store64(dst + AV1TILE_REF0S, load64(src + AV1TILE_REF0S));
+    # palette (0.8.2): a later tile's palette cache reads tile0's grids too (across the tile edge it reads none,
+    # by AvailL and the 64-row rule — but the stores must land in the one shared grid).
+    store64(dst + AV1TILE_PALSZY, load64(src + AV1TILE_PALSZY));
+    store64(dst + AV1TILE_PALSZUV, load64(src + AV1TILE_PALSZUV));
+    store64(dst + AV1TILE_PALPTR, load64(src + AV1TILE_PALPTR));
     # DeltaLFs (0.8.2): the deblocker runs once over the whole frame on tile0, so every tile's
     # stores must land in tile0's grids.
     store64(dst + AV1TILE_DLF + 0, load64(src + AV1TILE_DLF + 0));
@@ -417,7 +458,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(15 * 8);
+    var offs = alloc(18 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -432,8 +473,11 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 96, AV1TILE_DLF + 8);
     store64(offs + 104, AV1TILE_DLF + 16);
     store64(offs + 112, AV1TILE_DLF + 24);
+    store64(offs + 120, AV1TILE_PALSZY);  # PaletteSizes[ 0 ] (0.8.2); 0 = no palette
+    store64(offs + 128, AV1TILE_PALSZUV); # PaletteSizes[ 1 ]
+    store64(offs + 136, AV1TILE_PALPTR);  # the per-MI palette colour copy, 0 = none
     var g = 0;
-    while (g < 15) {
+    while (g < 18) {
         var arr = alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;
@@ -698,11 +742,19 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     # window extent MI_COLS/MI_ROWS. For a single tile FMI == MI_COLS, so this is
     # unchanged there; a windowed tile (MiColStart>0) with the extent would clamp
     # the above/left fill below the block and read the neighbouring tile's pixels.
-    var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
-      have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
-      load64(tile + AV1TILE_ENABLE_EF), av1_get_filter_type(tile, blk, plane),
-      log2w, log2h, load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
-    if (rc != DR_OK) { return rc; }
+    if (av1_pal_plane_active(mi, plane) != 0) {
+        # predict_palette (7.11.4), in place of predict_intra / CfL (5.11.35). The colour map is the tile's
+        # scratch, filled by this block's palette_tokens (or, encoding, from the plan).
+        av1_pal_predict(frame, av1_tile_palctx(tile), mi, plane, start_x, start_y, x, y, av1_tx_width(tx_sz),
+          av1_tx_height(tx_sz));
+        is_cfl = 0;
+    } else {
+        var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
+          have_ar, have_bl, mode, angle_delta, use_fi, load64(mi + AV1MI_FI_MODE),
+          load64(tile + AV1TILE_ENABLE_EF), av1_get_filter_type(tile, blk, plane),
+          log2w, log2h, load64(tile + AV1TILE_FMI_COLS), load64(tile + AV1TILE_FMI_ROWS));
+        if (rc != DR_OK) { return rc; }
+    }
     if (is_cfl) {
         var alpha = load64(mi + AV1MI_CFL_U);
         if (plane == 2) { alpha = load64(mi + AV1MI_CFL_V); }

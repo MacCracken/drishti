@@ -1437,7 +1437,7 @@ freeze/docs (0.13.x), each batched. See [`CHANGELOG.md`](../../CHANGELOG.md)
   `--relock` when a build under a just-moved pin has already locked the old
   rows. `cyrius.lock` records a sha256 per file (`cyrius deps --verify`).
 
-## Source (40 `[lib]` modules, dependency order)
+## Source (41 `[lib]` modules, dependency order)
 
 | Module | Family | Surface |
 |--------|--------|---------|
@@ -1458,6 +1458,7 @@ freeze/docs (0.13.x), each batched. See [`CHANGELOG.md`](../../CHANGELOG.md)
 | `src/av1_coeffcdf.cyr` | `av1_` | default coefficient CDF tables (8.3.2) — all 7 families: txb_skip / eob_pt / eob_extra / dc_sign / coeff_base_eob / coeff_base / coeff_br + accessors |
 | `src/av1_noncoeffcdf.cyr` | `av1_` | default non-coeff CDF tables (intra keyframe) — partition/skip/y-mode/uv-mode/cfl/angle/filter-intra/tx-size/tx-type + loop-restoration type (use_wiener/use_sgrproj/restoration_type) (1,634) + accessors + av1_ncdf_new |
 | `src/av1_modeinfo.cyr` | `av1_` | intra `intra_frame_mode_info` reads (5.11.16) — skip/y-mode/angle/uv-mode/CfL/filter-intra decode + inverse encode + orchestrator (Av1ModeInfo); block-size conversion tables (Mi/Block/Size_Group/Intra_Mode_Context/Subsampled_Size); CDEF-index syntax (5.11.56 av1_read_cdef / av1_write_cdef / av1_clear_cdef — cdef_idx, spliced into intra_frame_mode_info + decode_tile SB loop in 0.7.32, guarded by the tile CDEF context) |
+| `src/av1_palette.cyr` | `av1_` (`av1_pal_*`) | PALETTE mode (0.8.2): `palette_mode_info` (5.11.46) with `get_palette_cache`, `palette_tokens` (5.11.49) with `get_palette_color_context` (5.11.50), the palette prediction (7.11.4); decode + plan-driven encode; the per-tile `Av1PalCtx` (three frame grids + the colour-map scratch) |
 | `src/av1_txsize.cyr` | `av1_` | intra `read_tx_size` (5.11.15) — tx_depth decode + inverse encode + its ctx + tx-size CDF dispatch; Max_Tx_Size_Rect / Max_Tx_Depth / Split_Tx_Size + Tx_Size_Sqr/_Up/txSzCtx tables + av1_tx_width/height |
 | `src/av1_txtype.cyr` | `av1_` | transform-type derivation (5.11.48/5.11.40) — get_tx_set + transform_type (intra_tx_type) decode/inverse-encode + compute_tx_type; Mode_To_Txfm / Tx_Type_Intra_Inv_Set1/2 / Tx_Type_In_Set_Intra / Filter_Intra_Mode_To_Intra_Dir tables + Av1TxTypeCtx |
 | `src/av1_coeffs.cyr` | `av1_` | coeffs() reading loop (5.11.39) — decode + inverse encode; computes PlaneTxType via the av1_txtype seam (retires the caller input); txb_skip/dc_sign contexts + the adaptive per-tile CDF context (av1_ccdf_*); both CDF modes |
@@ -1774,6 +1775,10 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   `av1_seg_supported` is gone. libaom realtime ROI-skip streams (SKIP + ALT_LF -63, API-only) are
 >   committed as `tests/repro/roi-skip-*` and bit-exact. CAVEAT: their ALT_LF is invisible (smooth skipped
 >   copies), so the level add is unit-witnessed only;
+> - **palette (screen-content tools) decodes on both lanes** (`src/av1_palette.cyr`): the stock default
+>   `aomenc` encode of ordinary content, which libaom's detector marks as screen content, is bit-exact, as
+>   are screen-tuned streams with chroma palettes and palettes inside inter frames. `allow_intrabc` still
+>   rejects (0.8.4);
 > - **quantizer matrices now REJECT** where one could apply (they decoded silently wrong): `make conformance`
 >   is **142 / 4 known-gap / 0 / 0**, the 4 being the `qmon` frames held until roadmap 0.8.4 implements them;
 >
@@ -1787,13 +1792,10 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - **the cdef fill loops are bounded** (`av1_cdef_fill`, both lanes): memory-safe on their own, no longer
 >   only by the forced-partition invariant. Output-neutral: `make conformance` stays 196 / 4 / 0 / 0.
 >
-> **Every planned 0.8.2 item is done, but the batch's acceptance line is NOT fully met.** "No
-> `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset": libaom's DEFAULT screen-content detector
-> sets `allow_screen_content_tools = 1` on ordinary content (a 640x360 mandelbrot at default settings;
-> `--tune-content=default` does not stop it), and drishti rejects that wholesale. Decoding such a frame needs
-> at least the palette mode-info read (`has_palette_y` / `has_palette_uv` are coded whenever the tools are
-> allowed), which the roadmap schedules for 0.8.4. Either pull that into 0.8.2 or re-word the acceptance
-> line — a decision for the cut.
+> **The 0.8.2 batch is complete**, palette pulled in from 0.8.4 so the acceptance line holds: the stock default
+> encode that libaom's screen-content detector flags now decodes. What a stock encoder can still produce and
+> drishti rejects needs a non-default flag: `--enable-qm=1` (quantizer matrices) and `--tune-content=screen`
+> keyframes using intrabc — both 0.8.4.
 >
 > **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

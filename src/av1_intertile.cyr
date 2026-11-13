@@ -1116,7 +1116,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
       load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
       load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
       load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile));
+      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile), av1_tile_palctx(tile));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # per-segment dequant (0.7.125 D1): resolve this block's qindex from its segment_id so residual()
     # dequantizes at the right quantizer. == base_q when segmentation is disabled / segment inactive. Also
@@ -1148,6 +1148,10 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         if (inb == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
         av1_block_neighbours(tile, r, c, iavu, iavl, inb);
         var iloss = load64(tile + AV1TILE_CUR_LOSSLESS);
+        # palette_tokens (5.11.49): after the mode info, before the tx size; then PaletteSizes / PaletteColors.
+        var ipc = av1_tile_palctx(tile);
+        av1_read_palette_tokens(sd, load64(tile + AV1TILE_NCC), ipc, imi, sub_size, r, c, subx, suby);
+        av1_pal_store(ipc, imi, r, c, bw4, bh4);
         var itxc = av1_tx_depth_ctx_inter(tile, r, c, iavu, iavl, av1_max_tx_size_rect(sub_size));   # inter-aware (9.3)
         var itx = av1_read_tx_size(sd, load64(tile + AV1TILE_NCC), sub_size, iloss,
           load64(tile + AV1TILE_TX_MODE), 1, itxc);
@@ -1585,7 +1589,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
       load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
       load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
       load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile));
+      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile), av1_tile_palctx(tile));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # mirror of decode: the per-block Lossless / tx-type gate the tx-size and residual writes below use.
     av1_tile_block_setup(tile, fh, av1_fb_segment_id(fb));
@@ -1607,6 +1611,10 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         var eloss = load64(tile + AV1TILE_CUR_LOSSLESS);
         var etx = av1_max_tx_size_rect(sub_size);
         if (eloss != 0) { etx = 0; }   # Lossless -> TX_4X4, matching the decode's av1_read_tx_size result
+        var epc = av1_tile_palctx(tile);   # palette_tokens + the palette store, mirror of decode
+        var ewt = av1_write_palette_tokens(enc, load64(tile + AV1TILE_NCC), epc, emi, sub_size, r, c, subx, suby);
+        if (ewt != DR_OK) { return av1_ierr_latch(tile, ewt); }
+        av1_pal_store(epc, emi, r, c, bw4, bh4);
         var etxc = av1_tx_depth_ctx_inter(tile, r, c, eavu, eavl, av1_max_tx_size_rect(sub_size));   # mirror of decode
         av1_write_tx_size(enc, load64(tile + AV1TILE_NCC), sub_size, eloss,
           load64(tile + AV1TILE_TX_MODE), 1, etxc, etx);
@@ -1689,23 +1697,23 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
 # ================================================================
 # C1: cross-frame CDF inheritance (spec 7.20 save / 7.21 load).
 # A saved-CDF bundle is ONE flat alloc holding COPIES of all six adaptive-CDF families back to back
-# (ncc AV1_NCDF_N = 1914, cc 3999, ref 177, im 341, ii 566, mv 286 = 7283 i64). The symbol coder adapts
+# (ncc AV1_NCDF_N = 2515, cc 3999, ref 177, im 341, ii 566, mv 286 = 7884 i64). The symbol coder adapts
 # the per-tile copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future
 # frame whose primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families
 # are flat and pointer-free, so a plain word copy is a full copy. ncc grew 1839 -> 1875 for
-# Default_Partition_W128_Cdf (0.7.126), 1875 -> 1905 for the delta_q / delta_lf CDFs and 1905 -> 1914 for
-# seg_id_predicted (both 0.8.2); the
+# Default_Partition_W128_Cdf (0.7.126), 1875 -> 1905 for the delta_q / delta_lf CDFs, 1905 -> 1914 for
+# seg_id_predicted and 1914 -> 2515 for palette (all 0.8.2); the
 # offsets are NAMED here because each growth used to mean re-typing twenty literals across save,
 # defaults and load. tests/av1_intertile.tcyr pins every one of them as a literal.
 # ================================================================
 enum Av1CdfBundle {
-    AV1CB_NCC = 0;       # AV1_NCDF_N  (1914)
-    AV1CB_CC  = 1914;    # 3999
-    AV1CB_REF = 5913;    # 177
-    AV1CB_IM  = 6090;    # 341
-    AV1CB_II  = 6431;    # 566
-    AV1CB_MV  = 6997;    # 286
-    AV1CB_N   = 7283;
+    AV1CB_NCC = 0;       # AV1_NCDF_N  (2515)
+    AV1CB_CC  = 2515;    # 3999
+    AV1CB_REF = 6514;    # 177
+    AV1CB_IM  = 6691;    # 341
+    AV1CB_II  = 7032;    # 566
+    AV1CB_MV  = 7598;    # 286
+    AV1CB_N   = 7884;
 }
 fn av1_cdf_bundle_new(): i64 { return alloc(AV1CB_N * 8); }
 # Reset the per-row ADAPTATION COUNTERS in a saved bundle (libaom av1_reset_cdf_symbol_counters,

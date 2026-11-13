@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.2 bite 10: palette mode (screen-content tools), both lanes; the 0.8.2 acceptance line now holds
+
+**`allow_screen_content_tools` no longer rejects.** libaom's default screen-content detector turns it on for
+ordinary content: a plain 640x360 mandelbrot at default `aomenc` settings, which `--tune-content=default` does
+not stop. So the stock default encode was rejected outright, against 0.8.2's "no `DR_ERR_UNSUPPORTED` on a stock
+`aomenc` stream". Palette was pulled in from 0.8.4 to close that. **That stock stream now decodes bit-exact on
+every frame**, as do screen-tuned streams with chroma palettes and palettes inside inter frames. `allow_intrabc`
+still rejects; it is 0.8.4.
+
+New module **`src/av1_palette.cyr`**, spec-literal from the AV1 spec text and cross-checked against libaom
+(`decodemv.c`, `pred_common.h`, `detokenize.c`):
+- **`palette_mode_info`** (5.11.46), decode and plan-driven encode: `has_palette_y` / `has_palette_uv`, the
+  sizes, and `get_palette_cache`. The cache merges the above and left palettes; above is read only inside a
+  64-row band, left only when AvailL.
+- **The colour syntax:** cache flags, a literal, then ascending deltas (Y adds 1, and its range shrinks one more
+  than U's), then the sort. V colours are delta-coded with a sign and wrap through maxVal, or raw. The encoder
+  refuses colour sets the bitstream cannot carry: Y duplicates, unsorted colours, a size outside 2–8, a palette
+  without DC_PRED, or a palette on a block that may not have one.
+- **`palette_tokens`** (5.11.49) with `get_palette_color_context` (5.11.50): `NS(n)`, then the anti-diagonal
+  wavefront of `palette_color_idx` symbols mapped through ColorOrder, then the off-screen extension.
+- **The palette prediction** (7.11.4), in `av1_transform_block` in place of `predict_intra` / CfL. The MaxLuma
+  update still runs, as in the spec.
+- **The 601 palette default CDFs** (ncc 1914 -> 2515; the cross-frame bundle grows to match) were GENERATED from
+  the spec annex by a script that checked every row against libaom `entropymode.c`: all equal, all monotone and
+  terminated. They are pinned at absolute offsets.
+- **Wiring:**
+  - the palette sits in Av1ModeInfo (`AV1MI_SIZE` 80 -> 312, `AV1FB_SIZE` follows);
+  - three frame grids (`PaletteSizes[0/1]` and a per-block colour-copy pointer), initialised, allocated and
+    shared across tiles;
+  - a per-tile `Av1PalCtx`, threaded into the inter lane's intra fork (`av1_inter_frame_mode_info` gains
+    `palctx`);
+  - filter-intra now sees the real PaletteSizeY on both lanes.
+
+`force_integer_mv`, the other screen-content consequence, was already honoured by the MV reads.
+
+Evidence:
+- **Conformance, 214 matched / 4 known-gap / 0 / 0 (was 196).** A new palette section, every frame hard:
+  - **`palstock_640x360`**, the STOCK default encode (no flags added). Instrumented: 216 palette blocks over
+    the decoder's prefix passes, every Y size from 2 to 8;
+  - **`palscreen_320x240`** (testsrc2, `--tune-content=screen`): chroma palettes of every size, 143 palette
+    blocks inside INTER frames, delta-coded and raw V;
+  - **`palbars_320x240`** (SMPTE bars): V delta-heavy.
+
+  Each case's guard requires `allow_screen_content_tools` and refuses an intrabc frame. dav1d agreed with
+  aomdec on all three.
+- **Unit tests** (new `tests/av1_palette.tcyr`, 75 assertions):
+  - the cache, including the 64-row rule;
+  - colour-context KATs on every hash class;
+  - mode-info round trips: the cache in play, V delta through the wrap and raw;
+  - targeted cases: U's range shrinking at 17, a negative V step, a cache hit that forces the sort;
+  - the encoder's refusals;
+  - tokens at a frame edge, with the extension;
+  - prediction on all three planes;
+  - the filter-intra gate.
+
+  A frame-path witness decodes a keyframe whose 64x64 block is a palette checkerboard, all 8192 samples.
+
+**Mutation-verified**, 16 mutations in an isolated copy of the tree, every source file restored byte-exact. 15
+go red in the unit suites: every cache, context, colour-coding, token, prediction and gating rule. The 16th is
+equivalent: the spec's `leftC == aboveC` index skip in `get_palette_cache` cannot change the result, because the
+`!= PaletteCache[ n - 1 ]` check already drops the duplicate.
+
+**The first run left five green in the suites**:
+- the U range rule, the V delta sign, the colour sort, V predicting from the U palette, and filter-intra
+  ignoring the palette size;
+- the libaom streams caught four of them, and none caught the U range rule;
+- four targeted cases and a filter-intra-gate test close all five.
+
+**Gates:** 39 suites (+1), **30,872** assertions (+105); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`. `make conformance` is **214 matched / 4 known-gap / 0 / 0 skipped**.
+
 ### Fixed — 0.8.2 bite 9: the cdef_idx fill loops are bounded
 
 `av1_read_cdef` / `av1_write_cdef` fill `cdef_idx` at every 64x64 anchor the block covers (5.11.56). The

@@ -423,6 +423,10 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
           load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));
     }
+    # palette_tokens (5.11.49): after mode_info, before read_block_tx_size; then PaletteSizes / PaletteColors.
+    var pc = av1_tile_palctx(tile);
+    av1_read_palette_tokens(sd, ncc, pc, mi, sub_size, r, c, subx, suby);
+    av1_pal_store(pc, mi, r, c, bw4, bh4);
 
     var max_rect = av1_max_tx_size_rect(sub_size);
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40), max_rect);
@@ -484,6 +488,10 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
           load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));
     }
+    var epc = av1_tile_palctx(tile);   # palette_tokens + the palette store, mirror of decode
+    var ewt = av1_write_palette_tokens(enc, ncc, epc, mi, sub_size, r, c, subx, suby);
+    if (ewt != DR_OK) { return ewt; }
+    av1_pal_store(epc, mi, r, c, bw4, bh4);
 
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40),
       av1_max_tx_size_rect(sub_size));

@@ -1,0 +1,359 @@
+# tests/av1_palette.tcyr — AV1 palette mode (0.8.2, src/av1_palette.cyr): get_palette_cache, the colour
+# context, palette_mode_info and palette_tokens round trips (with the encoder's refusals), and the palette
+# prediction. Known answers are hand-computed from the spec text (5.11.46 / 5.11.49 / 5.11.50 / 7.11.4).
+include "src/main.cyr"
+
+# an 8 x 8 MI frame's palette grids (stride 8, 8 rows), 8-bit, screen content allowed.
+fn pt_pc(): i64 {
+    var szy = alloc(64 * 8);   memset(szy, 0, 64 * 8);
+    var szuv = alloc(64 * 8);  memset(szuv, 0, 64 * 8);
+    var ptr = alloc(64 * 8);   memset(ptr, 0, 64 * 8);
+    return av1_palctx_new(szy, szuv, ptr, 8, 8, 1, 8);
+}
+# store a neighbour block's palette (Y and U colours, sizes) at MI (r, c), 1 x 1 MI.
+fn pt_put(pc, r, c, ny, y0, y1, y2, nuv, u0, u1): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_PAL_NY, ny);
+    store64(mi + AV1MI_PAL_NUV, nuv);
+    store64(mi + AV1MI_PAL_Y + 0, y0); store64(mi + AV1MI_PAL_Y + 8, y1); store64(mi + AV1MI_PAL_Y + 16, y2);
+    store64(mi + AV1MI_PAL_U + 0, u0); store64(mi + AV1MI_PAL_U + 8, u1);
+    av1_pal_store(pc, mi, r, c, 1, 1);
+    return mi;
+}
+fn test_pal_cache() {
+    var pc = pt_pc();
+    pt_put(pc, 0, 2, 3, 10, 20, 30, 2, 5, 9);      # above of (1, 2)
+    pt_put(pc, 1, 1, 2, 20, 25, 0, 2, 9, 12);      # left of (1, 2)
+    var out = alloc(16 * 8);
+    # Y: merge {10, 20, 30} with {20, 25}, the shared 20 once -> {10, 20, 25, 30}.
+    assert_eq(av1_pal_cache(pc, 0, 1, 2, 1, out), 4, "Y cache: 4 colours");
+    assert_eq(load64(out + 0), 10, "Y cache[0] 10");
+    assert_eq(load64(out + 8), 20, "Y cache[1] 20 (deduplicated)");
+    assert_eq(load64(out + 16), 25, "Y cache[2] 25");
+    assert_eq(load64(out + 24), 30, "Y cache[3] 30");
+    # U (plane 1) reads the U colours: {5, 9} with {9, 12} -> {5, 9, 12}.
+    assert_eq(av1_pal_cache(pc, 1, 1, 2, 1, out), 3, "U cache: 3 colours");
+    assert_eq(load64(out + 8), 9, "U cache[1] 9");
+    # !AvailL: the above palette alone.
+    assert_eq(av1_pal_cache(pc, 0, 1, 2, 0, out), 3, "no left: the above palette only");
+    # a 64-ALIGNED row ((MiRow * 4) % 64 == 0) never looks up, even with a palette above: MiRow 16 of a taller
+    # frame. Build one 32 rows tall.
+    var szy = alloc(8 * 32 * 8);  memset(szy, 0, 8 * 32 * 8);
+    var szuv = alloc(8 * 32 * 8); memset(szuv, 0, 8 * 32 * 8);
+    var ptr = alloc(8 * 32 * 8);  memset(ptr, 0, 8 * 32 * 8);
+    var pc2 = av1_palctx_new(szy, szuv, ptr, 8, 32, 1, 8);
+    pt_put(pc2, 15, 2, 3, 10, 20, 30, 0, 0, 0);
+    pt_put(pc2, 14, 2, 2, 40, 50, 0, 0, 0, 0);
+    assert_eq(av1_pal_cache(pc2, 0, 16, 2, 0, out), 0, "MiRow 16 (64-aligned): the above palette is NOT used");
+    assert_eq(av1_pal_cache(pc2, 0, 15, 2, 0, out), 2, "MiRow 15: the above palette is used");
+    return 0;
+}
+# get_palette_color_context: scores (left 2, above-left 1, above 2), the 3-way partial sort, the hash and ctx.
+fn pt_map(v00, v01, v10): i64 {
+    var m = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);
+    memset(m, 0, AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);
+    store64(m, v00);
+    store64(m + 8, v01);
+    store64(m + (AV1_PAL_MAP_STRIDE * 8), v10);
+    return m;
+}
+fn test_pal_color_ctx() {
+    var order = alloc(8 * 8);
+    # position (1, 1): above-left (0,0), above (0,1), left (1,0).
+    assert_eq(av1_pal_color_ctx(pt_map(1, 1, 1), AV1_PAL_MAP_STRIDE, 1, 1, 4, order), 4, "all 1: hash 5 -> ctx 4");
+    assert_eq(load64(order), 1, "order[0] = 1");
+    assert_eq(load64(order + 8), 0, "order[1] = 0 (rotated down)");
+    # above-left 2, above 2, left 0: scores 2 -> 3, 0 -> 2: hash 3 + 4 = 7 -> ctx 2; order {2, 0, 1, 3}.
+    assert_eq(av1_pal_color_ctx(pt_map(2, 2, 0), AV1_PAL_MAP_STRIDE, 1, 1, 4, order), 2, "hash 7 -> ctx 2");
+    assert_eq(load64(order), 2, "order[0] = 2");
+    assert_eq(load64(order + 8), 0, "order[1] = 0");
+    assert_eq(load64(order + 16), 1, "order[2] = 1");
+    # all three distinct: above-left 0 (1), above 1 (2), left 2 (2): equal top scores keep index order -> 1, 2, 0;
+    # hash 2 + 4 + 2 = 8 -> ctx 1.
+    assert_eq(av1_pal_color_ctx(pt_map(0, 1, 2), AV1_PAL_MAP_STRIDE, 1, 1, 3, order), 1, "hash 8 -> ctx 1");
+    assert_eq(load64(order), 1, "order[0] = 1");
+    assert_eq(load64(order + 8), 2, "order[1] = 2");
+    assert_eq(load64(order + 16), 0, "order[2] = 0");
+    # row 0: only the left neighbour (score 2) -> hash 2 -> ctx 0.
+    assert_eq(av1_pal_color_ctx(pt_map(3, 0, 0), AV1_PAL_MAP_STRIDE, 0, 1, 4, order), 0, "left only: ctx 0");
+    assert_eq(load64(order), 3, "order[0] = 3");
+    # n bounds the search: with n = 2, a score on index 3 cannot be promoted past index 2.
+    assert_eq(av1_pal_color_ctx(pt_map(3, 3, 3), AV1_PAL_MAP_STRIDE, 1, 1, 2, order), 0, "n = 2: index 3 unseen");
+    return 0;
+}
+# palette_mode_info round trip on a 16x16 (BLOCK_16X16 = 6) DC_PRED block at MI (1, 2), neighbours as in the cache
+# test: Y {10, 20, 26, 90, 200} reuses cache entries 10 and 20 and codes 26, 90, 200 (literal + ascending deltas);
+# U {9, 9, 40} carries a duplicate (U deltas may be 0); V either delta-coded or raw.
+fn pt_mode_rt(vdelta, tag): i64 {
+    var pc = pt_pc();
+    pt_put(pc, 0, 2, 3, 10, 20, 30, 2, 5, 9);
+    pt_put(pc, 1, 1, 2, 20, 25, 0, 2, 9, 12);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_PAL_NY, 5);
+    store64(mi + AV1MI_PAL_Y + 0, 10); store64(mi + AV1MI_PAL_Y + 8, 20); store64(mi + AV1MI_PAL_Y + 16, 26);
+    store64(mi + AV1MI_PAL_Y + 24, 90); store64(mi + AV1MI_PAL_Y + 32, 200);
+    store64(mi + AV1MI_PAL_NUV, 3);
+    store64(mi + AV1MI_PAL_U + 0, 9); store64(mi + AV1MI_PAL_U + 8, 9); store64(mi + AV1MI_PAL_U + 16, 40);
+    store64(mi + AV1MI_PAL_V + 0, 250); store64(mi + AV1MI_PAL_V + 8, 3); store64(mi + AV1MI_PAL_V + 16, 128);
+    store64(mi + AV1MI_PAL_VDELTA, vdelta);
+    var enc = av1_sym_enc_init(256, 0);
+    var ncc_e = av1_ncdf_new();
+    assert_eq(av1_write_palette_mode_info(enc, ncc_e, pc, mi, 6, 1, 2, 1, 1, 1), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var got = av1_modeinfo_new();
+    assert_eq(av1_read_palette_mode_info(sd, av1_ncdf_new(), pc, got, 6, 1, 2, 1, 1, 1), DR_OK, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, tag);
+    assert_eq(load64(got + AV1MI_PAL_NY), 5, tag);
+    assert_eq(load64(got + AV1MI_PAL_NUV), 3, tag);
+    var bad = 0;
+    var i = 0;
+    while (i < 5) {
+        if (load64(got + AV1MI_PAL_Y + (i * 8)) != load64(mi + AV1MI_PAL_Y + (i * 8))) { bad = 1; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 3) {
+        if (load64(got + AV1MI_PAL_U + (i * 8)) != load64(mi + AV1MI_PAL_U + (i * 8))) { bad = 1; }
+        if (load64(got + AV1MI_PAL_V + (i * 8)) != load64(mi + AV1MI_PAL_V + (i * 8))) { bad = 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, tag);
+    return 0;
+}
+fn test_pal_mode_info_rt() {
+    pt_mode_rt(1, "mode info round trip, V delta-coded (250 -> 3 wraps through maxVal)");
+    pt_mode_rt(0, "mode info round trip, V raw");
+    return 0;
+}
+# targeted colour-coding cases, each a round trip through write -> read on a fresh (cache-free unless built) context:
+#  - U {200, 239, 250}: after 239 the remaining range is 256 - 239 = 17, so paletteBits drops to CeilLog2(17) = 5;
+#    Y's rule (range - 1 = 16 -> 4 bits) would read the next delta one bit short.
+#  - V {250, 3, 128, 100} delta-coded: +9 (through the wrap), +125, then -28 — a NEGATIVE step uses the sign bit.
+#  - Y {5, 20, 26} against the cache {10, 20, 25, 30}: 20 comes from the cache FIRST, then 5 and 26 are coded, so the
+#    decoder's array is [20, 5, 26] until the sort.
+fn pt_colors_rt(pc, ny, y0, y1, y2, nuv, u0, u1, u2, v0, v1, v2, v3, vdelta, mi_row, mi_col, avail_l, tag): i64 {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_PAL_NY, ny);
+    store64(mi + AV1MI_PAL_Y + 0, y0); store64(mi + AV1MI_PAL_Y + 8, y1); store64(mi + AV1MI_PAL_Y + 16, y2);
+    store64(mi + AV1MI_PAL_NUV, nuv);
+    store64(mi + AV1MI_PAL_U + 0, u0); store64(mi + AV1MI_PAL_U + 8, u1); store64(mi + AV1MI_PAL_U + 16, u2);
+    store64(mi + AV1MI_PAL_U + 24, u2);
+    store64(mi + AV1MI_PAL_V + 0, v0); store64(mi + AV1MI_PAL_V + 8, v1); store64(mi + AV1MI_PAL_V + 16, v2);
+    store64(mi + AV1MI_PAL_V + 24, v3);
+    store64(mi + AV1MI_PAL_VDELTA, vdelta);
+    var enc = av1_sym_enc_init(256, 1);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 6, mi_row, mi_col, 1, avail_l, 1), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_modeinfo_new();
+    av1_read_palette_mode_info(sd, av1_ncdf_new(), pc, got, 6, mi_row, mi_col, 1, avail_l, 1);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, tag);
+    var bad = 0;
+    var i = 0;
+    while (i < ny) {
+        if (load64(got + AV1MI_PAL_Y + (i * 8)) != load64(mi + AV1MI_PAL_Y + (i * 8))) { bad = 1; }
+        i = i + 1;
+    }
+    var k = 0;
+    while (k < nuv) {
+        if (load64(got + AV1MI_PAL_U + (k * 8)) != load64(mi + AV1MI_PAL_U + (k * 8))) { bad = 1; }
+        if (load64(got + AV1MI_PAL_V + (k * 8)) != load64(mi + AV1MI_PAL_V + (k * 8))) { bad = 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, tag);
+    return 0;
+}
+fn test_pal_colour_cases() {
+    pt_colors_rt(pt_pc(), 2, 1, 2, 0, 3, 200, 239, 250, 7, 8, 9, 0, 0, 1, 2, 0,
+      "U {200, 239, 250}: the range after 239 is 17 (U's rule, not Y's)");
+    pt_colors_rt(pt_pc(), 2, 1, 2, 0, 4, 10, 11, 12, 250, 3, 128, 100, 1, 1, 2, 0,
+      "V {250, 3, 128, 100} delta-coded: a wrapped step and a negative one");
+    var pc = pt_pc();
+    pt_put(pc, 0, 2, 3, 10, 20, 30, 0, 0, 0);
+    pt_put(pc, 1, 1, 2, 20, 25, 0, 0, 0, 0);
+    pt_colors_rt(pc, 3, 5, 20, 26, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1,
+      "Y {5, 20, 26} vs cache {10, 20, 25, 30}: the cache hit comes first, so the decoder must sort");
+    return 0;
+}
+
+# the writer refuses what the bitstream cannot carry.
+fn test_pal_mode_info_refusals() {
+    var pc = pt_pc();
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_PAL_NY, 3);
+    store64(mi + AV1MI_PAL_Y + 0, 10); store64(mi + AV1MI_PAL_Y + 8, 10); store64(mi + AV1MI_PAL_Y + 16, 30);
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 6, 1, 2, 0, 0, 0), DR_ERR_BOUNDS,
+      "Y duplicate (a Y delta is at least 1) -> bounds");
+    store64(mi + AV1MI_PAL_Y + 8, 5);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 6, 1, 2, 0, 0, 0), DR_ERR_BOUNDS,
+      "Y not ascending -> bounds");
+    store64(mi + AV1MI_PAL_Y + 8, 20);
+    store64(mi + AV1MI_PAL_NY, 9);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 6, 1, 2, 0, 0, 0), DR_ERR_BOUNDS,
+      "a palette of 9 -> bounds");
+    store64(mi + AV1MI_PAL_NY, 3);
+    store64(mi + AV1MI_YMODE, AV1_V_PRED);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 6, 1, 2, 0, 0, 0), DR_ERR_BOUNDS,
+      "a Y palette needs DC_PRED -> bounds");
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 2, 1, 2, 0, 0, 0), DR_ERR_BOUNDS,
+      "BLOCK_8X4 may not carry a palette -> bounds");
+    store64(pc + AV1PC_ALLOW, 0);
+    assert_eq(av1_write_palette_mode_info(enc, av1_ncdf_new(), pc, mi, 6, 1, 2, 0, 0, 0), DR_ERR_BOUNDS,
+      "allow_screen_content_tools 0 -> no palette -> bounds");
+    # and when not allowed nothing is read: a marker-only stream survives.
+    var me = av1_sym_enc_init(16, 1);
+    av1_sym_encode_literal(me, 165, 8);
+    var ml = 0;
+    var mb = av1_sym_enc_finish(me, &ml);
+    var sd = av1_sym_dec_init(mb, ml, 1);
+    var got = av1_modeinfo_new();
+    av1_read_palette_mode_info(sd, av1_ncdf_new(), pc, got, 6, 1, 2, 0, 0, 1);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "palette not allowed: nothing read");
+    assert_eq(av1_pal_allowed(pt_pc(), 16), 1, "BLOCK_4X16 (enum 16 >= BLOCK_8X8) may carry a palette");
+    assert_eq(av1_pal_bsize_ctx(16), 0, "bsizeCtx(4X16) = 0 + 2 - 2 = 0");
+    assert_eq(av1_pal_bsize_ctx(12), 6, "bsizeCtx(64X64) = 4 + 4 - 2 = 6");
+    assert_eq(av1_pal_allowed(pt_pc(), 13), 0, "BLOCK_64X128 is too tall");
+    return 0;
+}
+# palette_tokens round trip on a 16x16 block at MI (6, 6) of the 8x8-MI frame: only 8x8 samples are on screen, so
+# the wavefront covers 8x8 and the rest is the extension. The plan: map[r][c] = (r + 2c) % 3, 3 colours.
+fn test_pal_tokens_rt() {
+    var pc = pt_pc();
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_PAL_NY, 3);
+    var plan = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);
+    memset(plan, 0, AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) { store64(plan + (((r * AV1_PAL_MAP_STRIDE) + c) * 8), (r + (2 * c)) % 3); c = c + 1; }
+        r = r + 1;
+    }
+    store64(mi + AV1MI_PAL_MAPY, plan);
+    var enc = av1_sym_enc_init(512, 0);
+    assert_eq(av1_write_palette_tokens(enc, av1_ncdf_new(), pc, mi, 6, 6, 6, 1, 1), DR_OK, "tokens write ok");
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var dpc = pt_pc();
+    var sd = av1_sym_dec_init(out, olen, 0);
+    assert_eq(av1_read_palette_tokens(sd, av1_ncdf_new(), dpc, mi, 6, 6, 6, 1, 1), DR_OK, "tokens read ok");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "tokens marker");
+    var map = load64(dpc + AV1PC_MAPY);
+    var bad = 0;
+    var y = 0;
+    while (y < 8) {
+        var x = 0;
+        while (x < 8) {
+            if (load64(map + (((y * AV1_PAL_MAP_STRIDE) + x) * 8)) != ((y + (2 * x)) % 3)) { bad = bad + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "the onscreen 8x8 map decodes exactly");
+    # the extension: columns 8..15 copy column 7, rows 8..15 copy row 7.
+    assert_eq(load64(map + (((3 * AV1_PAL_MAP_STRIDE) + 12) * 8)), (3 + 14) % 3, "row 3, col 12 = col 7's value");
+    assert_eq(load64(map + (((12 * AV1_PAL_MAP_STRIDE) + 5) * 8)), (7 + 10) % 3, "row 12, col 5 = row 7's value");
+    assert_eq(load64(map + (((15 * AV1_PAL_MAP_STRIDE) + 15) * 8)), (7 + 14) % 3, "(15, 15) = (7, 7)");
+    # a plan value that is not a palette index is unrepresentable.
+    store64(plan + 8, 3);
+    assert_eq(av1_write_palette_tokens(av1_sym_enc_init(512, 0), av1_ncdf_new(), pt_pc(), mi, 6, 6, 6, 1, 1),
+      DR_ERR_BOUNDS, "a map index >= n -> bounds");
+    return 0;
+}
+# the palette prediction: CurrFrame = palette[ map[ y * 4 + i ][ x * 4 + j ] ] for the transform block.
+fn test_pal_predict() {
+    var pc = pt_pc();
+    var map = load64(pc + AV1PC_MAPY);
+    var r = 0;
+    while (r < 8) {
+        var c = 0;
+        while (c < 8) { store64(map + (((r * AV1_PAL_MAP_STRIDE) + c) * 8), (r + c) & 1); c = c + 1; }
+        r = r + 1;
+    }
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_PAL_NY, 2);
+    store64(mi + AV1MI_PAL_Y + 0, 50);
+    store64(mi + AV1MI_PAL_Y + 8, 200);
+    var oe = alloc(8);
+    var f = dr_frame_new(32, 32, 1, 0, 0, 8, 8, oe);
+    # a 4x4 transform block at 4x4 offset (1, 1) inside a block at (8, 8): samples (12..15, 12..15) from map (4..7).
+    av1_pal_predict(f, pc, mi, 0, 12, 12, 1, 1, 4, 4);
+    assert_eq(dr_frame_get(f, 0, 12, 12), 50, "map (4, 4) = 0 -> 50");
+    assert_eq(dr_frame_get(f, 0, 13, 12), 200, "map (4, 5) = 1 -> 200");
+    assert_eq(dr_frame_get(f, 0, 15, 15), 50, "map (7, 7) = 0 -> 50");
+    assert_eq(av1_pal_plane_active(mi, 0), 1, "Y palette active");
+    assert_eq(av1_pal_plane_active(mi, 1), 0, "no UV palette");
+    # chroma: U and V share ColorMapUV but each predicts from its OWN colours.
+    var muv = load64(pc + AV1PC_MAPUV);
+    store64(muv, 1);
+    store64(mi + AV1MI_PAL_NUV, 2);
+    store64(mi + AV1MI_PAL_U + 0, 11); store64(mi + AV1MI_PAL_U + 8, 22);
+    store64(mi + AV1MI_PAL_V + 0, 33); store64(mi + AV1MI_PAL_V + 8, 44);
+    var oe2 = alloc(8);
+    var fc = dr_frame_new(32, 32, 3, 1, 1, 8, 8, oe2);
+    av1_pal_predict(fc, pc, mi, 1, 0, 0, 0, 0, 4, 4);
+    av1_pal_predict(fc, pc, mi, 2, 0, 0, 0, 0, 4, 4);
+    assert_eq(dr_frame_get(fc, 1, 0, 0), 22, "U plane: map 1 -> U colour 22");
+    assert_eq(dr_frame_get(fc, 2, 0, 0), 44, "V plane: map 1 -> V colour 44 (not U's)");
+    return 0;
+}
+
+# filter_intra_mode_info needs PaletteSizeY == 0 (5.11.24 / 9.3): a 16x16 DC_PRED palette block with filter-intra
+# ENABLED reads no use_filter_intra symbol. Keyframe mode-info pair, a marker after the block.
+fn pt_tile(fh): i64 {
+    var oe = alloc(8);
+    var f = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var t = av1_tile_new(f, 16, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(t);
+    store64(t + AV1TILE_SEG_FH, fh);
+    return t;
+}
+fn test_pal_filter_intra_gate() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_ALLOW_SCT, 1);
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_PAL_NY, 2);
+    store64(mi + AV1MI_PAL_Y + 0, 40);
+    store64(mi + AV1MI_PAL_Y + 8, 220);
+    var enc = av1_sym_enc_init(64, 1);
+    var ew = av1_intra_frame_mode_info_encode(enc, av1_ncdf_new(), mi, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+      pt_tile(fh));
+    assert_eq(ew, DR_OK, "palette + filter-intra-enabled block encodes");
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_modeinfo_new();
+    av1_intra_frame_mode_info_decode(sd, av1_ncdf_new(), got, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, pt_tile(fh));
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "no use_filter_intra symbol for a palette block");
+    assert_eq(load64(got + AV1MI_PAL_NY), 2, "the palette decoded");
+    assert_eq(load64(got + AV1MI_USE_FI), 0, "use_filter_intra = 0");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("av1 palette");
+    test_pal_cache();
+    test_pal_color_ctx();
+    test_pal_mode_info_rt();
+    test_pal_colour_cases();
+    test_pal_mode_info_refusals();
+    test_pal_tokens_rt();
+    test_pal_predict();
+    test_pal_filter_intra_gate();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

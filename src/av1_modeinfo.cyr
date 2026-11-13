@@ -160,7 +160,17 @@ enum Av1ModeInfoOff {
     AV1MI_USE_FI    = 56;   # use_filter_intra (0/1)
     AV1MI_FI_MODE   = 64;   # filter_intra_mode (0..4)
     AV1MI_SEGID     = 72;   # segment_id (5.11.9; 0 when segmentation disabled). 0.7.125 D1.
-    AV1MI_SIZE      = 80;
+    # palette (5.11.46, 0.8.2; src/av1_palette.cyr): PaletteSizeY / PaletteSizeUV (0 = no palette), the colours,
+    # and two encode-only plan fields — the colour-index maps (stride AV1_PAL_MAP_STRIDE) and the V coding choice.
+    AV1MI_PAL_NY     = 80;
+    AV1MI_PAL_NUV    = 88;
+    AV1MI_PAL_Y      = 96;    # palette_colors_y [8] -> 160
+    AV1MI_PAL_U      = 160;   # palette_colors_u [8] -> 224
+    AV1MI_PAL_V      = 224;   # palette_colors_v [8] -> 288
+    AV1MI_PAL_MAPY   = 288;   # encode plan: ColorMapY source (0 on decode)
+    AV1MI_PAL_MAPUV  = 296;   # encode plan: ColorMapUV source
+    AV1MI_PAL_VDELTA = 304;   # encode plan: delta-code the V colours when they fit
+    AV1MI_SIZE       = 312;
 }
 fn av1_modeinfo_new(): i64 {
     var mi = alloc(AV1MI_SIZE);
@@ -175,6 +185,7 @@ fn av1_modeinfo_new(): i64 {
     store64(mi + AV1MI_USE_FI, 0);
     store64(mi + AV1MI_FI_MODE, 0);
     store64(mi + AV1MI_SEGID, 0);
+    memset(mi + AV1MI_PAL_NY, 0, AV1MI_SIZE - AV1MI_PAL_NY);   # no palette, no plan maps
     return mi;
 }
 
@@ -521,7 +532,8 @@ fn av1_write_y_mode(enc, ncc, size_group, ymode): i64 {
 # intra_frame_mode_info reads EXCEPT the Y-mode uses the Size_Group CDF (above), and skip / cdef /
 # segment_id were already read by av1_inter_frame_mode_info. Fills the embedded Av1ModeInfo `mi`.
 # RefFrame[0]=INTRA / RefFrame[1]=NONE are set by the caller. Returns the sticky symbol-decoder error.
-fn av1_read_intra_block_mode_info(sd, ncc, mi, mi_size, has_chroma, enable_filter_intra, subx, suby, lossless): i64 {
+fn av1_read_intra_block_mode_info(sd, ncc, mi, mi_size, has_chroma, enable_filter_intra, subx, suby, lossless,
+  pc, mi_row, mi_col, avail_u, avail_l): i64 {
     var ymode = av1_read_y_mode(sd, ncc, av1_size_group(mi_size));
     store64(mi + AV1MI_YMODE, ymode);
     store64(mi + AV1MI_ANGLE_Y, av1_read_angle_delta_y(sd, ncc, mi_size, ymode));
@@ -538,12 +550,16 @@ fn av1_read_intra_block_mode_info(sd, ncc, mi, mi_size, has_chroma, enable_filte
         }
         store64(mi + AV1MI_ANGLE_UV, av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode));
     }
-    var ufi = av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, 0, mi + AV1MI_FI_MODE);
+    # palette_mode_info (5.11.24 / 5.11.46), then filter_intra_mode_info, which needs PaletteSizeY == 0.
+    av1_read_palette_mode_info(sd, ncc, pc, mi, mi_size, mi_row, mi_col, avail_u, avail_l, has_chroma);
+    var ufi = av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, load64(mi + AV1MI_PAL_NY),
+      mi + AV1MI_FI_MODE);
     store64(mi + AV1MI_USE_FI, ufi);
     return av1_sym_dec_err(sd);
 }
 # the exact inverse — writes the same symbols from an already-filled Av1ModeInfo `mi`.
-fn av1_write_intra_block_mode_info(enc, ncc, mi, mi_size, has_chroma, enable_filter_intra, subx, suby, lossless): i64 {
+fn av1_write_intra_block_mode_info(enc, ncc, mi, mi_size, has_chroma, enable_filter_intra, subx, suby, lossless,
+  pc, mi_row, mi_col, avail_u, avail_l): i64 {
     var ymode = load64(mi + AV1MI_YMODE);
     av1_write_y_mode(enc, ncc, av1_size_group(mi_size), ymode);
     av1_write_angle_delta_y(enc, ncc, mi_size, ymode, load64(mi + AV1MI_ANGLE_Y));
@@ -556,7 +572,9 @@ fn av1_write_intra_block_mode_info(enc, ncc, mi, mi_size, has_chroma, enable_fil
         }
         av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, load64(mi + AV1MI_ANGLE_UV));
     }
-    av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, 0,
+    var wpe = av1_write_palette_mode_info(enc, ncc, pc, mi, mi_size, mi_row, mi_col, avail_u, avail_l, has_chroma);
+    if (wpe != DR_OK) { return wpe; }
+    av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, load64(mi + AV1MI_PAL_NY),
       load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
     return av1_sym_enc_err(enc);
 }
@@ -1061,7 +1079,11 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         store64(mi + AV1MI_ANGLE_UV, av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode));
     }
 
-    var use_fi = av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, 0, mi + AV1MI_FI_MODE);
+    # palette_mode_info (5.11.7 / 5.11.46), then filter_intra_mode_info, which needs PaletteSizeY == 0.
+    av1_read_palette_mode_info(sd, ncc, av1_tile_palctx(tile), mi, mi_size, mi_row, mi_col, avail_u, avail_l,
+      has_chroma);
+    var use_fi = av1_read_filter_intra(sd, ncc, enable_filter_intra, mi_size, ymode, load64(mi + AV1MI_PAL_NY),
+      mi + AV1MI_FI_MODE);
     store64(mi + AV1MI_USE_FI, use_fi);
     return av1_sym_dec_err(sd);
 }
@@ -1116,7 +1138,10 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
         av1_write_angle_delta_uv(enc, ncc, mi_size, uvmode, load64(mi + AV1MI_ANGLE_UV));
     }
 
-    av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, 0,
+    var wpk = av1_write_palette_mode_info(enc, ncc, av1_tile_palctx(tile), mi, mi_size, mi_row, mi_col, avail_u,
+      avail_l, has_chroma);
+    if (wpk != DR_OK) { return wpk; }
+    av1_write_filter_intra(enc, ncc, enable_filter_intra, mi_size, ymode, load64(mi + AV1MI_PAL_NY),
       load64(mi + AV1MI_USE_FI), load64(mi + AV1MI_FI_MODE));
     return av1_sym_enc_err(enc);
 }

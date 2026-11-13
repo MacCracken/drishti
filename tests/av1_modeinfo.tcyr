@@ -616,13 +616,13 @@ fn ibm_rt(mi, mi_size, has_chroma, lossless, subx, suby, efi, disable, tag): i64
         ncd = av1_ncdf_new();
     }
     var enc = av1_sym_enc_init(64, disable);
-    av1_write_intra_block_mode_info(enc, nce, mi, mi_size, has_chroma, efi, subx, suby, lossless);
+    av1_write_intra_block_mode_info(enc, nce, mi, mi_size, has_chroma, efi, subx, suby, lossless, 0, 0, 0, 0, 0);
     assert_eq(av1_sym_enc_err(enc), DR_OK, "ibm enc ok");
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var dmi = av1_modeinfo_new();
     var sd = av1_sym_dec_init(out, olen, disable);
-    av1_read_intra_block_mode_info(sd, ncd, dmi, mi_size, has_chroma, efi, subx, suby, lossless);
+    av1_read_intra_block_mode_info(sd, ncd, dmi, mi_size, has_chroma, efi, subx, suby, lossless, 0, 0, 0, 0, 0);
     assert_eq(av1_sym_dec_err(sd), DR_OK, "ibm dec ok");
     mi_assert(mi, dmi, tag);
     return 0;

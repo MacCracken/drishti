@@ -1,0 +1,639 @@
+# src/av1_palette.cyr — AV1 PALETTE MODE (0.8.2): palette_mode_info (5.11.46) with get_palette_cache,
+# palette_tokens (5.11.49) with get_palette_color_context (5.11.50), and the palette prediction process
+# (7.11.4). Decode and the plan-driven encode mirror. Spec-literal from the AV1 spec text (syntax, the 8.3.2 cdf
+# selection, the additional-tables CDFs and Palette_Color_Context / Palette_Color_Hash_Multipliers);
+# cross-checked against libaom av1/decoder/decodemv.c (read_palette_mode_info, read_palette_colors_y/uv),
+# av1/common/pred_common.h (av1_get_palette_cache) and av1/decoder/detokenize.c (av1_read_color_map).
+#
+# FLAT module — wiring in src/main.cyr after av1_modeinfo.cyr. Family av1_ (av1_pal_*). Depends on av1_symbol
+# (read/encode symbol, literal, ns), av1_noncoeffcdf (the palette CDF accessors), av1_modeinfo (the AV1MI_PAL_*
+# fields, av1_num_4x4_w/h, AV1_DC_PRED) and frame (dr_frame_set / dr_clip1).
+#
+# STATE. The block's palette (sizes, up to 8 colors per plane) lives in its Av1ModeInfo (AV1MI_PAL_*). The
+# frame-level state the cache and the has_palette_y context read — PaletteSizes[ 2 ][ row ][ col ] and
+# PaletteColors[ 2 ][ row ][ col ][ 8 ] — is three frame-addressed grids on the tile (AV1TILE_PALSZY / PALSZUV /
+# PALPTR, shared across tiles like every MI grid): the two sizes, and a pointer to a per-block COPY of its Y and U
+# colors (16 u64; 0 = no palette). Copying keeps a plan-driven encoder that reuses one Av1ModeInfo for many
+# blocks correct. ColorMapY / ColorMapUV are per-block scratch maps (stride AV1_PAL_MAP_STRIDE) in the tile's
+# Av1PalCtx record below.
+
+enum Av1PalConst {
+    AV1_PAL_MAP_STRIDE = 64;   # ColorMap row stride (a palette block is at most 64 wide; UV at most 64 too)
+    AV1_PAL_MAX        = 8;    # PALETTE_COLORS
+}
+
+# The per-tile palette context (built by av1_tile_palctx, av1_residual.cyr). 0 everywhere = palette off.
+enum Av1PalCtx {
+    AV1PC_SZY    = 0;    # PaletteSizes[ 0 ] grid (u64 per MI, stride AV1PC_STRIDE)
+    AV1PC_SZUV   = 8;    # PaletteSizes[ 1 ] grid
+    AV1PC_PTR    = 16;   # per-MI pointer to the block's colour copy (Y[8] then U[8]), 0 = none
+    AV1PC_STRIDE = 24;   # frame MiCols
+    AV1PC_ROWS   = 32;   # frame MiRows
+    AV1PC_ALLOW  = 40;   # allow_screen_content_tools
+    AV1PC_BD     = 48;   # BitDepth
+    AV1PC_MAPY   = 56;   # ColorMapY scratch (64 x 64 u64)
+    AV1PC_MAPUV  = 64;   # ColorMapUV scratch (64 x 64 u64)
+    AV1PC_SIZE   = 72;   # bytes
+}
+
+fn av1_palctx_new(szy, szuv, ptr, stride, rows, allow, bd): i64 {
+    var pc = alloc(AV1PC_SIZE);   # AV1PC_SIZE bytes
+    if (pc == 0) { return 0; }
+    var my = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);    # 64 x 64 u64
+    var muv = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);   # 64 x 64 u64
+    if ((my == 0) || (muv == 0)) { return 0; }
+    store64(pc + AV1PC_SZY, szy);
+    store64(pc + AV1PC_SZUV, szuv);
+    store64(pc + AV1PC_PTR, ptr);
+    store64(pc + AV1PC_STRIDE, stride);
+    store64(pc + AV1PC_ROWS, rows);
+    store64(pc + AV1PC_ALLOW, allow);
+    store64(pc + AV1PC_BD, bd);
+    store64(pc + AV1PC_MAPY, my);
+    store64(pc + AV1PC_MAPUV, muv);
+    return pc;
+}
+
+# CeilLog2( x ) (4.7): 0 for x < 2, else the smallest i with (1 << i) >= x.
+fn av1_pal_ceil_log2(x): i64 {
+    if (x < 2) { return 0; }
+    var i = 1;
+    var p = 2;
+    while (p < x) { i = i + 1; p = p << 1; }
+    return i;
+}
+fn av1_pal_log2(v): i64 {
+    var l = 0;
+    while (v > 1) { v = v >> 1; l = l + 1; }
+    return l;
+}
+# the palette_mode_info gate (5.11.24 / 5.11.7): MiSize >= BLOCK_8X8 BY ENUM VALUE (so BLOCK_4X16 / 16X4 qualify, as
+# in libaom av1_allow_palette), both dimensions <= 64, and allow_screen_content_tools.
+fn av1_pal_allowed(pc, mi_size): i64 {
+    if (pc == 0) { return 0; }
+    if (load64(pc + AV1PC_ALLOW) == 0) { return 0; }
+    if (mi_size < AV1_BLOCK_8X8) { return 0; }
+    if ((av1_num_4x4_w(mi_size) * 4) > 64) { return 0; }
+    if ((av1_num_4x4_h(mi_size) * 4) > 64) { return 0; }
+    return 1;
+}
+# bsizeCtx = Mi_Width_Log2[ MiSize ] + Mi_Height_Log2[ MiSize ] - 2.
+fn av1_pal_bsize_ctx(mi_size): i64 {
+    return (av1_pal_log2(av1_num_4x4_w(mi_size)) + av1_pal_log2(av1_num_4x4_h(mi_size))) - 2;
+}
+fn av1_pal_size_at(pc, plane, r, c): i64 {
+    var g = load64(pc + AV1PC_SZY);
+    if (plane != 0) { g = load64(pc + AV1PC_SZUV); }
+    return load64(g + (((r * load64(pc + AV1PC_STRIDE)) + c) * 8));
+}
+# PaletteColors[ plane ][ r ][ c ][ i ] (plane 0 = Y, 1 = U), through the per-MI colour-copy pointer.
+fn av1_pal_color_at(pc, plane, r, c, i): i64 {
+    var p = load64(load64(pc + AV1PC_PTR) + (((r * load64(pc + AV1PC_STRIDE)) + c) * 8));
+    if (p == 0) { return 0; }
+    return load64(p + (((plane * 8) + i) * 8));
+}
+
+# get_palette_cache( plane ) (5.11.46): merge the above and left palettes into `out` (ascending, duplicates
+# dropped); returns cacheN. The above palette is used only inside a 64-row band ((MiRow * MI_SIZE) % 64 != 0 —
+# no AvailU test, by the spec: a 64-aligned row never looks up), the left one only when AvailL.
+fn av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, out): i64 {
+    var above_n = 0;
+    if (((mi_row * 4) % 64) != 0) { above_n = av1_pal_size_at(pc, plane, mi_row - 1, mi_col); }
+    var left_n = 0;
+    if (avail_l != 0) { left_n = av1_pal_size_at(pc, plane, mi_row, mi_col - 1); }
+    var ai = 0;
+    var li = 0;
+    var n = 0;
+    while ((ai < above_n) && (li < left_n)) {
+        var above_c = av1_pal_color_at(pc, plane, mi_row - 1, mi_col, ai);
+        var left_c = av1_pal_color_at(pc, plane, mi_row, mi_col - 1, li);
+        if (left_c < above_c) {
+            if ((n == 0) || (left_c != load64(out + ((n - 1) * 8)))) { store64(out + (n * 8), left_c); n = n + 1; }
+            li = li + 1;
+        } else {
+            if ((n == 0) || (above_c != load64(out + ((n - 1) * 8)))) { store64(out + (n * 8), above_c); n = n + 1; }
+            ai = ai + 1;
+            if (left_c == above_c) { li = li + 1; }
+        }
+    }
+    while (ai < above_n) {
+        var av = av1_pal_color_at(pc, plane, mi_row - 1, mi_col, ai);
+        ai = ai + 1;
+        if ((n == 0) || (av != load64(out + ((n - 1) * 8)))) { store64(out + (n * 8), av); n = n + 1; }
+    }
+    while (li < left_n) {
+        var lv = av1_pal_color_at(pc, plane, mi_row, mi_col - 1, li);
+        li = li + 1;
+        if ((n == 0) || (lv != load64(out + ((n - 1) * 8)))) { store64(out + (n * 8), lv); n = n + 1; }
+    }
+    return n;
+}
+# sort( arr, 0, n - 1 ): ascending, in place (n <= 8).
+fn av1_pal_sort(arr, n): i64 {
+    var i = 1;
+    while (i < n) {
+        var v = load64(arr + (i * 8));
+        var j = i - 1;
+        while ((j >= 0) && (load64(arr + (j * 8)) > v)) {
+            store64(arr + ((j + 1) * 8), load64(arr + (j * 8)));
+            j = j - 1;
+        }
+        store64(arr + ((j + 1) * 8), v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# the Y / U colour syntax of palette_mode_info: cache flags, one literal, then ascending deltas (Y adds 1 to every
+# delta and shrinks its range by one more than U, so Y colours are distinct and U ones may repeat), then sort.
+fn av1_pal_read_colors(sd, pc, colors, plane, n, mi_row, mi_col, avail_l): i64 {
+    var bd = load64(pc + AV1PC_BD);
+    var cache = alloc(16 * 8);   # 16 u64: at most 8 above + 8 left
+    var cn = av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, cache);
+    var idx = 0;
+    var i = 0;
+    while ((i < cn) && (idx < n)) {
+        if (av1_sym_read_literal(sd, 1) != 0) {   # use_palette_color_cache_{y,u} L(1)
+            store64(colors + (idx * 8), load64(cache + (i * 8)));
+            idx = idx + 1;
+        }
+        i = i + 1;
+    }
+    if (idx < n) {
+        store64(colors + (idx * 8), av1_sym_read_literal(sd, bd));   # palette_colors_{y,u}[ idx ] L(BitDepth)
+        idx = idx + 1;
+    }
+    var bits = 0;
+    if (idx < n) { bits = (bd - 3) + av1_sym_read_literal(sd, 2); }   # palette_num_extra_bits L(2)
+    while (idx < n) {
+        var d = av1_sym_read_literal(sd, bits);   # palette_delta_{y,u} L(paletteBits)
+        if (plane == 0) { d = d + 1; }
+        var cv = dr_clip1(load64(colors + ((idx - 1) * 8)) + d, bd);
+        store64(colors + (idx * 8), cv);
+        var range = (1 << bd) - cv;
+        if (plane == 0) { range = range - 1; }
+        bits = av1_min(bits, av1_pal_ceil_log2(range));
+        idx = idx + 1;
+    }
+    av1_pal_sort(colors, n);
+    return 0;
+}
+# palette_mode_info( ) (5.11.46). Fills AV1MI_PAL_NY / NUV and the colours; both sizes 0 when not allowed.
+fn av1_read_palette_mode_info(sd, ncc, pc, mi, mi_size, mi_row, mi_col, avail_u, avail_l, has_chroma): i64 {
+    store64(mi + AV1MI_PAL_NY, 0);
+    store64(mi + AV1MI_PAL_NUV, 0);
+    if (av1_pal_allowed(pc, mi_size) == 0) { return DR_OK; }
+    var bd = load64(pc + AV1PC_BD);
+    var bctx = av1_pal_bsize_ctx(mi_size);
+    if (load64(mi + AV1MI_YMODE) == AV1_DC_PRED) {
+        var ctx = 0;
+        if ((avail_u != 0) && (av1_pal_size_at(pc, 0, mi_row - 1, mi_col) > 0)) { ctx = ctx + 1; }
+        if ((avail_l != 0) && (av1_pal_size_at(pc, 0, mi_row, mi_col - 1) > 0)) { ctx = ctx + 1; }
+        if (av1_sym_read_symbol(sd, av1_ncdf_palette_y_mode(ncc, bctx, ctx), 2) != 0) {   # has_palette_y
+            var ny = av1_sym_read_symbol(sd, av1_ncdf_palette_y_size(ncc, bctx), 7) + 2;   # palette_size_y_minus_2
+            store64(mi + AV1MI_PAL_NY, ny);
+            av1_pal_read_colors(sd, pc, mi + AV1MI_PAL_Y, 0, ny, mi_row, mi_col, avail_l);
+        }
+    }
+    if ((has_chroma != 0) && (load64(mi + AV1MI_UVMODE) == AV1_DC_PRED)) {
+        var uctx = (load64(mi + AV1MI_PAL_NY) > 0);
+        if (av1_sym_read_symbol(sd, av1_ncdf_palette_uv_mode(ncc, uctx), 2) != 0) {   # has_palette_uv
+            var nuv = av1_sym_read_symbol(sd, av1_ncdf_palette_uv_size(ncc, bctx), 7) + 2;
+            store64(mi + AV1MI_PAL_NUV, nuv);
+            av1_pal_read_colors(sd, pc, mi + AV1MI_PAL_U, 1, nuv, mi_row, mi_col, avail_l);
+            var v = mi + AV1MI_PAL_V;
+            if (av1_sym_read_literal(sd, 1) != 0) {   # delta_encode_palette_colors_v L(1)
+                var max_val = 1 << bd;
+                var vbits = (bd - 4) + av1_sym_read_literal(sd, 2);   # palette_num_extra_bits_v L(2)
+                store64(v, av1_sym_read_literal(sd, bd));             # palette_colors_v[ 0 ] L(BitDepth)
+                var k = 1;
+                while (k < nuv) {
+                    var dv = av1_sym_read_literal(sd, vbits);         # palette_delta_v L(paletteBits)
+                    if (dv != 0) {
+                        if (av1_sym_read_literal(sd, 1) != 0) { dv = 0 - dv; }   # palette_delta_sign_bit_v
+                    }
+                    var val = load64(v + ((k - 1) * 8)) + dv;
+                    if (val < 0) { val = val + max_val; }
+                    if (val >= max_val) { val = val - max_val; }
+                    store64(v + (k * 8), dr_clip1(val, bd));
+                    k = k + 1;
+                }
+            } else {
+                var k2 = 0;
+                while (k2 < nuv) { store64(v + (k2 * 8), av1_sym_read_literal(sd, bd)); k2 = k2 + 1; }
+            }
+        }
+    }
+    return av1_sym_dec_err(sd);
+}
+
+# the encode mirror of the Y / U colours. `colors` must be ascending (the decoder sorts) and, for Y, distinct (a
+# Y delta is at least 1); anything else is unrepresentable -> DR_ERR_BOUNDS. A cache entry is flagged exactly when
+# it is one of the colours (each flag consumes one occurrence); the rest are coded as a literal plus ascending
+# deltas at the smallest extra-bit count that holds the largest one, shrinking exactly as the decoder does.
+fn av1_pal_write_colors(enc, pc, colors, plane, n, mi_row, mi_col, avail_l): i64 {
+    var bd = load64(pc + AV1PC_BD);
+    var k = 1;
+    while (k < n) {
+        var a = load64(colors + ((k - 1) * 8));
+        var b = load64(colors + (k * 8));
+        if (b < a) { return DR_ERR_BOUNDS; }
+        if ((plane == 0) && (b == a)) { return DR_ERR_BOUNDS; }
+        k = k + 1;
+    }
+    var cache = alloc(16 * 8);
+    var cn = av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, cache);
+    var used = alloc(8 * 8);   # which plan colours a cache flag already took
+    memset(used, 0, 8 * 8);
+    var idx = 0;
+    var i = 0;
+    while ((i < cn) && (idx < n)) {
+        var cv = load64(cache + (i * 8));
+        var hit = 0 - 1;
+        var j = 0;
+        while (j < n) {
+            if ((hit < 0) && (load64(used + (j * 8)) == 0) && (load64(colors + (j * 8)) == cv)) { hit = j; }
+            j = j + 1;
+        }
+        if (hit >= 0) {
+            av1_sym_encode_literal(enc, 1, 1);
+            store64(used + (hit * 8), 1);
+            idx = idx + 1;
+        } else {
+            av1_sym_encode_literal(enc, 0, 1);
+        }
+        i = i + 1;
+    }
+    # the rest, ascending (a subsequence of the sorted plan).
+    var rest = alloc(8 * 8);
+    var rn = 0;
+    var t = 0;
+    while (t < n) {
+        if (load64(used + (t * 8)) == 0) { store64(rest + (rn * 8), load64(colors + (t * 8))); rn = rn + 1; }
+        t = t + 1;
+    }
+    if (rn == 0) { return DR_OK; }
+    av1_sym_encode_literal(enc, load64(rest), bd);
+    if (rn == 1) { return DR_OK; }
+    # the largest coded delta (Y codes delta - 1), then the extra bits over minBits = BitDepth - 3.
+    var maxd = 0;
+    var q = 1;
+    while (q < rn) {
+        var dq = load64(rest + (q * 8)) - load64(rest + ((q - 1) * 8));
+        if (plane == 0) { dq = dq - 1; }
+        if (dq > maxd) { maxd = dq; }
+        q = q + 1;
+    }
+    var need = av1_pal_ceil_log2(maxd + 1);
+    var minb = bd - 3;
+    var extra = 0;
+    if (need > minb) { extra = need - minb; }
+    if (extra > 3) { return DR_ERR_BOUNDS; }
+    av1_sym_encode_literal(enc, extra, 2);
+    var bits = minb + extra;
+    var u = 1;
+    while (u < rn) {
+        var prev = load64(rest + ((u - 1) * 8));
+        var cur = load64(rest + (u * 8));
+        var dd = cur - prev;
+        if (plane == 0) { dd = dd - 1; }
+        if (dd >= (1 << bits)) { return DR_ERR_BOUNDS; }   # cannot happen for an in-range colour set
+        av1_sym_encode_literal(enc, dd, bits);
+        var range = (1 << bd) - cur;
+        if (plane == 0) { range = range - 1; }
+        bits = av1_min(bits, av1_pal_ceil_log2(range));
+        u = u + 1;
+    }
+    return DR_OK;
+}
+# palette_mode_info writer. The plan's AV1MI_PAL_* fields are the source; AV1MI_PAL_VDELTA != 0 asks for the
+# delta-coded V colours (falling back to raw when a delta does not fit). A size outside 2..8 or a palette on a
+# block that may not carry one is unrepresentable -> DR_ERR_BOUNDS.
+fn av1_write_palette_mode_info(enc, ncc, pc, mi, mi_size, mi_row, mi_col, avail_u, avail_l, has_chroma): i64 {
+    var ny = load64(mi + AV1MI_PAL_NY);
+    var nuv = load64(mi + AV1MI_PAL_NUV);
+    if (av1_pal_allowed(pc, mi_size) == 0) {
+        if ((ny != 0) || (nuv != 0)) { return DR_ERR_BOUNDS; }
+        return DR_OK;
+    }
+    if ((ny != 0) && ((ny < 2) || (ny > 8))) { return DR_ERR_BOUNDS; }
+    if ((nuv != 0) && ((nuv < 2) || (nuv > 8))) { return DR_ERR_BOUNDS; }
+    var bd = load64(pc + AV1PC_BD);
+    var bctx = av1_pal_bsize_ctx(mi_size);
+    if (load64(mi + AV1MI_YMODE) == AV1_DC_PRED) {
+        var ctx = 0;
+        if ((avail_u != 0) && (av1_pal_size_at(pc, 0, mi_row - 1, mi_col) > 0)) { ctx = ctx + 1; }
+        if ((avail_l != 0) && (av1_pal_size_at(pc, 0, mi_row, mi_col - 1) > 0)) { ctx = ctx + 1; }
+        av1_sym_encode_symbol(enc, av1_ncdf_palette_y_mode(ncc, bctx, ctx), 2, (ny > 0));
+        if (ny > 0) {
+            av1_sym_encode_symbol(enc, av1_ncdf_palette_y_size(ncc, bctx), 7, ny - 2);
+            var ey = av1_pal_write_colors(enc, pc, mi + AV1MI_PAL_Y, 0, ny, mi_row, mi_col, avail_l);
+            if (ey != DR_OK) { return ey; }
+        }
+    } else {
+        if (ny != 0) { return DR_ERR_BOUNDS; }   # a Y palette needs YMode == DC_PRED
+    }
+    if ((has_chroma != 0) && (load64(mi + AV1MI_UVMODE) == AV1_DC_PRED)) {
+        av1_sym_encode_symbol(enc, av1_ncdf_palette_uv_mode(ncc, (ny > 0)), 2, (nuv > 0));
+        if (nuv > 0) {
+            av1_sym_encode_symbol(enc, av1_ncdf_palette_uv_size(ncc, bctx), 7, nuv - 2);
+            var eu = av1_pal_write_colors(enc, pc, mi + AV1MI_PAL_U, 1, nuv, mi_row, mi_col, avail_l);
+            if (eu != DR_OK) { return eu; }
+            av1_pal_write_v(enc, mi + AV1MI_PAL_V, nuv, bd, load64(mi + AV1MI_PAL_VDELTA));
+        }
+    } else {
+        if (nuv != 0) { return DR_ERR_BOUNDS; }
+    }
+    return DR_OK;
+}
+# the V colours: delta-coded when asked and every step fits (wrapping through maxVal the shorter way), else raw.
+fn av1_pal_write_v(enc, v, n, bd, want_delta): i64 {
+    var max_val = 1 << bd;
+    var minb = bd - 4;
+    var deltas = alloc(8 * 8);
+    var maxa = 0;
+    var k = 1;
+    while (k < n) {
+        var d = load64(v + (k * 8)) - load64(v + ((k - 1) * 8));
+        if (d > (max_val / 2)) { d = d - max_val; }
+        if (d < (0 - (max_val / 2))) { d = d + max_val; }
+        store64(deltas + (k * 8), d);
+        var a = d;
+        if (a < 0) { a = 0 - a; }
+        if (a > maxa) { maxa = a; }
+        k = k + 1;
+    }
+    var need = av1_pal_ceil_log2(maxa + 1);
+    var extra = 0;
+    if (need > minb) { extra = need - minb; }
+    if ((want_delta != 0) && (extra <= 3)) {
+        av1_sym_encode_literal(enc, 1, 1);
+        av1_sym_encode_literal(enc, extra, 2);
+        var bits = minb + extra;
+        av1_sym_encode_literal(enc, load64(v), bd);
+        var m = 1;
+        while (m < n) {
+            var dm = load64(deltas + (m * 8));
+            var am = dm;
+            if (am < 0) { am = 0 - am; }
+            av1_sym_encode_literal(enc, am, bits);
+            if (am != 0) { av1_sym_encode_literal(enc, (dm < 0), 1); }
+            m = m + 1;
+        }
+        return DR_OK;
+    }
+    av1_sym_encode_literal(enc, 0, 1);
+    var r = 0;
+    while (r < n) { av1_sym_encode_literal(enc, load64(v + (r * 8)), bd); r = r + 1; }
+    return DR_OK;
+}
+
+# PaletteSizes / PaletteColors store for the block's footprint (5.11.5), clipped to the frame. Every block stores
+# (sizes 0 and a null pointer when it has no palette), so a stale value from an earlier use of the grid cannot leak.
+fn av1_pal_store(pc, mi, mi_row, mi_col, bw4, bh4): i64 {
+    if (pc == 0) { return 0; }
+    var ny = load64(mi + AV1MI_PAL_NY);
+    var nuv = load64(mi + AV1MI_PAL_NUV);
+    var copy = 0;
+    if ((ny != 0) || (nuv != 0)) {
+        copy = alloc(16 * 8);   # Y[8] then U[8]
+        if (copy == 0) { return DR_ERR_OOM; }
+        var i = 0;
+        while (i < 8) {
+            store64(copy + (i * 8), load64(mi + AV1MI_PAL_Y + (i * 8)));
+            store64(copy + ((8 + i) * 8), load64(mi + AV1MI_PAL_U + (i * 8)));
+            i = i + 1;
+        }
+    }
+    var stride = load64(pc + AV1PC_STRIDE);
+    var rows = load64(pc + AV1PC_ROWS);
+    var y = 0;
+    while (y < bh4) {
+        if ((mi_row + y) < rows) {
+            var x = 0;
+            while (x < bw4) {
+                if ((mi_col + x) < stride) {
+                    var o = ((((mi_row + y) * stride) + (mi_col + x)) * 8);
+                    store64(load64(pc + AV1PC_SZY) + o, ny);
+                    store64(load64(pc + AV1PC_SZUV) + o, nuv);
+                    store64(load64(pc + AV1PC_PTR) + o, copy);
+                }
+                x = x + 1;
+            }
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+# get_palette_color_context( colorMap, r, c, n ) (5.11.50): writes ColorOrder[ 0..7 ] into `order`, returns
+# ctx = Palette_Color_Context[ ColorContextHash ] (hash 2 -> 0, 5 -> 4, 6 -> 3, 7 -> 2, 8 -> 1; the other hashes
+# cannot occur for a coded position).
+fn av1_pal_color_ctx(map, stride, r, c, n, order): i64 {
+    var scores = alloc(8 * 8);
+    var i = 0;
+    while (i < 8) { store64(scores + (i * 8), 0); store64(order + (i * 8), i); i = i + 1; }
+    if (c > 0) {
+        var nb = load64(map + (((r * stride) + (c - 1)) * 8));
+        store64(scores + (nb * 8), load64(scores + (nb * 8)) + 2);
+    }
+    if ((r > 0) && (c > 0)) {
+        var nb2 = load64(map + ((((r - 1) * stride) + (c - 1)) * 8));
+        store64(scores + (nb2 * 8), load64(scores + (nb2 * 8)) + 1);
+    }
+    if (r > 0) {
+        var nb3 = load64(map + ((((r - 1) * stride) + c) * 8));
+        store64(scores + (nb3 * 8), load64(scores + (nb3 * 8)) + 2);
+    }
+    var k = 0;
+    while (k < 3) {   # PALETTE_NUM_NEIGHBORS
+        var max_score = load64(scores + (k * 8));
+        var max_idx = k;
+        var j = k + 1;
+        while (j < n) {
+            if (load64(scores + (j * 8)) > max_score) { max_score = load64(scores + (j * 8)); max_idx = j; }
+            j = j + 1;
+        }
+        if (max_idx != k) {
+            max_score = load64(scores + (max_idx * 8));
+            var max_order = load64(order + (max_idx * 8));
+            var m = max_idx;
+            while (m > k) {
+                store64(scores + (m * 8), load64(scores + ((m - 1) * 8)));
+                store64(order + (m * 8), load64(order + ((m - 1) * 8)));
+                m = m - 1;
+            }
+            store64(scores + (k * 8), max_score);
+            store64(order + (k * 8), max_order);
+        }
+        k = k + 1;
+    }
+    var hash = load64(scores) + (2 * load64(scores + 8)) + (2 * load64(scores + 16));   # Palette_Color_Hash_Multipliers
+    if (hash == 2) { return 0; }
+    if (hash == 5) { return 4; }
+    if (hash == 6) { return 3; }
+    if (hash == 7) { return 2; }
+    if (hash == 8) { return 1; }
+    return 0;   # unreachable for a coded position (Palette_Color_Context marks these -1)
+}
+
+# the per-plane geometry of palette_tokens: block and onscreen width/height (UV: subsampled, +2 when below 4).
+fn av1_pal_geom(pc, mi_size, mi_row, mi_col, uv, subx, suby, out): i64 {
+    var bh = av1_num_4x4_h(mi_size) * 4;
+    var bw = av1_num_4x4_w(mi_size) * 4;
+    var oh = av1_min(bh, (load64(pc + AV1PC_ROWS) - mi_row) * 4);
+    var ow = av1_min(bw, (load64(pc + AV1PC_STRIDE) - mi_col) * 4);
+    if (uv != 0) {
+        bh = bh >> suby;
+        bw = bw >> subx;
+        oh = oh >> suby;
+        ow = ow >> subx;
+        if (bw < 4) { bw = bw + 2; ow = ow + 2; }
+        if (bh < 4) { bh = bh + 2; oh = oh + 2; }
+    }
+    store64(out + 0, bw);
+    store64(out + 8, bh);
+    store64(out + 16, ow);
+    store64(out + 24, oh);
+    return 0;
+}
+# the off-screen extension: columns past onscreenWidth copy the last onscreen column, rows past onscreenHeight
+# copy the last onscreen row.
+fn av1_pal_extend(map, bw, bh, ow, oh): i64 {
+    var s = AV1_PAL_MAP_STRIDE;
+    var i = 0;
+    while (i < oh) {
+        var j = ow;
+        while (j < bw) { store64(map + (((i * s) + j) * 8), load64(map + (((i * s) + (ow - 1)) * 8))); j = j + 1; }
+        i = i + 1;
+    }
+    var i2 = oh;
+    while (i2 < bh) {
+        var j2 = 0;
+        while (j2 < bw) {
+            store64(map + (((i2 * s) + j2) * 8), load64(map + ((((oh - 1) * s) + j2) * 8)));
+            j2 = j2 + 1;
+        }
+        i2 = i2 + 1;
+    }
+    return 0;
+}
+# one plane's colour index map (5.11.49): NS( n ) for [0][0], then the anti-diagonal wavefront of
+# palette_color_idx symbols, each mapped through ColorOrder; then the off-screen extension.
+fn av1_pal_read_map(sd, ncc, map, uv, n, bw, bh, ow, oh): i64 {
+    var s = AV1_PAL_MAP_STRIDE;
+    var order = alloc(8 * 8);
+    store64(map, av1_sym_read_ns(sd, n));   # color_index_map_{y,uv} NS(n)
+    var i = 1;
+    while (i < ((oh + ow) - 1)) {
+        var j = av1_min(i, ow - 1);
+        while (j >= av1_max(0, (i - oh) + 1)) {
+            var ctx = av1_pal_color_ctx(map, s, i - j, j, n, order);
+            var sym = av1_sym_read_symbol(sd, av1_ncdf_palette_color(ncc, uv, n, ctx), n);   # palette_color_idx
+            store64(map + ((((i - j) * s) + j) * 8), load64(order + (sym * 8)));
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    av1_pal_extend(map, bw, bh, ow, oh);
+    return 0;
+}
+fn av1_read_palette_tokens(sd, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby): i64 {
+    if (pc == 0) { return DR_OK; }
+    var g = alloc(4 * 8);
+    var ny = load64(mi + AV1MI_PAL_NY);
+    if (ny != 0) {
+        av1_pal_geom(pc, mi_size, mi_row, mi_col, 0, subx, suby, g);
+        av1_pal_read_map(sd, ncc, load64(pc + AV1PC_MAPY), 0, ny, load64(g), load64(g + 8), load64(g + 16),
+          load64(g + 24));
+    }
+    var nuv = load64(mi + AV1MI_PAL_NUV);
+    if (nuv != 0) {
+        av1_pal_geom(pc, mi_size, mi_row, mi_col, 1, subx, suby, g);
+        av1_pal_read_map(sd, ncc, load64(pc + AV1PC_MAPUV), 1, nuv, load64(g), load64(g + 8), load64(g + 16),
+          load64(g + 24));
+    }
+    return av1_sym_dec_err(sd);
+}
+# the encode mirror: the plan's map (AV1MI_PAL_MAPY / MAPUV, stride AV1_PAL_MAP_STRIDE, values < n) is coded and
+# also copied into the tile scratch (with the extension), so the shared palette prediction reads it unchanged. A
+# map value that is not a palette index is unrepresentable -> DR_ERR_BOUNDS.
+fn av1_pal_write_map(enc, ncc, plan, map, uv, n, bw, bh, ow, oh): i64 {
+    var s = AV1_PAL_MAP_STRIDE;
+    var order = alloc(8 * 8);
+    var r = 0;
+    while (r < oh) {
+        var c = 0;
+        while (c < ow) {
+            var pv = load64(plan + (((r * s) + c) * 8));
+            if ((pv < 0) || (pv >= n)) { return DR_ERR_BOUNDS; }
+            store64(map + (((r * s) + c) * 8), pv);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    av1_sym_encode_ns(enc, load64(map), n);
+    var i = 1;
+    while (i < ((oh + ow) - 1)) {
+        var j = av1_min(i, ow - 1);
+        while (j >= av1_max(0, (i - oh) + 1)) {
+            var ctx = av1_pal_color_ctx(map, s, i - j, j, n, order);
+            var want = load64(map + ((((i - j) * s) + j) * 8));
+            var sym = 0;
+            while (load64(order + (sym * 8)) != want) { sym = sym + 1; }
+            av1_sym_encode_symbol(enc, av1_ncdf_palette_color(ncc, uv, n, ctx), n, sym);
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    av1_pal_extend(map, bw, bh, ow, oh);
+    return DR_OK;
+}
+fn av1_write_palette_tokens(enc, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby): i64 {
+    if (pc == 0) { return DR_OK; }
+    var g = alloc(4 * 8);
+    var ny = load64(mi + AV1MI_PAL_NY);
+    if (ny != 0) {
+        if (load64(mi + AV1MI_PAL_MAPY) == 0) { return DR_ERR_BOUNDS; }
+        av1_pal_geom(pc, mi_size, mi_row, mi_col, 0, subx, suby, g);
+        var ey = av1_pal_write_map(enc, ncc, load64(mi + AV1MI_PAL_MAPY), load64(pc + AV1PC_MAPY), 0, ny,
+          load64(g), load64(g + 8), load64(g + 16), load64(g + 24));
+        if (ey != DR_OK) { return ey; }
+    }
+    var nuv = load64(mi + AV1MI_PAL_NUV);
+    if (nuv != 0) {
+        if (load64(mi + AV1MI_PAL_MAPUV) == 0) { return DR_ERR_BOUNDS; }
+        av1_pal_geom(pc, mi_size, mi_row, mi_col, 1, subx, suby, g);
+        var eu = av1_pal_write_map(enc, ncc, load64(mi + AV1MI_PAL_MAPUV), load64(pc + AV1PC_MAPUV), 1, nuv,
+          load64(g), load64(g + 8), load64(g + 16), load64(g + 24));
+        if (eu != DR_OK) { return eu; }
+    }
+    return DR_OK;
+}
+
+# the palette prediction process (7.11.4): CurrFrame[ plane ][ startY + i ][ startX + j ] =
+# palette[ map[ y * 4 + i ][ x * 4 + j ] ] for the w x h transform block at 4x4 offset (x, y) inside the block.
+fn av1_pal_predict(frame, pc, mi, plane, start_x, start_y, x, y, w, h): i64 {
+    var pal = mi + AV1MI_PAL_Y;
+    var map = load64(pc + AV1PC_MAPY);
+    if (plane == 1) { pal = mi + AV1MI_PAL_U; }
+    if (plane == 2) { pal = mi + AV1MI_PAL_V; }
+    if (plane != 0) { map = load64(pc + AV1PC_MAPUV); }
+    var s = AV1_PAL_MAP_STRIDE;
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            var idx = load64(map + (((((y * 4) + i) * s) + ((x * 4) + j)) * 8));
+            dr_frame_set(frame, plane, start_x + j, start_y + i, load64(pal + (idx * 8)));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+# whether this plane of this (intra) block predicts from its palette (transform_block, 5.11.35).
+fn av1_pal_plane_active(mi, plane): i64 {
+    if (plane == 0) { return load64(mi + AV1MI_PAL_NY) != 0; }
+    return load64(mi + AV1MI_PAL_NUV) != 0;
+}

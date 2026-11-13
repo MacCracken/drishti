@@ -149,7 +149,7 @@ fn ncdf_row_is_delta_default(b, off): i64 {
 }
 fn test_ncdf_delta_layout() {
     var b = av1_noncoeff_cdf_blob();
-    assert_eq(AV1_NCDF_N, 1914, "blob length 1914 i64 (1875 + six delta rows of 5 + three seg-pred rows of 3)");
+    assert_eq(AV1_NCDF_N, 2515, "blob length 2515 i64 (... + three seg-pred rows of 3 + 601 palette words)");
     assert_eq(av1_ncdf_delta_q(b) - b, 1875 * 8, "Default_Delta_Q_Cdf @ 1875");
     assert_eq(av1_ncdf_delta_lf(b) - b, 1880 * 8, "Default_Delta_Lf_Cdf @ 1880");
     var i = 0;
@@ -171,7 +171,7 @@ fn test_ncdf_delta_layout() {
     assert_eq(ncdf_row_is_delta_default(cc, 1900), 1, "av1_ncdf_new copies the last delta row");
     return 0;
 }
-# Default_Segment_Id_Predicted_Cdf (0.8.2) @ 1905..1913: three { 128 * 128, 32768, 0 } rows, the blob's END.
+# Default_Segment_Id_Predicted_Cdf (0.8.2) @ 1905..1913: three { 128 * 128, 32768, 0 } rows.
 # Pinned at ABSOLUTE offsets (a fill and a check through the same accessor would be circular).
 fn test_ncdf_seg_pred_layout() {
     var b = av1_noncoeff_cdf_blob();
@@ -183,9 +183,56 @@ fn test_ncdf_seg_pred_layout() {
         assert_eq(load64(b + ((1907 + (ctx * 3)) * 8)), 0, "seg_id_predicted count 0");
         ctx = ctx + 1;
     }
-    assert_eq(av1_ncdf_seg_id_predicted(b, 3) - b, AV1_NCDF_N * 8, "the last seg-pred row ends the blob");
+    assert_eq(av1_ncdf_seg_id_predicted(b, 3) - b, 1914 * 8, "the last seg-pred row ends at 1914 (palette next)");
     var cc = av1_ncdf_new();
     assert_eq(load64(cc + (1911 * 8)), 16384, "av1_ncdf_new copies the last seg-pred row");
+    return 0;
+}
+
+# the palette CDFs (0.8.2) @1914..2514, pinned at ABSOLUTE offsets with values read off the spec annex (a fill and a
+# check through the same accessor would be circular): first and last row of every family, and the accessors.
+fn test_ncdf_palette_layout() {
+    var b = av1_noncoeff_cdf_blob();
+    assert_eq(av1_ncdf_palette_y_size(b, 0) - b, 1914 * 8, "PaletteYSize @1914");
+    assert_eq(load64(b + (1914 * 8)), 7952, "PaletteYSize[0][0] = 7952");
+    assert_eq(load64(b + (1969 * 8)), 0, "PaletteYSize[6] count (the family's last word)");
+    assert_eq(load64(b + (1962 * 8)), 14940, "PaletteYSize[6][0] = 14940");
+    assert_eq(av1_ncdf_palette_uv_size(b, 6) - b, 1962 * 8 + (56 * 8), "PaletteUVSize[6] @2018");
+    assert_eq(load64(b + (1970 * 8)), 8713, "PaletteUVSize[0][0] = 8713");
+    assert_eq(load64(b + (2018 * 8)), 1269, "PaletteUVSize[6][0] = 1269");
+    assert_eq(av1_ncdf_palette_color(b, 0, 2, 0) - b, 2026 * 8, "Size2 Y color ctx0 @2026");
+    assert_eq(load64(b + (2026 * 8)), 28710, "Size2 Y color[0][0] = 28710");
+    assert_eq(av1_ncdf_palette_color(b, 0, 3, 0) - b, 2041 * 8, "Size3 Y color @2041");
+    assert_eq(av1_ncdf_palette_color(b, 0, 8, 4) - b, (2191 + 36) * 8, "Size8 Y color ctx4 @2227");
+    assert_eq(load64(b + (2227 * 8)), 31028, "Size8 Y color[4][0] = 31028");
+    assert_eq(load64(b + (2233 * 8)), 32392, "Size8 Y color[4][6] = 32392");
+    assert_eq(load64(b + (2234 * 8)), 32768, "Size8 Y color[4] terminator");
+    assert_eq(av1_ncdf_palette_color(b, 1, 2, 0) - b, 2236 * 8, "Size2 UV color @2236");
+    assert_eq(load64(b + (2236 * 8)), 29089, "Size2 UV color[0][0] = 29089");
+    assert_eq(load64(b + (2437 * 8)), 31190, "Size8 UV color[4][0] = 31190");
+    assert_eq(av1_ncdf_palette_y_mode(b, 0, 0) - b, 2446 * 8, "PaletteYMode @2446");
+    assert_eq(load64(b + (2446 * 8)), 31676, "PaletteYMode[0][0] = 31676");
+    assert_eq(av1_ncdf_palette_y_mode(b, 6, 2) - b, 2506 * 8, "PaletteYMode[6][2] @2506");
+    assert_eq(load64(b + (2506 * 8)), 129, "PaletteYMode[6][2] = 129");
+    assert_eq(av1_ncdf_palette_uv_mode(b, 1) - b, 2512 * 8, "PaletteUVMode[1] @2512");
+    assert_eq(load64(b + (2509 * 8)), 32461, "PaletteUVMode[0] = 32461");
+    assert_eq(load64(b + (2512 * 8)), 21488, "PaletteUVMode[1] = 21488");
+    assert_eq(av1_ncdf_palette_uv_mode(b, 2) - b, AV1_NCDF_N * 8, "the palette rows end the blob");
+    # every row is a valid CDF: monotone, ending 32768 then a 0 count (self-describing scan of the region).
+    var bad = 0;
+    var i = 1914;
+    while (i < AV1_NCDF_N) {
+        if (load64(b + (i * 8)) == 32768) {
+            if (load64(b + ((i + 1) * 8)) != 0) { bad = bad + 1; }
+            i = i + 2;
+        } else {
+            if (load64(b + (i * 8)) >= load64(b + ((i + 1) * 8))) { bad = bad + 1; }
+            i = i + 1;
+        }
+    }
+    assert_eq(bad, 0, "every palette row is monotone and terminated");
+    var cc = av1_ncdf_new();
+    assert_eq(load64(cc + (2512 * 8)), 21488, "av1_ncdf_new copies the palette rows");
     return 0;
 }
 
@@ -195,6 +242,7 @@ fn main() {
     test_ncdf_checksum();
     test_ncdf_delta_layout();
     test_ncdf_seg_pred_layout();
+    test_ncdf_palette_layout();
     test_ncdf_copy();
     test_ncdf_structure();
     test_group("non-coeff cdf known values + offsets");

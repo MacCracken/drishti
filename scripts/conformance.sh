@@ -71,6 +71,10 @@ QM_CASES="qm15_176x144 qmon_176x144"
 # frame but save the INITIAL context (disable_frame_end_update_cdf 1). Every case also has a later frame
 # inheriting those CDFs (primary_ref_frame != NONE) — the only place a wrong save shows.
 CDF_CASES="mt2c_352x288 mt2x2_640x360 mt2csb128_640x360 mt4crt_640x360 fp_352x288 fp2c_352x288"
+# PALETTE (0.8.2), kind_WxH: the STOCK case first — default aomenc settings on ordinary content, where libaom's
+# screen-content detector turns allow_screen_content_tools on — then explicit screen tuning on synthetic content
+# (chroma palettes, delta-coded V colours, palettes inside inter frames). intrabc stays off: it is roadmap 0.8.4.
+PAL_CASES="palstock_640x360 palscreen_320x240 palbars_320x240"
 RAV1E_CASES="rav1e_352x288_s6_q100"
 SVT_CASES="svt_352x288_p8_crf35"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
@@ -95,6 +99,7 @@ skip_external() { # reason
     for c in $TSEG_CASES; do skip_case "$c" "$1"; done
     for c in $QM_CASES; do skip_case "$c" "$1"; done
     for c in $CDF_CASES; do skip_case "$c" "$1"; done
+    for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
@@ -825,6 +830,38 @@ cdfcase() { # name = KIND_WxH
 }
 echo "--- cross-frame CDF save: the context tile, and the initial context (frame-parallel); every frame hard ---"
 for c in $CDF_CASES; do cdfcase "$c"; done
+palcase() { # name = KIND_WxH (6 frames)
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=6 src="mandelbrot" args=""
+    case "$kind" in
+        palstock)  ;;   # NOTHING added: the encode a user gets by default
+        palscreen) src="testsrc2"; args="--tune-content=screen --enable-intrabc=0" ;;
+        palbars)   src="smptehdbars"; args="--tune-content=screen --enable-intrabc=0" ;;
+        *)         echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w $w -h $h --i420 --cpu-used=8 --end-usage=q --cq-level=30 --limit="$fr" $args \
+        --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local probe; probe=$(./build/drishti-vector-probe 2>&1)
+    if ! echo "$probe" | grep -q 'allow_screen_content_tools=1'; then
+        echo "  $n: SETUP FAILED (no frame allows screen-content tools — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    if echo "$probe" | grep -q 'allow_intrabc=1'; then
+        echo "  $n: SETUP FAILED (a frame uses intrabc — roadmap 0.8.4, not this case)"; fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
+echo "--- palette (allow_screen_content_tools; the stock default encode first); every frame hard ---"
+for c in $PAL_CASES; do palcase "$c"; done
 echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); every frame hard ---"
 for c in $RAV1E_CASES; do rav1ecase "$c"; done
 for c in $SVT_CASES; do svtcase "$c"; done
