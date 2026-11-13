@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-13
+
+**The first AV1 batch release: no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset, on a gate that
+cannot score a non-run as a pass.** Ten bites, listed below newest first:
+- **The gate:** a missing fixture FAILS, and skipped cases are counted.
+- **Delta-q / delta-lf**, per superblock, on both lanes.
+- **Block-level lossless** from `LosslessArray[segment_id]`.
+- **The intra-in-inter `tx_depth` context** (the misfiled "segmentation divergence").
+- **Segmentation, every map config and every feature:** temporal, copied, inherited, `SEG_LVL_ALT_LF`, `SEG_LVL_SKIP`.
+- **Quantizer matrices REJECT** where they apply, instead of decoding silently wrong.
+- **Multi-tile streams:** the context tile, and the shared `REF0S` grid (an uninitialised-pointer write).
+- **Bounded cdef fills.**
+- **Palette mode**, which closes the stock default encode that libaom's screen-content detector flags.
+
+`drishti_version()` returns **8002**.
+
+`make conformance` is **214 matched / 4 known-gap / 0 regressed / 0 skipped**, up from 33 at 0.8.1:
+- the first non-libaom streams (rav1e, SVT-AV1);
+- multi-tile, frame-parallel, temporal-segmentation, ROI-skip and palette streams;
+- the 4 known gaps are the `--enable-qm=1` frames, held as REJECTED until 0.8.4 implements quantizer matrices.
+
+**Gates:** 39 suites, **30,872** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green; all three programs build.
+
+What a stock encoder can still produce that drishti rejects needs a non-default flag: `--enable-qm=1` and
+screen-tuned keyframes using intra block copy (both 0.8.4).
+
 ### Added — 0.8.2 bite 10: palette mode (screen-content tools), both lanes; the 0.8.2 acceptance line now holds
 
 **`allow_screen_content_tools` no longer rejects.** libaom's default screen-content detector turns it on for

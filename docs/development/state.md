@@ -6,6 +6,26 @@
 
 ## Version
 
+**0.8.2** — cut 2026-11-13, not yet tagged (user's git). **The first AV1 batch release: no `DR_ERR_UNSUPPORTED`
+on a stock `aomenc` stream at any preset, on a gate that cannot score a non-run as a pass.** Ten bites, listed
+newest first in the CHANGELOG:
+- the gate hardening;
+- delta-q / delta-lf;
+- block-level lossless;
+- the intra-in-inter `tx_depth` context;
+- every segmentation map config and feature;
+- the quantizer-matrix REJECT;
+- multi-tile decoding (the context tile; the shared `REF0S` grid);
+- bounded cdef fills;
+- palette mode (the stock default encode libaom's screen-content detector flags).
+
+`drishti_version()` = 8002.
+
+**ALL gates green:** 39 suites with **30,872** suite + **7,410** fuzz assertions, bench, vet, lint, fmt-check,
+version-check, `distlib --check`, and `make conformance` at **214 matched / 4 known-gap / 0 regressed / 0
+skipped** (was 33). The 4 known gaps are `--enable-qm=1` frames, held as clean rejects. The new module
+`src/av1_palette.cyr` makes 41 modules.
+
 **0.8.1** — cut 2026-11-13, not yet tagged (user's git). **Toolchain patch: cyrius 6.7.9 -> 6.7.18, and
 `lib/` re-synced to the 6.7.18 bundled snapshot** (plain `cyrius lib sync --full`; no `--relock` this
 time, because 6.7.18 refuses the build BEFORE touching the lock when the pin moved and `lib/` is stale).
@@ -1709,15 +1729,18 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.8.1; AV1 decode unchanged since 0.7.129).** **`make conformance` is 33 matched
-> / 0 KNOWN-GAP / 0 regressed.**
-> Every case in the gate — all eight published libaom vectors, the generated corpus WITH and
-> WITHOUT loop filters, the odd-MI geometries, the 128-superblock reproducers and a committed
-> 6-frame inter stream — is BIT-EXACT against `aomdec`, keyframes and INTER frames alike. There
-> are no xfails left in the harness.
+> **Where we are (0.8.2, the first AV1 batch, cut).** **`make conformance` is 214 matched / 4 KNOWN-GAP / 0
+> regressed / 0 skipped.** Every hard case is BIT-EXACT against `aomdec`, with dav1d as a tiebreak. That covers:
+> - the eight published libaom vectors;
+> - the generated corpus and the odd-MI geometries;
+> - libaom streams for delta-q / delta-lf, mixed lossless, every segmentation config, multi-tile,
+>   frame-parallel, realtime ROI-skip and palette;
+> - rav1e and SVT-AV1 streams.
+>
+> The 4 known gaps are `--enable-qm=1` frames that must REJECT (quantizer matrices are 0.8.4).
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
-> HONEST STATUS block and the batched release plan (0.8.2 → 0.8.11).
+> HONEST STATUS block and the batched release plan (0.8.3 → 0.8.11).
 >
 > **THE ONE HABIT THAT MATTERS, and 0.7.129 is the proof.** drishti's own round-trips and
 > hand-written oracles SHARE the implementation's reading of the spec, so they cannot catch a
@@ -1751,9 +1774,8 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   * An encoder flag that changes the BITSTREAM is not a controlled experiment. Check the stream
 >     md5 before concluding anything from `--enable-X=0`.
 >
-> **The next release is 0.8.2: "no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any
-> preset, on a gate that cannot score a non-run as a pass"** (see the roadmap table for the full
-> batch). **Done so far (unreleased, CHANGELOG):**
+> **0.8.2 shipped: "no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset, on a gate that
+> cannot score a non-run as a pass"** (the roadmap table has the batch). **What it contains:**
 > - **the gate:** `make conformance` exits 0 only when every case ran fresh and matched, 2 when
 >   anything was skipped;
 > - **per-superblock delta-q / delta-lf, both lanes:** libaom delta streams are bit-exact on every
@@ -1792,10 +1814,17 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - **the cdef fill loops are bounded** (`av1_cdef_fill`, both lanes): memory-safe on their own, no longer
 >   only by the forced-partition invariant. Output-neutral: `make conformance` stays 196 / 4 / 0 / 0.
 >
-> **The 0.8.2 batch is complete**, palette pulled in from 0.8.4 so the acceptance line holds: the stock default
-> encode that libaom's screen-content detector flags now decodes. What a stock encoder can still produce and
+> Palette was pulled in from 0.8.4 so the acceptance line holds. What a stock encoder can still produce and
 > drishti rejects needs a non-default flag: `--enable-qm=1` (quantizer matrices) and `--tune-content=screen`
-> keyframes using intrabc — both 0.8.4.
+> keyframes using intrabc, both 0.8.4.
+>
+> **NEXT: 0.8.3, "real streams in every shape"** (roadmap table). That means long GOPs, `show_existing_frame`,
+> switch frames, the full 7.21 reload and the DPB under real refresh patterns. It also includes the filed odd-MI
+> inter divergence: 160x136 at `--lag-in-frames=19`, frame 3, chroma, 1 LSB, bottom rows, MiRows % 4 == 2.
+> Its symbols match libaom exactly, so it is a RECONSTRUCTION bug.
+>
+> **Harness limit to know:** `programs/conformance.cyr` decodes at most 9 temporal units
+> (`CONF_MAX_FRAMES`). Long GOPs need that raised first.
 >
 > **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).
