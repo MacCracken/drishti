@@ -71,5 +71,11 @@ keep in sync.
   then an audit arc (0.11.x) and a freeze/docs arc (0.12.x); a cut
   ships whatever bites landed. Per-family phase plans live in
   [`roadmap.md`](../development/roadmap.md).
+  *Amended 2026-11-13:* the decision stands, the numbers moved. AV1
+  overran 0.7.x and closes in 0.8.x, so every later arc shifted one
+  minor (H.264 0.9.x, H.265 0.10.x, VP8/VP9 0.11.x, audit 0.12.x,
+  freeze/docs 0.13.x). "A cut ships whatever bites landed" became one
+  batch per release, and AV1's close-out is capped at a dozen releases
+  (roadmap § *How releases are cut*).
 - The registry's *Video Codec Projects* table collapses to a single
   `drishti` row (updated in agnosticos alongside this scaffold).

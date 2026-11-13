@@ -14561,7 +14561,7 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
 # fh the loop-filter params. isIntra / the 7.14.5 reference and mode deltas are read PER MI
 # (REF0S + YModes) as of 0.7.129 — this used to hardcode isIntra = 1 and ref = INTRA_FRAME,
 # which filtered every block of every frame at the intra level. Per-block delta_lf is still
-# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.7.130).
+# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.8.2).
 # ================================================================
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
@@ -19057,7 +19057,7 @@ fn av1_find_warp_samples(ctx, ws, mv_row, mv_col): i64 {
 # oracle is scripts/refs/warp_estimation_ref.py. Reuses dr_floor_log2 (bits.cyr),
 # av1_round2 / av1_round2_signed / av1_iabs / av1_clip3 / AV1_WARPEDMODEL_PREC_BITS.
 #
-# NOT modelled here (roadmap.md "warp" — deferred to a conformance-vector bite, being
+# NOT modelled here (roadmap.md 0.8.5 — deferred to a conformance-vector bite, being
 # un-witnessable by a self-consistent test): the libaom LS_MAT_MIN/MAX accumulator
 # clamp (existence + bounds unverified) and the shear-realizability rejection
 # (get_shear_params ~7.11.3.6 — a SEPARATE process run AFTER this one).
@@ -25426,7 +25426,7 @@ fn h264_ps_is_high_profile(profile_idc): i64 {
 
 # Skip one scaling_list() of `size` entries (16 for the 4x4 lists,
 # 64 for 8x8) — spec 7.3.2.1.1.1. We only SKIP in 0.7.0 (the lists
-# feed dequant, which lands with the 0.8.x transform milestone), but
+# feed dequant, which lands with the 0.9.x transform milestone), but
 # skipping still has to walk the exact syntax: delta_scale symbols
 # stop as soon as nextScale hits 0 ("use default" signal).
 # Returns DR_OK; DR_ERR_TRUNCATED / DR_ERR_BAD_VLC from the reader;
@@ -25559,7 +25559,7 @@ fn h264_sps_parse(rbsp, len, out_err): i64 {
 
     # pic_order_cnt_type ue(v), range [0, 2]. Type 1 (expected-delta
     # POC) is DR_ERR_UNSUPPORTED in 0.7.0 — vanishingly rare in real
-    # streams; support is a 0.8.x slice-header-lane item.
+    # streams; support is a 0.9.x slice-header-lane item.
     var poc_type = 0;
     rc = dr_ue_read(br, &poc_type);
     if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
@@ -25722,7 +25722,7 @@ fn h264_sps_height(sps): i64 { return load64(sps + 216); }
 # through redundant_pic_cnt_present_flag. The optional tail
 # (transform_8x8_mode_flag / pic_scaling_matrix /
 # second_chroma_qp_index_offset, gated on more_rbsp_data()) is a
-# 0.8.x High-profile item and is left unread.
+# 0.9.x High-profile item and is left unread.
 # ================================================================
 
 # Parse a PPS RBSP (rbsp[0..len)). Returns an H264Pps record, or 0
@@ -27498,7 +27498,7 @@ fn vp8_write_frame_hdr(h, out_len): i64 {
 #
 # Parsing STOPS after render_size() on the keyframe path — the rest of
 # uncompressed_header() (refresh flags, loop-filter/quant/segmentation/
-# tile syntax, header_size_in_bytes) is the 0.10.x VP9-keyframe-decode
+# tile syntax, header_size_in_bytes) is the 0.11.x VP9-keyframe-decode
 # milestone. bits_consumed tells the caller exactly where this parse
 # stopped. Inter-frame headers (frame_type == 1) stop right after
 # error_resilient_mode for the same reason.

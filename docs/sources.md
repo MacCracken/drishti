@@ -85,7 +85,7 @@ cross-checks — multiple of them, never a single source
 - **ITU-T Rec. H.265 (HEVC)** — authoritative. Sections used at 0.7.0: 7.3.1.2 / 7.4.2.2 (two-byte NAL unit header semantics), Table 7-1 (nal_unit_type), Annex B B.2.2 (byte-stream NAL unit decoding), 7.3.1.1 / 7.4.2 (emulation_prevention_three_byte), 7.3.3 / 7.4.4 (profile_tier_level incl. the 43+1 reserved constraint tail), 7.3.2.1 / 7.4.3.1 (VPS), 7.3.2.2 / 7.4.3.2.1 (SPS + conformance-window crop math), 7.3.2.3 / 7.4.3.3.1 (PPS), Table 6-1 (SubWidthC / SubHeightC), A.4.1 / A.4.2 + Table A.8 (level limits — the dimension bomb guard).
 - **libde265** (`nal.cc`, `nal-parser.cc`, `vps.cc`, `sps.cc`, `pps.cc`) — cross-check for NAL header layout, EPB behavior (incl. trailing-EPB strip), and parameter-set field ordering. The library this family replaces.
 - **ffmpeg** (`libavcodec/h2645_parse.c`, `hevc_ps.c`, `hevc_parse.c`) — second cross-check for Annex-B scanning and PS parsing; drishti is deliberately stricter (rejects non-zero bytes before start codes instead of resyncing).
-- **HM reference model** — planned conformance-vector source for the 0.9.x battery (not yet consumed).
+- **HM reference model** — planned conformance-vector source for the 0.10.x battery (not yet consumed).
 - Real-stream sanity anchor: parameter-set headers pack to the canonical on-wire bytes `40 01` (VPS) / `42 01` (SPS) / `44 01` (PPS), asserted in the suite.
 
 ## VP8/VP9

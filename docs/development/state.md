@@ -1397,9 +1397,10 @@ on the inter track: the INTER TILE DECODE that lets
 `av1_decode_stream` decode a genuine inter frame
 referencing the DPB through the MC driver, then the temporal scan (needs the DPB's deferred saved MVs) +
 scaled-reference/BILINEAR MC + OBMC/warp; plus film-grain synthesis; then conformance + the encode-lane
-completion. The remaining distance to 1.0 is inter + conformance + the encode-lane completion (finishing
-0.7.x), then the other per-codec arcs (0.8.x H.264 → 0.10.x VP8/VP9) + audit (0.11.x) + freeze/docs
-(0.12.x). See [`CHANGELOG.md`](../../CHANGELOG.md) + [`roadmap.md`](roadmap.md).
+completion. The remaining distance to 1.0: AV1 closes in 0.8.x (ten batches, 0.8.2 → 0.8.11, decode
+then encode), then the other per-codec arcs (0.9.x H.264 → 0.11.x VP8/VP9), audit (0.12.x) and
+freeze/docs (0.13.x), each batched. See [`CHANGELOG.md`](../../CHANGELOG.md)
++ [`roadmap.md`](roadmap.md).
 
 > **Start here if you are new**: [`docs/guides/verification.md`](../guides/verification.md)
 > — the verification loop every AV1 bite follows and, more importantly, the failure modes
@@ -1707,14 +1708,15 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.7.129).** **`make conformance` is 33 matched / 0 KNOWN-GAP / 0 regressed.**
+> **Where we are (0.8.1; AV1 decode unchanged since 0.7.129).** **`make conformance` is 33 matched
+> / 0 KNOWN-GAP / 0 regressed.**
 > Every case in the gate — all eight published libaom vectors, the generated corpus WITH and
 > WITHOUT loop filters, the odd-MI geometries, the 128-superblock reproducers and a committed
 > 6-frame inter stream — is BIT-EXACT against `aomdec`, keyframes and INTER frames alike. There
 > are no xfails left in the harness.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
-> HONEST STATUS block and the batched release plan (0.7.130 → 0.7.142).
+> HONEST STATUS block and the batched release plan (0.8.2 → 0.8.11).
 >
 > **THE ONE HABIT THAT MATTERS, and 0.7.129 is the proof.** drishti's own round-trips and
 > hand-written oracles SHARE the implementation's reading of the spec, so they cannot catch a
@@ -1748,18 +1750,24 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   * An encoder flag that changes the BITSTREAM is not a controlled experiment. Check the stream
 >     md5 before concluding anything from `--enable-X=0`.
 >
-> **The next release is 0.7.130 — "no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any
-> preset"** (see the roadmap table for the full batch): per-superblock delta-q / delta-lf on both
-> lanes, block-level lossless from `LosslessArray[segment_id]`, temporal segmentation
-> (`PrevSegmentIds` + the DPB-saved map), and the cross-frame CDF-inheritance follow-ons
-> (`context_update_tile_id` for multi-tile). None of these needs diagnosis — they are all
-> implementation against a clean gate, which is the best position this arc has been in.
+> **The next release is 0.8.2: "no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any
+> preset, on a gate that cannot score a non-run as a pass"** (see the roadmap table for the full
+> batch). **Start with the gate**, since every later outcome is measured by it: today the
+> conformance harness still scores several non-runs as passes (a missing fixture, a failed vector
+> fetch). Then:
+> - per-superblock delta-q / delta-lf on both lanes;
+> - block-level lossless from `LosslessArray[segment_id]`;
+> - temporal segmentation (`PrevSegmentIds` + the DPB-saved map);
+> - the cross-frame CDF-inheritance follow-ons (`context_update_tile_id` for multi-tile);
+> - bounding the `av1_read_cdef` / `av1_write_cdef` fill loops, which are unbounded on both axes
+>   and safe today only by the forced-partition invariant.
 >
-> **Known-and-tracked, not blocking 0.7.130:** the encode lane has NEVER run at 128 superblocks
-> (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted);
-> `av1_read_cdef` / `av1_write_cdef` fill loops are unbounded on both axes, safe today only by the
-> forced-partition invariant; and the conformance harness still scores several non-runs as passes
-> (a missing fixture, a failed vector fetch). All three are in the roadmap's Phase G.
+> None of these needs diagnosis. They are all implementation against a clean gate, which is the
+> best position this arc has been in.
+>
+> **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
+> (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).
+> It is scheduled in 0.8.6, where the encoder first runs.
 
 The **intra still-picture decode MILESTONE is COMPLETE (0.7.25)** — profile-0
 AV1 keyframes decode end-to-end to pixels. Per-release history is in

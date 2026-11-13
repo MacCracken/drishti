@@ -15,14 +15,14 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 Per-module surface: [`docs/development/state.md`](docs/development/state.md). Only AV1 has
 gone past the header layer so far — the other three are at their 0.7.0 baseline, awaiting
-their arcs (0.8.x–0.10.x).
+their arcs (0.9.x–0.11.x).
 
 Shared core (`src/drishti.cyr`, `src/bits.cyr`, `src/ivf.cyr`): error
 records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.8.1 (AV1: **`make conformance` is 33 matched / 0 KNOWN-GAP / 0 regressed** — every case in the gate is BIT-EXACT against libaom, keyframes and INTER frames alike. All eight published conformance vectors, the generated corpus with and without loop filters, and the committed reproducers all match `aomdec` byte for byte. 0.7.129 got there by fixing five defects that had been mis-filed for releases as "inter reconstruction rounding" and "inter entropy desync": the temporal-MV scan had NEVER RUN (`av1_mvctx_set_use_ref_frame_mvs` had zero callers); the deblocker filtered every block of every frame at the INTRA level; saved CDF bundles carried their adaptation counters across frame boundaries; `warpEstimation`'s least-squares constants were wrong (`LS_STEP` 2 instead of 8) — as was the Python reference port that generated its known-answers, so 43 assertions had agreed with a wrong decoder; and `LoopfilterTxSizes` was stamped uniformly across var-tx blocks. 8/10/12-bit, multi-tile, 64x64 and 128x128 superblocks, superres, segmentation, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.7.142 — no "% done" is printed)
+## Status — 0.8.1 (AV1: **`make conformance` is 33 matched / 0 KNOWN-GAP / 0 regressed** — every case in the gate is BIT-EXACT against libaom, keyframes and INTER frames alike. All eight published conformance vectors, the generated corpus with and without loop filters, and the committed reproducers all match `aomdec` byte for byte. 0.7.129 got there by fixing five defects that had been mis-filed for releases as "inter reconstruction rounding" and "inter entropy desync": the temporal-MV scan had NEVER RUN (`av1_mvctx_set_use_ref_frame_mvs` had zero callers); the deblocker filtered every block of every frame at the INTRA level; saved CDF bundles carried their adaptation counters across frame boundaries; `warpEstimation`'s least-squares constants were wrong (`LS_STEP` 2 instead of 8) — as was the Python reference port that generated its known-answers, so 43 assertions had agreed with a wrong decoder; and `LoopfilterTxSizes` was stamped uniformly across var-tx blocks. 8/10/12-bit, multi-tile, 64x64 and 128x128 superblocks, superres, segmentation, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (30,301 suite assertions + 7,410 fuzz
@@ -122,22 +122,28 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   encoder, bounds-hardened), VP8 frame framing + byte-exact writer,
   VP9 uncompressed header
 
-A profile-0 AV1 **keyframe** decodes end-to-end to pixels — single- or
-multi-tile, with or without superres, at 8/10/12-bit — through the full
-in-loop filter chain. That is where the decoder actually is: a complete
-**keyframe** decoder. The inter-prediction machinery (MC, all four warp
-forms, OBMC, compound, temporal MVs, scaled references, BILINEAR) is built
-as **primitives** but **no real inter frame decodes yet** — a non-key frame
-rejects at cross-frame CDF inheritance and the intra-block fork. Conformance
-vectors and a real encoder have **not been started** (what ships as "encode"
-is a plan-driven bitstream writer, not an encoder). The honest, phased,
-checkable breakdown — and why no "% done" is printed — is in
+AV1 decodes end-to-end to pixels, **keyframes and inter frames alike**, and
+`make conformance` is **33 matched / 0 known-gap / 0 regressed** against
+`aomdec`. The gate covers all eight published libaom vectors, a generated
+corpus with and without loop filters, and committed reproducers.
+
+That gate covers profile-0, 8-bit, 4:2:0. Beyond it:
+- 10/12-bit and 4:2:2/4:4:4 are parsed but not yet checked end-to-end;
+- palette, intra block copy, film grain, scalability, large-scale tile and
+  delta-q / delta-lf still reject;
+- there is **no encoder** yet: what ships as "encode" is a plan-driven
+  bitstream writer.
+
+The honest, checkable breakdown, and why no "% done" is printed, is in
 [`docs/development/roadmap.md`](docs/development/roadmap.md) under
-**HONEST STATUS**. The road to 1.0 is **one minor arc per codec** —
-**0.7.x** brings AV1 to 100%, **0.8.x** H.264, **0.9.x** H.265,
-**0.10.x** VP8/VP9 — then a cross-family **audit** arc (0.11.x) and a
-**freeze/documentation** arc (0.12.x) before the 1.0.0 close-out.
-Encode lanes grow from the writer seeds already shipped. Full plan:
+**HONEST STATUS**.
+
+The road to 1.0 is **one minor arc per codec**, in batched releases. AV1
+ran **0.7.x** and closes in **0.8.x** (ten batches
+left, 0.8.2 → 0.8.11). Then **0.9.x** is H.264, **0.10.x** H.265 and
+**0.11.x** VP8/VP9, followed by a cross-family **audit** arc (0.12.x) and a
+**freeze/documentation** arc (0.13.x) before the 1.0.0 close-out. Encode
+lanes grow from the writer seeds already shipped. Full plan:
 [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Build

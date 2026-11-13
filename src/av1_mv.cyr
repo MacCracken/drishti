@@ -1851,7 +1851,7 @@ fn av1_find_warp_samples(ctx, ws, mv_row, mv_col): i64 {
 # oracle is scripts/refs/warp_estimation_ref.py. Reuses dr_floor_log2 (bits.cyr),
 # av1_round2 / av1_round2_signed / av1_iabs / av1_clip3 / AV1_WARPEDMODEL_PREC_BITS.
 #
-# NOT modelled here (roadmap.md "warp" — deferred to a conformance-vector bite, being
+# NOT modelled here (roadmap.md 0.8.5 — deferred to a conformance-vector bite, being
 # un-witnessable by a self-consistent test): the libaom LS_MAT_MIN/MAX accumulator
 # clamp (existence + bounds unverified) and the shear-realizability rejection
 # (get_shear_params ~7.11.3.6 — a SEPARATE process run AFTER this one).

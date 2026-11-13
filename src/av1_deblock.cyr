@@ -242,7 +242,7 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
 # fh the loop-filter params. isIntra / the 7.14.5 reference and mode deltas are read PER MI
 # (REF0S + YModes) as of 0.7.129 — this used to hardcode isIntra = 1 and ref = INTRA_FRAME,
 # which filtered every block of every frame at the intra level. Per-block delta_lf is still
-# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.7.130).
+# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.8.2).
 # ================================================================
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);

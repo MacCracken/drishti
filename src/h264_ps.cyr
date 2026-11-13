@@ -109,7 +109,7 @@ fn h264_ps_is_high_profile(profile_idc): i64 {
 
 # Skip one scaling_list() of `size` entries (16 for the 4x4 lists,
 # 64 for 8x8) — spec 7.3.2.1.1.1. We only SKIP in 0.7.0 (the lists
-# feed dequant, which lands with the 0.8.x transform milestone), but
+# feed dequant, which lands with the 0.9.x transform milestone), but
 # skipping still has to walk the exact syntax: delta_scale symbols
 # stop as soon as nextScale hits 0 ("use default" signal).
 # Returns DR_OK; DR_ERR_TRUNCATED / DR_ERR_BAD_VLC from the reader;
@@ -242,7 +242,7 @@ fn h264_sps_parse(rbsp, len, out_err): i64 {
 
     # pic_order_cnt_type ue(v), range [0, 2]. Type 1 (expected-delta
     # POC) is DR_ERR_UNSUPPORTED in 0.7.0 — vanishingly rare in real
-    # streams; support is a 0.8.x slice-header-lane item.
+    # streams; support is a 0.9.x slice-header-lane item.
     var poc_type = 0;
     rc = dr_ue_read(br, &poc_type);
     if (rc != DR_OK) { return h264_ps_fail(out_err, rc); }
@@ -405,7 +405,7 @@ fn h264_sps_height(sps): i64 { return load64(sps + 216); }
 # through redundant_pic_cnt_present_flag. The optional tail
 # (transform_8x8_mode_flag / pic_scaling_matrix /
 # second_chroma_qp_index_offset, gated on more_rbsp_data()) is a
-# 0.8.x High-profile item and is left unread.
+# 0.9.x High-profile item and is left unread.
 # ================================================================
 
 # Parse a PPS RBSP (rbsp[0..len)). Returns an H264Pps record, or 0

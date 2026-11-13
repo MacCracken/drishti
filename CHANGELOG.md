@@ -4,6 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — roadmap re-planned: AV1 closes in 0.8.x, in a dozen releases
+
+- **Why:** the AV1 plan of record (14 releases, 0.7.129 → 0.7.142) lost its release numbers to
+  four toolchain cuts (0.7.130, 0.7.131, 0.8.0, 0.8.1) before any of its open batches shipped.
+- **The 13 open releases are consolidated into ten batches, 0.8.2 → 0.8.11.** Four close decode
+  (0.8.2–0.8.5), and six build the encoder (0.8.6–0.8.11). The 0.8.x line is capped at a dozen
+  releases, 0.8.0–0.8.11.
+- **Merged:**
+  - the real-GOP and geometry/format-matrix batches (now 0.8.3);
+  - screen content with film grain, scalability and large-scale tile (now 0.8.4);
+  - round-trip clean with the line close (now 0.8.11).
+- **Moved up to 0.8.2:** conformance-harness hardening and the cdef fill-loop bounds, because
+  every later outcome is measured by the gate.
+- **Moved to 0.8.6, where the encoder first runs:** encode-lane 128-SB coverage.
+- **Added to 0.8.5:** settle the warp `LS_MAT` accumulator clamp against the instrumented libaom.
+  The 0.7.x log had left it "for the conformance era".
+- **Every later arc moves one minor:** H.264 0.9.x, H.265 0.10.x, VP8/VP9 0.11.x, audit 0.12.x,
+  freeze/docs 0.13.x, each batched.
+- **New roadmap section, *How releases are cut*:**
+  - a release is a batch with one outcome;
+  - AV1's close-out is capped at a dozen, and going past it is the user's call.
+- **Kept readable:** the 0.7.x build log moved verbatim to an appendix. The retired-code legend
+  and an old-to-new release mapping stay, so older references still resolve.
+- **Retired:** the "Moving the cyrius pin to 6.6.5 / 6.6.6" sections, obsolete at pin 6.7.18.
+  Their one live caution (CI must be able to write `cyrius.lock`) moves to § Toolchain.
+- **Cross-references retargeted** to the new numbers: `src/av1_deblock.cyr`, `src/av1_mv.cyr`,
+  `src/h264_ps.cyr` (×3), `src/vp9.cyr`, `docs/sources.md`, the README, and `state.md`'s arc
+  summary and handoff block. ADR 0001 gains a dated amendment. All the source edits are
+  comment-only, and the smoke binary is byte-identical.
+- **README status paragraph corrected.** It still said no inter frame decodes and conformance had
+  not started, both false since 0.7.119–0.7.129.
+
 ## [0.8.1] - 2026-11-13
 
 Toolchain patch: **cyrius 6.7.9 → 6.7.18**, with `lib/` re-synced to the 6.7.18

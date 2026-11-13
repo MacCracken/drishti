@@ -5,54 +5,47 @@
 >
 > **Shape of the repo**: ONE repo, codec families as flat `[lib]`
 > modules (the shravan model — [ADR 0001](../adr/0001-one-repo-module-per-codec.md)).
-> The path to 1.0 is **one minor arc per codec** — each family gets a
-> full minor line to go from "bitstream/header layer" (all shipped at
-> **0.7.0**) to **100%** (decode conformance-clean + encode
-> round-trip-clean, where encode is in charter) — followed by a
-> cross-family **audit** arc and a **freeze/documentation** arc before
-> the 1.0.0 close-out.
+> The path to 1.0 is **one minor arc per codec**. Each family takes its
+> line from the "bitstream/header layer" (all shipped at **0.7.0**) to
+> **100%**: decode conformance-clean, plus encode round-trip-clean where
+> encode is in charter. A cross-family **audit** arc and a
+> **freeze/documentation** arc follow, then the 1.0.0 close-out.
+>
+> AV1 is the exception that set the rules below. It ran the whole 0.7.x
+> line (132 releases) and closes in **0.8.x**, the live plan. The 0.7.x
+> build log is kept as an appendix at the end of this file.
 
-## Moving the cyrius pin to 6.6.5
+## How releases are cut — every arc, from 0.8.2 on
 
-⛔ Before bumping the pin to 6.6.5: cross-reference the four deferral
-notes that turn `make lint` (`Makefile:76`) red. 6.6.5's cyrlint folds
-case, so `Deferred` and `DEFERRED` now count.
+AV1 took 132 releases to reach a conformance-clean decoder because the unit of release was one
+item. These rules exist so no arc does that again.
 
-cyrius 6.6.5 is not tagged yet. Nothing below can land against the pin
-until it is, except items marked **(can land now)**. The pin is 6.6.2
-today, and this section lists only what 6.6.5 itself changes.
-
-- [ ] ⛔ Put a tracking pointer (`roadmap.md`, CHANGELOG, an issue) on a
-      line the phrase itself touches, or mark prose that is not a
-      deferral `#skip-lint`. A `(roadmap.md)` on the next line does not
-      track it. **(can land now)** — a same-line pointer or `#skip-lint`
-      does not depend on the toolchain.
-  - `src/av1_intermode.cyr:2642` — "Deferred features gate hard"; its
-    `(roadmap.md)` is on `:2644`.
-  - `src/av1_intermode.cyr:2663` — "the read is DEFERRED to the
-    inter_segment_id(0) call". Prose about read order.
-  - `src/av1_modeinfo.cyr:615` — "Deferred features
-    (segment/cdef/deltas/intrabc/palette) are elided".
-  - `src/av1_mv.cyr:1156` — "The TEMPORAL scan … is DEFERRED"; its
-    `(roadmap.md)` is on `:1157`.
-
-  See the cyrius CHANGELOG [6.6.5] entry "cyrlint read every rule ONE
-  PHYSICAL LINE at a time".
-- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved
-      SYS_UNLINKAT 35 → 263, so an un-re-vendored peer's sys_unlink would
-      run nanosleep.
+1. **A release is a BATCH** with ONE stated outcome. No release ships a single item.
+2. **The outcome is the acceptance test.** A release is done when its outcome is demonstrable
+   against a gate, not when its bullet list is ticked.
+3. **AV1's cap.** AV1's close-out is capped at a dozen releases, 0.8.0–0.8.11: scope moves
+   between its batches, and the count does not grow. Going past it is the user's decision,
+   recorded in the CHANGELOG, never a silent extra
+   patch.
+4. **A bite is committed when it is finished and green** (gates run, witness in place), and work
+   continues on the next bite of the same release. A bite is not a release.
+5. **No new labels.** Findings are named for what BREAKS ("inter-frame symbol desync"), not with
+   codes. The retired codes are decoded in the legend under § 0.8.x.
 
 ## The path to 1.0 — minor arc per codec
 
-| Arc | Owner | Target | Charter |
-|-----|-------|--------|---------|
-| **0.7.x** | **AV1** | decode + encode → 100% | replaces dav1d + rav1e |
-| **0.8.x** | **H.264/AVC** | decode + encode → 100% | replaces openh264 |
-| **0.9.x** | **H.265/HEVC** | decode → 100% | replaces libde265 (encode out of charter) |
-| **0.10.x** | **VP8/VP9** | decode + encode → 100% | replaces libvpx |
-| **0.11.x** | **Audit** | cross-family security + correctness | find → adversarially verify → harden |
-| **0.12.x** | **Freeze + docs** | API freeze, benchmarks, consumer | no behavior change |
-| **1.0.0** | **Close-out** | clean cut, all criteria green | — |
+| Arc | Owner | Target | Charter | Releases |
+|-----|-------|--------|---------|----------|
+| **0.7.x** | **AV1** | decode conformance-clean on the gate — **closed** | — | 0.7.0–0.7.131 (history) |
+| **0.8.x** | **AV1** | decode + encode → 100% | replaces dav1d + rav1e | **0.8.0–0.8.11** |
+| **0.9.x** | **H.264/AVC** | decode + encode → 100% | replaces openh264 | — |
+| **0.10.x** | **H.265/HEVC** | decode → 100% | replaces libde265 (encode out of charter) | — |
+| **0.11.x** | **VP8/VP9** | decode + encode → 100% | replaces libvpx | — |
+| **0.12.x** | **Audit** | cross-family security + correctness | find → adversarially verify → harden | — |
+| **0.13.x** | **Freeze + docs** | API freeze, benchmarks, consumer | no behavior change | — |
+| **1.0.0** | **Close-out** | clean cut, all criteria green | — | one |
+
+Every arc after AV1 moved one minor later when AV1's close-out moved into 0.8.x (2026-11-13).
 
 > **Why 0.7.0 as the baseline** (not 0.1.0): the shared substrate plus
 > every family's full bitstream/container/header layer is a large,
@@ -65,16 +58,16 @@ today, and this section lists only what 6.6.5 itself changes.
 
 - [ ] All four families at their charter target (AV1 dec+enc, H.264
       dec+enc, H.265 dec, VP8/VP9 dec+enc), each conformance-clean
-      (decode) / round-trip-clean (encode) — arcs 0.7.x–0.10.x
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — arc 0.11.x
+      (decode) / round-trip-clean (encode) — arcs 0.8.x–0.11.x
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — arc 0.12.x
 - [ ] Public API frozen — `docs/api.md`, every exported symbol
-      documented and tested — arc 0.12.x
-- [ ] Benchmarks captured (`docs/benchmarks.md`) — arc 0.12.x
+      documented and tested — arc 0.13.x
+- [ ] Benchmarks captured (`docs/benchmarks.md`) — arc 0.13.x
 - [ ] At least one downstream consumer green (tarang / tazama / jalwa /
-      aethersafta) — arc 0.12.x
+      aethersafta) — arc 0.13.x
 - [ ] CHANGELOG complete from 0.7.0 onward
 
-## 0.7.0 — baseline (done, this cut)
+## 0.7.0 — baseline (done)
 
 Shipped for all four families at once, so the arcs below start from a
 common floor:
@@ -121,63 +114,287 @@ Not its own arc; these land inside whichever codec arc first needs them:
 
 ---
 
-## 0.7.x — AV1 → 100% (decode + encode; replaces dav1d + rav1e) — see HONEST STATUS (no completion % — every one ever given here was wrong)
+## 0.7.x — AV1 to a conformance-clean decoder on the gate (closed: 0.7.0 → 0.7.131)
 
-> ### HONEST STATUS as of 0.7.129 — read this before believing any "nearly done"
+What the line delivered, measured: **`make conformance` is 33 matched / 0 KNOWN-GAP / 0 regressed
+as of 0.7.129.** That covers all eight published libaom vectors, the generated corpus with and
+without loop filters, the odd-MI geometries, the 128-superblock reproducers and a committed 6-frame
+inter stream. Every case is bit-exact against `aomdec`, keyframes and inter frames alike.
+
+0.7.130 and 0.7.131 were toolchain cuts (cyrius 6.4.78 → 6.6.2 → 6.6.20). No AV1 decode logic
+changed after 0.7.129: 0.7.131 only reworded comments and re-indented files.
+
+The build log is the **Appendix** at the end of this file, and the per-release detail is in
+[`CHANGELOG.md`](../../CHANGELOG.md).
+
+The unit was the problem, not the work. One item per release turned a large-but-finite job into
+132 releases; the rules at the top of this file are the correction.
+
+## 0.8.x — AV1 closes: decode + encode at charter, in a dozen releases (0.8.0 → 0.8.11)
+
+**This is the plan of record.** It replaces the 14-release plan (0.7.129 → 0.7.142), whose release
+numbers went to toolchain cuts before any of its open batches shipped. Only 0.7.129 of that plan
+was done. Everything else in it is here, consolidated from 13 open releases into 10.
+
+**The charter does not change and nothing is deferred out of this line.** `0.8.x` = AV1 decode
+conformance-clean **and** encode round-trip-clean, in twelve releases, 0.8.0 → 0.8.11. 0.8.0 and
+0.8.1 were toolchain-only (cyrius 6.7.9, 6.7.18), so **ten batches remain, 0.8.2 → 0.8.11**. Four
+close decode, and six build the encoder.
+
+> ### HONEST STATUS as of 0.8.1 — read this before believing any "nearly done"
 >
-> **There is no honest single completion number, and this doc will not print one.**
-> The metric used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**
-> — i.e. it went UP as work got done, because it was lowballed the whole time. The
-> low point literally wrote the entire remaining inter effort as "inter ~1 — just
-> scaled-ref MC", when no inter FRAME had ever decoded at all. Any "% done" or
-> "N patches left" in this arc's history was a guess, always optimistic, and is the
-> mechanism by which "nearly done" persisted for ~60 releases. What follows is only
-> what is CHECKABLE against code — decodes / rejects / diverges — so completeness is
-> judged from facts, not from a number. Ground truth:
+> Unchanged since 0.7.129. Every release since then was a toolchain cut (0.8.0 also widened
+> `drishti_version()`), and no AV1 decode logic changed.
+>
+> **There is no honest single completion number, and this doc will not print one.** The metric
+> used to be "patches remaining"; it went **~35–55 → ~15–30 → (real) ~90+**. It went UP as work got
+> done, because it was lowballed the whole time. The low point wrote the entire remaining inter
+> effort as "inter ~1 — just scaled-ref MC", when no inter FRAME had ever decoded at all. Any
+> "% done" or "N patches left" in this arc's history was a guess, always optimistic, and is how
+> "nearly done" persisted for ~60 releases. What follows is only what is CHECKABLE against code
+> (decodes / rejects / diverges), so completeness is judged from facts, not from a number.
 >
 > **DECODE — externally verified:** **`make conformance` is 33 matched / 0 KNOWN-GAP / 0
-> regressed as of 0.7.129.** Every case — all eight published libaom vectors, the generated
-> corpus with AND without loop filters, and the committed reproducers — is BIT-EXACT against
-> `aomdec`, keyframes and INTER frames alike. This is the only evidence in the arc that
-> drishti did not produce itself. 128x128 superblocks decode as of 0.7.126; the inter frames
-> became bit-exact in 0.7.129.
+> regressed.** Every case is BIT-EXACT against `aomdec`, keyframes and INTER frames alike. This is
+> the only evidence in the arc that drishti did not produce itself.
 >
-> **DECODE — what works:** profile-0 keyframe decode to pixels (intra prediction,
-> transforms, reconstruction, dequant, CDEF, deblock, loop restoration, superres),
-> 8/10/12-bit, multi-tile, 64x64 AND 128x128 superblocks. Inter frames decode
-> end-to-end from real bytes (0.7.119–0.7.125): motion, compound/backward refs,
-> cross-frame CDF inheritance, the intra-block fork inside an inter frame, and
-> segmentation (spatial config).
+> **DECODE — what works:**
+> - profile-0 keyframe decode to pixels: intra prediction, transforms, reconstruction, dequant,
+>   CDEF, deblock, loop restoration, superres;
+> - 8/10/12-bit, multi-tile, 64x64 AND 128x128 superblocks;
+> - inter frames end-to-end from real bytes (0.7.119–0.7.125): motion, compound/backward refs,
+>   cross-frame CDF inheritance, the intra-block fork inside an inter frame, and segmentation
+>   (spatial config).
 >
-> **DECODE — what is still WRONG, measured not guessed:** on the conformance gate, NOTHING —
-> as of 0.7.129 it is 33 matched / 0 known-gap / 0 regressed, every case bit-exact against
-> `aomdec`, keyframes and inter frames alike. That is the strongest statement this arc has
-> ever been able to make, and it is still bounded by what the gate COVERS: profile-0, 8-bit,
-> 4:2:0, the geometries and tools these streams exercise. 10/12-bit and 4:2:2/4:4:4 are
-> parsed and untested end-to-end; palette, intra block copy, film grain, scalability and
-> large-scale-tile still reject; delta-q / delta-lf still reject. The 0.7.130-0.7.135
-> releases below close those, and the CfL edge-chroma bug found in 0.7.128 is the standing
-> proof that a green gate measures the corpus, not the decoder.
+> **DECODE — what is still WRONG or missing, measured not guessed:** on the gate, NOTHING. That is
+> bounded by what the gate COVERS: profile-0, 8-bit, 4:2:0, and the geometries and tools these
+> streams exercise. Beyond it:
+> - 10/12-bit and 4:2:2/4:4:4 are parsed but untested end-to-end;
+> - palette, intra block copy, film grain, scalability and large-scale tile still reject;
+> - delta-q / delta-lf still reject.
 >
-> **ENCODE — planned as releases 0.7.136-0.7.141, not deferred:** there is **no encoder** yet.
-> What exists (`av1_encode_*`) is a **bitstream writer** that replays a caller-supplied
-> partition plan + residual. It has no forward transform, no quantiser, no mode
-> decision / RDO, no motion search, no rate control, and cannot even emit its own
-> sequence or frame headers (the tests hand-build every header bit). It cannot produce
-> a file any external decoder could open. It is the largest work left in this arc, and it is
-> scheduled: 0.7.136 emits the first standalone `aomdec`-readable file, 0.7.141 is round-trip
-> clean on both lanes. See the release table below.
+> Batches 0.8.2–0.8.5 close those. The CfL edge-chroma bug found in 0.7.128 is the standing proof
+> that a green gate measures the corpus, not the decoder.
 >
-> **CONFORMANCE:** the harness exists and is a gate (`make conformance`, Phase E1).
-> libaom encodes the stream and `aomdec` produces the reference pixels, so the
-> reference cannot collude with drishti's own reading of the spec — the blind spot
-> every prior gate had (`docs/guides/verification.md`). Current: **33 matched /
-> 0 KNOWN-GAP / 0 regressed** — EVERY case is a hard gate, keyframes and inter frames
-> alike, and there are no xfails left anywhere in the harness.
+> **ENCODE — planned as batches 0.8.6–0.8.11, not deferred:** there is **no encoder** yet. What
+> exists (`av1_encode_*`) is a **bitstream writer** that replays a caller-supplied partition plan +
+> residual. It has no forward transform, quantiser, mode decision / RDO, motion search or rate
+> control. It cannot even emit its own sequence or frame headers (the tests hand-build every header
+> bit), so it cannot produce a file an external decoder could open. It is the largest work left, and
+> it is scheduled: 0.8.6 emits the first standalone `aomdec`-readable file, and 0.8.11 is round-trip
+> clean on both lanes.
 >
-> The properly-phased, honestly-sized remaining work is at the END of this section
-> ("### The honest remaining work"), not in the optimistic bite-prose that follows.
+> **CONFORMANCE:** the harness exists and is a gate (`make conformance`). libaom encodes the stream
+> and `aomdec` produces the reference pixels, so the reference cannot collude with drishti's own
+> reading of the spec. Every prior gate had that blind spot (`docs/guides/verification.md`). There
+> are no xfails left anywhere in the harness. It can still score a non-run as a pass, though, which
+> is why 0.8.2 hardens it first.
+>
 > See [[av1-decode-remaining-tracks]].
+
+**Order of the batches.** The gate is hardened first, because every later outcome is measured by
+it. Decode then widens in three steps: what a stock `aomenc` stream uses, then every stream shape,
+then every tool. Decode closes on the full published corpus before encode starts.
+
+#### Decode — 0.8.2 to 0.8.5
+
+| Release | Outcome (the acceptance test) | Batched work |
+|---|---|---|
+| **0.8.2** | **No `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset, on a gate that cannot score a non-run as a pass.** | **The gate first:** a missing fixture FAILS; a `skipped=` counter; a failed vector fetch is not a pass. Then per-superblock delta-q / delta-lf on both lanes; block-level lossless from `LosslessArray[segment_id]`; temporal segmentation (`PrevSegmentIds` + the DPB-saved map); the cross-frame CDF-inheritance follow-ons (`context_update_tile_id` multi-tile save, the `disable_frame_end_update_cdf` witness); bound the `av1_read_cdef` / `av1_write_cdef` fill loops, which are safe today only by the forced-partition invariant |
+| **0.8.3** | **Real streams in every shape: a long GOP and the full geometry/format matrix decode bit-exact vs `aomdec`**, as a standing matrix in `make conformance`. | GOPs beyond 4 frames, `show_existing_frame`, switch frames, the full 7.21 reference reload, the DPB under real refresh patterns, multi-tile inter frames; 4:2:2 / 4:4:4 / monochrome end-to-end; 10/12-bit vs `aomdec`; a dimension sweep (odd MI, non-multiple-of-8, superres, scaled refs) wired into the gate, not hand-run |
+| **0.8.4** | **Every AV1 coding tool decodes; any reject left is deliberate and documented.** | Screen content: palette (5.11.46) and intra block copy (5.11.6), as `--tune-content=screen` rejects wholesale today; film-grain synthesis (7.18.3, parsed and discarded today); scalability / operating-point select + `drop_obu`; large-scale tile / `OBU_TILE_LIST` |
+| **0.8.5** | **DECODE IS CONFORMANCE-CLEAN: the FULL published `aom-test-data` corpus decodes every frame bit-exactly**, and the decode path is fuzzed and fault-injected. | The complete published corpus gated, every frame, not just keyframes; the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection; corpus-guided fuzzing; restore the missing `scripts/refs/` MC generators; settle the warp `LS_MAT` accumulator clamp against the instrumented libaom in `ref/` (whether it exists, and its bounds; `src/av1_mv.cyr` leaves it unmodelled) |
+
+#### Encode — 0.8.6 to 0.8.11
+
+The `av1_encode_*` surface today is a plan-replay bitstream WRITER. Every syntax element has a
+working inverse, and every one is round-trip tested: that is the foundation, and it is real. What
+is missing is everything that DECIDES: forward transform, quantiser, mode decision, motion search,
+rate control and header emission. These are the biggest releases in the table, sized that way on
+purpose.
+
+| Release | Outcome (the acceptance test) | Batched work |
+|---|---|---|
+| **0.8.6** | **drishti emits a standalone `.ivf` that `aomdec` DECODES**, at both superblock sizes. Ugly, intra-only, fixed-QP, but a real file from drishti alone. | Forward transform (DCT/ADST/identity/WHT, the 7.13 inverses transposed); quantiser + the `Qlookup` forward path; sequence-header / frame-header / OBU / IVF WRITERS, so nothing is hand-built; a fixed partition + DC-mode intra encoder driving them; the encode lane at 128x128 superblocks (`av1_tile_set_sb128` has never been called on an encode tile, so that path has never run) |
+| **0.8.7** | **Intra mode decision: drishti picks modes and the output is measurably better than fixed-DC** (PSNR at matched rate), still `aomdec`-clean. | Intra mode search over the 13 Y modes + UV + CfL + angle deltas; tx-size and tx-type decision; a real partition search (RD-driven, not fixed); the distortion + rate estimators both need |
+| **0.8.8** | **An INTER frame drishti encoded decodes correctly**: motion estimation produces MVs that reconstruct. | Motion estimation (diamond/hex search, sub-pel refinement); reference selection; MV prediction reuse from the decode side; the inter residual + skip decision |
+| **0.8.9** | **Full RDO across intra/inter, compound and motion modes.** Output is competitive enough to compare against `aomenc --cpu-used=8`. | Rate-distortion optimisation over the whole mode space; compound / masked / OBMC / warp mode decision; interpolation-filter selection; the loop-filter level search (deblock / CDEF / LR parameter choice) |
+| **0.8.10** | **Rate control: a target bitrate is HIT** across CBR/VBR/CQ within tolerance, over a multi-frame clip. | Rate control (CQ, VBR, CBR); GOP structure and keyframe placement; the frame-level qindex ladder; `--lag-in-frames`-style lookahead if RC needs it |
+| **0.8.11** | **AV1 CLOSES: round-trip clean on both lanes, documented, benchmarked, audited.** drishti encode → drishti decode AND drishti encode → `aomdec` are bit-exact across the full geometry/format matrix. | The encode-lane conformance gate; encode-side fuzzing; every geometry from 0.8.3 driven through the encoder; `docs/api.md` for the AV1 surface; benchmarks (decode vs dav1d, encode vs rav1e / aomenc); CHANGELOG and state.md reconciled; the arc-end audit run once against the closed line |
+
+**What "complete" means here, so it cannot drift again.**
+- DECODE: every vector in the full published corpus decodes every frame bit-exactly against
+  `aomdec`; the geometry/format matrix is green; the decode path is fuzzed; no
+  `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream.
+- ENCODE: drishti emits standalone streams that `aomdec` decodes bit-exactly, that round-trip
+  through its own decoder bit-exactly, and that hit a target bitrate.
+
+Both lanes, or the line does not close.
+
+**Honesty about the back half.** Each encode batch is larger than any decode batch, and 0.8.9
+(RDO) is the largest single release in the table. They are batched this way because the
+alternative, one mode-decision heuristic per release, is exactly what produced 132 releases. If a
+batch overruns, its overflow moves to a LATER batch, and the line still closes at 0.8.11. Going
+past 0.8.11 is the user's decision, recorded in the CHANGELOG.
+
+**Where the old plan's releases went**, so references to them in the CHANGELOG and `state.md`
+still resolve:
+
+| Old 0.7.x plan | Now |
+|---|---|
+| 0.7.130 (stock-stream rejects) | 0.8.2 |
+| 0.7.131 (real GOP) + 0.7.132 (geometry/format matrix) | 0.8.3 |
+| 0.7.133 (screen content) + 0.7.134 (film grain, scalability, large-scale tile) | 0.8.4 |
+| 0.7.135 (full corpus + safety) | 0.8.5. Its harness hardening and cdef fill-loop bounds moved up to 0.8.2, and its encode-lane 128-SB coverage to 0.8.6. |
+| 0.7.136 → 0.7.140 (encode) | 0.8.6 → 0.8.10 |
+| 0.7.141 (round-trip clean) + 0.7.142 (line close) | 0.8.11 |
+
+**Legend for the retired codes**, so the historical log and older source comments stay readable:
+- the 128x128-superblock gate (E2a);
+- inter-frame pixel drift (E2b), inter-frame symbol desync (E2c);
+- the CDEF-grid heap overflow (E2d), the CfL edge-chroma bug (E2e);
+- segmentation (D1), per-superblock delta-q / delta-lf (D2), loop-filter ref/mode deltas (D3),
+  block-level lossless (D4);
+- film-grain synthesis (D5), palette (D6), intra block copy (D7), scalability (D9),
+  large-scale tile (D10), subsampling coverage (D11);
+- encoder 128-SB coverage (G0), cdef fill-loop bounds (G0b), conformance-harness hardening (G0c),
+  OOM fault injection (G1), corpus-guided fuzzing (G2), fixture hardening (G3);
+- cross-frame CDF inheritance (C1), GOP integration (C3).
+
+The conformance harness itself was Phase E1, the intra block inside an inter frame was C2, and
+"E2" alone is the conformance-gap family as a whole.
+
+## 0.9.x — H.264/AVC → 100% (decode + encode; replaces openh264)
+
+Baseline (0.7.0): NAL layer + parameter sets. Batched per § *How releases are cut*.
+
+- **slice + CAVLC** — slice header parse + CAVLC residual entropy (9.2);
+  pic_order_cnt_type 1; PPS High tail (transform_8x8, pic scaling
+  matrix, second_chroma_qp_index_offset via more_rbsp_data()).
+- **intra I-frame decode — MILESTONE** — Intra_4x4 / Intra_16x16
+  prediction, inverse 4×4 transform + dequant (8.5), reconstruction to
+  planar YUV.
+- **P slices** — ref pic lists, quarter-pel luma / eighth-pel chroma
+  motion compensation (8.4), deblocking filter (8.7).
+- **CABAC + High** — CABAC entropy decode (9.3) + High-profile 8×8
+  transform path.
+- **conformance** — ITU/JM test-vector sweep, fuzz corpus expansion.
+- **ENCODE lane** — Baseline intra encoder (SPS/PPS emission already
+  seeded by the composer + core VLC writers) → P-frame encode.
+- **H.264 100%** = decode conformance-clean + encode round-trip-clean →
+  close 0.9.x.
+
+## 0.10.x — H.265/HEVC → 100% (decode only; replaces libde265)
+
+Baseline (0.7.0): NAL layer + parameter sets. Encode is explicitly OUT
+of this family's charter (ADR 0001). Batched per § *How releases are
+cut*.
+
+- **slice plumbing** — slice_segment_header parse (7.3.6), remaining PPS
+  tail (tiles / deblocking / scaling-list flags), CABAC engine + context
+  init (9.3.2), parameter-set store keyed by vps/sps/pps ids.
+- **intra-only decode — MILESTONE** — CTU quadtree walk (7.3.8), all 35
+  intra prediction modes (8.4), inverse 4/8/16/32 transforms +
+  reconstruction: real Main-profile still-picture streams end to end.
+- **inter + loop filters** — motion compensation (8.5), deblocking
+  (8.7.2), SAO (8.7.3): full Main-profile P/B-frame decode.
+- **Main10 + conformance** — 10-bit code paths, HM conformance-vector
+  battery, fuzz hardening of the slice/CTU layers.
+- **H.265 100%** = Main + Main10 decode conformance-clean → close 0.10.x.
+
+## 0.11.x — VP8/VP9 → 100% (decode + encode; replaces libvpx)
+
+Baseline (0.7.0): the boolean coder (decode + encode) + frame headers.
+Batched per § *How releases are cut*.
+
+- **VP8 keyframe decode — MILESTONE** — header partition (mode/prob
+  decode), token/residual decode, dequant, inverse WHT/DCT, intra
+  prediction, loop filter: first pixels (RFC 6386 §§10-15).
+- **VP8 inter** — MV decode (§17), motion compensation (§18),
+  golden/altref reference state.
+- **VP9 keyframe decode** — superblock partition trees, tree probs,
+  transforms (VP9 spec §§8-9).
+- **VP9 inter + loop filter**.
+- **conformance** — libvpx test-vector sweep, fuzz hardening.
+- **ENCODE lane** — VP8 keyframe encoder first (RFC 6386's reference
+  code makes VP8 the natural encode entry), growing from the 0.7.0
+  bool-encoder + frame-tag-writer seeds; gate = own-decoder round-trip,
+  then libvpx cross-decode.
+- **VP8/VP9 100%** = decode conformance-clean + encode round-trip-clean
+  → close 0.11.x.
+
+## 0.12.x — Audit phase (cross-family)
+
+No new features — a security + correctness pass over the whole,
+now-complete codec surface, the standard AGNOS pattern (find →
+adversarially verify reachability → harden):
+
+- Untrusted-input hardening sweep across every decoder (all four
+  families are now full decoders, not just header parsers): re-audit
+  every entropy/transform/prediction loop bound, every allocation from
+  a stream-derived size, every table index.
+- Fuzz-corpus expansion to the decode paths (0.7.0 fuzzed the header
+  layer; now the full decoders get corpora).
+- Allocation audit — allocation confined to `*_init` / one-shot setup;
+  hot decode/encode paths allocation-free.
+- The report: `docs/audit/YYYY-MM-DD-audit.md`, findings fixed/guarded,
+  sound paths verified. Ticks the v1.0 security-audit criterion.
+
+## 0.13.x — Freeze + documentation phase
+
+No behavior change — close the remaining v1.0 criteria:
+
+- **API freeze** — `docs/api.md`: every exported symbol documented,
+  the stable 1.x surface declared, internals marked out-of-freeze;
+  `STABILITY.md`.
+- **Benchmarks** — `docs/benchmarks.md`: decode/encode throughput per
+  family with methodology + reproduction (0.7.0's bitreader/VLC numbers
+  extended to whole-frame decode).
+- **Downstream consumer green** — at least one of tarang / tazama /
+  jalwa / aethersafta (or a bundled `examples/` consumer) decoding a
+  real stream through the public API.
+- **CHANGELOG** complete + gap-free from 0.7.0; `SECURITY.md` current.
+
+## 1.0.0 — close-out
+
+The clean cut once 0.8.x–0.13.x are all green: no code change from the
+last 0.13.x, all six v1.0 criteria met, `api.md` freeze in force for
+the 1.x line (minors add only). drishti becomes a v1.0+ crate and moves
+to the applications libs registry.
+
+## Out of scope (for v1.0)
+
+- MP4 / WebM / Matroska demuxing — container work beyond IVF belongs to
+  a future container lib, not drishti.
+- HEVC encode — no sovereign x265-replacement is registered; re-enters
+  via the crate registry or not at all.
+- Hardware acceleration — drishti is the CPU reference; a GPU path is a
+  post-1.0 lever behind mabda.
+- Audio — that's shravan.
+
+---
+
+## Toolchain
+
+Toolchain bumps are not roadmap items. The current pin, its history and the bump procedure live in
+[`state.md`](state.md) § Toolchain.
+
+The "Moving the cyrius pin to 6.6.5 / 6.6.6" checklists that used to sit here are retired:
+- the four lint deferrals that 6.6.5's case-folding linter caught were reworded at 0.7.131;
+- `lib/` is re-vendored from the pinned snapshot on every bump (`cyrius lib sync --full`);
+- `cyrius.lock` now exists and is committed.
+
+One caution from those checklists still applies. Since 6.6.6, `cyrius deps` FAILS rather than
+warns when it cannot write `cyrius.lock`, so every CI checkout must be writable. Both workflows
+today run `cyrius deps` in a normal `actions/checkout` workspace, which is.
+
+---
+
+## Appendix — the 0.7.x AV1 build log (history, not plan)
+
+Kept verbatim from the 0.7.x roadmap, so that the bite references in the CHANGELOG and in source
+comments still resolve. It records what was written at the time, including deferrals that were
+closed later. The plan is § 0.8.x.
 
 Baseline (0.7.0): OBU layer + sequence header.
 
@@ -467,228 +684,3 @@ Baseline (0.7.0): OBU layer + sequence header.
   inter-prediction track before inter frames decode end-to-end; all table-free bar the warp filter +
   Obmc_Mask + Div_Mult, dav1d `mc_tmpl.c` / `refmvs.c` references in hand).
   See memory `av1-decode-remaining-tracks`.
-
-### THE GOAL: AV1 COMPLETE — decode AND encode — in 14 releases, 0.7.129 through 0.7.142
-
-**This is the plan of record. It replaces the phase-by-phase item list that ran this arc to 128
-releases.** That list was not wrong about the work; it was wrong about the UNIT. One item per
-release turned a large-but-finite job into an unbounded stream of patches.
-
-**The charter does not change and nothing is deferred out of this line.** `0.7.x` = AV1 decode
-conformance-clean **and** encode round-trip-clean. The encoder is the back half of this table,
-batched like everything else. It is the largest work in the arc and it is planned, not punted.
-
-**NAMING.** Findings are named for what BREAKS. The old alphanumeric codes (E2a-E2e, D1-D11,
-G0-G3, C1-C3) are retired — they were unreadable and hid what the work actually was. The
-historical CHANGELOG and the per-version log in `state.md` still carry them because they
-record what was written at the time; a legend is at the bottom of this section. Do not coin
-new codes.
-
-**Rules for this stretch, and they are not optional:**
-
-1. **A release is a BATCH.** Every release below bundles multiple items behind ONE stated
-   outcome. No release ships a single item.
-2. **A bite is committed when it is finished and green** — gates run, witness in place — and
-   work continues immediately on the next bite in the same release. Bites do not wait.
-3. **The outcome is the acceptance test.** A release is done when its stated outcome is
-   demonstrable against a gate, not when its bullet list is ticked.
-4. **No new labels.** Findings are described by what BREAKS — "inter-frame symbol desync",
-   not "E2c". The old codes are retired; see the legend below.
-5. **If a release overruns its outcome, the overflow goes to a LATER release.** The release
-   count is fixed at 14; scope moves between releases, the count does not grow silently.
-
-**Legend for the retired codes, so the historical log stays readable:** the 128x128-superblock
-gate (E2a), inter-frame pixel drift (E2b), inter-frame symbol desync (E2c), the CDEF-grid heap
-overflow (E2d), the CfL edge-chroma bug (E2e), segmentation (D1), per-superblock delta-q /
-delta-lf (D2), loop-filter ref/mode deltas (D3), block-level lossless (D4), film-grain
-synthesis (D5), palette (D6), intra block copy (D7), scalability (D9), large-scale tile (D10),
-subsampling coverage (D11), encoder 128-SB coverage (G0), cdef fill-loop bounds (G0b),
-conformance-harness hardening (G0c), OOM fault injection (G1), corpus-guided fuzzing (G2),
-fixture hardening (G3), cross-frame CDF inheritance (C1), GOP integration (C3).
-
-#### Decode — 0.7.129 to 0.7.135
-
-| Release | Outcome (the acceptance test) | Batched work |
-|---|---|---|
-| **0.7.129** | ✅ **DONE — `make conformance` 33 matched / 0 KNOWN-GAP / 0 regressed.** Every gate case is bit-exact vs `aomdec`, keyframes and inter frames alike. | Five defects, none matching the name it had been filed under: the temporal-MV scan had never run (zero callers); the deblocker filtered every block at the INTRA level; saved CDF bundles carried adaptation counters across frames; `warpEstimation`'s `LS_STEP` was 2 not 8 (and so was the reference port that generated its KATs); `LoopfilterTxSizes` was uniform on var-tx blocks. Found by diffing against an instrumented libaom in `ref/`. |
-| **0.7.130** | **No `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset.** | per-superblock delta-q / delta-lf per-SB delta-q / delta-lf, both lanes; block-level lossless block-level lossless from `LosslessArray[segment_id]`; temporal segmentation segmentation (`PrevSegmentIds` + the DPB-saved map); C1 follow-ons (`context_update_tile_id` multi-tile save, the `disable_frame_end_update_cdf` witness) |
-| **0.7.131** | **A real multi-frame GOP decodes end-to-end**, not a 4-frame fixture. | C3 remainder: GOPs beyond 4 frames, `show_existing_frame`, switch frames, full 7.21 reference reload; multi-tile inter frames; the DPB under real refresh patterns |
-| **0.7.132** | **The geometry and format matrix is CLEAN** — the CfL edge-chroma bug's lesson turned into a standing gate. | subsampling coverage 4:2:2 / 4:4:4 / monochrome end-to-end; 10/12-bit vs `aomdec`; a dimension sweep (odd MI, non-multiple-of-8, superres, scaled refs) wired into `make conformance` as a matrix, not hand-run |
-| **0.7.133** | **Screen content decodes** — palette and intra block copy. | palette palette (5.11.46); intra block copy intra block copy (5.11.6); `--tune-content=screen` rejects wholesale today |
-| **0.7.134** | **Film grain renders; every remaining reject is deliberate and documented.** | film-grain synthesis film-grain synthesis (7.18.3, parsed and discarded today); scalability scalability / operating-point select + `drop_obu`; large-scale tile large-scale-tile / `OBU_TILE_LIST` |
-| **0.7.135** | **DECODE IS CONFORMANCE-CLEAN: the FULL published `aom-test-data` corpus decodes every frame bit-exactly**, plus safety and harness integrity. | The complete published corpus gated, every frame not just keyframes; encoder 128-SB coverage encode-lane 128-SB coverage; the cdef fill-loop bounds bound the `av1_read_cdef`/`av1_write_cdef` fill loops; conformance-harness hardening harness hardening (a missing fixture must FAIL, `skipped=` counter, no non-run scoring as a pass); the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection OOM injection; corpus-guided fuzzing corpus fuzzing; restore the missing `scripts/refs/` MC generators |
-
-#### Encode — 0.7.136 to 0.7.142
-
-The `av1_encode_*` surface today is a plan-replay bitstream WRITER: every syntax element has a
-working inverse, and every one is round-trip tested. That is the foundation and it is real. What
-is missing is everything that DECIDES: no forward transform, no quantiser, no mode decision, no
-motion search, no rate control, and no header emission. These are the biggest releases in the
-table and they are sized that way on purpose.
-
-| Release | Outcome (the acceptance test) | Batched work |
-|---|---|---|
-| **0.7.136** | **drishti emits a standalone `.ivf` that `aomdec` DECODES.** Ugly, intra-only, fixed-QP — but a real file, from drishti alone. | Forward transform (DCT/ADST/identity/WHT, the 7.13 inverses transposed); quantiser + `Qlookup` forward path; sequence-header / frame-header / OBU / IVF WRITERS so nothing is hand-built; a fixed partition + DC-mode intra encoder driving them |
-| **0.7.137** | **Intra mode decision: drishti picks modes and the output is measurably better than fixed-DC** (PSNR at matched rate), still `aomdec`-clean. | Intra mode search over the 13 Y modes + UV + CfL + angle deltas; tx-size and tx-type decision; a real partition search (RD-driven, not fixed); the distortion + rate estimators both need |
-| **0.7.138** | **An INTER frame drishti encoded decodes correctly** — motion estimation produces MVs that reconstruct. | Motion estimation (diamond/hex search, sub-pel refinement); reference selection; MV prediction reuse from the decode side; the inter residual + skip decision |
-| **0.7.139** | **Full RDO across intra/inter, compound and motion modes.** Output is competitive enough to compare against `aomenc --cpu-used=8`. | Rate-distortion optimisation over the whole mode space; compound / masked / OBMC / warp mode decision; interpolation-filter selection; the loop-filter level search (deblock / CDEF / LR parameter choice) |
-| **0.7.140** | **Rate control: a target bitrate is HIT** across CBR/VBR/CQ within tolerance, over a multi-frame clip. | Rate control (CQ, VBR, CBR); GOP structure and keyframe placement; the frame-level qindex ladder; `--lag-in-frames` style lookahead if RC needs it |
-| **0.7.141** | **ROUND-TRIP CLEAN: drishti encode → drishti decode is bit-exact, AND drishti encode → `aomdec` is bit-exact**, across the full geometry/format matrix. | The encode-lane conformance gate; encode-side fuzzing; the 128-SB encode path exercised for real; every geometry from 0.7.132 driven through the encoder |
-| **0.7.142** | **THE 0.7.x LINE CLOSES — AV1 decode + encode at charter.** | Final sweep green on both lanes; `docs/api.md` for the AV1 surface; benchmarks (decode vs dav1d, encode vs rav1e/aomenc); CHANGELOG and state.md reconciled; the arc-end audit run once against the closed line |
-
-**What "complete" means here, so it cannot drift again.** DECODE: every vector in the full
-published corpus decodes every frame bit-exactly against `aomdec`; the geometry/format matrix is
-green; the decode path is fuzzed; no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream. ENCODE:
-drishti emits standalone streams that `aomdec` decodes bit-exactly, round-trips through its own
-decoder bit-exactly, and hits a target bitrate. Both lanes, or the line does not close.
-
-**Honesty about the back half.** The encode releases are each larger than any decode release in
-this arc, and 0.7.139 (RDO) is the largest single release in the table. They are batched this way
-because the alternative — one mode-decision heuristic per release — is exactly what produced 128
-patches. If one of them overruns, it takes scope from a neighbour or the count moves from 14 to
-15, stated in the CHANGELOG. It does not silently absorb another twenty bites.
-
-
-## 0.8.x — H.264/AVC → 100% (decode + encode; replaces openh264)
-
-Baseline (0.7.0): NAL layer + parameter sets.
-
-- **slice + CAVLC** — slice header parse + CAVLC residual entropy (9.2);
-  pic_order_cnt_type 1; PPS High tail (transform_8x8, pic scaling
-  matrix, second_chroma_qp_index_offset via more_rbsp_data()).
-- **intra I-frame decode — MILESTONE** — Intra_4x4 / Intra_16x16
-  prediction, inverse 4×4 transform + dequant (8.5), reconstruction to
-  planar YUV.
-- **P slices** — ref pic lists, quarter-pel luma / eighth-pel chroma
-  motion compensation (8.4), deblocking filter (8.7).
-- **CABAC + High** — CABAC entropy decode (9.3) + High-profile 8×8
-  transform path.
-- **conformance** — ITU/JM test-vector sweep, fuzz corpus expansion.
-- **ENCODE lane** — Baseline intra encoder (SPS/PPS emission already
-  seeded by the composer + core VLC writers) → P-frame encode.
-- **H.264 100%** = decode conformance-clean + encode round-trip-clean →
-  close 0.8.x.
-
-## 0.9.x — H.265/HEVC → 100% (decode only; replaces libde265)
-
-Baseline (0.7.0): NAL layer + parameter sets. Encode is explicitly OUT
-of this family's charter (ADR 0001).
-
-- **slice plumbing** — slice_segment_header parse (7.3.6), remaining PPS
-  tail (tiles / deblocking / scaling-list flags), CABAC engine + context
-  init (9.3.2), parameter-set store keyed by vps/sps/pps ids.
-- **intra-only decode — MILESTONE** — CTU quadtree walk (7.3.8), all 35
-  intra prediction modes (8.4), inverse 4/8/16/32 transforms +
-  reconstruction: real Main-profile still-picture streams end to end.
-- **inter + loop filters** — motion compensation (8.5), deblocking
-  (8.7.2), SAO (8.7.3): full Main-profile P/B-frame decode.
-- **Main10 + conformance** — 10-bit code paths, HM conformance-vector
-  battery, fuzz hardening of the slice/CTU layers.
-- **H.265 100%** = Main + Main10 decode conformance-clean → close 0.9.x.
-
-## 0.10.x — VP8/VP9 → 100% (decode + encode; replaces libvpx)
-
-Baseline (0.7.0): the boolean coder (decode + encode) + frame headers.
-
-- **VP8 keyframe decode — MILESTONE** — header partition (mode/prob
-  decode), token/residual decode, dequant, inverse WHT/DCT, intra
-  prediction, loop filter: first pixels (RFC 6386 §§10-15).
-- **VP8 inter** — MV decode (§17), motion compensation (§18),
-  golden/altref reference state.
-- **VP9 keyframe decode** — superblock partition trees, tree probs,
-  transforms (VP9 spec §§8-9).
-- **VP9 inter + loop filter**.
-- **conformance** — libvpx test-vector sweep, fuzz hardening.
-- **ENCODE lane** — VP8 keyframe encoder first (RFC 6386's reference
-  code makes VP8 the natural encode entry), growing from the 0.7.0
-  bool-encoder + frame-tag-writer seeds; gate = own-decoder round-trip,
-  then libvpx cross-decode.
-- **VP8/VP9 100%** = decode conformance-clean + encode round-trip-clean
-  → close 0.10.x.
-
-## 0.11.x — Audit phase (cross-family)
-
-No new features — a security + correctness pass over the whole,
-now-complete codec surface, the standard AGNOS pattern (find →
-adversarially verify reachability → harden):
-
-- Untrusted-input hardening sweep across every decoder (all four
-  families are now full decoders, not just header parsers): re-audit
-  every entropy/transform/prediction loop bound, every allocation from
-  a stream-derived size, every table index.
-- Fuzz-corpus expansion to the decode paths (0.7.0 fuzzed the header
-  layer; now the full decoders get corpora).
-- Allocation audit — allocation confined to `*_init` / one-shot setup;
-  hot decode/encode paths allocation-free.
-- The report: `docs/audit/YYYY-MM-DD-audit.md`, findings fixed/guarded,
-  sound paths verified. Ticks the v1.0 security-audit criterion.
-
-## 0.12.x — Freeze + documentation phase
-
-No behavior change — close the remaining v1.0 criteria:
-
-- **API freeze** — `docs/api.md`: every exported symbol documented,
-  the stable 1.x surface declared, internals marked out-of-freeze;
-  `STABILITY.md`.
-- **Benchmarks** — `docs/benchmarks.md`: decode/encode throughput per
-  family with methodology + reproduction (0.7.0's bitreader/VLC numbers
-  extended to whole-frame decode).
-- **Downstream consumer green** — at least one of tarang / tazama /
-  jalwa / aethersafta (or a bundled `examples/` consumer) decoding a
-  real stream through the public API.
-- **CHANGELOG** complete + gap-free from 0.7.0; `SECURITY.md` current.
-
-## 1.0.0 — close-out
-
-The clean cut once 0.7.x–0.12.x are all green: no code change from the
-last 0.12.x, all six v1.0 criteria met, `api.md` freeze in force for
-the 1.x line (minors add only). drishti becomes a v1.0+ crate and moves
-to the applications libs registry.
-
-## Out of scope (for v1.0)
-
-- MP4 / WebM / Matroska demuxing — container work beyond IVF belongs to
-  a future container lib, not drishti.
-- HEVC encode — no sovereign x265-replacement is registered; re-enters
-  via the crate registry or not at all.
-- Hardware acceleration — drishti is the CPU reference; a GPU path is a
-  post-1.0 lever behind mabda.
-- Audio — that's shravan.
-
----
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first;
-this is a pin bump and a rebuild.
-
-**What was checked** (41 `.cyr` under `src/`, plus `programs/`; vendored `lib/` excluded):
-
-- **Windows write corruption: not a drishti exposure.** `O_APPEND` / `O_TRUNC` appear **42
-  times, every one inside the vendored `lib/` fold, zero in `src/` or `programs/`**.
-  drishti's only file I/O is two read-only `file_read_all("build/conformance-input.ivf", …)`
-  calls in `programs/vector-probe.cyr:111` and `programs/conformance.cyr:110`. 6.6.6 also
-  stops `file_exists`/`file_read_all` requesting write access so they succeed on read-only
-  files and volumes — but that is the **PE** access-mode decode, so it is not a change for
-  drishti's Linux-only build either.
-- **No struct/vector shape to trip the new refusals.** drishti declares **zero** `struct`s
-  in `src/`; there are no by-value struct params, no struct-typed returns, no
-  `var x: T = q;` copies, no `async fn`, no `operator` fn, no SIMD-returning fn, and no fn
-  mixing pair and scalar returns. The codec kernels work on raw pointers and `i64`.
-- **Also clean:** no `var` inside a top-level block (zero top-level `{` / `if (` / `while (`
-  at column 0), no raw `SYS_STATFS`, no `lib/regression.cyr` consumer, no `vec_*` of
-  drishti's own, no duplicate top-level global, no symlink in `lib/`.
-- **Platform:** CI is `ubuntu-latest` only, `src/` has no `CYRIUS_TARGET_*` branch. No
-  Windows build.
-
-**What it gains:** 6.6.3's `#inline`-disarms-`#derive` fix, 6.6.5's aggregate-layout fix
-(silently wrong since 5.8.17 — for a codec repo built on dense struct-shaped buffers, this
-is the one to want) and the corrected ENTRY stack bases, and 6.6.6's nine new refusals.
-**Not** a gain here: 6.6.4's ≥64 KB string-literal fix — drishti's longest literal is 99
-bytes (`src/vpx_bool.cyr`), measured, so that defect was never reachable.
-
-**Verify after bumping:** `cyrius deps` → `cyrius build` → `cyrius test` → the codec
-conformance runs in `programs/`, then **regenerate `dist/drishti.cyr`**, which consumers
-compile with their own toolchain. drishti has no `cyrius.lock`, so note that 6.6.6 makes
-`cyrius deps` **fail** rather than warn if the lockfile cannot be written — if a lock is
-introduced later, make sure the CI checkout can write it.
