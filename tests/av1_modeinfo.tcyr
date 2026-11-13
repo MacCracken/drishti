@@ -759,6 +759,209 @@ fn test_write_segment_id_skip_mirror() {
     return 0;
 }
 
+# ================================================================
+# 0.8.2 — per-superblock deltas: 5.11.12 read_delta_qindex / 5.11.13 read_delta_lf.
+# Known answers are derived from the SPEC formulas, never from the writer:
+#   escape: S() == 3 -> n = L(3) + 1, abs = L(n) + (1 << n) + 1; then, if abs, sign = L(1).
+#   CurrentQIndex = Clip3(1, 255, Cur + (red << delta_q_res)); DeltaLF = Clip3(-63, 63, DLF + (red << res)).
+# ================================================================
+# the writer's RAW fields, read back with the low-level coder (not av1_delta_reduced_read), so a writer and
+# reader that shared a wrong escape bias could not agree their way past this.
+fn dq_raw(v, want_sym, want_n_minus1, want_bits, want_n, want_sign, tag): i64 {
+    var enc = av1_sym_enc_init(64, 1);
+    var ncc = av1_ncdf_new();
+    assert_eq(av1_delta_reduced_write(enc, av1_ncdf_delta_q(ncc), v), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var ncd = av1_ncdf_new();
+    assert_eq(av1_sym_read_symbol(sd, av1_ncdf_delta_q(ncd), 4), want_sym, tag);
+    if (want_sym == 3) {
+        assert_eq(av1_sym_read_literal(sd, 3), want_n_minus1, tag);
+        assert_eq(av1_sym_read_literal(sd, want_n), want_bits, tag);
+    }
+    if (want_sign >= 0) { assert_eq(av1_sym_read_literal(sd, 1), want_sign, tag); }
+    assert_eq(av1_sym_read_literal(sd, 8), 165, tag);
+    return 0;
+}
+fn test_delta_escape_kat() {
+    dq_raw(0, 0, 0, 0, 0, 0 - 1, "delta 0: symbol 0, NO sign bit");
+    dq_raw(1, 1, 0, 0, 0, 0, "delta +1: symbol 1, sign 0");
+    dq_raw(2, 2, 0, 0, 0, 0, "delta +2: symbol 2 (the top direct symbol)");
+    dq_raw(0 - 2, 2, 0, 0, 0, 1, "delta -2: symbol 2, sign 1");
+    dq_raw(3, 3, 0, 0, 1, 0, "delta 3: ESCAPE n=1 bits=0 (3 is never a direct symbol)");
+    dq_raw(4, 3, 0, 1, 1, 0, "delta 4: escape n=1 bits=1");
+    dq_raw(5, 3, 1, 0, 2, 0, "delta 5: escape n=2 bits=0");
+    dq_raw(0 - 7, 3, 1, 2, 2, 1, "delta -7: escape n=2 bits=2 sign 1");
+    dq_raw(512, 3, 7, 255, 8, 0, "delta 512: the largest escape, n=8 bits=255");
+    return 0;
+}
+# every representable value round-trips, adaptive CDF ON (disable_cdf 0); 513 is refused both signs.
+fn test_delta_roundtrip_range() {
+    var enc = av1_sym_enc_init(4096, 0);
+    var ncc = av1_ncdf_new();
+    var v = 0 - 512;
+    while (v <= 512) {
+        av1_delta_reduced_write(enc, av1_ncdf_delta_lf(ncc), v);
+        v = v + 1;
+    }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var ncd = av1_ncdf_new();
+    var ok = 1;
+    var w = 0 - 512;
+    while (w <= 512) {
+        if (av1_delta_reduced_read(sd, av1_ncdf_delta_lf(ncd)) != w) { ok = 0; }
+        w = w + 1;
+    }
+    assert_eq(ok, 1, "delta: all 1025 values -512..512 round-trip with CDF adaptation");
+    assert_eq(av1_sym_dec_err(sd), DR_OK, "delta: range sweep decodes clean");
+    var e2 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_delta_reduced_write(e2, av1_ncdf_delta_q(ncc), 513), DR_ERR_BOUNDS, "delta +513 refused");
+    assert_eq(av1_delta_reduced_write(e2, av1_ncdf_delta_q(ncc), 0 - 513), DR_ERR_BOUNDS, "delta -513 refused");
+    return 0;
+}
+# write one superblock's deltas through av1_write_deltas from a single-cell plan, then read them back.
+fn dq_rt(dq_res, lf_present, lf_res, multi, planes, base_q, dq, l0, l1, l2, l3, mi_size, skip): i64 {
+    var plan = alloc(AV1_DQPLAN_W * 8);
+    store64(plan + 0, dq); store64(plan + 8, l0); store64(plan + 16, l1);
+    store64(plan + 24, l2); store64(plan + 32, l3);
+    var dw = av1_dctx_new(1, dq_res, lf_present, lf_res, multi, planes, AV1_BLOCK_64X64, base_q);
+    av1_dctx_set_plan(dw, plan, 1);
+    av1_dctx_sb_start(dw);
+    var enc = av1_sym_enc_init(64, 1);
+    var ncc = av1_ncdf_new();
+    av1_write_deltas(enc, ncc, dw, mi_size, skip, 0, 0);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var dr = av1_dctx_new(1, dq_res, lf_present, lf_res, multi, planes, AV1_BLOCK_64X64, base_q);
+    av1_dctx_sb_start(dr);
+    av1_read_deltas(sd, av1_ncdf_new(), dr, mi_size, skip);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "dq_rt: marker after the deltas (exact consumption)");
+    assert_eq(av1_dctx_qindex(dr), av1_dctx_qindex(dw), "dq_rt: reader CurrentQIndex == writer's");
+    return dr;
+}
+fn test_delta_clamps() {
+    # CurrentQIndex floor is 1, NOT 0 (a delta never makes a block lossless): 10 + (-5 << 3) = -30 -> 1.
+    var a = dq_rt(3, 0, 0, 0, 3, 10, 0 - 5, 0, 0, 0, 0, 6, 0);
+    assert_eq(av1_dctx_qindex(a), 1, "CurrentQIndex clamps to 1, not 0");
+    var b = dq_rt(3, 0, 0, 0, 3, 250, 5, 0, 0, 0, 0, 6, 0);
+    assert_eq(av1_dctx_qindex(b), 255, "CurrentQIndex clamps to 255");
+    var c = dq_rt(0, 0, 0, 0, 3, 100, 0 - 9, 0, 0, 0, 0, 6, 0);
+    assert_eq(av1_dctx_qindex(c), 91, "CurrentQIndex 100 + (-9 << 0) = 91");
+    # DeltaLF clamps to +-MAX_LOOP_FILTER (63): (20 << 2) = 80 -> 63, (-20 << 2) -> -63.
+    var d = dq_rt(0, 1, 2, 1, 3, 100, 0, 20, 0 - 20, 3, 0 - 1, 6, 0);
+    assert_eq(av1_dctx_delta_lf(d, 0), 63, "DeltaLF clamps to +63");
+    assert_eq(av1_dctx_delta_lf(d, 1), 0 - 63, "DeltaLF clamps to -63");
+    assert_eq(av1_dctx_delta_lf(d, 2), 12, "DeltaLF[2] = 3 << 2");
+    assert_eq(av1_dctx_delta_lf(d, 3), 0 - 4, "DeltaLF[3] = -1 << 2");
+    return 0;
+}
+# frameLfCount: 1 without multi; FRAME_LF_COUNT = 4 with multi and chroma; FRAME_LF_COUNT - 2 = 2 mono.
+fn test_delta_lf_count() {
+    var mono = dq_rt(0, 1, 0, 1, 1, 100, 0, 5, 6, 7, 8, 6, 0);
+    assert_eq(av1_dctx_delta_lf(mono, 0), 5, "mono multi: DeltaLF[0] read");
+    assert_eq(av1_dctx_delta_lf(mono, 1), 6, "mono multi: DeltaLF[1] read");
+    assert_eq(av1_dctx_delta_lf(mono, 2), 0, "mono multi: DeltaLF[2] NOT read (FRAME_LF_COUNT - 2)");
+    assert_eq(av1_dctx_delta_lf(mono, 3), 0, "mono multi: DeltaLF[3] NOT read");
+    var one = dq_rt(0, 1, 0, 0, 3, 100, 0, 5, 6, 7, 8, 6, 0);
+    assert_eq(av1_dctx_delta_lf(one, 0), 5, "no multi: one delta, DeltaLF[0]");
+    assert_eq(av1_dctx_delta_lf(one, 1), 0, "no multi: DeltaLF[1] untouched");
+    var off = dq_rt(0, 0, 0, 1, 3, 100, 4, 5, 6, 7, 8, 6, 0);
+    assert_eq(av1_dctx_qindex(off), 104, "delta_lf_present 0: delta_q still read");
+    assert_eq(av1_dctx_delta_lf(off, 0), 0, "delta_lf_present 0: no delta_lf read");
+    return 0;
+}
+# the closed gates consume NOTHING (a marker right behind them decodes): the full-superblock skip block,
+# and every block after the first in a superblock (ReadDeltas = 0).
+fn test_delta_gates() {
+    var g1 = dq_rt(0, 1, 0, 1, 3, 100, 7, 1, 2, 3, 4, AV1_BLOCK_64X64, 1);
+    assert_eq(av1_dctx_qindex(g1), 100, "gate: MiSize == sbSize && skip reads no delta_q");
+    assert_eq(av1_dctx_delta_lf(g1, 0), 0, "gate: ...and no delta_lf");
+    var g2 = dq_rt(0, 1, 0, 1, 3, 100, 7, 1, 2, 3, 4, AV1_BLOCK_64X64, 0);
+    assert_eq(av1_dctx_qindex(g2), 107, "gate: a NON-skip full-superblock block DOES read");
+    var g3 = dq_rt(0, 1, 0, 1, 3, 100, 7, 1, 2, 3, 4, 6, 1);
+    assert_eq(av1_dctx_qindex(g3), 107, "gate: a skip block SMALLER than the superblock DOES read");
+    # ReadDeltas: a second read in the same superblock consumes nothing.
+    var d = av1_dctx_new(1, 0, 1, 0, 0, 3, AV1_BLOCK_64X64, 100);
+    var enc = av1_sym_enc_init(64, 1);
+    av1_sym_encode_literal(enc, 165, 8);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    av1_read_deltas(sd, av1_ncdf_new(), d, 6, 0);            # ReadDeltas 0 (no sb_start)
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "gate: ReadDeltas = 0 consumes nothing");
+    # the 128x128 superblock: the gate keys on BLOCK_128X128, so a skip 64x64 block in it DOES read.
+    var d128 = av1_dctx_new(1, 0, 0, 0, 0, 3, AV1_BLOCK_128X128, 100);
+    assert_eq(av1_dctx_sb_skip(d128, AV1_BLOCK_64X64, 1), 0, "gate: 64x64 skip inside a 128 SB is NOT gated");
+    assert_eq(av1_dctx_sb_skip(d128, AV1_BLOCK_128X128, 1), 1, "gate: the 128x128 skip block IS gated");
+    return 0;
+}
+# CDF DISPATCH (a round trip cannot see it): delta_q adapts DeltaQCdf; with multi, delta_lf[i] adapts
+# DeltaLFMultiCdf[i] and leaves DeltaLFCdf alone; without multi, the reverse. The adaptation counter
+# sits in each row's 5th word.
+fn dq_cnt(cdf): i64 { return load64(cdf + (4 * 8)); }
+fn test_delta_cdf_dispatch() {
+    var plan = alloc(AV1_DQPLAN_W * 8);
+    store64(plan + 0, 1); store64(plan + 8, 1); store64(plan + 16, 1); store64(plan + 24, 1); store64(plan + 32, 1);
+    var dw = av1_dctx_new(1, 0, 1, 0, 1, 3, AV1_BLOCK_64X64, 100);
+    av1_dctx_set_plan(dw, plan, 1);
+    av1_dctx_sb_start(dw);
+    var enc = av1_sym_enc_init(64, 0);
+    av1_write_deltas(enc, av1_ncdf_new(), dw, 6, 0, 0, 0);
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 0);
+    var ncd = av1_ncdf_new();
+    var dr = av1_dctx_new(1, 0, 1, 0, 1, 3, AV1_BLOCK_64X64, 100);
+    av1_dctx_sb_start(dr);
+    av1_read_deltas(sd, ncd, dr, 6, 0);
+    assert_eq(dq_cnt(av1_ncdf_delta_q(ncd)), 1, "dispatch: delta_q adapted DeltaQCdf once");
+    assert_eq(dq_cnt(av1_ncdf_delta_lf(ncd)), 0, "dispatch multi: DeltaLFCdf untouched");
+    var i = 0;
+    while (i < 4) {
+        assert_eq(dq_cnt(av1_ncdf_delta_lf_multi(ncd, i)), 1, "dispatch multi: DeltaLFMultiCdf[i] adapted once");
+        i = i + 1;
+    }
+    var dw1 = av1_dctx_new(1, 0, 1, 0, 0, 3, AV1_BLOCK_64X64, 100);
+    av1_dctx_set_plan(dw1, plan, 1);
+    av1_dctx_sb_start(dw1);
+    var enc1 = av1_sym_enc_init(64, 0);
+    av1_write_deltas(enc1, av1_ncdf_new(), dw1, 6, 0, 0, 0);
+    var olen1 = 0;
+    var out1 = av1_sym_enc_finish(enc1, &olen1);
+    var sd1 = av1_sym_dec_init(out1, olen1, 0);
+    var ncd1 = av1_ncdf_new();
+    var dr1 = av1_dctx_new(1, 0, 1, 0, 0, 3, AV1_BLOCK_64X64, 100);
+    av1_dctx_sb_start(dr1);
+    av1_read_deltas(sd1, ncd1, dr1, 6, 0);
+    assert_eq(dq_cnt(av1_ncdf_delta_lf(ncd1)), 1, "dispatch no-multi: DeltaLFCdf adapted once");
+    assert_eq(dq_cnt(av1_ncdf_delta_lf_multi(ncd1, 0)), 0, "dispatch no-multi: DeltaLFMultiCdf[0] untouched");
+    return 0;
+}
+# per-tile reset and per-superblock ReadDeltas.
+fn test_delta_resets() {
+    var d = av1_dctx_new(1, 0, 1, 0, 0, 3, AV1_BLOCK_64X64, 77);
+    assert_eq(av1_dctx_qindex(d), 77, "new: CurrentQIndex = base_q");
+    assert_eq(av1_dctx_read_deltas(d), 0, "new: ReadDeltas 0 until a superblock starts");
+    store64(d + AV1DQ_CUR_QINDEX, 5);
+    store64(d + AV1DQ_DELTA_LF + 16, 9);
+    av1_dctx_tile_reset(d);
+    assert_eq(av1_dctx_qindex(d), 77, "tile reset: CurrentQIndex back to base_q");
+    assert_eq(av1_dctx_delta_lf(d, 2), 0, "tile reset: DeltaLF back to 0");
+    av1_dctx_sb_start(d);
+    assert_eq(av1_dctx_read_deltas(d), 1, "sb start: ReadDeltas = delta_q_present (1)");
+    var dz = av1_dctx_new(0, 0, 0, 0, 0, 3, AV1_BLOCK_64X64, 77);
+    av1_dctx_sb_start(dz);
+    assert_eq(av1_dctx_read_deltas(dz), 0, "sb start: ReadDeltas = delta_q_present (0)");
+    assert_eq(av1_read_deltas(0, 0, 0, 6, 0), 0, "a null context is inert");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("block-size conversion tables");
@@ -799,6 +1002,13 @@ fn main() {
     test_clear_cdef();
     test_clear_cdef_bounds();
     test_clear_cdef_axes();
+    test_delta_escape_kat();
+    test_delta_roundtrip_range();
+    test_delta_clamps();
+    test_delta_lf_count();
+    test_delta_gates();
+    test_delta_cdf_dispatch();
+    test_delta_resets();
     return assert_summary();
 }
 

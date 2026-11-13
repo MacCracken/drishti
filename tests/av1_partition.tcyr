@@ -565,10 +565,46 @@ fn test_bd_grid_sized_for_128() {
     return 0;
 }
 
+# 0.8.2: the block dequant qindex, get_qindex(0, segment_id) (7.12.2). KATs from the spec text:
+#   ALT_Q active: Clip3(0, 255, (delta_q_present ? CurrentQIndex : base_q_idx) + data)
+#   else:         delta_q_present ? CurrentQIndex : base_q_idx
+fn bq_fh(base_q, seg_en, alt_q_seg3): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_BASE_Q_IDX, base_q);
+    store64(fh + AV1FH_SEG_ENABLED, seg_en);
+    store64(fh + AV1FH_FEATURE_ENABLED + ((3 * 8 + AV1_SEG_LVL_ALT_Q) * 8), 1);
+    store64(fh + AV1FH_FEATURE_DATA + ((3 * 8 + AV1_SEG_LVL_ALT_Q) * 8), alt_q_seg3);
+    return fh;
+}
+fn test_block_qindex() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(64, 64, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 16, 16, 60, 1, 0, 1);
+    assert_eq(av1_tile_block_qindex(tile, 0, 0), 60, "no fh, no deltas: base_q");
+    var d = av1_dctx_new(1, 0, 0, 0, 0, 1, AV1_BLOCK_64X64, 60);
+    store64(d + AV1DQ_CUR_QINDEX, 90);
+    av1_tile_set_dctx(tile, d);
+    assert_eq(av1_tile_block_qindex(tile, 0, 0), 90, "deltas, no segmentation: CurrentQIndex");
+    var fh = bq_fh(60, 1, 0 - 30);
+    assert_eq(av1_tile_block_qindex(tile, fh, 3), 60, "ALT_Q segment: CurrentQIndex 90 + (-30)");
+    assert_eq(av1_tile_block_qindex(tile, fh, 2), 90, "segment without ALT_Q: CurrentQIndex");
+    var fh2 = bq_fh(60, 1, 0 - 200);
+    assert_eq(av1_tile_block_qindex(tile, fh2, 3), 0, "ALT_Q clips to 0 (90 - 200)");
+    var fh3 = bq_fh(60, 1, 200);
+    assert_eq(av1_tile_block_qindex(tile, fh3, 3), 255, "ALT_Q clips to 255 (90 + 200)");
+    av1_tile_set_dctx(tile, 0);
+    assert_eq(av1_tile_block_qindex(tile, fh, 3), 30, "no deltas, ALT_Q: base_q_idx 60 + (-30)");
+    var fhoff = bq_fh(60, 0, 0 - 30);
+    assert_eq(av1_tile_block_qindex(tile, fhoff, 3), 60, "segmentation OFF: ALT_Q ignored");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Partition_Subsize / is_inside / partition ctx");
     test_partsub_checksum();
+    test_block_qindex();
     test_partsub_values();
     test_is_inside();
     test_partition_ctx();

@@ -36,6 +36,9 @@ fn test_limits() {
 enum Av1LfTestRef { AV1_LF_TEST_LAST = 1; }
 fn mk_fh(lvl0, lvl1, lvl2, lvl3, sharp, delta_en, intra_ref_delta): i64 {
     var fh = alloc(1024);
+    # zeroed: alloc does not zero, and since 0.8.2 the edge loop reads AV1FH_DELTA_LF_MULTI, which this
+    # helper never set — the old tests passed only because fresh arena pages happened to be zero.
+    memset(fh, 0, 1024);
     store64(fh + AV1FH_LF_LEVEL + 0, lvl0);
     store64(fh + AV1FH_LF_LEVEL + 8, lvl1);
     store64(fh + AV1FH_LF_LEVEL + 16, lvl2);
@@ -415,6 +418,94 @@ fn test_deblock_level0_delta() {
     return 0;
 }
 
+# ---- 0.8.2: the per-block deltaLF (7.14.4) reaches the filter level ----
+# deltaLF index map, poisoned: four DISTINCT DeltaLFs values at one MI so every (multi, plane, pass)
+# case lands on a different number. multi = 0 -> always [0]; multi = 1 -> plane 0 ? pass : plane + 1.
+fn test_lf_delta_index() {
+    var oe = alloc(8);
+    var frame = dr_frame_new(32, 16, 1, 0, 0, 8, 8, oe);
+    var tile = av1_tile_new(frame, 8, 4, 40, 1, 0, 1);
+    av1_tile_grids_new(tile);
+    var i = 0;
+    while (i < 4) { av1_grid_set(tile, AV1TILE_DLF + (i * 8), 2, 3, 11 * (i + 1)); i = i + 1; }
+    var fh = mk_fh(20, 20, 20, 20, 0, 0, 0);
+    assert_eq(av1_lf_delta(tile, fh, 0, 0, 2, 3), 11, "no multi: Y pass0 -> [0]");
+    assert_eq(av1_lf_delta(tile, fh, 0, 1, 2, 3), 11, "no multi: Y pass1 -> [0]");
+    assert_eq(av1_lf_delta(tile, fh, 2, 1, 2, 3), 11, "no multi: V pass1 -> [0]");
+    store64(fh + AV1FH_DELTA_LF_MULTI, 1);
+    assert_eq(av1_lf_delta(tile, fh, 0, 0, 2, 3), 11, "multi: Y pass0 -> [0]");
+    assert_eq(av1_lf_delta(tile, fh, 0, 1, 2, 3), 22, "multi: Y pass1 -> [1]");
+    assert_eq(av1_lf_delta(tile, fh, 1, 0, 2, 3), 33, "multi: U pass0 -> [2]");
+    assert_eq(av1_lf_delta(tile, fh, 1, 1, 2, 3), 33, "multi: U pass1 -> [2]");
+    assert_eq(av1_lf_delta(tile, fh, 2, 0, 2, 3), 44, "multi: V pass0 -> [3]");
+    assert_eq(av1_lf_delta(tile, fh, 2, 1, 2, 3), 44, "multi: V pass1 -> [3]");
+    assert_eq(av1_lf_delta(tile, fh, 0, 0, 2, 4), 0, "a neighbouring MI reads its own (zero) value");
+    return 0;
+}
+# PIXEL witness: a uniform base level 20, with DeltaLFs[..][0] = -6 on the right half only. The step of
+# 22 filters at level 20 and NOT at level 14 (the narrow filter's MASK is the only level-dependent part),
+# so the right half must stay untouched. With deltaLF hardcoded 0 (the pre-0.8.2 edge loop) both halves
+# filter and the right-half assertion goes red.
+fn test_deblock_delta_lf() {
+    var tile = lf_mk_step_tile(3, 1);
+    var frame = load64(tile + AV1TILE_FRAME);
+    var r = 0;
+    while (r < 4) {
+        var c = 4;
+        while (c < 8) { av1_grid_set(tile, AV1TILE_DLF + 0, r, c, 0 - 6); c = c + 1; }
+        r = r + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 0, 0);
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 7, 4) != 100, 1, "deltaLF 0 half (level 20) filters");
+    assert_eq(dr_frame_get(frame, 0, 23, 4), 100, "deltaLF -6 half (level 14) does NOT filter");
+    assert_eq(dr_frame_get(frame, 0, 24, 4), 122, "deltaLF -6 half: q side untouched too");
+    return 0;
+}
+# multi = 1: the VERTICAL edges here are pass 0, so they read DeltaLFs[..][0] and must ignore [1]. A -6
+# in [1] alone leaves level 20 (filters); a -6 in [0] alone drops to 14 (does not).
+fn test_deblock_delta_lf_multi_pass() {
+    var t1 = lf_mk_step_tile(3, 1);
+    var f1 = load64(t1 + AV1TILE_FRAME);
+    var t0 = lf_mk_step_tile(3, 1);
+    var f0 = load64(t0 + AV1TILE_FRAME);
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 8) {
+            av1_grid_set(t1, AV1TILE_DLF + 8, r, c, 0 - 6);   # [1] only
+            av1_grid_set(t0, AV1TILE_DLF + 0, r, c, 0 - 6);   # [0] only
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 0, 0);
+    store64(fh + AV1FH_DELTA_LF_MULTI, 1);
+    av1_deblock(t1, fh);
+    av1_deblock(t0, fh);
+    assert_eq(dr_frame_get(f1, 0, 7, 4) != 100, 1, "multi: pass-0 edges ignore DeltaLFs[1]");
+    assert_eq(dr_frame_get(f0, 0, 7, 4), 100, "multi: pass-0 edges read DeltaLFs[0]");
+    return 0;
+}
+# the level-0 FALLBACK (7.14.2) re-runs 7.14.4 at the PREVIOUS block, deltaLF included: the block right of
+# the x=8 edge has deltaLF -20 (level 0), its left neighbour has deltaLF 0 (level 20), so the edge must
+# filter at the neighbour's level. A fallback that reused the CURRENT block's deltaLF would stay at 0 and
+# leave the edge unfiltered.
+fn test_deblock_delta_lf_prev_fallback() {
+    var tile = lf_mk_step_tile(3, 1);
+    var frame = load64(tile + AV1TILE_FRAME);
+    var r = 0;
+    while (r < 4) {
+        av1_grid_set(tile, AV1TILE_DLF + 0, r, 2, 0 - 20);
+        av1_grid_set(tile, AV1TILE_DLF + 0, r, 3, 0 - 20);
+        r = r + 1;
+    }
+    var fh = mk_fh(20, 20, 20, 20, 0, 0, 0);
+    av1_deblock(tile, fh);
+    assert_eq(dr_frame_get(frame, 0, 7, 4) != 100, 1, "x=8 edge filters at the PREVIOUS block's level");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("deblock strength / size / limits");
@@ -434,6 +525,10 @@ fn main() {
     test_deblock_level0_prev_fallback();
     test_deblock_level0();
     test_deblock_level0_delta();
+    test_lf_delta_index();
+    test_deblock_delta_lf();
+    test_deblock_delta_lf_multi_pass();
+    test_deblock_delta_lf_prev_fallback();
     return assert_summary();
 }
 

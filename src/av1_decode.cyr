@@ -364,11 +364,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # segmentation (0.7.125 D1): the DECODABLE configs (spatial map read, per-segment qindex) now
     # decode on BOTH lanes (av1_intra_segment_id / av1_inter_segment_id). av1_seg_supported gates the
     # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) and
-    # a lossless-boundary-crossing segment — which still REJECT cleanly (trust no input byte). delta-q/lf
-    # remain fully rejected (an entropy desync on the intra path, not merely wrong pixels).
+    # a lossless-boundary-crossing segment — which still REJECT cleanly (trust no input byte). The
+    # per-superblock delta_q / delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile
+    # loop below); they used to reject here because reading neither desynced the intra path.
     if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
-    if (av1_fh_delta_q_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
-    if (av1_fh_delta_lf_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     # allow_intrabc (5.11.6) and the palette tools gated by allow_screen_content_tools
     # (5.11.46) are read by neither path; a screen-content stream would desync.
     if (av1_fh_allow_intrabc(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
@@ -465,6 +464,17 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         store64(tile + AV1TILE_ENABLE_FI, enable_fi);
         store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
         av1_tile_set_sb128(tile, av1_seq_use_128x128(seq));   # 128x128 superblocks (0.7.126 E2a)
+        # per-superblock deltas (0.8.2): one Av1DeltaCtx per TILE, since CurrentQIndex and DeltaLF are
+        # reset per tile (5.11.1 / 5.11.2). Only when delta_q_present (delta_lf_present implies it): a
+        # frame without deltas attaches none, so every splice and the qindex helper take the old path.
+        if (av1_fh_delta_q_present(fh) != 0) {
+            var dsb = AV1_BLOCK_64X64;
+            if (av1_seq_use_128x128(seq) != 0) { dsb = AV1_BLOCK_128X128; }
+            var dctx = av1_dctx_new(1, av1_fh_delta_q_res(fh), av1_fh_delta_lf_present(fh),
+              av1_fh_delta_lf_res(fh), av1_fh_delta_lf_multi(fh), num_planes, dsb, base_q);
+            if (dctx == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
+            av1_tile_set_dctx(tile, dctx);
+        }
         av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows);
         var tile0 = load64(fdc + AV1FDEC_TILE0);
         if (tile0 == 0) {
@@ -557,7 +567,7 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                 serr = av1_cdf_bundle_defaults(cdfb, av1_coeff_cdf_qbucket(load64(tile0 + AV1TILE_BASE_Q)));
             } else {
                 var src = av1_ref_saved_cdf(refs, av1_fh_ref_frame_idx(fh, pr));
-                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7244); }
+                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, AV1CB_N); }
             }
         }
         if (serr != DR_OK) { store64(out_err, serr); return 0; }

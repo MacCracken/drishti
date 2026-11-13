@@ -48,6 +48,8 @@ CORPUS_FRAME=$(( CORPUS_Y + (2 * CORPUS_C) ))
 GEN_CASES="kf_only seq_filters seq_nofilt"
 ODDMI_CASES="160x136:64 160x136:128 288x152:64 288x152:128"
 SB_CASES="64 128"
+# kind_WxH_sbN: dqlf = delta_q + delta_lf, dqonly = delta_q alone (0.8.2).
+DELTA_CASES="dqlf_352x288_sb64 dqlf_352x288_sb128 dqonly_352x288_sb64"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
@@ -64,6 +66,7 @@ skip_external() { # reason
     for c in $GEN_CASES; do skip_case "$c" "$1"; done
     for c in $ODDMI_CASES; do skip_case "oddmi_${c%%:*}_sb${c##*:}" "$1"; done
     for c in $SB_CASES; do skip_case "sbrepro_sb$c" "$1"; done
+    for c in $DELTA_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -125,6 +128,9 @@ repro_case() { # name expect(match|xfail)
 
 cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 || {
     echo "conformance: harness build FAILED"; exit 1; }
+# the header probe proves a delta case's stream really carries deltas before it is scored.
+cyrius build programs/vector-probe.cyr build/drishti-vector-probe >/dev/null 2>&1 || {
+    echo "conformance: vector-probe build FAILED"; exit 1; }
 echo "=== drishti conformance ==="
 # A committed MULTI-FRAME reproducer: 6 frames with their per-frame aomdec MD5s, one per
 # line. Runs anywhere. hard_n = how many leading frames are HARD gates; the rest are xfail.
@@ -426,6 +432,61 @@ for c in $ODDMI_CASES; do d="${c%%:*}"; oddmi "${d%%x*}" "${d##*x}" "${c##*:}"; 
 
 echo "--- 128-SB reproducer (same source, only --sb-size differs) ---"
 for sb in $SB_CASES; do sbrepro "$sb" match; done   # 128 is the CDEF-grid heap overflow: was xfail until av1_clear_cdef was bounded
+
+# ---- PER-SUPERBLOCK DELTAS (0.8.2): delta_q / delta_lf decode bit-exact, keyframes AND inter frames ----
+# libaom emits deltas only from its delta-q modes, and --deltaq-mode=2 needs lookahead (deltaq-mode=1 rides
+# on the TPL model and emitted none at all for these sources), hence --lag-in-frames=19 here, unlike the
+# generated corpus. libaom always writes delta_lf_multi = 0, so multi = 1 is witnessed only by the unit
+# tests. A case is only meaningful if its stream REALLY carries deltas, so each one first PROVES
+# delta_q_present (and delta_lf_present for dqlf) through vector-probe — a libaom that stopped emitting
+# them would otherwise turn these into ordinary inter streams passing for the wrong reason.
+DELTA_FRAMES=5
+deltacase() { # name = kind_WxH_sbN
+    local n="$1" kind dims sbx
+    IFS=_ read -r kind dims sbx <<< "$n"
+    local w="${dims%%x*}" h="${dims##*x}" sb="${sbx#sb}"
+    local flags="--deltaq-mode=2"
+    [ "$kind" = "dqlf" ] && flags="$flags --delta-lf-mode=1"
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30" -frames:v $DELTA_FRAMES \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --sb-size="$sb" --cpu-used=8 --end-usage=q --cq-level=40 \
+        --aq-mode=0 --enable-restoration=0 --tune-content=default --enable-palette=0 --enable-intrabc=0 \
+        --limit=$DELTA_FRAMES --lag-in-frames=19 $flags --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" 2>/dev/null
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local probe; probe=$(./build/drishti-vector-probe 2>&1)
+    if ! echo "$probe" | grep -q 'delta_q_present=1'; then
+        echo "  $n: SETUP FAILED (the stream carries no delta_q — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    if [ "$kind" = "dqlf" ] && ! echo "$probe" | grep -q 'delta_lf_present=1'; then
+        echo "  $n: SETUP FAILED (the stream carries no delta_lf — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    aomdec --rawvideo -o "$WORK/$n.ref" "$WORK/$n.ivf" 2>/dev/null
+    local fs=$(( (w * h) + (2 * ((w + 1) / 2) * ((h + 1) / 2)) ))
+    local refsz; refsz=$(stat -c %s "$WORK/$n.ref" 2>/dev/null || echo 0)
+    if [ "$refsz" -ne $(( fs * DELTA_FRAMES )) ]; then
+        echo "  $n: SETUP FAILED (reference holds $refsz bytes, not $DELTA_FRAMES frames of $fs)"
+        fail=$((fail+1)); return
+    fi
+    local line="  $n:" k=1
+    while [ "$k" -le "$DELTA_FRAMES" ]; do
+        local a b
+        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
+        else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
+        k=$((k+1))
+    done
+    echo "$line"
+}
+echo "--- per-superblock deltas (delta_q / delta_lf; every frame hard) ---"
+for c in $DELTA_CASES; do deltacase "$c"; done
 
 echo "--- published libaom vectors (128x128 superblocks) ---"
 for v in $PUBLISHED; do check_published "$v" match; done

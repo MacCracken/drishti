@@ -2639,20 +2639,18 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # (av1_nbctx_setup) is built HERE, at the spec's preamble position, from the ctx's
 # grid; ctx carries the block geometry as for 5.11.23. above_skip/left_skip and
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
-# cdef_ctx is the intra path's splice record (0 to skip). Unsupported features gate
-# hard rather than desync: a non-spatial segmentation config (av1_seg_supported)
-# and delta-q / delta-lf (roadmap.md). Segment-id reads, read_cdef and the intra
-# fork are all wired below.
+# cdef_ctx is the intra path's splice record (0 to skip); dctx is the tile's Av1DeltaCtx for
+# read_delta_qindex / read_delta_lf (0 = no deltas). A non-spatial segmentation config
+# (av1_seg_supported) still gates hard rather than desync (roadmap.md 0.8.2). Segment-id reads,
+# read_cdef, the deltas and the intra fork are all wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids, dctx): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
     if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
-    if (av1_fh_delta_q_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }        # roadmap.md
-    if (av1_fh_delta_lf_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }       # roadmap.md
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the map grid
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -2695,8 +2693,9 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
         var cs = load64(cdef_ctx + 40);
         av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
     }
-    # read_delta_qindex / read_delta_lf: delta_q/lf_present are gated OFF above, and
-    # with them disabled the spec reads nothing here (roadmap.md).
+    # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.18), straight after read_cdef and
+    # before is_inter — so an intra block inside an inter frame reads its deltas here too.
+    av1_read_deltas(sd, ncc, dctx, mi_size, skip);
     var is_inter = av1_read_is_inter(sd, cc_ref, nb, fh, skip_mode, segment_id);
     store64(out + AV1FB_ISINTER, is_inter);
     if (is_inter == 0) {
@@ -2714,13 +2713,11 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
   ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids, dctx): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
     if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
-    if (av1_fh_delta_q_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }        # roadmap.md
-    if (av1_fh_delta_lf_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }       # roadmap.md
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -2765,6 +2762,8 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
         av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size,
           load64(blk + AV1FB_SKIP), ce, cb, cl, ci);
     }
+    var ewd = av1_write_deltas(enc, ncc, dctx, mi_size, load64(blk + AV1FB_SKIP), mi_row, mi_col);
+    if (ewd != DR_OK) { return ewd; }
     var is_inter = load64(blk + AV1FB_ISINTER);
     var e2 = av1_write_is_inter(enc, cc_ref, nb, fh, skip_mode, segid, is_inter);
     if (e2 != DR_OK) { return e2; }

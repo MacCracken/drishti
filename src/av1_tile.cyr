@@ -88,6 +88,8 @@ fn av1_decode_tile(tile): i64 {
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
     var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);   # frame row bound for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
+    var dctx = av1_tile_dctx(tile);
+    av1_dctx_tile_reset(dctx);                       # CurrentQIndex = base_q_idx, DeltaLF[] = 0, per tile
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }         # RefLrWiener/RefSgrXqd = Mid, per tile
@@ -107,6 +109,7 @@ fn av1_decode_tile(tile): i64 {
         av1_clear_left_context(tile, num_planes);
         var c = col_start;
         while (c < col_end) {
+            av1_dctx_sb_start(dctx);                 # ReadDeltas = delta_q_present (5.11.2)
             # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. Guarded: grid may be
             # unallocated. A 128 SB spans FOUR 64x64 cdef units, which use_128 handles;
             # fmi_rows bounds the three extra writes when the SB overhangs the MI grid.
@@ -137,6 +140,8 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var bc = alloc(8);
     store64(pc, 0);
     store64(bc, 0);
+    var dctx = av1_tile_dctx(tile);
+    av1_dctx_tile_reset(dctx);                       # mirror of decode_tile: per-tile delta reset
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }
@@ -152,6 +157,7 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
+            av1_dctx_sb_start(dctx);                 # mirror: ReadDeltas = delta_q_present
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
             if (lrp != 0) {
                 av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,

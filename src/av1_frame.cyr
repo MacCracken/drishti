@@ -932,7 +932,8 @@ fn av1_seg_supported(fh): i64 {
     if (av1_fh_base_q_idx(fh) == 0) { base_lossless = 1; }
     var s = 0;
     while (s < AV1_MAX_SEGMENTS) {
-        var qs = av1_get_qindex_ignore_delta(fh, s);   # == per-block qindex (delta_q_present rejected)
+        # LosslessArray uses get_qindex(1, s): delta-q is ignored by definition, so this stays exact.
+        var qs = av1_get_qindex_ignore_delta(fh, s);
         var sl = 0;
         if (qs == 0) { sl = 1; }
         if (sl != base_lossless) { return 0; }

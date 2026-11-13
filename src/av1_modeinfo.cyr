@@ -611,10 +611,229 @@ fn av1_clear_cdef(grid, stride, rows, r, c, use_128): i64 {
 }
 
 # ================================================================
+# Per-superblock quantizer and loop-filter DELTAS — 5.11.12 read_delta_qindex + 5.11.13
+# read_delta_lf (spec "Quantizer index delta syntax" / "Loop filter delta syntax"), and the
+# state they drive. Cross-checked against libaom av1/decoder/decodemv.c read_delta_qindex /
+# read_delta_lflevel / read_delta_q_params.
+#
+# The state is one Av1DeltaCtx record per tile (AV1TILE_DCTX; 0 = the feature is off and every
+# splice below is inert, which is what every pre-0.8.2 caller passes):
+#   * the five frame-header fields (delta_q_present / _res, delta_lf_present / _res / _multi),
+#     NumPlanes and sbSize (BLOCK_64X64 or BLOCK_128X128);
+#   * CurrentQIndex — reset to base_q_idx per TILE (5.11.1 tile_group_obu, just before
+#     init_symbol), updated by read_delta_qindex, read by get_qindex (7.12.2) for dequant;
+#   * DeltaLF[ FRAME_LF_COUNT ] — reset to 0 per TILE (5.11.2 decode_tile), updated by
+#     read_delta_lf, stored per 4x4 into DeltaLFs (5.11.5) for the deblocker (7.14.4);
+#   * ReadDeltas — set to delta_q_present at every SUPERBLOCK (5.11.2) and cleared after the
+#     first block's mode info (both intra_frame_mode_info and inter_frame_mode_info), so only
+#     the first block of a superblock reads deltas. libaom's equivalent is b_col == 0 && b_row
+#     == 0 within the superblock, which is the same block.
+#   * an encode-only PLAN: an MI-grid-shaped array, AV1_DQPLAN_W i64 per cell (the reduced
+#     delta_q, then the reduced delta_lf[0..3]), read at the superblock's first block. 0 on decode.
+#
+# Both reads sit at the same point in both mode-info orders: after read_cdef, before is_inter /
+# y_mode: read_cdef, read_delta_qindex, read_delta_lf, ReadDeltas = 0.
+# ================================================================
+enum Av1DeltaCtx {
+    AV1DQ_DQ_PRESENT  = 0;
+    AV1DQ_DQ_RES      = 8;
+    AV1DQ_LF_PRESENT  = 16;
+    AV1DQ_LF_RES      = 24;
+    AV1DQ_LF_MULTI    = 32;
+    AV1DQ_NUM_PLANES  = 40;
+    AV1DQ_SB_SIZE     = 48;    # BLOCK_64X64 or BLOCK_128X128
+    AV1DQ_BASE_Q      = 56;    # base_q_idx, the per-tile reset value of CurrentQIndex
+    AV1DQ_READ_DELTAS = 64;
+    AV1DQ_CUR_QINDEX  = 72;
+    AV1DQ_DELTA_LF    = 80;    # [FRAME_LF_COUNT = 4] i64 -> 112
+    AV1DQ_PLAN        = 112;   # encode plan (AV1_DQPLAN_W i64 per MI cell); 0 on decode
+    AV1DQ_PLAN_STRIDE = 120;   # plan row stride in MI cells (the frame MiCols)
+    AV1DQ_SIZE        = 128;
+}
+enum Av1DeltaConst {
+    AV1_DELTA_Q_SMALL   = 3;    # 03.symbols: DELTA_Q_SMALL
+    AV1_DELTA_LF_SMALL  = 3;    # 03.symbols: DELTA_LF_SMALL
+    AV1_FRAME_LF_COUNT  = 4;    # 03.symbols: FRAME_LF_COUNT
+    AV1_DELTA_ABS_MAX   = 512;  # the largest |delta| the escape codes: L(3)+1 = 8 -> (1<<8)+255+1
+    AV1_DQPLAN_W        = 5;    # plan cell: reduced delta_q, reduced delta_lf[0..3]
+}
+fn av1_dctx_new(dq_present, dq_res, lf_present, lf_res, lf_multi, num_planes, sb_size, base_q): i64 {
+    var d = alloc(AV1DQ_SIZE);
+    if (d == 0) { return 0; }
+    store64(d + AV1DQ_DQ_PRESENT, dq_present);
+    store64(d + AV1DQ_DQ_RES, dq_res);
+    store64(d + AV1DQ_LF_PRESENT, lf_present);
+    store64(d + AV1DQ_LF_RES, lf_res);
+    store64(d + AV1DQ_LF_MULTI, lf_multi);
+    store64(d + AV1DQ_NUM_PLANES, num_planes);
+    store64(d + AV1DQ_SB_SIZE, sb_size);
+    store64(d + AV1DQ_BASE_Q, base_q);
+    store64(d + AV1DQ_PLAN, 0);
+    store64(d + AV1DQ_PLAN_STRIDE, 0);
+    av1_dctx_tile_reset(d);
+    store64(d + AV1DQ_READ_DELTAS, 0);
+    return d;
+}
+fn av1_dctx_set_plan(d, plan, stride): i64 {
+    store64(d + AV1DQ_PLAN, plan);
+    store64(d + AV1DQ_PLAN_STRIDE, stride);
+    return DR_OK;
+}
+# Per TILE: CurrentQIndex = base_q_idx (5.11.1) and DeltaLF[ i ] = 0 (5.11.2).
+fn av1_dctx_tile_reset(d): i64 {
+    if (d == 0) { return 0; }
+    store64(d + AV1DQ_CUR_QINDEX, load64(d + AV1DQ_BASE_Q));
+    var i = 0;
+    while (i < AV1_FRAME_LF_COUNT) { store64(d + AV1DQ_DELTA_LF + (i * 8), 0); i = i + 1; }
+    return 0;
+}
+# Per SUPERBLOCK: ReadDeltas = delta_q_present (5.11.2).
+fn av1_dctx_sb_start(d): i64 {
+    if (d == 0) { return 0; }
+    store64(d + AV1DQ_READ_DELTAS, load64(d + AV1DQ_DQ_PRESENT));
+    return 0;
+}
+fn av1_dctx_qindex(d): i64 { return load64(d + AV1DQ_CUR_QINDEX); }
+fn av1_dctx_dq_present(d): i64 { return load64(d + AV1DQ_DQ_PRESENT); }
+fn av1_dctx_delta_lf(d, i): i64 { return load64(d + AV1DQ_DELTA_LF + (i * 8)); }
+fn av1_dctx_read_deltas(d): i64 { return load64(d + AV1DQ_READ_DELTAS); }
+# frameLfCount (5.11.13): 1, or with delta_lf_multi FRAME_LF_COUNT (NumPlanes > 1) / FRAME_LF_COUNT - 2.
+fn av1_dctx_lf_count(d): i64 {
+    if (load64(d + AV1DQ_LF_MULTI) == 0) { return 1; }
+    if (load64(d + AV1DQ_NUM_PLANES) > 1) { return AV1_FRAME_LF_COUNT; }
+    return AV1_FRAME_LF_COUNT - 2;
+}
+# "if ( MiSize == sbSize && skip ) return" — the shared early-out of both reads.
+fn av1_dctx_sb_skip(d, mi_size, skip): i64 {
+    return (mi_size == load64(d + AV1DQ_SB_SIZE)) && (skip != 0);
+}
+# The signed reduced delta both reads share (delta_q_abs and delta_lf_abs code identically,
+# 5.11.12 / 5.11.13): a 4-symbol S() where the top symbol (DELTA_*_SMALL = 3) escapes to
+# rem_bits = L(3) + 1, abs_bits = L(rem_bits), abs = abs_bits + (1 << rem_bits) + 1; then, if abs
+# is non-zero, sign = L(1) (1 = negative). The escape bias is (1 << n) + 1, NOT (1 << n): with
+# n >= 1 that makes the escaped range start at 3, so abs == 3 is coded through the escape and
+# the symbol 3 never means "3" directly.
+fn av1_delta_reduced_read(sd, cdf): i64 {
+    var a = av1_sym_read_symbol(sd, cdf, AV1_DELTA_Q_SMALL + 1);
+    if (a == AV1_DELTA_Q_SMALL) {
+        var n = av1_sym_read_literal(sd, 3) + 1;
+        a = av1_sym_read_literal(sd, n) + (1 << n) + 1;
+    }
+    if (a != 0) {
+        if (av1_sym_read_literal(sd, 1) != 0) { return 0 - a; }
+    }
+    return a;
+}
+# The encode inverse: the symbol for |v| < 3, else the escape with n = floor(log2(|v| - 1)) so
+# that (1 << n) + 1 <= |v| <= 1 << (n + 1). Refuses |v| > AV1_DELTA_ABS_MAX (unrepresentable).
+fn av1_delta_reduced_write(enc, cdf, v): i64 {
+    var a = v;
+    if (a < 0) { a = 0 - v; }
+    if (a > AV1_DELTA_ABS_MAX) { return DR_ERR_BOUNDS; }
+    if (a < AV1_DELTA_Q_SMALL) {
+        av1_sym_encode_symbol(enc, cdf, AV1_DELTA_Q_SMALL + 1, a);
+    } else {
+        av1_sym_encode_symbol(enc, cdf, AV1_DELTA_Q_SMALL + 1, AV1_DELTA_Q_SMALL);
+        var n = dr_floor_log2(a - 1);
+        av1_sym_encode_literal(enc, n - 1, 3);
+        av1_sym_encode_literal(enc, a - (1 << n) - 1, n);
+    }
+    if (a != 0) {
+        var neg = 0;
+        if (v < 0) { neg = 1; }
+        av1_sym_encode_literal(enc, neg, 1);
+    }
+    return DR_OK;
+}
+# read_delta_qindex (5.11.12): CurrentQIndex = Clip3(1, 255, CurrentQIndex + (reduced << delta_q_res)).
+# The floor is 1, not 0, so a delta can never make a block lossless (libaom: "Normative: Clamp to
+# [1,MAXQ] to not interfere with lossless mode").
+fn av1_read_delta_qindex(sd, ncc, d, mi_size, skip): i64 {
+    if (av1_dctx_sb_skip(d, mi_size, skip)) { return 0; }
+    if (load64(d + AV1DQ_READ_DELTAS) == 0) { return 0; }
+    var red = av1_delta_reduced_read(sd, av1_ncdf_delta_q(ncc));
+    if (red != 0) {
+        store64(d + AV1DQ_CUR_QINDEX, av1_clip3(1, 255,
+            load64(d + AV1DQ_CUR_QINDEX) + (red << load64(d + AV1DQ_DQ_RES))));
+    }
+    return 0;
+}
+# read_delta_lf (5.11.13): DeltaLF[ i ] = Clip3(-MAX_LOOP_FILTER, MAX_LOOP_FILTER,
+# DeltaLF[ i ] + (reduced << delta_lf_res)) for i < frameLfCount, each from its own CDF.
+fn av1_read_delta_lf(sd, ncc, d, mi_size, skip): i64 {
+    if (av1_dctx_sb_skip(d, mi_size, skip)) { return 0; }
+    if ((load64(d + AV1DQ_READ_DELTAS) == 0) || (load64(d + AV1DQ_LF_PRESENT) == 0)) { return 0; }
+    var multi = load64(d + AV1DQ_LF_MULTI);
+    var cnt = av1_dctx_lf_count(d);
+    var i = 0;
+    while (i < cnt) {
+        var cdf = av1_ncdf_delta_lf(ncc);
+        if (multi != 0) { cdf = av1_ncdf_delta_lf_multi(ncc, i); }
+        var red = av1_delta_reduced_read(sd, cdf);
+        if (red != 0) {
+            var slot = d + AV1DQ_DELTA_LF + (i * 8);
+            store64(slot, av1_clip3(0 - AV1_MAX_LOOP_FILTER, AV1_MAX_LOOP_FILTER,
+                load64(slot) + (red << load64(d + AV1DQ_LF_RES))));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+# The mode-info splice (both lanes): read_delta_qindex, read_delta_lf, ReadDeltas = 0.
+fn av1_read_deltas(sd, ncc, d, mi_size, skip): i64 {
+    if (d == 0) { return 0; }
+    av1_read_delta_qindex(sd, ncc, d, mi_size, skip);
+    av1_read_delta_lf(sd, ncc, d, mi_size, skip);
+    store64(d + AV1DQ_READ_DELTAS, 0);
+    return 0;
+}
+# The encode mirror. The reduced deltas come from the plan cell at (mi_row, mi_col) — the
+# superblock's first block — and the SAME state updates run, so the encoder's CurrentQIndex /
+# DeltaLF track the decoder's exactly. With no plan every delta written is 0.
+fn av1_write_deltas(enc, ncc, d, mi_size, skip, mi_row, mi_col): i64 {
+    if (d == 0) { return DR_OK; }
+    var rd = load64(d + AV1DQ_READ_DELTAS);
+    store64(d + AV1DQ_READ_DELTAS, 0);
+    if (av1_dctx_sb_skip(d, mi_size, skip) || (rd == 0)) { return DR_OK; }
+    var cell = 0;
+    var plan = load64(d + AV1DQ_PLAN);
+    if (plan != 0) {
+        cell = plan + ((((mi_row * load64(d + AV1DQ_PLAN_STRIDE)) + mi_col) * AV1_DQPLAN_W) * 8);
+    }
+    var dq = 0;
+    if (cell != 0) { dq = load64(cell + 0); }
+    var e = av1_delta_reduced_write(enc, av1_ncdf_delta_q(ncc), dq);
+    if (e != DR_OK) { return e; }
+    if (dq != 0) {
+        store64(d + AV1DQ_CUR_QINDEX, av1_clip3(1, 255,
+            load64(d + AV1DQ_CUR_QINDEX) + (dq << load64(d + AV1DQ_DQ_RES))));
+    }
+    if (load64(d + AV1DQ_LF_PRESENT) == 0) { return DR_OK; }
+    var multi = load64(d + AV1DQ_LF_MULTI);
+    var cnt = av1_dctx_lf_count(d);
+    var i = 0;
+    while (i < cnt) {
+        var cdf = av1_ncdf_delta_lf(ncc);
+        if (multi != 0) { cdf = av1_ncdf_delta_lf_multi(ncc, i); }
+        var dl = 0;
+        if (cell != 0) { dl = load64(cell + ((1 + i) * 8)); }
+        var el = av1_delta_reduced_write(enc, cdf, dl);
+        if (el != DR_OK) { return el; }
+        if (dl != 0) {
+            var slot = d + AV1DQ_DELTA_LF + (i * 8);
+            store64(slot, av1_clip3(0 - AV1_MAX_LOOP_FILTER, AV1_MAX_LOOP_FILTER,
+                load64(slot) + (dl << load64(d + AV1DQ_LF_RES))));
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
 # intra_frame_mode_info() — intra branch orchestrator (decode + inverse encode).
-# Fills / reads Av1ModeInfo. intra_segment_id (5.11.9) and read_cdef (5.11.56)
-# are read below; delta-q/lf, intrabc and palette are elided (PaletteSizeY is
-# fixed 0) per the module SCOPE note.
+# Fills / reads Av1ModeInfo. intra_segment_id (5.11.9), read_cdef (5.11.56) and the
+# delta_q / delta_lf reads (5.11.12 / 5.11.13, via the tile's Av1DeltaCtx) are read below;
+# intrabc and palette are elided (PaletteSizeY is fixed 0) per the module SCOPE note.
 # Read order mirrors the spec: skip, y_mode, angle_y, then (HasChroma) uv_mode,
 # cfl_alphas (if UV_CFL_PRED), angle_uv, then filter_intra.
 # ================================================================
@@ -646,6 +865,8 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         var cs = load64(cdef_ctx + 40);
         av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
     }
+    # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.7), straight after read_cdef.
+    av1_read_deltas(sd, ncc, av1_tile_dctx(tile), mi_size, skip);
 
     var ymode = av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode);
     store64(mi + AV1MI_YMODE, ymode);
@@ -698,6 +919,8 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
         var cp = load64(cdef_ctx + 48);
         av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size, load64(mi + AV1MI_SKIP), ce, cb, cl, ci);
     }
+    var ewd = av1_write_deltas(enc, ncc, av1_tile_dctx(tile), mi_size, load64(mi + AV1MI_SKIP), mi_row, mi_col);
+    if (ewd != DR_OK) { return ewd; }
 
     var ymode = load64(mi + AV1MI_YMODE);
     av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode);

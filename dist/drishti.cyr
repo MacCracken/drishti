@@ -3101,7 +3101,8 @@ fn av1_seg_supported(fh): i64 {
     if (av1_fh_base_q_idx(fh) == 0) { base_lossless = 1; }
     var s = 0;
     while (s < AV1_MAX_SEGMENTS) {
-        var qs = av1_get_qindex_ignore_delta(fh, s);   # == per-block qindex (delta_q_present rejected)
+        # LosslessArray uses get_qindex(1, s): delta-q is ignored by definition, so this stays exact.
+        var qs = av1_get_qindex_ignore_delta(fh, s);
         var sl = 0;
         if (qs == 0) { sl = 1; }
         if (sl != base_lossless) { return 0; }
@@ -9864,9 +9865,16 @@ fn av1_coeff_br_cdf(q, txsz_ctx, ptype, ctx): i64 {
 # Extracted from the spec and validated (every cdf non-decreasing, ends
 # 32768, count 0). The mode-info / tx-size / tx-type / partition reads that
 # consume these land in later 0.7.x bites (roadmap.md). FLAT module — wiring
-# in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a)
-# and segment_id (0.7.125 D1) CDFs are now HERE. Still absent (feature-gated, roadmap.md):
-# delta_q/lf, intrabc, palette CDFs.
+# in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a),
+# segment_id (0.7.125 D1) and delta_q / delta_lf (0.8.2) CDFs are now HERE. Still absent
+# (feature-gated, roadmap.md 0.8.4): intrabc and palette CDFs.
+
+# The blob length in i64, named ONCE: av1_ncdf_new, the cross-frame CDF bundle (av1_intertile.cyr)
+# and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows; when
+# it was a literal in seven places, growing it meant finding all seven.
+enum Av1NcdfSize {
+    AV1_NCDF_N = 1905;
+}
 
 var Av1_NCdf = 0;
 fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
@@ -9891,7 +9899,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1877 * 8);   # 1875 entries (+ Default_Partition_W128_Cdf 1839..1874) + pad
+    var t = alloc((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -10194,17 +10202,31 @@ fn av1_noncoeff_cdf_blob(): i64 {
     store64(t + (1866 * 8), 711);   store64(t + (1867 * 8), 966);   store64(t + (1868 * 8), 1172);
     store64(t + (1869 * 8), 32448); store64(t + (1870 * 8), 32538); store64(t + (1871 * 8), 32617);
     store64(t + (1872 * 8), 32664); store64(t + (1873 * 8), 32768); store64(t + (1874 * 8), 0);
+    # Default_Delta_Q_Cdf @ 1875, Default_Delta_Lf_Cdf @ 1880, and DeltaLFMultiCdf[FRAME_LF_COUNT = 4]
+    # @ 1885..1904 — six 4-symbol rows (delta_q_abs / delta_lf_abs take 0..DELTA_*_SMALL = 0..3), stride
+    # 5 = 4 cumulative values ending 32768 + the adaptation count. ALL SIX ROWS ARE THE SAME DEFAULT:
+    # init_non_coeff_cdfs sets "DeltaLFMultiCdf[ i ] ... to a copy of Default_Delta_Lf_Cdf for i =
+    # 0..FRAME_LF_COUNT-1" (spec semantics), and Default_Delta_Q_Cdf has the same values. Spec additional-
+    # tables annex {28160, 32120, 32677, 32768, 0}, cross-checked against libaom av1/common/entropymode.c
+    # default_delta_q_cdf / default_delta_lf_cdf / default_delta_lf_multi_cdf = AOM_CDF4(28160, 32120, 32677).
+    var dr = 1875;
+    while (dr < AV1_NCDF_N) {
+        store64(t + ((dr + 0) * 8), 28160); store64(t + ((dr + 1) * 8), 32120);
+        store64(t + ((dr + 2) * 8), 32677); store64(t + ((dr + 3) * 8), 32768);
+        store64(t + ((dr + 4) * 8), 0);
+        dr = dr + 5;
+    }
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1875 * 8);   # + Default_Partition_W128_Cdf 1839..1874
+    var cc = alloc(AV1_NCDF_N * 8);
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1875) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < AV1_NCDF_N) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -10232,6 +10254,11 @@ fn av1_ncdf_intra_y_mode(cc, sg): i64 { return cc + ((1756 + sg * 14) * 8); }
 # (stride 9 = 8 cumulative + count). 5.11.11 read_segment_id.
 fn av1_ncdf_segment_id(cc, ctx): i64 { return cc + ((1812 + ctx * 9) * 8); }
 fn av1_ncdf_filter_intra_mode(cc): i64 { return cc + (1129 * 8); }
+# delta_q_abs: TileDeltaQCdf. delta_lf_abs: TileDeltaLFCdf when delta_lf_multi == 0, else
+# TileDeltaLFMultiCdf[ i ] for loop index i (spec 8.3.2 cdf selection). Stride 5.
+fn av1_ncdf_delta_q(cc): i64 { return cc + (1875 * 8); }
+fn av1_ncdf_delta_lf(cc): i64 { return cc + (1880 * 8); }
+fn av1_ncdf_delta_lf_multi(cc, i): i64 { return cc + ((1885 + (i * 5)) * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }
 fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }
@@ -10866,10 +10893,229 @@ fn av1_clear_cdef(grid, stride, rows, r, c, use_128): i64 {
 }
 
 # ================================================================
+# Per-superblock quantizer and loop-filter DELTAS — 5.11.12 read_delta_qindex + 5.11.13
+# read_delta_lf (spec "Quantizer index delta syntax" / "Loop filter delta syntax"), and the
+# state they drive. Cross-checked against libaom av1/decoder/decodemv.c read_delta_qindex /
+# read_delta_lflevel / read_delta_q_params.
+#
+# The state is one Av1DeltaCtx record per tile (AV1TILE_DCTX; 0 = the feature is off and every
+# splice below is inert, which is what every pre-0.8.2 caller passes):
+#   * the five frame-header fields (delta_q_present / _res, delta_lf_present / _res / _multi),
+#     NumPlanes and sbSize (BLOCK_64X64 or BLOCK_128X128);
+#   * CurrentQIndex — reset to base_q_idx per TILE (5.11.1 tile_group_obu, just before
+#     init_symbol), updated by read_delta_qindex, read by get_qindex (7.12.2) for dequant;
+#   * DeltaLF[ FRAME_LF_COUNT ] — reset to 0 per TILE (5.11.2 decode_tile), updated by
+#     read_delta_lf, stored per 4x4 into DeltaLFs (5.11.5) for the deblocker (7.14.4);
+#   * ReadDeltas — set to delta_q_present at every SUPERBLOCK (5.11.2) and cleared after the
+#     first block's mode info (both intra_frame_mode_info and inter_frame_mode_info), so only
+#     the first block of a superblock reads deltas. libaom's equivalent is b_col == 0 && b_row
+#     == 0 within the superblock, which is the same block.
+#   * an encode-only PLAN: an MI-grid-shaped array, AV1_DQPLAN_W i64 per cell (the reduced
+#     delta_q, then the reduced delta_lf[0..3]), read at the superblock's first block. 0 on decode.
+#
+# Both reads sit at the same point in both mode-info orders: after read_cdef, before is_inter /
+# y_mode: read_cdef, read_delta_qindex, read_delta_lf, ReadDeltas = 0.
+# ================================================================
+enum Av1DeltaCtx {
+    AV1DQ_DQ_PRESENT  = 0;
+    AV1DQ_DQ_RES      = 8;
+    AV1DQ_LF_PRESENT  = 16;
+    AV1DQ_LF_RES      = 24;
+    AV1DQ_LF_MULTI    = 32;
+    AV1DQ_NUM_PLANES  = 40;
+    AV1DQ_SB_SIZE     = 48;    # BLOCK_64X64 or BLOCK_128X128
+    AV1DQ_BASE_Q      = 56;    # base_q_idx, the per-tile reset value of CurrentQIndex
+    AV1DQ_READ_DELTAS = 64;
+    AV1DQ_CUR_QINDEX  = 72;
+    AV1DQ_DELTA_LF    = 80;    # [FRAME_LF_COUNT = 4] i64 -> 112
+    AV1DQ_PLAN        = 112;   # encode plan (AV1_DQPLAN_W i64 per MI cell); 0 on decode
+    AV1DQ_PLAN_STRIDE = 120;   # plan row stride in MI cells (the frame MiCols)
+    AV1DQ_SIZE        = 128;
+}
+enum Av1DeltaConst {
+    AV1_DELTA_Q_SMALL   = 3;    # 03.symbols: DELTA_Q_SMALL
+    AV1_DELTA_LF_SMALL  = 3;    # 03.symbols: DELTA_LF_SMALL
+    AV1_FRAME_LF_COUNT  = 4;    # 03.symbols: FRAME_LF_COUNT
+    AV1_DELTA_ABS_MAX   = 512;  # the largest |delta| the escape codes: L(3)+1 = 8 -> (1<<8)+255+1
+    AV1_DQPLAN_W        = 5;    # plan cell: reduced delta_q, reduced delta_lf[0..3]
+}
+fn av1_dctx_new(dq_present, dq_res, lf_present, lf_res, lf_multi, num_planes, sb_size, base_q): i64 {
+    var d = alloc(AV1DQ_SIZE);
+    if (d == 0) { return 0; }
+    store64(d + AV1DQ_DQ_PRESENT, dq_present);
+    store64(d + AV1DQ_DQ_RES, dq_res);
+    store64(d + AV1DQ_LF_PRESENT, lf_present);
+    store64(d + AV1DQ_LF_RES, lf_res);
+    store64(d + AV1DQ_LF_MULTI, lf_multi);
+    store64(d + AV1DQ_NUM_PLANES, num_planes);
+    store64(d + AV1DQ_SB_SIZE, sb_size);
+    store64(d + AV1DQ_BASE_Q, base_q);
+    store64(d + AV1DQ_PLAN, 0);
+    store64(d + AV1DQ_PLAN_STRIDE, 0);
+    av1_dctx_tile_reset(d);
+    store64(d + AV1DQ_READ_DELTAS, 0);
+    return d;
+}
+fn av1_dctx_set_plan(d, plan, stride): i64 {
+    store64(d + AV1DQ_PLAN, plan);
+    store64(d + AV1DQ_PLAN_STRIDE, stride);
+    return DR_OK;
+}
+# Per TILE: CurrentQIndex = base_q_idx (5.11.1) and DeltaLF[ i ] = 0 (5.11.2).
+fn av1_dctx_tile_reset(d): i64 {
+    if (d == 0) { return 0; }
+    store64(d + AV1DQ_CUR_QINDEX, load64(d + AV1DQ_BASE_Q));
+    var i = 0;
+    while (i < AV1_FRAME_LF_COUNT) { store64(d + AV1DQ_DELTA_LF + (i * 8), 0); i = i + 1; }
+    return 0;
+}
+# Per SUPERBLOCK: ReadDeltas = delta_q_present (5.11.2).
+fn av1_dctx_sb_start(d): i64 {
+    if (d == 0) { return 0; }
+    store64(d + AV1DQ_READ_DELTAS, load64(d + AV1DQ_DQ_PRESENT));
+    return 0;
+}
+fn av1_dctx_qindex(d): i64 { return load64(d + AV1DQ_CUR_QINDEX); }
+fn av1_dctx_dq_present(d): i64 { return load64(d + AV1DQ_DQ_PRESENT); }
+fn av1_dctx_delta_lf(d, i): i64 { return load64(d + AV1DQ_DELTA_LF + (i * 8)); }
+fn av1_dctx_read_deltas(d): i64 { return load64(d + AV1DQ_READ_DELTAS); }
+# frameLfCount (5.11.13): 1, or with delta_lf_multi FRAME_LF_COUNT (NumPlanes > 1) / FRAME_LF_COUNT - 2.
+fn av1_dctx_lf_count(d): i64 {
+    if (load64(d + AV1DQ_LF_MULTI) == 0) { return 1; }
+    if (load64(d + AV1DQ_NUM_PLANES) > 1) { return AV1_FRAME_LF_COUNT; }
+    return AV1_FRAME_LF_COUNT - 2;
+}
+# "if ( MiSize == sbSize && skip ) return" — the shared early-out of both reads.
+fn av1_dctx_sb_skip(d, mi_size, skip): i64 {
+    return (mi_size == load64(d + AV1DQ_SB_SIZE)) && (skip != 0);
+}
+# The signed reduced delta both reads share (delta_q_abs and delta_lf_abs code identically,
+# 5.11.12 / 5.11.13): a 4-symbol S() where the top symbol (DELTA_*_SMALL = 3) escapes to
+# rem_bits = L(3) + 1, abs_bits = L(rem_bits), abs = abs_bits + (1 << rem_bits) + 1; then, if abs
+# is non-zero, sign = L(1) (1 = negative). The escape bias is (1 << n) + 1, NOT (1 << n): with
+# n >= 1 that makes the escaped range start at 3, so abs == 3 is coded through the escape and
+# the symbol 3 never means "3" directly.
+fn av1_delta_reduced_read(sd, cdf): i64 {
+    var a = av1_sym_read_symbol(sd, cdf, AV1_DELTA_Q_SMALL + 1);
+    if (a == AV1_DELTA_Q_SMALL) {
+        var n = av1_sym_read_literal(sd, 3) + 1;
+        a = av1_sym_read_literal(sd, n) + (1 << n) + 1;
+    }
+    if (a != 0) {
+        if (av1_sym_read_literal(sd, 1) != 0) { return 0 - a; }
+    }
+    return a;
+}
+# The encode inverse: the symbol for |v| < 3, else the escape with n = floor(log2(|v| - 1)) so
+# that (1 << n) + 1 <= |v| <= 1 << (n + 1). Refuses |v| > AV1_DELTA_ABS_MAX (unrepresentable).
+fn av1_delta_reduced_write(enc, cdf, v): i64 {
+    var a = v;
+    if (a < 0) { a = 0 - v; }
+    if (a > AV1_DELTA_ABS_MAX) { return DR_ERR_BOUNDS; }
+    if (a < AV1_DELTA_Q_SMALL) {
+        av1_sym_encode_symbol(enc, cdf, AV1_DELTA_Q_SMALL + 1, a);
+    } else {
+        av1_sym_encode_symbol(enc, cdf, AV1_DELTA_Q_SMALL + 1, AV1_DELTA_Q_SMALL);
+        var n = dr_floor_log2(a - 1);
+        av1_sym_encode_literal(enc, n - 1, 3);
+        av1_sym_encode_literal(enc, a - (1 << n) - 1, n);
+    }
+    if (a != 0) {
+        var neg = 0;
+        if (v < 0) { neg = 1; }
+        av1_sym_encode_literal(enc, neg, 1);
+    }
+    return DR_OK;
+}
+# read_delta_qindex (5.11.12): CurrentQIndex = Clip3(1, 255, CurrentQIndex + (reduced << delta_q_res)).
+# The floor is 1, not 0, so a delta can never make a block lossless (libaom: "Normative: Clamp to
+# [1,MAXQ] to not interfere with lossless mode").
+fn av1_read_delta_qindex(sd, ncc, d, mi_size, skip): i64 {
+    if (av1_dctx_sb_skip(d, mi_size, skip)) { return 0; }
+    if (load64(d + AV1DQ_READ_DELTAS) == 0) { return 0; }
+    var red = av1_delta_reduced_read(sd, av1_ncdf_delta_q(ncc));
+    if (red != 0) {
+        store64(d + AV1DQ_CUR_QINDEX, av1_clip3(1, 255,
+            load64(d + AV1DQ_CUR_QINDEX) + (red << load64(d + AV1DQ_DQ_RES))));
+    }
+    return 0;
+}
+# read_delta_lf (5.11.13): DeltaLF[ i ] = Clip3(-MAX_LOOP_FILTER, MAX_LOOP_FILTER,
+# DeltaLF[ i ] + (reduced << delta_lf_res)) for i < frameLfCount, each from its own CDF.
+fn av1_read_delta_lf(sd, ncc, d, mi_size, skip): i64 {
+    if (av1_dctx_sb_skip(d, mi_size, skip)) { return 0; }
+    if ((load64(d + AV1DQ_READ_DELTAS) == 0) || (load64(d + AV1DQ_LF_PRESENT) == 0)) { return 0; }
+    var multi = load64(d + AV1DQ_LF_MULTI);
+    var cnt = av1_dctx_lf_count(d);
+    var i = 0;
+    while (i < cnt) {
+        var cdf = av1_ncdf_delta_lf(ncc);
+        if (multi != 0) { cdf = av1_ncdf_delta_lf_multi(ncc, i); }
+        var red = av1_delta_reduced_read(sd, cdf);
+        if (red != 0) {
+            var slot = d + AV1DQ_DELTA_LF + (i * 8);
+            store64(slot, av1_clip3(0 - AV1_MAX_LOOP_FILTER, AV1_MAX_LOOP_FILTER,
+                load64(slot) + (red << load64(d + AV1DQ_LF_RES))));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+# The mode-info splice (both lanes): read_delta_qindex, read_delta_lf, ReadDeltas = 0.
+fn av1_read_deltas(sd, ncc, d, mi_size, skip): i64 {
+    if (d == 0) { return 0; }
+    av1_read_delta_qindex(sd, ncc, d, mi_size, skip);
+    av1_read_delta_lf(sd, ncc, d, mi_size, skip);
+    store64(d + AV1DQ_READ_DELTAS, 0);
+    return 0;
+}
+# The encode mirror. The reduced deltas come from the plan cell at (mi_row, mi_col) — the
+# superblock's first block — and the SAME state updates run, so the encoder's CurrentQIndex /
+# DeltaLF track the decoder's exactly. With no plan every delta written is 0.
+fn av1_write_deltas(enc, ncc, d, mi_size, skip, mi_row, mi_col): i64 {
+    if (d == 0) { return DR_OK; }
+    var rd = load64(d + AV1DQ_READ_DELTAS);
+    store64(d + AV1DQ_READ_DELTAS, 0);
+    if (av1_dctx_sb_skip(d, mi_size, skip) || (rd == 0)) { return DR_OK; }
+    var cell = 0;
+    var plan = load64(d + AV1DQ_PLAN);
+    if (plan != 0) {
+        cell = plan + ((((mi_row * load64(d + AV1DQ_PLAN_STRIDE)) + mi_col) * AV1_DQPLAN_W) * 8);
+    }
+    var dq = 0;
+    if (cell != 0) { dq = load64(cell + 0); }
+    var e = av1_delta_reduced_write(enc, av1_ncdf_delta_q(ncc), dq);
+    if (e != DR_OK) { return e; }
+    if (dq != 0) {
+        store64(d + AV1DQ_CUR_QINDEX, av1_clip3(1, 255,
+            load64(d + AV1DQ_CUR_QINDEX) + (dq << load64(d + AV1DQ_DQ_RES))));
+    }
+    if (load64(d + AV1DQ_LF_PRESENT) == 0) { return DR_OK; }
+    var multi = load64(d + AV1DQ_LF_MULTI);
+    var cnt = av1_dctx_lf_count(d);
+    var i = 0;
+    while (i < cnt) {
+        var cdf = av1_ncdf_delta_lf(ncc);
+        if (multi != 0) { cdf = av1_ncdf_delta_lf_multi(ncc, i); }
+        var dl = 0;
+        if (cell != 0) { dl = load64(cell + ((1 + i) * 8)); }
+        var el = av1_delta_reduced_write(enc, cdf, dl);
+        if (el != DR_OK) { return el; }
+        if (dl != 0) {
+            var slot = d + AV1DQ_DELTA_LF + (i * 8);
+            store64(slot, av1_clip3(0 - AV1_MAX_LOOP_FILTER, AV1_MAX_LOOP_FILTER,
+                load64(slot) + (dl << load64(d + AV1DQ_LF_RES))));
+        }
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
 # intra_frame_mode_info() — intra branch orchestrator (decode + inverse encode).
-# Fills / reads Av1ModeInfo. intra_segment_id (5.11.9) and read_cdef (5.11.56)
-# are read below; delta-q/lf, intrabc and palette are elided (PaletteSizeY is
-# fixed 0) per the module SCOPE note.
+# Fills / reads Av1ModeInfo. intra_segment_id (5.11.9), read_cdef (5.11.56) and the
+# delta_q / delta_lf reads (5.11.12 / 5.11.13, via the tile's Av1DeltaCtx) are read below;
+# intrabc and palette are elided (PaletteSizeY is fixed 0) per the module SCOPE note.
 # Read order mirrors the spec: skip, y_mode, angle_y, then (HasChroma) uv_mode,
 # cfl_alphas (if UV_CFL_PRED), angle_uv, then filter_intra.
 # ================================================================
@@ -10901,6 +11147,8 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
         var cs = load64(cdef_ctx + 40);
         av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
     }
+    # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.7), straight after read_cdef.
+    av1_read_deltas(sd, ncc, av1_tile_dctx(tile), mi_size, skip);
 
     var ymode = av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode);
     store64(mi + AV1MI_YMODE, ymode);
@@ -10953,6 +11201,8 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
         var cp = load64(cdef_ctx + 48);
         av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size, load64(mi + AV1MI_SKIP), ce, cb, cl, ci);
     }
+    var ewd = av1_write_deltas(enc, ncc, av1_tile_dctx(tile), mi_size, load64(mi + AV1MI_SKIP), mi_row, mi_col);
+    if (ewd != DR_OK) { return ewd; }
 
     var ymode = load64(mi + AV1MI_YMODE);
     av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode);
@@ -12093,7 +12343,23 @@ enum Av1TileOff {
     #     writes it; every intra block (including the intra fork inside an inter frame) is
     #     correct by default. ---
     AV1TILE_REF0S     = 592;  # RefFrame[0] per MI (0 = INTRA_FRAME)
-    AV1TILE_SIZE      = 600;
+    # --- per-superblock deltas (0.8.2): the tile's Av1DeltaCtx (CurrentQIndex / DeltaLF / ReadDeltas,
+    #     see av1_modeinfo.cyr; 0 = off), and DeltaLFs[ row ][ col ][ FRAME_LF_COUNT ] as FOUR
+    #     frame-addressed grids (index i at AV1TILE_DLF + i*8) for the deblocker's 7.14.4 deltaLF.
+    #     Zero-initialised with the other grids, which is exactly DeltaLFs when delta_lf is absent. ---
+    AV1TILE_DCTX      = 600;  # Av1DeltaCtx pointer (0 = no deltas)
+    AV1TILE_DLF       = 608;  # [4] DeltaLFs grids -> 640
+    AV1TILE_SIZE      = 640;
+}
+fn av1_tile_dctx(tile): i64 {
+    if (tile == 0) { return 0; }
+    return load64(tile + AV1TILE_DCTX);
+}
+fn av1_tile_set_dctx(tile, d): i64 { store64(tile + AV1TILE_DCTX, d); return 0; }
+# DeltaLFs[ r ][ c ][ i ] — 0 when the grids were never allocated (a tile-level test without grids).
+fn av1_dlf_get(tile, i, r, c): i64 {
+    if (load64(tile + AV1TILE_DLF + (i * 8)) == 0) { return 0; }
+    return av1_grid_get(tile, AV1TILE_DLF + (i * 8), r, c);
 }
 # sbMask (5.11.34 / compute_prediction): the mask that turns an ABSOLUTE MI coord into
 # one relative to the current superblock. 31 for a 128x128 SB, 15 for 64x64.
@@ -12178,6 +12444,11 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_SKIPMODES, 0);
     store64(tile + AV1TILE_ICDEF, 0);
     store64(tile + AV1TILE_IERR, 0);
+    store64(tile + AV1TILE_DCTX, 0);              # no deltas unless the driver attaches an Av1DeltaCtx
+    store64(tile + AV1TILE_DLF + 0, 0);           # DeltaLFs grids: allocated by av1_tile_grids_new
+    store64(tile + AV1TILE_DLF + 8, 0);
+    store64(tile + AV1TILE_DLF + 16, 0);
+    store64(tile + AV1TILE_DLF + 24, 0);
     # frame-addressed grids default to the tile dims (single tile spans the frame);
     # a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new.
     store64(tile + AV1TILE_FMI_COLS, mi_cols);
@@ -12258,6 +12529,12 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_MVGRID, load64(src + AV1TILE_MVGRID));
     store64(dst + AV1TILE_SKIPMODES, load64(src + AV1TILE_SKIPMODES));
     store64(dst + AV1TILE_SEGIDS, load64(src + AV1TILE_SEGIDS));   # shared SegmentIds map (0.7.125 D1)
+    # DeltaLFs (0.8.2): the deblocker runs once over the whole frame on tile0, so every tile's
+    # stores must land in tile0's grids.
+    store64(dst + AV1TILE_DLF + 0, load64(src + AV1TILE_DLF + 0));
+    store64(dst + AV1TILE_DLF + 8, load64(src + AV1TILE_DLF + 8));
+    store64(dst + AV1TILE_DLF + 16, load64(src + AV1TILE_DLF + 16));
+    store64(dst + AV1TILE_DLF + 24, load64(src + AV1TILE_DLF + 24));
     return 0;
 }
 
@@ -12288,7 +12565,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(11 * 8);
+    var offs = alloc(15 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -12299,8 +12576,12 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 64, AV1TILE_TXTYPES);
     store64(offs + 72, AV1TILE_SEGIDS);   # SegmentIds map (0.7.125 D1); zeroed like the others
     store64(offs + 80, AV1TILE_REF0S);    # RefFrame[0] per MI for the deblocker; 0 = INTRA_FRAME
+    store64(offs + 88, AV1TILE_DLF + 0);  # DeltaLFs[..][..][0..3] for the deblocker (0.8.2); 0 = no delta
+    store64(offs + 96, AV1TILE_DLF + 8);
+    store64(offs + 104, AV1TILE_DLF + 16);
+    store64(offs + 112, AV1TILE_DLF + 24);
     var g = 0;
-    while (g < 11) {
+    while (g < 15) {
         var arr = alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;
@@ -12987,7 +13268,56 @@ fn av1_block_write_grids(tile, r, c, bw4, bh4, mi_size, y_mode, uv_mode, skip, t
         }
         y = y + 1;
     }
+    # DeltaLFs[ r + y ][ c + x ][ i ] = DeltaLF[ i ] (5.11.5, the last storage loop of decode_block).
+    # Every block on both lanes — intra, inter, and the intra fork inside an inter frame — passes
+    # through here, so this one store covers them all. Without a delta context the grids keep their
+    # zero-initialised value, which is DeltaLFs when delta_lf is absent.
+    var d = av1_tile_dctx(tile);
+    if ((d != 0) && (load64(tile + AV1TILE_DLF) != 0)) {
+        var i = 0;
+        while (i < AV1_FRAME_LF_COUNT) {
+            var dl = av1_dctx_delta_lf(d, i);
+            var yy = 0;
+            while ((yy < bh4) && ((r + yy) < row_end)) {
+                var xx = 0;
+                while ((xx < bw4) && ((c + xx) < col_end)) {
+                    av1_grid_set(tile, AV1TILE_DLF + (i * 8), r + yy, c + xx, dl);
+                    xx = xx + 1;
+                }
+                yy = yy + 1;
+            }
+            i = i + 1;
+        }
+    }
     return 0;
+}
+# get_qindex( 0, segment_id ) (7.12.2) for the block just read — the dequant qindex. With a delta
+# context it is CurrentQIndex (plus the segment's ALT_Q, clipped); without one it reduces to the old
+# ignore-delta value, so a pre-0.8.2 caller gets byte-identical results. fh may be 0 (a tile-level
+# caller without a frame header): then segmentation is off and the answer is base_q / CurrentQIndex.
+fn av1_tile_block_qindex(tile, fh, segment_id): i64 {
+    var base_q = load64(tile + AV1TILE_BASE_Q);
+    var cur = base_q;
+    var dq_present = 0;
+    var d = av1_tile_dctx(tile);
+    if (d != 0) {
+        cur = av1_dctx_qindex(d);
+        dq_present = av1_dctx_dq_present(d);
+    }
+    var seg_active = 0;
+    var seg_data = 0;
+    if (fh != 0) {
+        # base_q comes from fh only when segmentation is on, exactly as the pre-0.8.2 code did
+        # (av1_get_qindex_ignore_delta vs the tile's BASE_Q); in a real decode they are equal.
+        if (av1_fh_segmentation_enabled(fh) != 0) {
+            base_q = av1_fh_base_q_idx(fh);
+            if (av1_fh_feature_enabled(fh, segment_id, AV1_SEG_LVL_ALT_Q) != 0) {
+                seg_active = 1;
+                seg_data = av1_fh_feature_data(fh, segment_id, AV1_SEG_LVL_ALT_Q);
+            }
+        }
+    }
+    return av1_get_qindex(0, base_q, cur, dq_present, seg_active, seg_data);
 }
 # HasChroma (5.11.5): mono / edge-4x4 chroma-sharing rules.
 fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
@@ -13063,15 +13393,14 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
       avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
       lossless, subx, suby, enable_fi, load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
-    # per-segment dequant + segid map stamp (0.7.125 D1): resolve this block's qindex from the segment_id
-    # the mode-info read, and stamp it across the footprint for later blocks' spatial prediction.
+    # the block's dequant qindex (7.12.2 get_qindex(0, segment_id): CurrentQIndex after this block's
+    # delta_q read, plus the segment's ALT_Q), then the segid map stamp for later blocks' spatial
+    # prediction (0.7.125 D1).
     var seg_fh = load64(tile + AV1TILE_SEG_FH);
+    store64(tile + AV1TILE_CUR_QINDEX, av1_tile_block_qindex(tile, seg_fh, load64(mi + AV1MI_SEGID)));
     if ((seg_fh != 0) && (av1_fh_segmentation_enabled(seg_fh) != 0)) {
-        store64(tile + AV1TILE_CUR_QINDEX, av1_get_qindex_ignore_delta(seg_fh, load64(mi + AV1MI_SEGID)));
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
           load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, load64(mi + AV1MI_SEGID));
-    } else {
-        store64(tile + AV1TILE_CUR_QINDEX, load64(tile + AV1TILE_BASE_Q));
     }
 
     var max_rect = av1_max_tx_size_rect(sub_size);
@@ -14197,6 +14526,8 @@ fn av1_decode_tile(tile): i64 {
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
     var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);   # frame row bound for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
+    var dctx = av1_tile_dctx(tile);
+    av1_dctx_tile_reset(dctx);                       # CurrentQIndex = base_q_idx, DeltaLF[] = 0, per tile
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }         # RefLrWiener/RefSgrXqd = Mid, per tile
@@ -14216,6 +14547,7 @@ fn av1_decode_tile(tile): i64 {
         av1_clear_left_context(tile, num_planes);
         var c = col_start;
         while (c < col_end) {
+            av1_dctx_sb_start(dctx);                 # ReadDeltas = delta_q_present (5.11.2)
             # clear_cdef (5.11.2): reset this SB's cdef_idx to -1. Guarded: grid may be
             # unallocated. A 128 SB spans FOUR 64x64 cdef units, which use_128 handles;
             # fmi_rows bounds the three extra writes when the SB overhangs the MI grid.
@@ -14246,6 +14578,8 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var bc = alloc(8);
     store64(pc, 0);
     store64(bc, 0);
+    var dctx = av1_tile_dctx(tile);
+    av1_dctx_tile_reset(dctx);                       # mirror of decode_tile: per-tile delta reset
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
     var lrp = load64(tile + AV1TILE_LRPARAMS);
     if (lrp != 0) { av1_lr_ref_reset(lrp); }
@@ -14261,6 +14595,7 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
         av1_clear_left_context(tile, num_planes);
         var c = 0;
         while (c < mi_cols) {
+            av1_dctx_sb_start(dctx);                 # mirror: ReadDeltas = delta_q_present
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
             if (lrp != 0) {
                 av1_write_lr(load64(tile + AV1TILE_ENC), load64(tile + AV1TILE_NCC), lrp, r, c, sb_bsize,
@@ -14560,9 +14895,22 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
 # for a plane/pass. tile carries the frame + the MI grids + LoopfilterTxSizes;
 # fh the loop-filter params. isIntra / the 7.14.5 reference and mode deltas are read PER MI
 # (REF0S + YModes) as of 0.7.129 — this used to hardcode isIntra = 1 and ref = INTRA_FRAME,
-# which filtered every block of every frame at the intra level. Per-block delta_lf is still
-# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.8.2).
+# which filtered every block of every frame at the intra level. The per-block deltaLF (7.14.4)
+# is read PER MI from the DeltaLFs grids as of 0.8.2 (it was passed as 0 while delta_lf_present
+# was a frame-level reject).
 # ================================================================
+# deltaLF (7.14.4): DeltaLFs[ row ][ col ][ 0 ] when delta_lf_multi is 0, otherwise
+# DeltaLFs[ row ][ col ][ plane == 0 ? pass : plane + 1 ] — the same i 7.14.5 indexes
+# loop_filter_level[] with (libaom delta_lf_id_lut = {{0,1},{2,2},{3,3}}). The grids are zero
+# when delta_lf is absent, so this is 0 exactly when it used to be hardcoded 0.
+fn av1_lf_delta(tile, fh, plane, pass, row, col): i64 {
+    var i = 0;
+    if (av1_fh_delta_lf_multi(fh) != 0) {
+        i = pass;
+        if (plane > 0) { i = plane + 1; }
+    }
+    return av1_dlf_get(tile, i, row, col);
+}
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var subx = 0;
@@ -14626,10 +14974,13 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     # filtered, at the neighbour's level). av1_lf_strength already implemented the ref/mode
     # deltas — it was simply never handed a real ref or mode_type.
     var lvl = av1_lf_strength(fh, plane, pass, ref0,
-      av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)), 0);
+      av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)),
+      av1_lf_delta(tile, fh, plane, pass, arow, acol));
     if (lvl == 0) {
+        # the fallback re-derives EVERYTHING at the previous block, its deltaLF included.
         lvl = av1_lf_strength(fh, plane, pass, prev_ref0,
-          av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)), 0);
+          av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)),
+          av1_lf_delta(tile, fh, plane, pass, prev_row, prev_col));
     }
     var lim = alloc(3 * 8);
     av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);
@@ -21999,20 +22350,18 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # (av1_nbctx_setup) is built HERE, at the spec's preamble position, from the ctx's
 # grid; ctx carries the block geometry as for 5.11.23. above_skip/left_skip and
 # skip_mode_ctx are tile-grid neighbour state (caller-derived; roadmap.md);
-# cdef_ctx is the intra path's splice record (0 to skip). Unsupported features gate
-# hard rather than desync: a non-spatial segmentation config (av1_seg_supported)
-# and delta-q / delta-lf (roadmap.md). Segment-id reads, read_cdef and the intra
-# fork are all wired below.
+# cdef_ctx is the intra path's splice record (0 to skip); dctx is the tile's Av1DeltaCtx for
+# read_delta_qindex / read_delta_lf (0 = no deltas). A non-spatial segmentation config
+# (av1_seg_supported) still gates hard rather than desync (roadmap.md 0.8.2). Segment-id reads,
+# read_cdef, the deltas and the intra fork are all wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids, dctx): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
     if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
-    if (av1_fh_delta_q_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }        # roadmap.md
-    if (av1_fh_delta_lf_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }       # roadmap.md
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }   # caller must supply the map grid
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -22055,8 +22404,9 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
         var cs = load64(cdef_ctx + 40);
         av1_read_cdef(sd, cg, cs, mi_row, mi_col, mi_size, skip, ce, cb, cl, ci);
     }
-    # read_delta_qindex / read_delta_lf: delta_q/lf_present are gated OFF above, and
-    # with them disabled the spec reads nothing here (roadmap.md).
+    # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.18), straight after read_cdef and
+    # before is_inter — so an intra block inside an inter frame reads its deltas here too.
+    av1_read_deltas(sd, ncc, dctx, mi_size, skip);
     var is_inter = av1_read_is_inter(sd, cc_ref, nb, fh, skip_mode, segment_id);
     store64(out + AV1FB_ISINTER, is_inter);
     if (is_inter == 0) {
@@ -22074,13 +22424,11 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
   ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids): i64 {
+  fwd_eq_bck, has_chroma, enable_filter_intra, lossless, segids, dctx): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
     if (av1_seg_supported(fh) == 0) { return DR_ERR_UNSUPPORTED; }   # unsupported seg config (0.7.125 D1)
-    if (av1_fh_delta_q_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }        # roadmap.md
-    if (av1_fh_delta_lf_present(fh) != 0) { return DR_ERR_UNSUPPORTED; }       # roadmap.md
     var seg_enabled = av1_fh_segmentation_enabled(fh);
     if ((seg_enabled != 0) && (segids == 0)) { return DR_ERR_BOUNDS; }
     var mi_row = load64(ctx + AV1MVC_MI_ROW);
@@ -22125,6 +22473,8 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
         av1_write_cdef(enc, cg, cp, cs, mi_row, mi_col, mi_size,
           load64(blk + AV1FB_SKIP), ce, cb, cl, ci);
     }
+    var ewd = av1_write_deltas(enc, ncc, dctx, mi_size, load64(blk + AV1FB_SKIP), mi_row, mi_col);
+    if (ewd != DR_OK) { return ewd; }
     var is_inter = load64(blk + AV1FB_ISINTER);
     var e2 = av1_write_is_inter(enc, cc_ref, nb, fh, skip_mode, segid, is_inter);
     if (e2 != DR_OK) { return e2; }
@@ -22505,11 +22855,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # segmentation (0.7.125 D1): the DECODABLE configs (spatial map read, per-segment qindex) now
     # decode on BOTH lanes (av1_intra_segment_id / av1_inter_segment_id). av1_seg_supported gates the
     # rest — temporal-predicted / copied maps + feature-data inheritance (need a DPB-saved seg map) and
-    # a lossless-boundary-crossing segment — which still REJECT cleanly (trust no input byte). delta-q/lf
-    # remain fully rejected (an entropy desync on the intra path, not merely wrong pixels).
+    # a lossless-boundary-crossing segment — which still REJECT cleanly (trust no input byte). The
+    # per-superblock delta_q / delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile
+    # loop below); they used to reject here because reading neither desynced the intra path.
     if (av1_seg_supported(fh) == 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
-    if (av1_fh_delta_q_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
-    if (av1_fh_delta_lf_present(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     # allow_intrabc (5.11.6) and the palette tools gated by allow_screen_content_tools
     # (5.11.46) are read by neither path; a screen-content stream would desync.
     if (av1_fh_allow_intrabc(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
@@ -22606,6 +22955,17 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         store64(tile + AV1TILE_ENABLE_FI, enable_fi);
         store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
         av1_tile_set_sb128(tile, av1_seq_use_128x128(seq));   # 128x128 superblocks (0.7.126 E2a)
+        # per-superblock deltas (0.8.2): one Av1DeltaCtx per TILE, since CurrentQIndex and DeltaLF are
+        # reset per tile (5.11.1 / 5.11.2). Only when delta_q_present (delta_lf_present implies it): a
+        # frame without deltas attaches none, so every splice and the qindex helper take the old path.
+        if (av1_fh_delta_q_present(fh) != 0) {
+            var dsb = AV1_BLOCK_64X64;
+            if (av1_seq_use_128x128(seq) != 0) { dsb = AV1_BLOCK_128X128; }
+            var dctx = av1_dctx_new(1, av1_fh_delta_q_res(fh), av1_fh_delta_lf_present(fh),
+              av1_fh_delta_lf_res(fh), av1_fh_delta_lf_multi(fh), num_planes, dsb, base_q);
+            if (dctx == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
+            av1_tile_set_dctx(tile, dctx);
+        }
         av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows);
         var tile0 = load64(fdc + AV1FDEC_TILE0);
         if (tile0 == 0) {
@@ -22698,7 +23058,7 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
                 serr = av1_cdf_bundle_defaults(cdfb, av1_coeff_cdf_qbucket(load64(tile0 + AV1TILE_BASE_Q)));
             } else {
                 var src = av1_ref_saved_cdf(refs, av1_fh_ref_frame_idx(fh, pr));
-                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, 7244); }
+                if (src == 0) { serr = DR_ERR_UNSUPPORTED; } else { av1_cdf_copy_words(cdfb, src, AV1CB_N); }
             }
         }
         if (serr != DR_OK) { store64(out_err, serr); return 0; }
@@ -24200,18 +24560,17 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
       load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
       load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
       load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
+      (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS), av1_tile_dctx(tile));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # per-segment dequant (0.7.125 D1): resolve this block's qindex from its segment_id so residual()
     # dequantizes at the right quantizer. == base_q when segmentation is disabled / segment inactive. Also
     # stamp segment_id across the block footprint in the SEGIDS map so LATER blocks' spatial prediction
     # (read_segment_id) reads this block's segment id. fh is AV1TILE_FH, set for every inter tile.
+    # 0.8.2: the qindex is get_qindex(0, segment_id) — CurrentQIndex after this block's delta read.
+    store64(tile + AV1TILE_CUR_QINDEX, av1_tile_block_qindex(tile, fh, av1_fb_segment_id(fb)));
     if (av1_fh_segmentation_enabled(fh) != 0) {
-        store64(tile + AV1TILE_CUR_QINDEX, av1_get_qindex_ignore_delta(fh, av1_fb_segment_id(fb)));
         av1_segid_store(load64(tile + AV1TILE_SEGIDS), load64(tile + AV1TILE_FMI_COLS),
           load64(tile + AV1TILE_FMI_ROWS), r, c, bw4, bh4, av1_fb_segment_id(fb));
-    } else {
-        store64(tile + AV1TILE_CUR_QINDEX, load64(tile + AV1TILE_BASE_Q));
     }
     # the intra fork (5.11.24) RECONSTRUCTION: build an Av1Block from the fork's Av1ModeInfo and run the
     # keyframe residual driver (intra predict + coeff + reconstruct, skip-aware), then the intra stores.
@@ -24670,7 +25029,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
       load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
       load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
       load64(tile + AV1TILE_ICDEF), 0, has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS));
+      (load64(tile + AV1TILE_BASE_Q) == 0), load64(tile + AV1TILE_SEGIDS), av1_tile_dctx(tile));
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # stamp segment_id across the block footprint (mirror of decode) so the encoder's later-block
     # spatial prediction reads this block's segment id.
@@ -24772,13 +25131,24 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
 # ================================================================
 # C1: cross-frame CDF inheritance (spec 7.20 save / 7.21 load).
 # A saved-CDF bundle is ONE flat alloc holding COPIES of all six adaptive-CDF families back to back
-# (ncc 1875, cc 3999, ref 177, im 341, ii 566, mv 286 = 7244 i64). The symbol coder adapts the per-tile
-# copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future frame whose
-# primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families are flat
-# and pointer-free, so a plain word copy is a full copy. Bundle offsets (i64): ncc 0, cc 1875, ref 5874,
-# im 6051, ii 6392, mv 6958. (ncc grew 1839->1875 for Default_Partition_W128_Cdf, 0.7.126 E2a.)
+# (ncc AV1_NCDF_N = 1905, cc 3999, ref 177, im 341, ii 566, mv 286 = 7274 i64). The symbol coder adapts
+# the per-tile copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future
+# frame whose primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families
+# are flat and pointer-free, so a plain word copy is a full copy. ncc grew 1839 -> 1875 for
+# Default_Partition_W128_Cdf (0.7.126) and 1875 -> 1905 for the delta_q / delta_lf CDFs (0.8.2); the
+# offsets are NAMED here because each growth used to mean re-typing twenty literals across save,
+# defaults and load. tests/av1_intertile.tcyr pins every one of them as a literal.
 # ================================================================
-fn av1_cdf_bundle_new(): i64 { return alloc(7244 * 8); }
+enum Av1CdfBundle {
+    AV1CB_NCC = 0;       # AV1_NCDF_N  (1905)
+    AV1CB_CC  = 1905;    # 3999
+    AV1CB_REF = 5904;    # 177
+    AV1CB_IM  = 6081;    # 341
+    AV1CB_II  = 6422;    # 566
+    AV1CB_MV  = 6988;    # 286
+    AV1CB_N   = 7274;
+}
+fn av1_cdf_bundle_new(): i64 { return alloc(AV1CB_N * 8); }
 # Reset the per-row ADAPTATION COUNTERS in a saved bundle (libaom av1_reset_cdf_symbol_counters,
 # av1/decoder/decodeframe.c, called immediately after the frame context is captured). Every CDF
 # row is [c0 .. c(n-2), 32768, count]; av1_cdf_update reads count at cdf[n] to pick its rate
@@ -24822,13 +25192,18 @@ fn av1_cdf_bundle_save(bundle, tile): i64 {
     # null-check EVERY source before any copy — the fallback blob accessors alloc() lazily and return
     # 0 on OOM, and av1_cdf_copy_words would dereference a null source.
     if ((ncc == 0) || (cc == 0) || (ref == 0) || (im == 0) || (ii == 0) || (mv == 0)) { return DR_ERR_OOM; }
-    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1875);
-    av1_cdf_copy_words(bundle + (1875 * 8), cc, 3999);
-    av1_cdf_copy_words(bundle + (5874 * 8), ref, 177);
-    av1_cdf_copy_words(bundle + (6051 * 8), im, 341);
-    av1_cdf_copy_words(bundle + (6392 * 8), ii, 566);
-    av1_cdf_copy_words(bundle + (6958 * 8), mv, 286);
-    av1_cdf_reset_counters(bundle, 7244);
+    av1_cdf_bundle_fill(bundle, ncc, cc, ref, im, ii, mv);
+    return DR_OK;
+}
+# the one copy of the six families into a bundle (save + defaults share it), then the counter reset.
+fn av1_cdf_bundle_fill(bundle, ncc, cc, ref, im, ii, mv): i64 {
+    av1_cdf_copy_words(bundle + (AV1CB_NCC * 8), ncc, AV1_NCDF_N);
+    av1_cdf_copy_words(bundle + (AV1CB_CC * 8), cc, AV1CB_REF - AV1CB_CC);
+    av1_cdf_copy_words(bundle + (AV1CB_REF * 8), ref, AV1CB_IM - AV1CB_REF);
+    av1_cdf_copy_words(bundle + (AV1CB_IM * 8), im, AV1CB_II - AV1CB_IM);
+    av1_cdf_copy_words(bundle + (AV1CB_II * 8), ii, AV1CB_MV - AV1CB_II);
+    av1_cdf_copy_words(bundle + (AV1CB_MV * 8), mv, AV1CB_N - AV1CB_MV);
+    av1_cdf_reset_counters(bundle, AV1CB_N);
     return DR_OK;
 }
 # fill `bundle` with the DEFAULT CDFs (q-bucketed coeff defaults + the read-only family blobs) — the
@@ -24842,23 +25217,17 @@ fn av1_cdf_bundle_defaults(bundle, q): i64 {
     var ii = av1_iicdf_blob();
     var mv = av1_mvcdf_blob();
     if ((ncc == 0) || (cc == 0) || (ref == 0) || (im == 0) || (ii == 0) || (mv == 0)) { return DR_ERR_OOM; }
-    av1_cdf_copy_words(bundle + (0 * 8), ncc, 1875);
-    av1_cdf_copy_words(bundle + (1875 * 8), cc, 3999);
-    av1_cdf_copy_words(bundle + (5874 * 8), ref, 177);
-    av1_cdf_copy_words(bundle + (6051 * 8), im, 341);
-    av1_cdf_copy_words(bundle + (6392 * 8), ii, 566);
-    av1_cdf_copy_words(bundle + (6958 * 8), mv, 286);
-    av1_cdf_reset_counters(bundle, 7244);
+    av1_cdf_bundle_fill(bundle, ncc, cc, ref, im, ii, mv);
     return DR_OK;
 }
 # LOAD (7.21): copy `bundle` INTO an inter tile's six freshly-allocated families (all present on inter).
 fn av1_cdf_bundle_load(bundle, tile): i64 {
-    av1_cdf_copy_words(load64(tile + AV1TILE_NCC), bundle + (0 * 8), 1875);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CC), bundle + (1875 * 8), 3999);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCREF), bundle + (5874 * 8), 177);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCIM), bundle + (6051 * 8), 341);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCII), bundle + (6392 * 8), 566);
-    av1_cdf_copy_words(load64(tile + AV1TILE_CCMV), bundle + (6958 * 8), 286);
+    av1_cdf_copy_words(load64(tile + AV1TILE_NCC), bundle + (AV1CB_NCC * 8), AV1_NCDF_N);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CC), bundle + (AV1CB_CC * 8), AV1CB_REF - AV1CB_CC);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCREF), bundle + (AV1CB_REF * 8), AV1CB_IM - AV1CB_REF);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCIM), bundle + (AV1CB_IM * 8), AV1CB_II - AV1CB_IM);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCII), bundle + (AV1CB_II * 8), AV1CB_MV - AV1CB_II);
+    av1_cdf_copy_words(load64(tile + AV1TILE_CCMV), bundle + (AV1CB_MV * 8), AV1CB_N - AV1CB_MV);
     return DR_OK;
 }
 # INHERIT (7.21): if primary_ref_frame != NONE, replace the tile's just-defaulted CDFs with the saved

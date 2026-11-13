@@ -368,7 +368,9 @@ fn test_tg_adversarial() {
 # SB1 64x64 — the same plan as av1_tile.tcyr's keyframe round-trip. Returns the
 # tile byte buffer, length at *out_len. For NumTiles==1 this buffer IS the
 # tile-group payload (no group header bits).
-fn frame_enc_keyframe(out_len): i64 {
+fn frame_enc_keyframe(out_len): i64 { return frame_enc_keyframe_d(out_len, 0); }
+# the same keyframe, encoded with an Av1DeltaCtx (0 = no deltas) attached to the encode tile.
+fn frame_enc_keyframe_d(out_len, dctx): i64 {
     var mi = av1_modeinfo_new();
     store64(mi + AV1MI_SKIP, 1);
     store64(mi + AV1MI_YMODE, AV1_DC_PRED);
@@ -388,6 +390,7 @@ fn frame_enc_keyframe(out_len): i64 {
     var eframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe);
     var etile = av1_tile_new(eframe, 32, 16, 40, 1, 0, 1);   # enable_ef=1, reduced_tx=0, 1 plane
     av1_tile_grids_new(etile);
+    av1_tile_set_dctx(etile, dctx);
     return av1_encode_intra_tile(etile, pp, pm, pt, 1, out_len);   # disable_cdf=1
 }
 # a sequence header carrying the fields av1_decode_frame reads (zeroed first —
@@ -1251,7 +1254,7 @@ fn test_cdf_save_populates_slots() {
     var cceq = 1;
     var wj = 0;
     while (wj < 3999) {
-        if (load64(b + ((1875 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
+        if (load64(b + ((1905 + wj) * 8)) != load64(defcc + (wj * 8))) { cceq = 0; }
         wj = wj + 1;
     }
     assert_eq(cceq, 1, "CDF save: disable_frame_end_update_cdf=1 saves the INITIAL (default) coeff CDFs");
@@ -1284,8 +1287,6 @@ fn test_silent_misdecode_rejects() {
     # segmentation with update_map=0 (the memset default here) needs PrevSegmentIds — an unsupported
     # config, still rejected. A SUPPORTED spatial-map keyframe now DECODES (witnessed in av1_partition.tcyr).
     dec_reject(AV1FH_SEG_ENABLED, 1, "segmentation update_map=0 rejected (needs PrevSegmentIds)");
-    dec_reject(AV1FH_DELTA_Q_PRESENT, 1, "delta_q_present rejected (per-SB delta-q unread)");
-    dec_reject(AV1FH_DELTA_LF_PRESENT, 1, "delta_lf_present rejected (per-SB delta-lf unread)");
     dec_reject(AV1FH_ALLOW_INTRABC, 1, "allow_intrabc rejected (5.11.6 unimplemented)");
     dec_reject(AV1FH_ALLOW_SCT, 1, "allow_screen_content_tools rejected (palette unimplemented)");
     # primary_ref_frame only binds on a NON-intra frame; the spec forces PRIMARY_REF_NONE on
@@ -1309,12 +1310,92 @@ fn test_silent_misdecode_rejects() {
     return 0;
 }
 
+# ================================================================
+# 0.8.2 per-superblock deltas, end to end through the keyframe tile and frame drivers.
+# frame_enc_keyframe's 128x64 keyframe has TWO 64x64 superblocks: SB0 at MI (0,0) is SPLIT into four
+# skip 32x32 blocks (its first block reads the deltas), SB1 at MI (0,16) is ONE 64x64 skip block, so
+# 5.11.12's "MiSize == sbSize && skip -> return" gate closes and it reads NOTHING. The plan therefore
+# carries values for BOTH superblocks, and the expected state is derived from the SPEC, not from the
+# writer: SB1's planned values must never take effect, even if writer and reader agreed on a wrong gate.
+#   SB0: reduced delta_q +6 << delta_q_res 1 -> CurrentQIndex 40 + 12 = 52; reduced delta_lf -4 (res 0).
+#   SB1: planned +9 / +7 -> GATED -> CurrentQIndex stays 52 and DeltaLF stays -4, persisting across the
+#        superblock boundary (both reset only per TILE, 5.11.1 / 5.11.2).
+# ================================================================
+fn fdq_dctx(): i64 { return av1_dctx_new(1, 1, 1, 0, 0, 1, AV1_BLOCK_64X64, 40); }
+fn fdq_plan(): i64 {
+    var plan = alloc(32 * 16 * AV1_DQPLAN_W * 8);
+    memset(plan, 0, 32 * 16 * AV1_DQPLAN_W * 8);
+    store64(plan + 0, 6);                                   # SB0 (0,0): delta_q
+    store64(plan + 8, 0 - 4);                               # SB0 (0,0): delta_lf[0]
+    var c1 = plan + ((16 * AV1_DQPLAN_W) * 8);              # SB1 origin (0,16)
+    store64(c1 + 0, 9);
+    store64(c1 + 8, 7);
+    return plan;
+}
+fn fdq_stream(out_len): i64 {
+    var de = fdq_dctx();
+    av1_dctx_set_plan(de, fdq_plan(), 32);
+    var out = frame_enc_keyframe_d(out_len, de);
+    assert_eq(av1_dctx_qindex(de), 52, "deltas: the ENCODER's CurrentQIndex is 52 (SB1 gated)");
+    return out;
+}
+fn fdq_check_tile(dt, dd, tag): i64 {
+    assert_eq(av1_dctx_qindex(dd), 52, tag);
+    assert_eq(av1_dctx_delta_lf(dd, 0), 0 - 4, tag);
+    assert_eq(load64(dt + AV1TILE_CUR_QINDEX), 52, tag);      # the LAST block (SB1) dequantizes at 52
+    assert_eq(av1_dlf_get(dt, 0, 0, 0), 0 - 4, tag);          # SB0 first block
+    assert_eq(av1_dlf_get(dt, 0, 15, 15), 0 - 4, tag);        # SB0 last 32x32 block, far corner
+    assert_eq(av1_dlf_get(dt, 0, 0, 16), 0 - 4, tag);         # SB1: the value PERSISTED, +7 not applied
+    assert_eq(av1_dlf_get(dt, 0, 15, 31), 0 - 4, tag);        # SB1 far corner
+    assert_eq(av1_dlf_get(dt, 1, 0, 0), 0, tag);              # multi = 0: only DeltaLFs[..][0] moves
+    return 0;
+}
+fn test_tile_deltas_decode() {
+    var olen = 0;
+    var out = fdq_stream(&olen);
+    var doe = alloc(8);
+    var dframe = dr_frame_new(128, 64, 1, 0, 0, 8, 8, doe);
+    var dt = av1_tile_new(dframe, 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt);
+    var dd = fdq_dctx();
+    av1_tile_set_dctx(dt, dd);
+    assert_eq(av1_decode_intra_tile(dt, out, olen, 1), DR_OK, "deltas: the keyframe tile decodes");
+    fdq_check_tile(dt, dd, "deltas: decoded state");
+    # PER-TILE reset: decoding again with the SAME context must start from base_q / zero again. Without
+    # the reset in decode_tile it would continue from 52 / -4 and land on 64 / -8.
+    var dt2 = av1_tile_new(dframe, 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dt2);
+    av1_tile_set_dctx(dt2, dd);
+    assert_eq(av1_decode_intra_tile(dt2, out, olen, 1), DR_OK, "deltas: the second decode succeeds");
+    fdq_check_tile(dt2, dd, "deltas: per-tile reset (second decode == first)");
+    return 0;
+}
+# the FRAME driver: delta_q_present / delta_lf_present no longer reject; the driver attaches the per-tile
+# context from the header and the stream that carries the deltas decodes.
+fn test_frame_deltas_decode() {
+    var olen = 0;
+    var out = fdq_stream(&olen);
+    var oe = alloc(8);
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_DELTA_Q_PRESENT, 1);
+    store64(fh + AV1FH_DELTA_Q_RES, 1);
+    store64(fh + AV1FH_DELTA_LF_PRESENT, 1);
+    store64(fh + AV1FH_DELTA_LF_RES, 0);
+    store64(fh + AV1FH_DELTA_LF_MULTI, 0);
+    assert_eq(av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe) != 0, 1,
+      "deltas: a keyframe carrying per-SB deltas decodes through the frame driver");
+    assert_eq(load64(oe), DR_OK, "deltas: ...with DR_OK");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
     test_cdf_save_populates_slots();
     test_cdf_multitile_ctx_rejected();
     test_silent_misdecode_rejects();
+    test_tile_deltas_decode();
+    test_frame_deltas_decode();
     test_group("decode frame allocation extent (0.7.114 regression)");
     test_decode_alloc_extent();
     test_decode_frame_alloc_invariant();

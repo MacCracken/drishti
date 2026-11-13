@@ -4037,10 +4037,10 @@ fn test_cdf_inheritance() {
             if (load64(dt1cc + ((wi - 1) * 8)) == AV1_CDF_PROB_TOP) { is_counter = 1; }
         }
         if (is_counter == 1) {
-            if (load64(bundle + ((1875 + wi) * 8)) != 0) { counters_zeroed = 0; }
+            if (load64(bundle + ((1905 + wi) * 8)) != 0) { counters_zeroed = 0; }
             if (load64(dt1cc + (wi * 8)) != 0) { counters_live = 1; }
         } else {
-            if (load64(bundle + ((1875 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
+            if (load64(bundle + ((1905 + wi) * 8)) != load64(dt1cc + (wi * 8))) { save_copied = 0; }
         }
         if (load64(dt1cc + (wi * 8)) != load64(defcc + (wi * 8))) { adapted = 1; }
         wi = wi + 1;
@@ -4137,7 +4137,7 @@ fn cdfw_eq(a, b, n): i64 {
 fn test_cdf_bundle_roundtrip() {
     var src = alloc(AV1TILE_SIZE);
     memset(src, 0, AV1TILE_SIZE);
-    store64(src + AV1TILE_NCC, cdfw_stamp(1875, 100000));
+    store64(src + AV1TILE_NCC, cdfw_stamp(1905, 100000));
     store64(src + AV1TILE_CC, cdfw_stamp(3999, 200000));
     store64(src + AV1TILE_CCREF, cdfw_stamp(177, 300000));
     store64(src + AV1TILE_CCIM, cdfw_stamp(341, 400000));
@@ -4145,7 +4145,7 @@ fn test_cdf_bundle_roundtrip() {
     store64(src + AV1TILE_CCMV, cdfw_stamp(286, 600000));
     var dst = alloc(AV1TILE_SIZE);
     memset(dst, 0, AV1TILE_SIZE);
-    store64(dst + AV1TILE_NCC, alloc(1875 * 8));
+    store64(dst + AV1TILE_NCC, alloc(1905 * 8));
     store64(dst + AV1TILE_CC, alloc(3999 * 8));
     store64(dst + AV1TILE_CCREF, alloc(177 * 8));
     store64(dst + AV1TILE_CCIM, alloc(341 * 8));
@@ -4154,7 +4154,7 @@ fn test_cdf_bundle_roundtrip() {
     var bundle = av1_cdf_bundle_new();
     assert_eq(av1_cdf_bundle_save(bundle, src), DR_OK, "bundle save ok");
     assert_eq(av1_cdf_bundle_load(bundle, dst), DR_OK, "bundle load ok");
-    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1875), 1, "ncc family save+load exact");
+    assert_eq(cdfw_eq(load64(dst + AV1TILE_NCC), load64(src + AV1TILE_NCC), 1905), 1, "ncc family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CC), load64(src + AV1TILE_CC), 3999), 1, "cc family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CCREF), load64(src + AV1TILE_CCREF), 177), 1, "ref family save+load exact");
     assert_eq(cdfw_eq(load64(dst + AV1TILE_CCIM), load64(src + AV1TILE_CCIM), 341), 1, "im family save+load exact");
@@ -5949,10 +5949,30 @@ fn it_interintra_roundtrip(ii_mode, is_wedge, wedge_idx, tag): i64 {
     return 0;
 }
 
+# 0.8.2: the cross-frame CDF bundle layout, pinned as LITERALS — family by family, start and size — so a
+# family that grows without the bundle being re-laid-out (the 1875 -> 1905 ncc growth) fails here.
+fn test_cdf_bundle_layout() {
+    assert_eq(AV1CB_NCC, 0, "bundle: ncc @ 0");
+    assert_eq(AV1CB_CC, 1905, "bundle: cc @ 1905 (ncc is 1905 long)");
+    assert_eq(AV1CB_CC - AV1CB_NCC, AV1_NCDF_N, "bundle: the ncc region IS the ncc family length");
+    assert_eq(AV1CB_REF, 5904, "bundle: ref @ 5904");
+    assert_eq(AV1CB_REF - AV1CB_CC, 3999, "bundle: cc family 3999");
+    assert_eq(AV1CB_IM, 6081, "bundle: im @ 6081");
+    assert_eq(AV1CB_IM - AV1CB_REF, 177, "bundle: ref family 177");
+    assert_eq(AV1CB_II, 6422, "bundle: ii @ 6422");
+    assert_eq(AV1CB_II - AV1CB_IM, 341, "bundle: im family 341");
+    assert_eq(AV1CB_MV, 6988, "bundle: mv @ 6988");
+    assert_eq(AV1CB_MV - AV1CB_II, 566, "bundle: ii family 566");
+    assert_eq(AV1CB_N, 7274, "bundle: 7274 i64 total");
+    assert_eq(AV1CB_N - AV1CB_MV, 286, "bundle: mv family 286");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
     test_inter_tile_e2e();
+    test_cdf_bundle_layout();
     test_inter_tile_subpel();
     test_inter_tile_two_sb();
     test_inter_tile_signbias_negation();

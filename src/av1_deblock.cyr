@@ -241,9 +241,22 @@ fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size)
 # for a plane/pass. tile carries the frame + the MI grids + LoopfilterTxSizes;
 # fh the loop-filter params. isIntra / the 7.14.5 reference and mode deltas are read PER MI
 # (REF0S + YModes) as of 0.7.129 — this used to hardcode isIntra = 1 and ref = INTRA_FRAME,
-# which filtered every block of every frame at the intra level. Per-block delta_lf is still
-# passed as 0 (delta_lf_present is a frame-level reject; roadmap.md 0.8.2).
+# which filtered every block of every frame at the intra level. The per-block deltaLF (7.14.4)
+# is read PER MI from the DeltaLFs grids as of 0.8.2 (it was passed as 0 while delta_lf_present
+# was a frame-level reject).
 # ================================================================
+# deltaLF (7.14.4): DeltaLFs[ row ][ col ][ 0 ] when delta_lf_multi is 0, otherwise
+# DeltaLFs[ row ][ col ][ plane == 0 ? pass : plane + 1 ] — the same i 7.14.5 indexes
+# loop_filter_level[] with (libaom delta_lf_id_lut = {{0,1},{2,2},{3,3}}). The grids are zero
+# when delta_lf is absent, so this is 0 exactly when it used to be hardcoded 0.
+fn av1_lf_delta(tile, fh, plane, pass, row, col): i64 {
+    var i = 0;
+    if (av1_fh_delta_lf_multi(fh) != 0) {
+        i = pass;
+        if (plane > 0) { i = plane + 1; }
+    }
+    return av1_dlf_get(tile, i, row, col);
+}
 fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var subx = 0;
@@ -307,10 +320,13 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
     # filtered, at the neighbour's level). av1_lf_strength already implemented the ref/mode
     # deltas — it was simply never handed a real ref or mode_type.
     var lvl = av1_lf_strength(fh, plane, pass, ref0,
-      av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)), 0);
+      av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, arow, acol)),
+      av1_lf_delta(tile, fh, plane, pass, arow, acol));
     if (lvl == 0) {
+        # the fallback re-derives EVERYTHING at the previous block, its deltaLF included.
         lvl = av1_lf_strength(fh, plane, pass, prev_ref0,
-          av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)), 0);
+          av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)),
+          av1_lf_delta(tile, fh, plane, pass, prev_row, prev_col));
     }
     var lim = alloc(3 * 8);
     av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);

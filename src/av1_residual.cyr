@@ -147,7 +147,23 @@ enum Av1TileOff {
     #     writes it; every intra block (including the intra fork inside an inter frame) is
     #     correct by default. ---
     AV1TILE_REF0S     = 592;  # RefFrame[0] per MI (0 = INTRA_FRAME)
-    AV1TILE_SIZE      = 600;
+    # --- per-superblock deltas (0.8.2): the tile's Av1DeltaCtx (CurrentQIndex / DeltaLF / ReadDeltas,
+    #     see av1_modeinfo.cyr; 0 = off), and DeltaLFs[ row ][ col ][ FRAME_LF_COUNT ] as FOUR
+    #     frame-addressed grids (index i at AV1TILE_DLF + i*8) for the deblocker's 7.14.4 deltaLF.
+    #     Zero-initialised with the other grids, which is exactly DeltaLFs when delta_lf is absent. ---
+    AV1TILE_DCTX      = 600;  # Av1DeltaCtx pointer (0 = no deltas)
+    AV1TILE_DLF       = 608;  # [4] DeltaLFs grids -> 640
+    AV1TILE_SIZE      = 640;
+}
+fn av1_tile_dctx(tile): i64 {
+    if (tile == 0) { return 0; }
+    return load64(tile + AV1TILE_DCTX);
+}
+fn av1_tile_set_dctx(tile, d): i64 { store64(tile + AV1TILE_DCTX, d); return 0; }
+# DeltaLFs[ r ][ c ][ i ] — 0 when the grids were never allocated (a tile-level test without grids).
+fn av1_dlf_get(tile, i, r, c): i64 {
+    if (load64(tile + AV1TILE_DLF + (i * 8)) == 0) { return 0; }
+    return av1_grid_get(tile, AV1TILE_DLF + (i * 8), r, c);
 }
 # sbMask (5.11.34 / compute_prediction): the mask that turns an ABSOLUTE MI coord into
 # one relative to the current superblock. 31 for a 128x128 SB, 15 for 64x64.
@@ -232,6 +248,11 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     store64(tile + AV1TILE_SKIPMODES, 0);
     store64(tile + AV1TILE_ICDEF, 0);
     store64(tile + AV1TILE_IERR, 0);
+    store64(tile + AV1TILE_DCTX, 0);              # no deltas unless the driver attaches an Av1DeltaCtx
+    store64(tile + AV1TILE_DLF + 0, 0);           # DeltaLFs grids: allocated by av1_tile_grids_new
+    store64(tile + AV1TILE_DLF + 8, 0);
+    store64(tile + AV1TILE_DLF + 16, 0);
+    store64(tile + AV1TILE_DLF + 24, 0);
     # frame-addressed grids default to the tile dims (single tile spans the frame);
     # a multi-tile driver overrides via av1_tile_set_frame_mi before grids_new.
     store64(tile + AV1TILE_FMI_COLS, mi_cols);
@@ -312,6 +333,12 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_MVGRID, load64(src + AV1TILE_MVGRID));
     store64(dst + AV1TILE_SKIPMODES, load64(src + AV1TILE_SKIPMODES));
     store64(dst + AV1TILE_SEGIDS, load64(src + AV1TILE_SEGIDS));   # shared SegmentIds map (0.7.125 D1)
+    # DeltaLFs (0.8.2): the deblocker runs once over the whole frame on tile0, so every tile's
+    # stores must land in tile0's grids.
+    store64(dst + AV1TILE_DLF + 0, load64(src + AV1TILE_DLF + 0));
+    store64(dst + AV1TILE_DLF + 8, load64(src + AV1TILE_DLF + 8));
+    store64(dst + AV1TILE_DLF + 16, load64(src + AV1TILE_DLF + 16));
+    store64(dst + AV1TILE_DLF + 24, load64(src + AV1TILE_DLF + 24));
     return 0;
 }
 
@@ -342,7 +369,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(11 * 8);
+    var offs = alloc(15 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -353,8 +380,12 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 64, AV1TILE_TXTYPES);
     store64(offs + 72, AV1TILE_SEGIDS);   # SegmentIds map (0.7.125 D1); zeroed like the others
     store64(offs + 80, AV1TILE_REF0S);    # RefFrame[0] per MI for the deblocker; 0 = INTRA_FRAME
+    store64(offs + 88, AV1TILE_DLF + 0);  # DeltaLFs[..][..][0..3] for the deblocker (0.8.2); 0 = no delta
+    store64(offs + 96, AV1TILE_DLF + 8);
+    store64(offs + 104, AV1TILE_DLF + 16);
+    store64(offs + 112, AV1TILE_DLF + 24);
     var g = 0;
-    while (g < 11) {
+    while (g < 15) {
         var arr = alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;

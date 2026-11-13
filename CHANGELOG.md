@@ -4,6 +4,101 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.2 bite 2: per-superblock delta-q / delta-lf decode, both lanes
+
+`delta_q_present` and `delta_lf_present` no longer reject. **libaom-encoded delta streams decode
+bit-exact against `aomdec` on every frame, keyframes and inter frames alike**, at both
+superblock sizes, with and without delta-lf. Three such cases are now hard gates in
+`make conformance`.
+
+Spec-literal from the AV1 spec text: 5.11.12 `read_delta_qindex`, 5.11.13 `read_delta_lf`, the
+per-tile `CurrentQIndex` / `DeltaLF` resets (5.11.1 / 5.11.2), the per-superblock `ReadDeltas`,
+the `DeltaLFs` store (5.11.5), `get_qindex` (7.12.2) and the 7.14.4 / 7.14.5 `deltaLF`.
+Cross-checked against libaom `decodemv.c` and `av1_loopfilter.c`.
+
+What changed:
+- **The delta state is one `Av1DeltaCtx` per tile** (`av1_modeinfo.cyr`): the header fields,
+  `CurrentQIndex`, `DeltaLF[4]` and `ReadDeltas`, plus an encode-only per-superblock plan. A null
+  context is inert, and the frame driver attaches one only when `delta_q_present`. So a stream
+  without deltas takes exactly the old path.
+- **Read and write sit in both mode-info orders** at the spec's point: after `read_cdef`, before
+  `is_inter` / `y_mode`. The intra pair reads the context off the tile. The inter pair gains a
+  `dctx` parameter, and 6.7's arity check flagged all 21 old test calls.
+- **Escape coding is the spec's**: a direct symbol for 0..2. `|v| = 3` goes through the escape,
+  because the bias is `(1 << n) + 1`. The writer refuses `|v| > 512`, which is unrepresentable.
+- **Clamps**: `CurrentQIndex` stays in `[1, 255]`, never 0, so a delta can't make a block
+  lossless. `DeltaLF` stays in `[-63, 63]`.
+- **Dequant uses `get_qindex(0, segment_id)`** through one helper on both lanes, the segment's
+  `ALT_Q` included.
+- **`DeltaLFs` are four frame-addressed grids**, written in `av1_block_write_grids` (the one
+  funnel for every block on both lanes) and shared across tiles. The deblocker reads them at the
+  same MI as `REF0S` / `YModes`, for both the block and the level-0 fallback.
+- **The six delta CDF rows** are appended to the non-coeff blob (1875 → 1905): spec annex values,
+  cross-checked against libaom. The blob length is named once (`AV1_NCDF_N`), and so are the
+  cross-frame CDF bundle's offsets (`AV1CB_*`). Each had been a literal in up to seven places, and
+  the bundle grew from 7244 to 7274 words.
+- **`vector-probe`** reports the five delta fields instead of flagging them as reject gates.
+
+Evidence:
+- **Conformance**: the matrix below, every frame bit-exact against aomdec (dav1d agrees with
+  aomdec on the first stream). Each case first proves through `vector-probe` that its stream
+  carries `delta_q_present` (and `delta_lf_present`), so it cannot pass vacuously.
+- **Unit tests, with known answers from the spec formulas, not the writer**:
+  - the writer's raw fields read back one by one: 0, ±1, ±2, the escape boundary 3, 4, 5, −7, 512;
+  - all 1025 values −512..512 round-trip with CDF adaptation, and ±513 are refused;
+  - the clamps;
+  - `frameLfCount` (1 / 4 / mono 2);
+  - the closed gates consume nothing, checked by a marker;
+  - the CDF dispatch: which row adapts;
+  - the per-tile reset;
+  - a tile-level decode against hand-derived state, where the skip 64x64 superblock's planned
+    deltas must not apply;
+  - frame-driver decode;
+  - deblock pixel witnesses: deltaLF −6 un-filters an edge, the multi index, and the fallback at
+    the previous block;
+  - the qindex KATs;
+  - absolute layout pins for the CDF rows and the bundle.
+
+Not covered externally: libaom always writes `delta_lf_multi = 0`, so multi = 1 is witnessed by
+the unit tests only.
+
+**Mutation-verified.** Each mutation was run against the delta unit suites and against three
+libaom delta streams scored against aomdec. Every source file was restored byte-exact afterwards.
+
+| Mutation | Unit suites | libaom streams |
+|---|---|---|
+| `CurrentQIndex` never updated | red | red, all frames |
+| dequant ignores `CurrentQIndex` | red | red, all frames |
+| deblocker `deltaLF` forced 0 | red | red (delta-lf streams) |
+| escape bias drops the `+1` | red | red, all frames |
+| `ReadDeltas` never cleared | red | red, all frames |
+| full-superblock skip gate removed | red | red |
+| `ReadDeltas` never set per superblock | red | red, all frames |
+| `DeltaLFs` never stored | red | red (delta-lf streams) |
+| `delta_q_res` shift ignored | red | red, all frames |
+| per-tile reset skipped | red | green (single-tile streams) |
+| fallback reads the current block's `deltaLF` | red | red |
+| `delta_lf_multi` index fixed at 0 | red | green (libaom writes multi = 0) |
+| frame driver never attaches the context | red | red, all frames |
+
+The two the streams cannot see are exactly the two libaom cannot exercise, and the unit tests
+catch both. The "stream carries no deltas" guard was seen to fire: an encode with
+`--deltaq-mode=0` fails all three cases.
+
+**Gates:** 38 suites, **30,484** assertions (+183); 7,410 fuzz; bench; vet; lint; fmt-check;
+version-check; `distlib --check`. `make conformance` is **48 matched / 0 known-gap /
+0 regressed / 0 skipped** (was 33).
+
+Found, not fixed here:
+- **A pre-existing inter defect at an odd-MI geometry.** At 160x136 with lookahead
+  (`--lag-in-frames=19`), frame 3 differs from aomdec with deltas OFF too. It belongs to 0.8.3
+  (real GOPs × the geometry matrix).
+- **`AV1TILE_REF0S` is not shared across tiles** (missing from `av1_tile_share_grids`) and not
+  initialised in `av1_tile_new`. A multi-tile inter frame that passes the existing gates would
+  store through an uninitialised pointer. Today's aomenc multi-tile streams reject earlier, at the
+  context-update-tile gate. Belongs to 0.8.3 (multi-tile inter frames).
+- **`av1_lf_strength` still omits 7.14.5 step 3**, the segment `SEG_LVL_ALT_LF` add (roadmap.md 0.8.2).
+
 ### Fixed — 0.8.2 bite 1: the conformance gate no longer scores a non-run as a pass
 
 `scripts/conformance.sh` had six ways to report green for a case that never ran, or never ran

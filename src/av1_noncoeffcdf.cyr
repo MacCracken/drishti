@@ -11,9 +11,16 @@
 # Extracted from the spec and validated (every cdf non-decreasing, ends
 # 32768, count 0). The mode-info / tx-size / tx-type / partition reads that
 # consume these land in later 0.7.x bites (roadmap.md). FLAT module — wiring
-# in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a)
-# and segment_id (0.7.125 D1) CDFs are now HERE. Still absent (feature-gated, roadmap.md):
-# delta_q/lf, intrabc, palette CDFs.
+# in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a),
+# segment_id (0.7.125 D1) and delta_q / delta_lf (0.8.2) CDFs are now HERE. Still absent
+# (feature-gated, roadmap.md 0.8.4): intrabc and palette CDFs.
+
+# The blob length in i64, named ONCE: av1_ncdf_new, the cross-frame CDF bundle (av1_intertile.cyr)
+# and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows; when
+# it was a literal in seven places, growing it meant finding all seven.
+enum Av1NcdfSize {
+    AV1_NCDF_N = 1905;
+}
 
 var Av1_NCdf = 0;
 fn av1_ncdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
@@ -38,7 +45,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc(1877 * 8);   # 1875 entries (+ Default_Partition_W128_Cdf 1839..1874) + pad
+    var t = alloc((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -341,17 +348,31 @@ fn av1_noncoeff_cdf_blob(): i64 {
     store64(t + (1866 * 8), 711);   store64(t + (1867 * 8), 966);   store64(t + (1868 * 8), 1172);
     store64(t + (1869 * 8), 32448); store64(t + (1870 * 8), 32538); store64(t + (1871 * 8), 32617);
     store64(t + (1872 * 8), 32664); store64(t + (1873 * 8), 32768); store64(t + (1874 * 8), 0);
+    # Default_Delta_Q_Cdf @ 1875, Default_Delta_Lf_Cdf @ 1880, and DeltaLFMultiCdf[FRAME_LF_COUNT = 4]
+    # @ 1885..1904 — six 4-symbol rows (delta_q_abs / delta_lf_abs take 0..DELTA_*_SMALL = 0..3), stride
+    # 5 = 4 cumulative values ending 32768 + the adaptation count. ALL SIX ROWS ARE THE SAME DEFAULT:
+    # init_non_coeff_cdfs sets "DeltaLFMultiCdf[ i ] ... to a copy of Default_Delta_Lf_Cdf for i =
+    # 0..FRAME_LF_COUNT-1" (spec semantics), and Default_Delta_Q_Cdf has the same values. Spec additional-
+    # tables annex {28160, 32120, 32677, 32768, 0}, cross-checked against libaom av1/common/entropymode.c
+    # default_delta_q_cdf / default_delta_lf_cdf / default_delta_lf_multi_cdf = AOM_CDF4(28160, 32120, 32677).
+    var dr = 1875;
+    while (dr < AV1_NCDF_N) {
+        store64(t + ((dr + 0) * 8), 28160); store64(t + ((dr + 1) * 8), 32120);
+        store64(t + ((dr + 2) * 8), 32677); store64(t + ((dr + 3) * 8), 32768);
+        store64(t + ((dr + 4) * 8), 0);
+        dr = dr + 5;
+    }
     Av1_NCdf = t;
     return t;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(1875 * 8);   # + Default_Partition_W128_Cdf 1839..1874
+    var cc = alloc(AV1_NCDF_N * 8);
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
-    while (i < 1875) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
+    while (i < AV1_NCDF_N) { store64(cc + (i * 8), load64(sb + (i * 8))); i = i + 1; }
     return cc;
 }
 
@@ -379,6 +400,11 @@ fn av1_ncdf_intra_y_mode(cc, sg): i64 { return cc + ((1756 + sg * 14) * 8); }
 # (stride 9 = 8 cumulative + count). 5.11.11 read_segment_id.
 fn av1_ncdf_segment_id(cc, ctx): i64 { return cc + ((1812 + ctx * 9) * 8); }
 fn av1_ncdf_filter_intra_mode(cc): i64 { return cc + (1129 * 8); }
+# delta_q_abs: TileDeltaQCdf. delta_lf_abs: TileDeltaLFCdf when delta_lf_multi == 0, else
+# TileDeltaLFMultiCdf[ i ] for loop index i (spec 8.3.2 cdf selection). Stride 5.
+fn av1_ncdf_delta_q(cc): i64 { return cc + (1875 * 8); }
+fn av1_ncdf_delta_lf(cc): i64 { return cc + (1880 * 8); }
+fn av1_ncdf_delta_lf_multi(cc, i): i64 { return cc + ((1885 + (i * 5)) * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }
 fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }

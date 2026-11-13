@@ -137,10 +137,46 @@ fn test_ncdf_known() {
     return 0;
 }
 
+# 0.8.2: the delta_q / delta_lf rows, pinned ABSOLUTELY (an accessor-relative check would be circular:
+# a wrong base in both the fill and the accessor cancels). Values read at literal offsets.
+fn ncdf_row_is_delta_default(b, off): i64 {
+    if (load64(b + ((off + 0) * 8)) != 28160) { return 0; }
+    if (load64(b + ((off + 1) * 8)) != 32120) { return 0; }
+    if (load64(b + ((off + 2) * 8)) != 32677) { return 0; }
+    if (load64(b + ((off + 3) * 8)) != 32768) { return 0; }
+    if (load64(b + ((off + 4) * 8)) != 0) { return 0; }
+    return 1;
+}
+fn test_ncdf_delta_layout() {
+    var b = av1_noncoeff_cdf_blob();
+    assert_eq(AV1_NCDF_N, 1905, "blob length 1905 i64 (1875 + six delta rows of 5)");
+    assert_eq(av1_ncdf_delta_q(b) - b, 1875 * 8, "Default_Delta_Q_Cdf @ 1875");
+    assert_eq(av1_ncdf_delta_lf(b) - b, 1880 * 8, "Default_Delta_Lf_Cdf @ 1880");
+    var i = 0;
+    while (i < 4) {
+        assert_eq(av1_ncdf_delta_lf_multi(b, i) - b, (1885 + (i * 5)) * 8, "DeltaLFMultiCdf[i] @ 1885 + 5i");
+        i = i + 1;
+    }
+    # the END: a fifth multi row would start exactly at the blob length, i.e. past it.
+    assert_eq(av1_ncdf_delta_lf_multi(b, 4) - b, AV1_NCDF_N * 8, "the last delta row ends the blob");
+    var r = 1875;
+    while (r < 1905) {
+        assert_eq(ncdf_row_is_delta_default(b, r), 1, "every delta row = {28160,32120,32677,32768,0}");
+        r = r + 5;
+    }
+    # the W128 partition table still ends right before (its last word, the row-3 counter, at 1874).
+    assert_eq(load64(b + (1873 * 8)), 32768, "W128 row 3 terminator at 1873, untouched");
+    # av1_ncdf_new copies ALL of it, not the old 1875.
+    var cc = av1_ncdf_new();
+    assert_eq(ncdf_row_is_delta_default(cc, 1900), 1, "av1_ncdf_new copies the last delta row");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("non-coeff cdf blob");
     test_ncdf_checksum();
+    test_ncdf_delta_layout();
     test_ncdf_copy();
     test_ncdf_structure();
     test_group("non-coeff cdf known values + offsets");
