@@ -6284,6 +6284,123 @@ fn test_intra_fork_tx_depth_ctx_e2e() {
     return 0;
 }
 
+# THE NOMINAL OVERLAP (0.8.3). 7.11.3.10 predicts each neighbour's overlap at predW x predH and passes those to
+# the block inter prediction, whose filter choice (<= 4 samples -> the 4-tap set) depends on them. drishti used to
+# trim the overlap to the VISIBLE plane first: an OBMC block on the frame edge whose overlap ran past the picture
+# was predicted with fewer rows / columns, took the 4-tap filter, and left the band past the picture unblended.
+# Fixture: a picture 4 samples short of the 64x64 superblock grid it is allocated to (as the decoder allocates),
+# an 8x8 OBMC block straddling that edge — 4 visible + 4 overhang — and a neighbour with a SUB-PEL MV across it.
+#   bottom = 1: 64x60 picture, block at (16, 56), LEFT neighbour, Mv (3/8 px down): predW 4, predH 8.
+#   bottom = 0: 60x64 picture, block at (56, 16), ABOVE neighbour, Mv (3/8 px right): predW 8, predH 4.
+fn obmc_nominal_case(bottom, tag): i64 {
+    var oe = alloc(8);
+    var vw = 64;
+    var vh = 60;
+    if (bottom == 0) { vw = 60; vh = 64; }
+    # the reference has the SAME picture size (an unscaled stream); a 64x64 one would take the scaled MC path
+    var ref = dr_frame_new_ext(vw, vh, 64, 64, 1, 0, 0, 8, 32, oe);
+    var y0 = 0;
+    while (y0 < vh) {
+        var x0 = 0;
+        while (x0 < vw) {
+            var v = (x0 * 7) + ((y0 * y0) * 3);              # quadratic down the column (bottom case)
+            if (bottom == 0) { v = (y0 * 7) + ((x0 * x0) * 3); }   # ...or along the row (right case)
+            dr_frame_set(ref, 0, x0, y0, v & 255);
+            x0 = x0 + 1;
+        }
+        y0 = y0 + 1;
+    }
+    var fh = it_fh();
+    var refs = it_refs();
+    var seq = it_seq();
+    var dpb = av1_dpb_new();
+    av1_dpb_store(dpb, fh, ref);
+    var frame = dr_frame_new_ext(vw, vh, 64, 64, 1, 0, 0, 8, 32, oe);
+    var tile = av1_tile_new(frame, 16, 16, 40, 1, 0, 1);          # 2 * ((60 + 7) >> 3) = 16 MI either way
+    av1_tile_grids_new(tile);
+    av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb);
+    var grid = load64(tile + AV1TILE_MVGRID);
+    var bx = 16;
+    var by = 56;
+    var px = 16;          # the overlap region's origin and size (7.11.3.10)
+    var py = 56;
+    var pw = 4;
+    var ph = 8;
+    var mvr = 3;
+    var mvc = 0;
+    if (bottom == 0) { bx = 56; by = 16; px = 56; py = 16; pw = 8; ph = 4; mvr = 0; mvc = 3; }
+    if (bottom != 0) {
+        obmc_set_nb(grid, 16, 14, 3, mvr, mvc);   # left neighbour rows 14..15 (candRow 15)
+        obmc_set_nb(grid, 16, 15, 3, mvr, mvc);
+    } else {
+        obmc_set_nb(grid, 16, 3, 14, mvr, mvc);   # above neighbour cols 14..15 (candCol 15)
+        obmc_set_nb(grid, 16, 3, 15, mvr, mvc);
+    }
+    av1_mc_pred_block(frame, ref, 0, bx, by, 8, 8, 0, 0, AV1_EIGHTTAP, AV1_EIGHTTAP);   # the block's own MC
+    var own = alloc(8 * 8 * 8);
+    var i = 0;
+    while (i < 8) {
+        var j = 0;
+        while (j < 8) { store64(own + (((i * 8) + j) * 8), dr_frame_get(frame, 0, bx + j, by + i)); j = j + 1; }
+        i = i + 1;
+    }
+    assert_eq(av1_obmc_predict(tile, frame, 0, by >> 2, bx >> 2, AV1_BLOCK_8X8, 0, 0), DR_OK, tag);
+    var nb = alloc(8 * 8 * 8);
+    var nbt = alloc(8 * 8 * 8);
+    assert_eq(av1_mc_pred_core(nb, frame, ref, 0, px, py, pw, ph, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP, 0),
+      DR_OK, tag);
+    # the TRIMMED prediction the old code made: 4 samples in the direction that crossed the picture edge
+    var tw = pw;
+    var th = ph;
+    if (bottom != 0) { th = 4; } else { tw = 4; }
+    assert_eq(av1_mc_pred_core(nbt, frame, ref, 0, px, py, tw, th, mvr, mvc, AV1_EIGHTTAP, AV1_EIGHTTAP, 0),
+      DR_OK, tag);
+    var differ = 0;
+    i = 0;
+    while (i < th) {
+        var j = 0;
+        while (j < tw) {
+            if (load64(nb + (((i * pw) + j) * 8)) != load64(nbt + (((i * tw) + j) * 8))) { differ = differ + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(differ > 0, 1, tag);           # the fixture DISCRIMINATES: 4 samples take the 4-tap filter
+    var bad = 0;
+    var overhang = 0;
+    i = 0;
+    while (i < 8) {
+        var j = 0;
+        while (j < 8) {
+            var o = load64(own + (((i * 8) + j) * 8));
+            var want = o;                       # outside the overlap region
+            var ry = (by + i) - py;
+            var rx = (bx + j) - px;
+            if ((ry < ph) && (rx < pw)) {
+                var m = av1_obmc_mask(pw, rx);
+                if (bottom == 0) { m = av1_obmc_mask(ph, ry); }
+                want = av1_round2((m * o) + ((64 - m) * load64(nb + (((ry * pw) + rx) * 8))), 6);
+            }
+            var got = dr_frame_get(frame, 0, bx + j, by + i);
+            if (got != want) { bad = bad + 1; }
+            var past = 0;
+            if ((bottom != 0) && (i >= 4)) { past = 1; }
+            if ((bottom == 0) && (j >= 4)) { past = 1; }
+            if ((past != 0) && (got != o)) { overhang = overhang + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, tag);                   # all 64 samples == the NOMINAL prediction, blended
+    assert_eq(overhang > 0, 1, tag);          # ...including the samples past the picture
+    return 0;
+}
+fn test_obmc_nominal_overlap() {
+    obmc_nominal_case(1, "nominal overlap: bottom edge (LEFT neighbour, 4x8 overlap, vertical sub-pel)");
+    obmc_nominal_case(0, "nominal overlap: right edge (ABOVE neighbour, 8x4 overlap, horizontal sub-pel)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
@@ -6314,6 +6431,7 @@ fn main() {
     test_obmc_e2e();
     test_obmc_chroma_gate();
     test_obmc_edge_gate();
+    test_obmc_nominal_overlap();
     test_obmc_scan_intra();
     test_inter_tile_dual_filter();
     test_inter_frame_route();

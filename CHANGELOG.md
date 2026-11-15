@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.3 bite 6: the dimension sweep in the gate; Fixed: OBMC's overlap trimmed to the visible plane
+
+**The dimension and scaled-reference matrix is now a standing section of `make conformance`, not a hand-run
+sweep.** It found one real defect, the last instance of the bite-2 class.
+- **16 geometries**, 8 frames each, every frame hard: 1x1, 2x2, 3x5, 1x64, 64x1, 8x8, 9x9, 33x17, 65x47, 127x129,
+  175x143 and 257x31 at 64-SB, plus 3x5, 129x127, 199x113 and 31x257 at 128-SB. A `dim_property` guard proves
+  every coded frame is exactly the named size.
+- **10 scaled-reference cases** (`--resize-mode`), every frame hard:
+  - fixed denominators 9/16, 12/13 and 16/9;
+  - a half-size keyframe under full-size inter frames, and the reverse, at the 2x reference limit;
+  - random sizes with 128-SB, with 2x2 tiles, at `--lag-in-frames=35`, realtime, and `--cpu-used=2`.
+
+  The guard requires ≥ 2 distinct coded sizes; the random cases reach 6 to 9.
+- **libaom's published resize vectors**, `av1-1-b8-03-sizeup` and `sizedown` (20 frames each, switching between
+  352x288 and 1280x720 mid-stream). They ship only as `.mkv`, so `fetch_mkv` remuxes them losslessly to IVF (`ffmpeg -c copy`) and they are
+  scored on every frame like the IVF vectors. All 40 frames are bit-exact.
+
+**Fixed: `av1_obmc_overlap` trimmed each neighbour's overlap to the VISIBLE plane.** Spec 7.11.3.10 predicts the
+overlap at `predW x predH` and passes those dims to the block inter prediction, whose filter choice (≤ 4 samples
+selects the 4-tap set) depends on them. On an OBMC block straddling the bottom or right edge, the trim cut the
+overlap to the visible 4 rows or columns. That took the 4-tap filter where the spec takes the 8-tap one, and it
+left the band past the picture unblended, although deblocking and CDEF read it. It is the bite-2 defect (MC trimmed
+to an undersized extent) in the one MC path that fix did not reach. The overlap is now predicted and blended at its
+nominal size. The decode frame (the superblock grid since bite 2) contains the block and so its overlap, and the
+allocated extent is the only backstop. The unused visible-dims parameters are gone.
+- Found by the sweep: random resize at `--cpu-used=0` produced an 88x72 frame (`MiRows % 4 == 2`) with an OBMC
+  block on its bottom edge. One V sample was off by 1, and dav1d agreed with aomdec.
+- Diagnosed with the symbol trace. Every symbol VALUE matched, so it was reconstruction. The trace has one apparent
+  extra symbol, a logging artifact: libaom's instrumented `inspect` printed no init marker for the stream's last
+  frame and did not log that frame's first `use_sgrproj` read. So it was pixels, not entropy.
+
+Evidence:
+- **Conformance: 1608 matched / 4 known-gap / 0 regressed / 0 skipped** (was 1256).
+- **A committed reproducer**, `tests/repro/obmc-edge-96x80`: 1.9 KB, `--cpu-used=2 --resize-mode=2`, 12 frames at
+  six sizes from 51x43 to 96x80. The pre-fix decoder (built from `HEAD` in isolation) differs on frames 5–12, and
+  the `rsrandc2_176x144` gate case on 12 of 20. dav1d agrees with aomdec on both. Fixed-size odd-MI streams at
+  cpu-used 0–2 never tripped it: the condition needs an edge OBMC block, a sub-pel neighbour MV, and an overlap
+  cut to ≤ 4 samples.
+- **Unit test** `test_obmc_nominal_overlap` (`tests/av1_intertile.tcyr`, +12 assertions). A picture 4 samples short
+  of its 64x64 allocation has an 8x8 OBMC block straddling the edge, with a sub-pel neighbour across it, at the
+  bottom edge (LEFT neighbour, 4x8 overlap) and at the right edge (ABOVE neighbour, 8x4). Each case asserts:
+  - all 64 samples equal the NOMINAL-size prediction blended;
+  - the samples past the picture are blended;
+  - the fixture discriminates: the trimmed prediction differs.
+
+  Four mutants were all killed: the old visible trim, each axis alone, and blending only the visible rows. The
+  first draft of the fixture used a 64x64 reference for a 64x60 frame. That made MC take the SCALED path and clamp
+  both predictions to the same row, so the overhang check could not fire.
+- The `dim_property` guard was canary-tested: it rejects a wrong height, a transposed size and a fixed-size stream
+  claimed as resized.
+
 ### Fixed — 0.8.3 bite 5: the compound_idx context's order-hint term (the `av1-1-b8-05-mv` / `--cpu-used=0` desync)
 
 **libaom's published `av1-1-b8-05-mv` vector desynced at frame 3, and every libaom `--cpu-used=0` stream tried

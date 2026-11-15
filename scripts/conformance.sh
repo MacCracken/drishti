@@ -102,6 +102,19 @@ av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-all
 FMT_CASES="fmtmono_176x144 fmt444_176x144 fmt422_176x144 fmtmonort_176x144 fmt444rt_176x144 fmt422rt_176x144 \
 fmt444scr_320x240 fmt422scr_320x240 fmtmonosr_352x288 fmt444sr_352x288 fmt422sr_352x288 fmt444sb128_352x288 \
 fmt422oddmi_136x136"
+# THE DIMENSION SWEEP (0.8.3), every frame hard. dim_WxH_sbS: frame sizes from 1x1 up, none a multiple of 8 on both
+# axes unless the point is the tiny size itself, at both superblock sizes, each proved by the probe to code exactly
+# W x H. rs*: SCALED REFERENCES (--resize-mode), every fixed denominator class, both directions at the 2x limit,
+# random sizes with 128-SB / tiles / lookahead / realtime / the slower preset whose edge OBMC blocks exposed the
+# visible-plane overlap trim; each proved to change frame size.
+DIM_CASES="dim_1x1_sb64 dim_2x2_sb64 dim_3x5_sb64 dim_1x64_sb64 dim_64x1_sb64 dim_8x8_sb64 dim_9x9_sb64 \
+dim_33x17_sb64 dim_65x47_sb64 dim_127x129_sb64 dim_175x143_sb64 dim_257x31_sb64 dim_3x5_sb128 dim_129x127_sb128 \
+dim_199x113_sb128 dim_31x257_sb128"
+RS_CASES="rsfix9_197x113 rsfix12_197x113 rsfix16_197x113 rsup2x_176x144 rsdown2x_176x144 rsrand128_352x288 \
+rsrandtiles_640x360 rsrandc2_176x144 rsrandlag_176x144 rsrandrt_176x144"
+# libaom's published RESIZE vectors ship as .mkv; they are remuxed losslessly (ffmpeg -c copy) to IVF for the harness
+# and scored on every frame like the IVF ones.
+PUBLISHED_MKV="av1-1-b8-03-sizeup av1-1-b8-03-sizedown"
 
 pass=0; fail=0; xfail=0; skip=0; skipped_names=""
 
@@ -128,6 +141,9 @@ skip_external() { # reason
     for c in $GOP_CASES; do skip_case "$c" "$1"; done
     for c in $SR_CASES; do skip_case "$c" "$1"; done
     for c in $FMT_CASES; do skip_case "$c" "$1"; done
+    for c in $DIM_CASES; do skip_case "$c" "$1"; done
+    for c in $RS_CASES; do skip_case "$c" "$1"; done
+    for c in $PUBLISHED_MKV; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -254,6 +270,11 @@ repro_seq  oddmi-inter-136x96 8 8
 # threaded that order-hint term in as a constant 0, read row 0, and desynced at frame 6 (AV1_ERR_BAD_FRAME, the
 # SymbolMaxBits exit bound) — the same defect as the published av1-1-b8-05-mv. dav1d agrees with aomdec.
 repro_seq  jnt-ctx-96x64 10 10
+# OBMC AT THE FRAME EDGE (0.8.3): libaom 3.15.3 `--cpu-used=2 --resize-mode=2 --end-usage=q --cq-level=40`, 96x80,
+# 12 frames at six random sizes (51x43 .. 96x80). av1_obmc_overlap trimmed a neighbour's overlap to the VISIBLE
+# plane, so an edge OBMC block's overlap cut to <= 4 chroma rows/columns took the 4-tap filter (and the band past
+# the picture went unblended); frames 5-12 differed. dav1d agrees with aomdec.
+repro_seq  obmc-edge-96x80 12 12
 repro_seq  fmt-mono-72x56 8 8
 repro_seq  fmt-444-72x56 8 8
 repro_seq  fmt-422-72x56 8 8
@@ -423,6 +444,20 @@ fetch_vec() { # name -> 0 if available
     curl -sf --max-time 60 -o "$VDIR/$1.ivf.md5.part" "$AOM_BASE/$1.ivf.md5" || {
         rm -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf.md5.part"; return 1; }
     mv -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf" && mv -f "$VDIR/$1.ivf.md5.part" "$VDIR/$1.ivf.md5"
+}
+# An .mkv-only published vector, put in the cache as the IVF + md5 pair check_published reads: the .mkv and its
+# .mkv.md5 are fetched (via .part names, as fetch_vec), the stream is remuxed LOSSLESSLY (ffmpeg -c copy: the
+# temporal units are carried byte for byte) and the md5 file is reused as is (one md5 per frame).
+fetch_mkv() { # name -> 0 if "$VDIR/name.ivf" and its md5 are available
+    [ -s "$VDIR/$1.ivf" ] && [ -s "$VDIR/$1.ivf.md5" ] && return 0
+    rm -f "${VDIR:?}/$1.mkv.part" "${VDIR:?}/$1.mkv.md5.part" "${VDIR:?}/$1.ivf.part"
+    curl -sf --max-time 120 -o "$VDIR/$1.mkv.part" "$AOM_BASE/$1.mkv" || { rm -f "${VDIR:?}/$1.mkv.part"; return 1; }
+    curl -sf --max-time 60 -o "$VDIR/$1.mkv.md5.part" "$AOM_BASE/$1.mkv.md5" || {
+        rm -f "${VDIR:?}/$1.mkv.part" "${VDIR:?}/$1.mkv.md5.part"; return 1; }
+    ffmpeg -loglevel error -y -i "$VDIR/$1.mkv.part" -c copy -f ivf "$VDIR/$1.ivf.part" 2>/dev/null || {
+        rm -f "${VDIR:?}/$1.mkv.part" "${VDIR:?}/$1.mkv.md5.part" "${VDIR:?}/$1.ivf.part"; return 1; }
+    mv -f "$VDIR/$1.mkv.md5.part" "$VDIR/$1.ivf.md5" && mv -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf"
+    rm -f "${VDIR:?}/$1.mkv.part"
 }
 # The md5 of frame k in the PUBLISHED convention. libaom's .md5 files checksum an I420 image even for a
 # MONOCHROME stream: the Y plane followed by two 4:2:0 chroma planes of the neutral value 1 << (BitDepth - 1)
@@ -1042,6 +1077,82 @@ fmtcase() { # name = KIND_WxH
     echo "  $n ($prop)"
     vs_judge "$n" "$fr"
 }
+# dimension property: "exact WxH" = every coded frame is exactly W x H (the geometry the case names, not one the
+# encoder rounded); "resize" = >= 2 distinct coded sizes. Prints the distinct sizes either way.
+dim_property() { # want w h
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" -v W="$2" -v H="$3" '
+        /^ *show_existing_frame=/ { split($0, a, "="); se = a[2] + 0 }
+        /^ *frame_width=/ { split($0, a, "="); fw = a[2] + 0 }
+        /^ *frame_height=/ {
+            split($0, a, "="); fh = a[2] + 0
+            if (!se) { sz[fw "x" fh] = 1; nf++; if (fw != W || fh != H) off++ }
+        }
+        END {
+            ns = 0; list = ""; for (s in sz) { ns++; list = list " " s }
+            ok = (nf > 0)
+            if (want == "exact") ok = ok && (off == 0)
+            if (want == "resize") ok = ok && (ns >= 2)
+            printf "sizes:%s", list
+            exit !ok
+        }'
+}
+dimcase() { # name = dim_WxH_sbS (8 frames)
+    local n="$1" geo sbx
+    IFS=_ read -r _ geo sbx <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" sb="${sbx#sb}" fr=8 lag=19
+    [ "$sb" = "128" ] && lag=0
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30,noise=alls=6:allf=t" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --limit="$fr" --cpu-used=6 --sb-size="$sb" --lag-in-frames="$lag" \
+        --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(dim_property exact "$w" "$h"); then
+        echo "  $n: SETUP FAILED (not every frame is ${w}x${h}: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    vs_judge "$n" "$fr"
+}
+rscase() { # name = KIND_WxH
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=10 args
+    rsfixed() { echo "--resize-mode=1 --resize-denominator=$1 --resize-kf-denominator=$2"; }
+    case "$kind" in
+        rsfix9)      args="--cpu-used=6 $(rsfixed 9 16)" ;;
+        rsfix12)     args="--cpu-used=6 $(rsfixed 12 13)" ;;
+        rsfix16)     args="--cpu-used=6 $(rsfixed 16 9)" ;;
+        rsup2x)      args="--cpu-used=6 $(rsfixed 8 16)" ;;        # half-size keyframe, full-size inter frames
+        rsdown2x)    args="--cpu-used=6 $(rsfixed 16 8)" ;;        # the 2x-larger reference limit
+        rsrand128)   fr=20; args="--cpu-used=6 --sb-size=128 --resize-mode=2" ;;
+        rsrandtiles) fr=12; args="--cpu-used=6 --tile-columns=1 --tile-rows=1 --resize-mode=2" ;;
+        rsrandc2)    fr=20; args="--cpu-used=2 --resize-mode=2" ;;   # the edge-OBMC witness (bite 6)
+        rsrandlag)   fr=40; args="--cpu-used=6 --lag-in-frames=35 --resize-mode=2" ;;
+        rsrandrt)    fr=30; args="--rt --cpu-used=8 --resize-mode=2" ;;
+        *)           echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30,noise=alls=6:allf=t" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --limit="$fr" $args --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" \
+        >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(dim_property resize "$w" "$h"); then
+        echo "  $n: SETUP FAILED (the frame size never changes: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    vs_judge "$n" "$fr"
+}
 # odd-MI INTER frames (0.8.3). The probe must show an INTER frame whose MI extent leaves a bottom or right
 # superblock-row remainder that is not a multiple of 16 luma samples (mi_rows % 4 == 2 or mi_cols % 4 == 2): that
 # is where an edge block's chroma is cut to 4 rows or columns by an MI-grid-sized allocation (see oddmi-inter-*).
@@ -1220,10 +1331,18 @@ for c in $SR_CASES; do srcase "$c"; done
 echo "--- chroma formats: monochrome, 4:4:4, 4:2:2 (palettes, LR, superres, 128-SB, odd MI); every frame hard ---"
 for c in $FMT_CASES; do fmtcase "$c"; done
 
+echo "--- dimension sweep: 1x1 .. 257x31, both superblock sizes; every frame hard ---"
+for c in $DIM_CASES; do dimcase "$c"; done
+echo "--- scaled references (resize): every denominator class, 2x both ways, random sizes; every frame hard ---"
+for c in $RS_CASES; do rscase "$c"; done
+
 echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
 for c in $GOP_CASES; do gopcase "$c"; done
 
 echo "--- published libaom vectors (128x128 superblocks; every frame) ---"
 for v in $PUBLISHED; do check_published "$v"; done
+for v in $PUBLISHED_MKV; do
+    if fetch_mkv "$v"; then check_published "$v"; else skip_case "$v" "vector fetch/remux failed"; fi
+done
 
 finish

@@ -25309,14 +25309,23 @@ fn av1_ierr_latch(tile, e): i64 {
 # then left). Reconciled vs spec + cached dav1d recon_tmpl.c obmc + libaom (0.7.101).
 # ================================================================
 # av1_obmc_overlap — MC one neighbour (its Mv[0] + own interp filters) into the driver scratch at
-# (predX,predY) edge-clamped to mc_w x mc_h, then blend it into the frame. pass 0 (above) indexes the mask
-# by ROW i with length predH; pass 1 (left) by COL j with length predW (the mask table is chosen from the
-# NOMINAL predW/predH, NOT the edge-clamped extent). m weights the CURRENT (in-frame) pixel, 64-m the
-# neighbour: CurrFrame = Round2(m*own + (64-m)*nb, 6), no Clip1 (a weighted average of two in-range pixels
-# stays in range). The neighbour MC is single-ref (compound=0) -> final Clip1'd pixels.
-fn av1_obmc_overlap(tile, frame, plane, cell, dpb, fh, predX, predY, predW, predH, pass, pw, ph): i64 {
-    var mc_w = av1_min(predW, pw - predX);
-    var mc_h = av1_min(predH, ph - predY);
+# (predX,predY) over the NOMINAL predW x predH region, then blend it into the frame. pass 0 (above) indexes
+# the mask by ROW i with length predH; pass 1 (left) by COL j with length predW. m weights the CURRENT
+# (in-frame) pixel, 64-m the neighbour: CurrFrame = Round2(m*own + (64-m)*nb, 6), no Clip1 (a weighted
+# average of two in-range pixels stays in range). The neighbour MC is single-ref (compound=0) -> final
+# Clip1'd pixels.
+#
+# THE NOMINAL REGION, NOT THE VISIBLE ONE (0.8.3). This used to trim the region to the VISIBLE plane, which
+# is wrong twice: the trimmed height/width is what av1_mc_filter_set sees, so an overlap cut to <= 4 rows or
+# columns took the 4-tap filter where the spec's predW/predH (7.11.3.10, passed straight to 7.11.3.4) take
+# the 8-tap one; and the band between the visible frame and the MI grid was left unblended although
+# deblocking and CDEF read it. A bottom-edge OBMC block on an 88x72 frame (MiRows % 4 == 2) came out 1 LSB
+# wrong in its corner chroma sample — the bite-2 odd-MI defect in the one MC path that fix did not reach.
+# The decode frame covers the superblock grid, which contains the block and so its overlap; the clamp
+# against the ALLOCATED extent below is only a backstop for test-built frames.
+fn av1_obmc_overlap(tile, frame, plane, cell, dpb, fh, predX, predY, predW, predH, pass): i64 {
+    var mc_w = av1_min(predW, dr_frame_plane_alloc_w(frame, plane) - predX);
+    var mc_h = av1_min(predH, dr_frame_plane_alloc_h(frame, plane) - predY);
     if ((mc_w <= 0) || (mc_h <= 0)) { return DR_OK; }
     var nref = av1_dpb_ref_frame(dpb, fh, load64(cell + AV1MIR_REF0));
     if (nref == 0) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }
@@ -25359,10 +25368,8 @@ fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i
     var fh = load64(tile + AV1TILE_FH);
     var bw4 = av1_num_4x4_w(sub_size);
     var bh4 = av1_num_4x4_h(sub_size);
-    var nom_w = (bw4 * 4) >> subX;                  # NOMINAL plane overlap dims (pre-edge-clamp)
+    var nom_w = (bw4 * 4) >> subX;                  # NOMINAL plane block dims (7.11.3.10's w / h)
     var nom_h = (bh4 * 4) >> subY;
-    var pw = dr_frame_plane_width(frame, plane);
-    var ph = dr_frame_plane_height(frame, plane);
     # ABOVE pass.
     if ((mi_row > load64(tile + AV1TILE_ROW_START))
       && (av1_get_plane_residual_size(sub_size, plane, subX, subY) >= AV1_BLOCK_8X8)) {
@@ -25380,7 +25387,7 @@ fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i
                 var apw = av1_min(nom_w, (astep * 4) >> subX);
                 var aph = av1_min(nom_h >> 1, 32 >> subY);
                 var eo = av1_obmc_overlap(tile, frame, plane, acell, dpb, fh,
-                  (x4 * 4) >> subX, (mi_row * 4) >> subY, apw, aph, 0, pw, ph);
+                  (x4 * 4) >> subX, (mi_row * 4) >> subY, apw, aph, 0);
                 if (eo != DR_OK) { return eo; }
             }
             x4 = x4 + astep;
@@ -25402,7 +25409,7 @@ fn av1_obmc_predict(tile, frame, plane, mi_row, mi_col, sub_size, subX, subY): i
                 var lpw = av1_min(nom_w >> 1, 32 >> subX);
                 var lph = av1_min(nom_h, (lstep * 4) >> subY);
                 var eo2 = av1_obmc_overlap(tile, frame, plane, lcell, dpb, fh,
-                  (mi_col * 4) >> subX, (y4 * 4) >> subY, lpw, lph, 1, pw, ph);
+                  (mi_col * 4) >> subX, (y4 * 4) >> subY, lpw, lph, 1);
                 if (eo2 != DR_OK) { return eo2; }
             }
             y4 = y4 + lstep;
