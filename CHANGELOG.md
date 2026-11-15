@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.3 bite 4: monochrome, 4:4:4 and 4:2:2 gated end-to-end (8-bit)
+
+**Every chroma format decodes bit-exact vs `aomdec` on every frame, as a standing section of `make conformance`.**
+No decoder change was needed. Monochrome, 4:4:4 (profile 1) and 4:2:2 (profile 2) were already right across 38
+hand-run libaom configurations. Before claiming that, I checked the format-specific tools really ran, using
+libaom's own block dumps: CfL over thousands of 4x4 units; luma and CHROMA palettes in 4:4:4 and 4:2:2 screen content;
+CDEF; and loop restoration on chroma planes. What was missing was a gate, so a later change cannot silently break a
+format nobody tests.
+- **13 generated format cases**, every frame hard, all judged through the variable-size judge:
+  - GOPs and realtime in each format;
+  - screen content (chroma palettes) in 4:4:4 and 4:2:2;
+  - superres with loop restoration in each format;
+  - 4:4:4 at 128-SB;
+  - 4:2:2 at an odd-MI 136x136.
+
+  Each case's `fmt_property` guard proves the stream's format from the sequence header. The LR cases prove a
+  CHROMA plane was restored (luma for monochrome), and the screen cases prove `allow_screen_content_tools`.
+  `programs/vector-probe.cyr` now prints the per-plane restoration types (`lr_type_y/u/v`) for this.
+- **Three committed reproducers**, so a machine without libaom still decodes every format: `tests/repro/fmt-mono-72x56`,
+  `fmt-444-72x56` and `fmt-422-72x56`. Each is 72x56 (odd MI on both axes), 8 frames with inter frames and LR
+  enabled, 1–3 KB, and dav1d agrees with aomdec on every frame.
+- **Two more published libaom vectors**, every frame: `av1-1-b8-24-monochrome` (10 frames) and `av1-1-b8-02-allintra`
+  (39 frames). libaom's `.md5` files checksum an I420 image even for a monochrome stream: the Y plane, then two 4:2:0
+  planes of the neutral value `1 << (BitDepth - 1)`. drishti matched `aomdec` on all 10 frames from the start; the
+  published checksums match once the gate appends those neutral planes (`published_md5`), and none match without
+  them.
+
+Evidence:
+- **Conformance: 1220 matched / 6 known-gap / 0 regressed / 0 skipped** (was 929).
+- The guards were canary-tested. They reject 4:4:4 claimed as monochrome, 4:2:2 as 4:4:4, 4:2:0 as 4:2:2, a
+  stream without LR or screen content claimed with it, and monochrome without luma LR. Each accepts its own case.
+- The monochrome checksum rule is what makes the published vector match: 10/10 with it, 0/10 with it disabled.
+
 ### Fixed — 0.8.3 bite 3: superres reads the overhang columns (the 7.16 tap clamp is the MI grid)
 
 **Every superres frame whose downscaled width is not a multiple of 8 decoded 1 LSB wrong in its last upscaled

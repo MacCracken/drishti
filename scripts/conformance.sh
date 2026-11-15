@@ -94,7 +94,14 @@ SR_CASES="srfix_352x288 srrand_352x288 srsb128_352x288 srodd_175x99 srtiles_640x
 srresize_352x288"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
-av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
+av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-allintra"
+# CHROMA FORMATS (0.8.3), kind_WxH, every frame hard: monochrome, 4:4:4 (profile 1) and 4:2:2 (profile 2), over
+# GOPs, realtime, screen content (chroma palettes), superres + loop restoration, 128-SB and an odd-MI geometry. Each
+# stream PROVES its format through vector-probe (num_planes / subsampling), and the restoration cases prove a
+# CHROMA plane was restored (lr_type_u/v), not just luma. 4:2:0 is covered by every other section.
+FMT_CASES="fmtmono_176x144 fmt444_176x144 fmt422_176x144 fmtmonort_176x144 fmt444rt_176x144 fmt422rt_176x144 \
+fmt444scr_320x240 fmt422scr_320x240 fmtmonosr_352x288 fmt444sr_352x288 fmt422sr_352x288 fmt444sb128_352x288 \
+fmt422oddmi_136x136"
 
 pass=0; fail=0; xfail=0; skip=0; skipped_names=""
 
@@ -120,6 +127,7 @@ skip_external() { # reason
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
     for c in $GOP_CASES; do skip_case "$c" "$1"; done
     for c in $SR_CASES; do skip_case "$c" "$1"; done
+    for c in $FMT_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -237,6 +245,13 @@ repro_seq  roi-skip-160x136 8 8
 # agrees with aomdec on every frame.
 repro_seq  oddmi-inter-160x136 8 8
 repro_seq  oddmi-inter-136x96 8 8
+# CHROMA FORMATS (0.8.3): monochrome, 4:4:4 (profile 1) and 4:2:2 (profile 2), so a machine without libaom still
+# decodes every format. 72x56 (MiCols and MiRows % 4 == 2), 8 frames each with inter frames and loop restoration
+# enabled; libaom 3.15.3 `--cpu-used=6 --end-usage=q --cq-level=40 --lag-in-frames=0`. Their md5s are the
+# aomdec --rawvideo layout, which for monochrome is the Y plane alone. dav1d agrees with aomdec on every frame.
+repro_seq  fmt-mono-72x56 8 8
+repro_seq  fmt-444-72x56 8 8
+repro_seq  fmt-422-72x56 8 8
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -406,6 +421,24 @@ fetch_vec() { # name -> 0 if available
         rm -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf.md5.part"; return 1; }
     mv -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf" && mv -f "$VDIR/$1.ivf.md5.part" "$VDIR/$1.ivf.md5"
 }
+# The md5 of frame k in the PUBLISHED convention. libaom's .md5 files checksum an I420 image even for a
+# MONOCHROME stream: the Y plane followed by two 4:2:0 chroma planes of the neutral value 1 << (BitDepth - 1)
+# (verified: av1-1-b8-24-monochrome matches on all 10 frames that way, and on none as Y alone). The harness writes
+# the aomdec --rawvideo layout (Y alone), so the neutral planes are appended here, from the frame's dims and depth
+# in the harness log ("frame k decoded WxH planes=P bitdepth=B").
+published_md5() { # k log
+    local k="$1" log="$2" geo np bd
+    geo=$(sed -n "s/^frame $k decoded \([0-9]*x[0-9]*\) planes=\([0-9]*\) bitdepth=\([0-9]*\).*/\1 \2 \3/p" "$log")
+    [ -f "build/conformance-out-$k.yuv" ] || return 0
+    read -r geo np bd <<< "$geo"
+    if [ "${np:-3}" != "1" ]; then md5sum "build/conformance-out-$k.yuv" | cut -d' ' -f1; return 0; fi
+    local w="${geo%x*}" h="${geo#*x}"
+    local n=$(( 2 * ((w + 1) / 2) * ((h + 1) / 2) )) mid=$(( 1 << (bd - 1) ))
+    { cat "build/conformance-out-$k.yuv"
+      LC_ALL=C awk -v n="$n" -v lo=$(( mid & 255 )) -v hi=$(( mid >> 8 )) -v two=$(( bd > 8 )) \
+          'BEGIN { for (i = 0; i < n; i++) { if (two) printf "%c%c", lo, hi; else printf "%c", lo } }'
+    } | md5sum | cut -d' ' -f1
+}
 check_published() { # name
     local name="$1"
     if ! fetch_vec "$name"; then skip_case "$name" "vector fetch failed"; return; fi
@@ -419,7 +452,7 @@ check_published() { # name
     while [ "$k" -le "$nref" ]; do
         local ref got gap=0
         ref=$(grep -E '^[0-9a-f]{32}' "$VDIR/$name.ivf.md5" | sed -n "${k}p" | cut -d' ' -f1)
-        got=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+        got=$(published_md5 "$k" "$WORK/$name.log")
         case " $PUBLISHED_XFAIL_FRAMES " in *" $name:$k "*) gap=1 ;; esac
         if [ -n "$got" ] && [ "$got" = "$ref" ]; then
             if [ "$gap" = "1" ]; then
@@ -937,6 +970,70 @@ srcase() { # name = KIND_WxH
     echo "  $n ($prop)"
     vs_judge "$n" "$fr"
 }
+# chroma-format property: the sequence header must carry the format the case claims (mono: num_planes 1; 444:
+# subsampling 0/0; 422: 1/0), and extra "lr" needs a frame restoring a CHROMA plane (luma for mono), "sct" a frame
+# with allow_screen_content_tools (chroma palettes are only possible there).
+fmt_property() { # format extra
+    ./build/drishti-vector-probe 2>&1 | awk -v fmt="$1" -v extra="$2" '
+        /^ *num_planes=/ { split($0, a, "="); np = a[2] + 0 }
+        /^ *subsampling_x=/ { split($0, a, "="); sx = a[2] + 0 }
+        /^ *subsampling_y=/ { split($0, a, "="); sy = a[2] + 0 }
+        /^ *frame_type=/ { nf++ }
+        /^ *allow_screen_content_tools=1/ { nsct++ }
+        /^ *lr_type_y=[1-3]/ { nly++ }
+        /^ *lr_type_[uv]=[1-3]/ { nlc++ }
+        END {
+            ok = 0
+            if (fmt == "mono") ok = (np == 1)
+            if (fmt == "444") ok = (np == 3 && sx == 0 && sy == 0)
+            if (fmt == "422") ok = (np == 3 && sx == 1 && sy == 0)
+            if (extra == "lr") ok = ok && ((fmt == "mono") ? (nly >= 1) : (nlc >= 1))
+            if (extra == "sct") ok = ok && (nsct >= 1)
+            printf "planes=%d subsampling=%d/%d frames=%d sct_frames=%d lr_luma=%d lr_chroma=%d", \
+                np, sx, sy, nf, nsct, nly, nlc
+            exit !ok
+        }'
+}
+fmtcase() { # name = KIND_WxH
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=20 fmt extra="" pf args src="mandelbrot"
+    case "$kind" in
+        fmtmono*) fmt="mono"; pf="yuv420p"; args="--i420 --monochrome" ;;
+        fmt444*)  fmt="444"; pf="yuv444p"; args="--i444 --profile=1" ;;
+        fmt422*)  fmt="422"; pf="yuv422p"; args="--i422 --profile=2" ;;
+        *)        echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    local srfix="--superres-mode=1 --superres-denominator=13 --superres-kf-denominator=11"
+    case "${kind#fmt}" in
+        mono|444|422)       args="$args --cpu-used=6" ;;
+        monort|444rt|422rt) fr=30; args="$args --rt --cpu-used=8" ;;
+        444scr|422scr)      fr=8; extra="sct"; src="testsrc2"
+                            args="$args --cpu-used=6 --tune-content=screen --enable-intrabc=0" ;;
+        monosr|444sr|422sr) fr=10; extra="lr"; args="$args --cpu-used=6 $srfix" ;;
+        444sb128)           fr=10; args="$args --cpu-used=4 --sb-size=128 --end-usage=q --cq-level=20" ;;
+        422oddmi)           fr=12; args="$args --cpu-used=6 --sb-size=64 --lag-in-frames=19" ;;
+        *)                  echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    local sfilt=",noise=alls=6:allf=t"
+    [ "$src" = "testsrc2" ] && sfilt=""
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30${sfilt}" -frames:v "$fr" \
+        -pix_fmt "$pf" -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w "$w" -h "$h" --limit="$fr" $args --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(fmt_property "$fmt" "$extra"); then
+        echo "  $n: SETUP FAILED (not a '$fmt${extra:+ + $extra}' stream: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    vs_judge "$n" "$fr"
+}
 # odd-MI INTER frames (0.8.3). The probe must show an INTER frame whose MI extent leaves a bottom or right
 # superblock-row remainder that is not a multiple of 16 luma samples (mi_rows % 4 == 2 or mi_cols % 4 == 2): that
 # is where an edge block's chroma is cut to 4 rows or columns by an MI-grid-sized allocation (see oddmi-inter-*).
@@ -1111,6 +1208,9 @@ for c in $ODDMII_CASES; do oddmiicase "$c"; done
 
 echo "--- superres (7.16 upscaling with overhang columns; tiles, 128-SB, LR, resize); every frame hard ---"
 for c in $SR_CASES; do srcase "$c"; done
+
+echo "--- chroma formats: monochrome, 4:4:4, 4:2:2 (palettes, LR, superres, 128-SB, odd MI); every frame hard ---"
+for c in $FMT_CASES; do fmtcase "$c"; done
 
 echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
 for c in $GOP_CASES; do gopcase "$c"; done

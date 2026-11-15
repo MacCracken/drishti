@@ -101,6 +101,10 @@ fn probe_fh(fh, seq): i64 {
     probe_kv("tile_cols", load64(fh + AV1FH_TILE_COLS));
     probe_kv("tile_rows", load64(fh + AV1FH_TILE_ROWS));
     probe_kv("uses_lr", load64(fh + AV1FH_USES_LR));
+    # per-plane FrameRestorationType (0.8.3): the format cases prove CHROMA restoration ran, not just luma.
+    probe_kv("lr_type_y", av1_fh_frame_restoration_type(fh, 0));
+    probe_kv("lr_type_u", av1_fh_frame_restoration_type(fh, 1));
+    probe_kv("lr_type_v", av1_fh_frame_restoration_type(fh, 2));
     probe_puts(" --- drishti reject gates ---\n");
     probe_gate("allow_screen_content_tools", load64(fh + AV1FH_ALLOW_SCT), 1);
     probe_gate("allow_intrabc", load64(fh + AV1FH_ALLOW_INTRABC), 1);
