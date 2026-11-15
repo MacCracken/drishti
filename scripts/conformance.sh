@@ -77,6 +77,13 @@ CDF_CASES="mt2c_352x288 mt2x2_640x360 mt2csb128_640x360 mt4crt_640x360 fp_352x28
 PAL_CASES="palstock_640x360 palscreen_320x240 palbars_320x240"
 RAV1E_CASES="rav1e_352x288_s6_q100"
 SVT_CASES="svt_352x288_p8_crf35"
+# LONG GOPs (0.8.3), kind_WxH, every frame hard: real reference patterns, which need far more frames than the 9
+# the harness could decode before it streamed. Each case PROVES its property through vector-probe first (see
+# gop_property): the default and 2-pass GOPs show hidden frames, show_existing_frame and a refresh of every one of
+# the eight slots; the others show what their flag exists for (repeated keyframes, error-resilient inter frames,
+# SWITCH frames, no order hints, no motion-field MVs, the realtime pattern).
+GOP_CASES="gopdef_176x144 goplag35_176x144 gop2pass_176x144 gopkf_176x144 goprt_176x144 goperr_176x144 \
+gopsf_176x144 gopnoord_176x144 gopnomfmv_176x144"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
@@ -102,6 +109,7 @@ skip_external() { # reason
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
+    for c in $GOP_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -128,7 +136,7 @@ finish() {
 # failed copy can never leave the last case's stream (or its frames) in place to be scored
 # as this one. Returns 1 if the stream could not be put in place.
 run_drishti() { # ivf log
-    rm -f build/conformance-input.ivf build/conformance-out-*.i420
+    rm -f build/conformance-input.ivf build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     ./build/drishti-conformance >"$2" 2>&1
     return 0
@@ -150,7 +158,7 @@ repro_case() { # name expect(match|xfail)
     mkdir -p build
     run_drishti "$ivf" /dev/null || { echo "  repro $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
     local got want
-    got=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    got=$(md5sum build/conformance-out-1.yuv 2>/dev/null | cut -d' ' -f1)
     want=$(cat "$md5f")
     if [ -n "$got" ] && [ "$got" = "$want" ]; then
         echo "  repro $n: keyframe BIT-EXACT vs committed reference"; pass=$((pass+1))
@@ -185,7 +193,7 @@ repro_seq() { # name hard_n total_n
     local k=1
     while [ "$k" -le "$tot" ]; do
         local got want
-        got=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        got=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
         want=$(sed -n "${k}p" "$md5f")
         if [ -n "$got" ] && [ "$got" = "$want" ]; then
             line="$line f$k=OK"; pass=$((pass+1))
@@ -309,11 +317,11 @@ check() { # name expect(all|keyframe) frames_expected
         local off=$(( (k-1) * CORPUS_FRAME ))
         dd if="$WORK/$name.ref" bs=1 skip=$off count=$CORPUS_FRAME of="$WORK/$name.f$k" status=none 2>/dev/null
         local a b st
-        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
         b=$(md5sum "$WORK/$name.f$k" 2>/dev/null | cut -d' ' -f1)
         if [ -z "$a" ]; then st="reject"; else
             if [ "$a" = "$b" ]; then st="OK"; else
-                st="differs $(frame_delta "build/conformance-out-$k.i420" "$WORK/$name.f$k")"
+                st="differs $(frame_delta "build/conformance-out-$k.yuv" "$WORK/$name.f$k")"
             fi
         fi
         if [ "$st" = "OK" ]; then
@@ -352,17 +360,20 @@ check seq_nofilt  all $FRAME_LIMIT
 # ---- PUBLISHED conformance vectors (libaom's own corpus + its own reference MD5s) ----
 # These are the real thing: streams drishti never touched, with checksums published by
 # the reference implementation. They ALL use 128x128 superblocks (libaom's default), so
-# every one of them rejected outright until the 128x128-superblock gate landed. Only the
-# KEYFRAME (frame 1) is scored here; scoring every frame of the full corpus is roadmap.md 0.8.5.
+# every one of them rejected outright until the 128x128-superblock gate landed. Their .md5
+# companion holds ONE LINE PER FRAME, and since 0.8.3 (the streaming harness) EVERY frame is
+# scored, not just the keyframe; the full published corpus is roadmap.md 0.8.5.
 VDIR="${CONFORMANCE_VECTORS:-build/vectors}"
 AOM_BASE="${CONFORMANCE_AOM_BASE:-https://storage.googleapis.com/aom-test-data}"
-# NO published keyframe gaps remain. quantizer-00 and mfmv were the last two, and both
-# were filed here with a WRONG named cause — "coded_lossless = 1 (the WHT lossless path)"
-# and "uses_lr = 1 (loop restoration)" respectively. A controlled sweep refuted both
-# attributions (0.7.126), and the real cause turned out to be neither feature: a single
-# unbounded store in av1_clear_cdef overwriting the CDF blob (the CDEF-grid heap overflow). The lesson is worth
-# keeping: a named cause on an xfail is a HYPOTHESIS, not a diagnosis — label it as one.
-PUBLISHED_XFAIL=""
+# Frames that are KNOWN GAPS, as name:frame. A named cause on a gap is a HYPOTHESIS until it
+# is fixed: quantizer-00 and mfmv were once filed here as "coded_lossless" and "loop
+# restoration", and both turned out to be the CDEF-grid heap overflow (av1_clear_cdef).
+#   av1-1-b8-05-mv frames 3-4: drishti stops at frame 3 with AV1_ERR_BAD_FRAME (12), the
+#   SymbolMaxBits >= -14 exit bound, i.e. an entropy DESYNC. Seen the first time inter frames
+#   of a published vector were scored (0.8.3); libaom --cpu-used=0 streams show the same
+#   symptom. Roadmap 0.8.3.
+# A listed frame that now MATCHES fails the gate, so this list cannot go stale.
+PUBLISHED_XFAIL_FRAMES="av1-1-b8-05-mv:3 av1-1-b8-05-mv:4"
 
 mkdir -p "$VDIR"
 # Downloads land under a .part name and are moved into place only when complete, so an
@@ -376,24 +387,35 @@ fetch_vec() { # name -> 0 if available
         rm -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf.md5.part"; return 1; }
     mv -f "$VDIR/$1.ivf.part" "$VDIR/$1.ivf" && mv -f "$VDIR/$1.ivf.md5.part" "$VDIR/$1.ivf.md5"
 }
-check_published() { # name expect(match|xfail)
-    local name="$1" expect="$2"
+check_published() { # name
+    local name="$1"
     if ! fetch_vec "$name"; then skip_case "$name" "vector fetch failed"; return; fi
-    local ref got
-    ref=$(head -1 "$VDIR/$name.ivf.md5" | cut -d' ' -f1)
-    if ! echo "$ref" | grep -qE '^[0-9a-f]{32}$'; then
+    local nref; nref=$(grep -cE '^[0-9a-f]{32}' "$VDIR/$name.ivf.md5" || true)
+    if [ "$nref" -lt 1 ]; then
         echo "  $name: SETUP FAILED (published md5 file holds no md5)"; fail=$((fail+1)); return
     fi
     run_drishti "$VDIR/$name.ivf" "$WORK/$name.log" || {
         echo "  $name: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
-    got=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
-    if [ -n "$got" ] && [ "$got" = "$ref" ]; then
-        echo "  $name: keyframe BIT-EXACT vs published md5"; pass=$((pass+1))
-    elif [ "$expect" = "xfail" ]; then
-        echo "  $name: keyframe differs (known gap)"; xfail=$((xfail+1))
-    else
-        echo "  $name: keyframe REGRESSED (ref=$ref got=${got:-none})"; fail=$((fail+1))
-    fi
+    local line="  $name:" k=1
+    while [ "$k" -le "$nref" ]; do
+        local ref got gap=0
+        ref=$(grep -E '^[0-9a-f]{32}' "$VDIR/$name.ivf.md5" | sed -n "${k}p" | cut -d' ' -f1)
+        got=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+        case " $PUBLISHED_XFAIL_FRAMES " in *" $name:$k "*) gap=1 ;; esac
+        if [ -n "$got" ] && [ "$got" = "$ref" ]; then
+            if [ "$gap" = "1" ]; then
+                line="$line f$k=MATCHES(remove-from-PUBLISHED_XFAIL_FRAMES)"; fail=$((fail+1))
+            else
+                line="$line f$k=OK"; pass=$((pass+1))
+            fi
+        elif [ "$gap" = "1" ]; then
+            line="$line f$k=known-gap"; xfail=$((xfail+1))
+        else
+            line="$line f$k=REGRESSED"; fail=$((fail+1))
+        fi
+        k=$((k+1))
+    done
+    echo "$line"
 }
 
 # ---- THE 128-SB REPRODUCER (the CDEF-grid heap overflow — FIXED, kept as the regression guard) ----
@@ -426,7 +448,7 @@ sbrepro() { # sbsize expect(match|xfail)
     [ -s "$WORK/sb$sb.ref" ] || { echo "  $n: SETUP FAILED (aomdec produced no reference)"
         fail=$((fail+1)); return; }
     local a b
-    a=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    a=$(md5sum build/conformance-out-1.yuv 2>/dev/null | cut -d' ' -f1)
     b=$(md5sum "$WORK/sb$sb.ref" 2>/dev/null | cut -d' ' -f1)
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
         echo "  352x288 sb-size=$sb: keyframe BIT-EXACT"; pass=$((pass+1))
@@ -462,7 +484,7 @@ oddmi() { # w h sbsize
     [ -s "$WORK/$n.ref" ] || { echo "  $n: SETUP FAILED (aomdec produced no reference)"
         fail=$((fail+1)); return; }
     local a b
-    a=$(md5sum build/conformance-out-1.i420 2>/dev/null | cut -d' ' -f1)
+    a=$(md5sum build/conformance-out-1.yuv 2>/dev/null | cut -d' ' -f1)
     b=$(md5sum "$WORK/$n.ref" 2>/dev/null | cut -d' ' -f1)
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
         echo "  ${w}x${h} sb-size=$sb (MiRows%4==2): keyframe BIT-EXACT"; pass=$((pass+1))
@@ -520,7 +542,7 @@ deltacase() { # name = kind_WxH_sbN
     local line="  $n:" k=1
     while [ "$k" -le "$DELTA_FRAMES" ]; do
         local a b
-        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
         b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
         if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
         else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
@@ -579,7 +601,7 @@ llcase() { # name = ll_WxH_sbN
     local line="  $n (mask $kmask):" k=1
     while [ "$k" -le "$LL_FRAMES" ]; do
         local a b
-        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
         b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
         if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
         else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
@@ -618,7 +640,7 @@ seg_judge() { # n w h fr — decode, reference, dav1d guard, per-frame compare (
     local line="  $n:" k=1
     while [ "$k" -le "$fr" ]; do
         local a b
-        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
         b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
         if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
         else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
@@ -665,7 +687,7 @@ segicase() { # name = seg_aqA_cqQ_fF
     fi
     seg_judge "$n" "$w" "$h" "$fr"
 }
-tsegcase() { # name = tseg_WxH_bKBPS_cCPU (9 frames: CONF_MAX_FRAMES)
+tsegcase() { # name = tseg_WxH_bKBPS_cCPU (9 frames)
     local n="$1" geo bx cx
     IFS=_ read -r _ geo bx cx <<< "$n"
     local w="${geo%x*}" h="${geo#*x}" br="${bx#b}" cpu="${cx#c}" fr=9
@@ -723,6 +745,84 @@ svtcase() { # name = svt_WxH_pPRESET_crfCRF (9 frames, --aq-mode 1)
     fi
     seg_judge "$n" "$w" "$h" "$fr"
 }
+# The probe's per-frame fields reduced to one GOP property — does the stream show what the case exists for?
+#   reorder  : >= 8 hidden coded frames, >= 8 show_existing_frame, and the inter frames' refresh_frame_flags
+#              together cover all eight slots
+#   keys     : >= 4 coded KEY frames          sframe : >= 2 SWITCH frames (frame_type 3)
+#   errres   : EVERY coded inter frame has error_resilient_mode = 1 (and there are >= 20)
+#   realtime : no hidden frame, >= 40 inter frames, refreshes spread over >= 3 slots
+#   noorder  : the sequence header has enable_order_hint = 0
+#   nomfmv   : the sequence header has enable_ref_frame_mvs = 0
+# Prints the measured counts either way, so a failed guard says what the stream did have.
+gop_property() { # want
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" '
+        function judge() {
+            if (!seen) return
+            if (se) { nse++ }
+            else {
+                if (ft == 0) nkey++
+                if (ft == 3) nsf++
+                if (ft != 0) { ninter++; if (er) ner++; ref_or = or(ref_or, rf) }
+                if (!sf) nhid++
+            }
+        }
+        /^ *enable_order_hint=/ { split($0, a, "="); ordh = a[2] + 0 }
+        /^ *enable_ref_frame_mvs=/ { split($0, a, "="); mfmv = a[2] + 0 }
+        /^ *frame_type=/ { judge(); seen = 1; split($0, a, "="); ft = a[2] + 0; se = 0; sf = 0; er = 0; rf = 0 }
+        /^ *show_existing_frame=/ { split($0, a, "="); se = a[2] + 0 }
+        /^ *show_frame=/ { split($0, a, "="); sf = a[2] + 0 }
+        /^ *error_resilient_mode=/ { split($0, a, "="); er = a[2] + 0 }
+        /^ *refresh_frame_flags=/ { split($0, a, "="); rf = a[2] + 0 }
+        END {
+            judge()
+            nslot = 0; for (i = 0; i < 8; i++) if (and(ref_or, lshift(1, i))) nslot++
+            ok = 0
+            if (want == "reorder")  ok = (nhid >= 8 && nse >= 8 && ref_or == 255)
+            if (want == "keys")     ok = (nkey >= 4)
+            if (want == "sframe")   ok = (nsf >= 2)
+            if (want == "errres")   ok = (ninter >= 20 && ner == ninter)
+            if (want == "realtime") ok = (nhid == 0 && ninter >= 40 && nslot >= 3)
+            if (want == "noorder")  ok = (ordh == 0)
+            if (want == "nomfmv")   ok = (mfmv == 0)
+            printf "hidden=%d show_existing=%d keys=%d switch=%d inter=%d err_res=%d slots=%d", \
+                nhid, nse, nkey, nsf, ninter, ner, nslot
+            exit !ok
+        }'
+}
+gopcase() { # name = KIND_WxH
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=40 want="reorder" args="--cpu-used=6"
+    case "$kind" in
+        gopdef)    fr=90 ;;
+        goplag35)  fr=90; args="--cpu-used=8 --lag-in-frames=35" ;;
+        gop2pass)  fr=60; args="--cpu-used=6 --passes=2 --end-usage=vbr --target-bitrate=200" ;;
+        gopkf)     fr=45; args="--cpu-used=6 --kf-max-dist=10"; want="keys" ;;
+        goprt)     fr=60; args="--rt --cpu-used=9 --end-usage=cbr --target-bitrate=200"; want="realtime" ;;
+        goperr)    args="--cpu-used=6 --error-resilient=1"; want="errres" ;;
+        gopsf)     args="--cpu-used=6 --sframe-dist=8 --sframe-mode=1"; want="sframe" ;;
+        gopnoord)  args="--cpu-used=6 --enable-order-hint=0"; want="noorder" ;;
+        gopnomfmv) args="--cpu-used=6 --enable-ref-frame-mvs=0"; want="nomfmv" ;;
+        *)         echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    # a little temporal noise keeps the content natural (no screen-content tools) and the residual busy.
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30,noise=alls=6:allf=t" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --limit="$fr" $args --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" \
+        >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(gop_property "$want"); then
+        echo "  $n: SETUP FAILED (no '$want' GOP: $prop — the case would prove nothing)"; fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    seg_judge "$n" "$w" "$h" "$fr"
+}
 echo "--- segmentation on inter frames (libaom AQ; copied map + inherited data; every frame hard) ---"
 for c in $SEGI_CASES; do segicase "$c"; done
 echo "--- temporal segmentation (libaom realtime cyclic refresh; seg_id_predicted; every frame hard) ---"
@@ -760,7 +860,7 @@ qmcase() { # name = qm15_WxH (hard) | qmon_WxH (must reject); 4 frames
     local line="  $n:" k=1
     while [ "$k" -le "$fr" ]; do
         local a b
-        a=$(md5sum "build/conformance-out-$k.i420" 2>/dev/null | cut -d' ' -f1)
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
         b=$(dd if="$WORK/$n.ref" bs="$fs" skip=$((k-1)) count=1 status=none | md5sum | cut -d' ' -f1)
         if [ -z "$a" ] && grep -q "frame $k DECODE-FAILED err=7" "$WORK/$n.log"; then
             line="$line f$k=rejected(known-gap)"; xfail=$((xfail+1))
@@ -866,8 +966,10 @@ echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); 
 for c in $RAV1E_CASES; do rav1ecase "$c"; done
 for c in $SVT_CASES; do svtcase "$c"; done
 
-echo "--- published libaom vectors (128x128 superblocks) ---"
-for v in $PUBLISHED; do check_published "$v" match; done
-for v in $PUBLISHED_XFAIL; do check_published "$v" xfail; done
+echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
+for c in $GOP_CASES; do gopcase "$c"; done
+
+echo "--- published libaom vectors (128x128 superblocks; every frame) ---"
+for v in $PUBLISHED; do check_published "$v"; done
 
 finish

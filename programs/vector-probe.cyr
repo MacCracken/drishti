@@ -69,6 +69,7 @@ fn probe_seq(seq): i64 {
     probe_kv("enable_filter_intra", load64(seq + AV1_SEQ_ENABLE_FILTER_INTRA));
     probe_kv("enable_intra_edge_filter", load64(seq + AV1_SEQ_ENABLE_INTRA_EDGE));
     probe_kv("enable_order_hint", load64(seq + AV1_SEQ_ENABLE_ORDER_HINT));
+    probe_kv("enable_ref_frame_mvs", load64(seq + AV1_SEQ_ENABLE_REF_FRAME_MVS));
     probe_kv("enable_superres", load64(seq + AV1_SEQ_ENABLE_SUPERRES));
     return 0;
 }
@@ -81,6 +82,16 @@ fn probe_fh(fh, seq): i64 {
     probe_kv("show_frame", load64(fh + AV1FH_SHOW_FRAME));
     probe_kv("mi_cols", load64(fh + AV1FH_MI_COLS));
     probe_kv("mi_rows", load64(fh + AV1FH_MI_ROWS));
+    # frame geometry (0.8.3): the dimension-sweep cases prove a resize / superres stream really changes
+    # size, and switch / error-resilient cases prove their signalling, from these.
+    probe_kv("frame_width", load64(fh + AV1FH_FRAME_WIDTH));
+    probe_kv("frame_height", load64(fh + AV1FH_FRAME_HEIGHT));
+    probe_kv("upscaled_width", load64(fh + AV1FH_UPSCALED_WIDTH));
+    probe_kv("use_superres", load64(fh + AV1FH_USE_SUPERRES));
+    probe_kv("superres_denom", load64(fh + AV1FH_SUPERRES_DENOM));
+    probe_kv("frame_size_override_flag", load64(fh + AV1FH_FRAME_SIZE_OVERRIDE));
+    probe_kv("error_resilient_mode", load64(fh + AV1FH_ERROR_RESILIENT));
+    probe_kv("frame_refs_short_signaling", load64(fh + AV1FH_SHORT_SIGNALING));
     probe_kv("base_q_idx", load64(fh + AV1FH_BASE_Q_IDX));
     probe_kv("coded_lossless", load64(fh + AV1FH_CODED_LOSSLESS));
     probe_kv("tx_mode", load64(fh + AV1FH_TX_MODE));

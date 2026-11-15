@@ -1,6 +1,6 @@
 # drishti conformance harness (Phase E1) — decode a REAL, externally-produced AV1
-# stream and dump each decoded frame as raw I420 so an outside reference (the
-# libaom test-vector .md5 companions) can judge the pixels.
+# stream and dump each decoded frame as raw YUV so an outside reference (aomdec, or
+# the libaom test-vector .md5 companions) can judge the pixels.
 #
 # This is the first evidence in the AV1 arc that drishti did not produce itself:
 # every prior witness round-trips drishti's own writer into drishti's own decoder,
@@ -11,24 +11,30 @@
 # I/O contract (fixed paths — the stdlib arg module is not in [deps].stdlib, and
 # scripts/conformance.sh drives this by copying each vector into place):
 #   IN   build/conformance-input.ivf
-#   OUT  build/conformance-out-<k>.i420   (k = 1..frames, one per decoded frame)
-#   stdout: one "frame <k> <status>" line per frame, then a SUMMARY line.
+#   OUT  build/conformance-out-<k>.yuv   (k = 1..units, the frame temporal unit k shows)
+#   stdout: one "frame <k> <status>" line per temporal unit, then a SUMMARY line.
 #
-# WHY A PREFIX RE-DECODE PER FRAME: av1_decode_stream owns its Av1RefState (it is
-# a whole-stream entry point) and returns only the LAST shown frame, so it cannot
-# hand back frame k mid-stream. Decoding the concatenated prefix of k temporal
-# units therefore yields frame k as that call's last shown frame — correct because
-# each prefix re-decodes from the keyframe with a fresh DPB. It is O(n^2) in frame
-# count, which is fine for the small conformance vectors and keeps the library API
-# untouched; a streaming per-frame output hook is a later bite (roadmap.md E1).
+# OUTPUT FORMAT = `aomdec --rawvideo`, so a frame's md5 compares directly against the
+# reference decoder's: the VISIBLE rectangle of each plane in order Y, U, V; chroma
+# planes (w + subsampling_x) >> subsampling_x wide (likewise high); one byte per sample
+# at 8-bit and two (little-endian) at 10/12-bit; and a MONOCHROME frame is its Y plane
+# ALONE (aomdec writes no chroma for it). Each frame is written at its own size, so a
+# stream whose frame size changes (reference scaling) still compares frame by frame.
+#
+# STREAMING (0.8.3). Each temporal unit is fed once to a persistent av1_decoder, and
+# the frame it shows is written as it comes out. The harness used to re-decode the
+# k-unit PREFIX from the keyframe for every k (av1_decode_stream returns only the last
+# shown frame), which was O(n^2) and capped at 9 frames by its single-digit output
+# naming; a real GOP needs far more frames than that before its reference patterns
+# repeat. A failed unit latches the decoder's error, so every later unit reports the
+# same failure, exactly as the prefix re-decode did.
 #
 # Build: cyrius build programs/conformance.cyr build/drishti-conformance
 
 include "src/main.cyr"
 
 enum ConfConst {
-    CONF_MAX_INPUT  = 8388608;   # 8 MiB — larger than any vector in the E1 subset
-    CONF_MAX_FRAMES = 9;         # single-digit output naming (see conf_out_path)
+    CONF_MAX_INPUT = 67108864;   # 64 MiB — a long GOP at a large size, with room to spare
 }
 
 fn conf_puts(s): i64 { return print(s, strlen(s)); }
@@ -50,38 +56,49 @@ fn conf_putn(n): i64 {
     while (j < i) { store8(o + j, load8((d + i - 1) - j)); j = j + 1; }
     return print(o, i);
 }
-# "build/conformance-out-<k>.i420" — k is a single digit (CONF_MAX_FRAMES = 9).
+# "build/conformance-out-<k>.yuv", k decimal (any number of digits).
 fn conf_out_path(k): i64 {
-    var t = "build/conformance-out-0.i420";
-    var n = strlen(t);
-    var p = alloc(n + 1);
+    var pre = "build/conformance-out-";
+    var suf = ".yuv";
+    var np = strlen(pre);
+    var ns = strlen(suf);
+    var digits = alloc(24);
+    var nd = 0;
+    var v = k;
+    if (v <= 0) { store8(digits, 48); nd = 1; }
+    while (v > 0) { store8(digits + nd, 48 + (v % 10)); v = v / 10; nd = nd + 1; }
+    var p = alloc(np + nd + ns + 1);
     var i = 0;
-    while (i < n) { store8(p + i, load8(t + i)); i = i + 1; }
-    store8(p + 22, 48 + k);   # the '0' placeholder sits at byte 22
-    store8(p + n, 0);
+    while (i < np) { store8(p + i, load8(pre + i)); i = i + 1; }
+    var j = 0;
+    while (j < nd) { store8(p + np + j, load8(digits + (nd - 1) - j)); j = j + 1; }
+    var m = 0;
+    while (m < ns) { store8(p + np + nd + m, load8(suf + m)); m = m + 1; }
+    store8(p + np + nd + ns, 0);
     return p;
 }
 
-# Serialise a decoded DrFrame as raw I420 (plane order Y, U, V; 8-bit, one byte per
-# sample) covering the VISIBLE extent only — the frame buffer may be MI-aligned and
-# bordered, and the reference .i420 is the display rectangle. Returns bytes written,
-# or a negative error.
-fn conf_write_i420(f, path): i64 {
+# Serialise a decoded DrFrame in the `aomdec --rawvideo` layout (see the header):
+# visible extent only — the frame buffer may be MI-aligned and bordered — planes Y,
+# U, V (Y alone when monochrome), 1 byte per sample at 8-bit, 2 bytes LE above it.
+# Returns bytes written, or a negative error.
+fn conf_write_frame(f, path): i64 {
     var w = dr_frame_width(f);
     var h = dr_frame_height(f);
     var np = dr_frame_num_planes(f);
     var sx = dr_frame_subx(f);
     var sy = dr_frame_suby(f);
-    var cw = w;
-    var ch = h;
-    if (sx != 0) { cw = (w + 1) >> 1; }
-    if (sy != 0) { ch = (h + 1) >> 1; }
-    var total = (w * h) + (2 * (cw * ch));
-    var out = alloc(total);
+    var bps = 1;
+    if (dr_frame_bit_depth(f) > 8) { bps = 2; }
+    var cw = (w + sx) >> sx;
+    var ch = (h + sy) >> sy;
+    var total = w * h;
+    if (np > 1) { total = total + (2 * (cw * ch)); }
+    var out = alloc(total * bps);
     if (out == 0) { return 0 - 1; }
     var off = 0;
     var p = 0;
-    while (p < 3) {
+    while (p < np) {
         var pw = w;
         var ph = h;
         if (p > 0) { pw = cw; ph = ch; }
@@ -89,10 +106,10 @@ fn conf_write_i420(f, path): i64 {
         while (y < ph) {
             var x = 0;
             while (x < pw) {
-                var v = 128;                      # neutral chroma for a monochrome frame
-                if (p < np) { v = dr_frame_get(f, p, x, y); }
+                var v = dr_frame_get(f, p, x, y);
                 store8(out + off, v & 255);
-                off = off + 1;
+                if (bps == 2) { store8(out + off + 1, (v >> 8) & 255); }
+                off = off + bps;
                 x = x + 1;
             }
             y = y + 1;
@@ -112,6 +129,10 @@ fn main() {
         conf_puts("SUMMARY cannot-read-input\n");
         return 1;
     }
+    if (n >= CONF_MAX_INPUT) {
+        conf_puts("SUMMARY input-too-large\n");   # a truncated read would score as a short stream
+        return 1;
+    }
     var e = 0;
     var r = dr_ivf_reader_init(buf, n, &e);
     if ((r == 0) || (e != DR_OK)) {
@@ -129,82 +150,57 @@ fn main() {
     conf_putn(dr_ivf_hdr_frame_count(hdr));
     conf_puts("\n");
 
-    # demux: record every temporal-unit payload (ptr, size).
-    var ptrs = alloc(CONF_MAX_FRAMES * 8);
-    var sizes = alloc(CONF_MAX_FRAMES * 8);
-    var nf = 0;
+    var dec = av1_decoder_new(0);
+    if (dec == 0) { conf_puts("SUMMARY oom\n"); return 1; }
+    var ok = 0;
+    var k = 0;
     var go = 1;
     while (go == 1) {
         var pp = 0;
         var ps = 0;
         var pt = 0;
-        var rc = dr_ivf_next_frame(r, &pp, &ps, &pt);
-        if (rc != DR_OK) { go = 0; }
+        if (dr_ivf_next_frame(r, &pp, &ps, &pt) != DR_OK) { go = 0; }
         else {
-            if (nf >= CONF_MAX_FRAMES) { go = 0; }
-            else {
-                store64(ptrs + (nf * 8), pp);
-                store64(sizes + (nf * 8), ps);
-                nf = nf + 1;
+            k = k + 1;
+            var derr = 0;
+            var f = av1_decoder_decode(dec, pp, ps, &derr);
+            conf_puts("frame ");
+            conf_putn(k);
+            if (derr != DR_OK) {
+                conf_puts(" DECODE-FAILED err=");
+                conf_putn(derr);
+                conf_puts(" (");
+                conf_puts(dr_err_name(derr));
+                conf_puts(")\n");
+            } else {
+                if (f == 0) {
+                    conf_puts(" NO-OUTPUT (the unit showed no frame)\n");
+                } else {
+                    var wrote = conf_write_frame(f, conf_out_path(k));
+                    conf_puts(" decoded ");
+                    conf_putn(dr_frame_width(f));
+                    conf_puts("x");
+                    conf_putn(dr_frame_height(f));
+                    conf_puts(" planes=");
+                    conf_putn(dr_frame_num_planes(f));
+                    conf_puts(" bitdepth=");
+                    conf_putn(dr_frame_bit_depth(f));
+                    conf_puts(" shown=");
+                    conf_putn(av1_decoder_shown_count(dec));
+                    conf_puts(" wrote=");
+                    conf_putn(wrote);
+                    conf_puts("\n");
+                    if (wrote > 0) { ok = ok + 1; }
+                }
             }
         }
-    }
-    conf_puts("demuxed ");
-    conf_putn(nf);
-    conf_puts(" temporal units\n");
-
-    # decode the prefix [0..k) for each k, dumping that call's last shown frame.
-    var ok = 0;
-    var k = 1;
-    while (k <= nf) {
-        var catlen = 0;
-        var i = 0;
-        while (i < k) { catlen = catlen + load64(sizes + (i * 8)); i = i + 1; }
-        var cat = alloc(catlen);
-        if (cat == 0) { conf_puts("SUMMARY oom\n"); return 1; }
-        var off = 0;
-        var j = 0;
-        while (j < k) {
-            var src = load64(ptrs + (j * 8));
-            var sz = load64(sizes + (j * 8));
-            var b = 0;
-            while (b < sz) { store8(cat + off + b, load8(src + b)); b = b + 1; }
-            off = off + sz;
-            j = j + 1;
-        }
-        var dpb = av1_dpb_new();
-        var cnt = 0;
-        var derr = 0;
-        var f = av1_decode_stream(dpb, cat, catlen, &cnt, &derr);
-        conf_puts("frame ");
-        conf_putn(k);
-        if (f == 0) {
-            conf_puts(" DECODE-FAILED err=");
-            conf_putn(derr);
-            conf_puts(" (");
-            conf_puts(dr_err_name(derr));
-            conf_puts(")\n");
-        } else {
-            var wrote = conf_write_i420(f, conf_out_path(k));
-            conf_puts(" decoded ");
-            conf_putn(dr_frame_width(f));
-            conf_puts("x");
-            conf_putn(dr_frame_height(f));
-            conf_puts(" planes=");
-            conf_putn(dr_frame_num_planes(f));
-            conf_puts(" wrote=");
-            conf_putn(wrote);
-            conf_puts("\n");
-            if (wrote > 0) { ok = ok + 1; }
-        }
-        k = k + 1;
     }
     conf_puts("SUMMARY decoded=");
     conf_putn(ok);
     conf_puts("/");
-    conf_putn(nf);
+    conf_putn(k);
     conf_puts("\n");
-    if (ok == nf) { return 0; }
+    if ((k > 0) && (ok == k)) { return 0; }
     return 1;
 }
 

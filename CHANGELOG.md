@@ -4,6 +4,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.3 bite 1: the streaming decoder; the gate scores long GOPs and every published frame
+
+**A real GOP now decodes bit-exact on every frame**, as a standing section of `make conformance`: libaom's
+default GOP over 90 frames (35 hidden frames, 30 `show_existing_frame`, all eight reference slots refreshed),
+`--lag-in-frames=35`, 2-pass, repeated keyframes, realtime, error-resilient, SWITCH frames, and streams without
+order hints or motion-field MVs. None of it needed a decoder fix. What it needed was a harness that could reach
+it: the old one decoded at most 9 frames.
+
+**The streaming decoder** (`src/av1_dpb.cyr`): `av1_decoder_new` / `av1_decoder_decode`, plus accessors. The
+DPB, the reference metadata, the active sequence header and a frame still waiting for its tile groups all persist
+across calls. So a caller feeds one temporal unit at a time and gets back the frame that unit shows (7.18: the
+last shown, with a count of all of them). Errors latch: once a call fails, every later call returns that error
+without reading its input. `av1_decode_stream` is now one call over a fresh decoder, with unchanged behaviour.
+
+**The harness** (`programs/conformance.cyr`) streams. Each temporal unit is decoded once and its frame written as
+it comes out. It used to re-decode the k-unit prefix from the keyframe for every k, which was O(n²) and capped at
+9 frames by single-digit output names. Output is now the `aomdec --rawvideo` layout, so md5s compare directly:
+- two bytes (little-endian) per sample above 8-bit;
+- a monochrome frame is its Y plane alone;
+- chroma dims are `(w + ss) >> ss`;
+- each frame is written at its own size.
+
+Files are `build/conformance-out-<k>.yuv`, with no frame cap. The input cap went from 8 to 64 MiB, and an input
+that fills it is refused rather than scored truncated. `programs/vector-probe.cyr` also prints the frame geometry
+(`frame_width` / `frame_height` / `upscaled_width` / `use_superres` / `superres_denom` /
+`frame_size_override_flag`), `error_resilient_mode`, `frame_refs_short_signaling` and `enable_ref_frame_mvs`.
+
+**The published libaom vectors are scored on EVERY frame** (one md5 per line of their `.md5`), not just the
+keyframe. That exposed a real gap: **`av1-1-b8-05-mv` frames 3–4 fail with `AV1_ERR_BAD_FRAME`**, the
+SymbolMaxBits exit bound, i.e. an entropy desync. libaom `--cpu-used=0` streams show the same symptom. Both frames
+are listed in `PUBLISHED_XFAIL_FRAMES` as known gaps, and a listed frame that starts matching fails the gate, so
+the list cannot go stale.
+
+Evidence:
+- **Conformance: 729 matched / 6 known-gap / 0 regressed / 0 skipped** (was 214 / 4). The new GOP section has nine
+  cases, every frame hard, each with a `gop_property` guard that PROVES its stream has what it exists for (hidden
+  frames + `show_existing` + all eight refresh slots; ≥ 4 keyframes; ≥ 2 SWITCH frames; every inter frame
+  error-resilient; the realtime pattern; `enable_order_hint` 0; `enable_ref_frame_mvs` 0). Each guard was
+  canary-tested: it rejects a stream without its property. The per-frame published scoring was canary-tested
+  too: a listed gap that matches fails, and an unlisted mismatch regresses. The full gate runs in 84 s.
+- **Unit tests** (`tests/av1_dpb.tcyr`, +41 assertions, 123 total):
+  - one stream fed a sequence header, a frame header, its tile group and a whole frame in four calls;
+  - a call that shows nothing must not return the previous call's frame;
+  - two shown frames in one call;
+  - a caller-supplied DPB;
+  - the latch;
+  - argument faults that must NOT latch.
+
+  Eight mutants were all killed: no latch, no per-call reset, a per-call header reset, the shown count, first-
+  shown-wins, an argument fault that latches, the frame count, and an ignored caller DPB.
+
+Found while sweeping 30+ libaom configurations through the streaming harness, filed for the next 0.8.3 bites:
+- **superres** decodes 1 LSB wrong in the last upscaled columns of every plane: 7.16 clamps the taps at the
+  MI-aligned width, and drishti clamps at the visible one;
+- **the decode allocation covers the MI grid, not the superblock grid**. So a 128x128 or 64x128 block can write
+  past the plane plus its 32-sample border: an instrumented build counted 6144 out-of-bounds writes, 16 rows
+  deep, on a 256x80 128-SB keyframe. The same bound trims an edge block's MC to ≤ 4 chroma rows, which selects
+  the 4-tap filter. That is the filed 160x136 odd-MI inter divergence, reproduced with every in-loop filter
+  off;
+- **the entropy desync** above.
+
+Scaled references (`--resize-mode`), SWITCH frames and error-resilient streams already decode bit-exact.
+
 ## [0.8.2] - 2026-11-13
 
 **The first AV1 batch release: no `DR_ERR_UNSUPPORTED` on a stock `aomenc` stream at any preset, on a gate that

@@ -367,6 +367,133 @@ fn test_stream_reject() {
     return 0;
 }
 
+# ================================================================
+# av1_decoder_* — the STREAMING decoder (0.8.3): state persists across calls, each call
+# returns the frame IT showed, errors latch. Built from the same reduced-still keyframe
+# pieces as the stream tests above.
+# ================================================================
+fn dec_unit(seq, slen, fhb, flen, tile, tlen, with_seq, with_fh, with_tg): i64 {
+    var bw = dr_bw_init(256);
+    dpb_obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    if (with_seq) { dpb_obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen); }
+    if (with_fh) { dpb_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen); }
+    if (with_tg) { dpb_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen); }
+    var n = dr_bw_flush(bw);
+    var u = alloc(16);   # {buf, len}
+    store64(u, dr_bw_buf(bw));
+    store64(u + 8, n);
+    return u;
+}
+# a stream fed one piece per call: a sequence header alone, then a frame header alone, then
+# its tile group, then a whole second frame. Each call returns exactly what it showed.
+fn test_decoder_streaming() {
+    var slen = 0;
+    var seq = dpb_build_seq(&slen);
+    var flen = 0;
+    var fhb = dpb_build_fh(&flen);
+    var tlen = 0;
+    var tile = dpb_enc_keyframe(&tlen);
+    var dec = av1_decoder_new(0);
+    assert_eq(dec != 0, 1, "decoder allocated");
+    assert_eq(av1_decoder_dpb(dec) != 0, 1, "a fresh DPB is allocated when none is given");
+    assert_eq(av1_decoder_count(dec), 0, "fresh decoder: count 0");
+    var oe = alloc(8);
+    # (1) TD + SEQ: no frame, no error, the sequence is now active.
+    var u1 = dec_unit(seq, slen, fhb, flen, tile, tlen, 1, 0, 0);
+    assert_eq(av1_decoder_decode(dec, load64(u1), load64(u1 + 8), oe), 0, "seq-only unit shows nothing");
+    assert_eq(load64(oe), DR_OK, "seq-only unit: DR_OK");
+    assert_eq(av1_decoder_shown_count(dec), 0, "seq-only unit: shown 0");
+    assert_eq(av1_decoder_seq(dec) != 0, 1, "seq-only unit: the sequence header persists");
+    # (2) the FRAME_HEADER alone: the frame is pending, nothing is shown yet.
+    var u2 = dec_unit(seq, slen, fhb, flen, tile, tlen, 0, 1, 0);
+    assert_eq(av1_decoder_decode(dec, load64(u2), load64(u2 + 8), oe), 0, "header-only unit shows nothing");
+    assert_eq(load64(oe), DR_OK, "header-only unit: DR_OK");
+    assert_eq(av1_decoder_count(dec), 0, "header-only unit: no frame finished");
+    # (3) its TILE_GROUP in the NEXT call completes it — the header carried across the call boundary.
+    var bw3 = dr_bw_init(256);
+    dpb_obus_wrap(bw3, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n3 = dr_bw_flush(bw3);
+    var f1 = av1_decoder_decode(dec, dr_bw_buf(bw3), n3, oe);
+    assert_eq(load64(oe), DR_OK, "tile-group unit decodes against the previous call's header");
+    assert_eq(f1 != 0, 1, "tile-group unit shows the frame");
+    if (f1 != 0) { assert_eq(dr_frame_get(f1, 0, 40, 30), 128, "the shown frame is the flat-DC 128 keyframe"); }
+    assert_eq(av1_decoder_shown_count(dec), 1, "tile-group unit: shown 1");
+    assert_eq(av1_decoder_count(dec), 1, "tile-group unit: count 1");
+    assert_eq(av1_dpb_count(av1_decoder_dpb(dec)), 8, "the keyframe refreshed all eight slots");
+    # (4) a unit that shows nothing must NOT hand back the previous call's frame.
+    var u4 = dec_unit(seq, slen, fhb, flen, tile, tlen, 1, 0, 0);
+    assert_eq(av1_decoder_decode(dec, load64(u4), load64(u4 + 8), oe), 0, "a later seq-only unit shows nothing");
+    assert_eq(av1_decoder_shown_count(dec), 0, "the shown count resets per call");
+    # (5) a whole frame in one unit: a NEW frame, count 2.
+    var u5 = dec_unit(seq, slen, fhb, flen, tile, tlen, 0, 1, 1);
+    var f2 = av1_decoder_decode(dec, load64(u5), load64(u5 + 8), oe);
+    assert_eq(load64(oe), DR_OK, "second frame decodes");
+    assert_eq((f2 != 0) && (f2 != f1), 1, "the second unit shows a newly decoded frame");
+    assert_eq(av1_decoder_count(dec), 2, "count 2 after the second frame");
+    assert_eq(av1_dpb_frame(av1_decoder_dpb(dec), 3), f2, "the DPB now holds the second frame");
+    return 0;
+}
+# two shown frames in ONE call: the call returns the LAST and counts both (7.18 output).
+fn test_decoder_two_in_one_call() {
+    var slen = 0;
+    var seq = dpb_build_seq(&slen);
+    var flen = 0;
+    var fhb = dpb_build_fh(&flen);
+    var tlen = 0;
+    var tile = dpb_enc_keyframe(&tlen);
+    var bw = dr_bw_init(512);
+    dpb_obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    dpb_obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    dpb_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen);
+    dpb_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    dpb_obus_wrap(bw, AV1_OBU_FRAME_HEADER, fhb, flen);
+    dpb_obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n = dr_bw_flush(bw);
+    var dpb = av1_dpb_new();
+    var dec = av1_decoder_new(dpb);
+    assert_eq(av1_decoder_dpb(dec), dpb, "a caller-supplied DPB is used, not replaced");
+    var oe = alloc(8);
+    var f = av1_decoder_decode(dec, dr_bw_buf(bw), n, oe);
+    assert_eq(load64(oe), DR_OK, "two-frame unit decodes");
+    assert_eq(av1_decoder_shown_count(dec), 2, "both frames counted as shown");
+    assert_eq(av1_decoder_count(dec), 2, "both frames counted as processed");
+    assert_eq(f, av1_dpb_frame(dpb, 0), "the call returns the LAST shown frame");
+    return 0;
+}
+# errors LATCH: once a call fails, a later valid unit is refused with the same error and decodes
+# nothing. Argument faults (null decoder / buffer, negative size) do not latch.
+fn test_decoder_sticky() {
+    var slen = 0;
+    var seq = dpb_build_seq(&slen);
+    var flen = 0;
+    var fhb = dpb_build_fh(&flen);
+    var tlen = 0;
+    var tile = dpb_enc_keyframe(&tlen);
+    var oe = alloc(8);
+    var good = dec_unit(seq, slen, fhb, flen, tile, tlen, 1, 1, 1);
+    # argument faults: BOUNDS, and a healthy decoder stays healthy.
+    var dec0 = av1_decoder_new(0);
+    assert_eq(av1_decoder_decode(0, load64(good), load64(good + 8), oe), 0, "null decoder -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "null decoder -> BOUNDS");
+    assert_eq(av1_decoder_decode(dec0, 0, 4, oe), 0, "null buffer -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "null buffer -> BOUNDS");
+    assert_eq(av1_decoder_decode(dec0, load64(good), 0 - 1, oe), 0, "negative size -> 0");
+    assert_eq(load64(oe), DR_ERR_BOUNDS, "negative size -> BOUNDS");
+    assert_eq(av1_decoder_error(dec0), DR_OK, "argument faults do not latch");
+    assert_eq(av1_decoder_decode(dec0, load64(good), load64(good + 8), oe) != 0, 1,
+      "the decoder still decodes after argument faults");
+    # a tile group with no frame header is malformed: BAD_HEADER, latched.
+    var dec = av1_decoder_new(0);
+    var bad = dec_unit(seq, slen, fhb, flen, tile, tlen, 1, 0, 1);
+    assert_eq(av1_decoder_decode(dec, load64(bad), load64(bad + 8), oe), 0, "orphan tile group -> 0");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "orphan tile group -> BAD_HEADER");
+    assert_eq(av1_decoder_error(dec), DR_ERR_BAD_HEADER, "the error is latched");
+    assert_eq(av1_decoder_decode(dec, load64(good), load64(good + 8), oe), 0, "a valid unit after a fault -> 0");
+    assert_eq(load64(oe), DR_ERR_BAD_HEADER, "...with the latched error");
+    assert_eq(av1_decoder_count(dec), 0, "...and nothing decoded");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("DPB reference frame update (7.20 pixel store)");
@@ -384,6 +511,10 @@ fn main() {
     test_stream_single();
     test_stream_two_frames();
     test_stream_reject();
+    test_group("streaming decoder (av1_decoder_*)");
+    test_decoder_streaming();
+    test_decoder_two_in_one_call();
+    test_decoder_sticky();
     return assert_summary();
 }
 

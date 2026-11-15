@@ -1823,8 +1823,11 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > inter divergence: 160x136 at `--lag-in-frames=19`, frame 3, chroma, 1 LSB, bottom rows, MiRows % 4 == 2.
 > Its symbols match libaom exactly, so it is a RECONSTRUCTION bug.
 >
-> **Harness limit to know:** `programs/conformance.cyr` decodes at most 9 temporal units
-> (`CONF_MAX_FRAMES`). Long GOPs need that raised first.
+> **Harness (0.8.3 bite 1):** `programs/conformance.cyr` STREAMS through `av1_decoder_*` — one decode per
+> temporal unit, no frame cap (the old 9-unit `CONF_MAX_FRAMES` prefix re-decode is gone), output in the
+> `aomdec --rawvideo` layout as `build/conformance-out-<k>.yuv`. Bite 1 filed three defects for the next bites:
+> the superres tap clamp, the MI-grid (not superblock-grid) decode allocation (a heap overflow on 128-SB streams,
+> and the odd-MI inter chroma divergence), and the `av1-1-b8-05-mv` / `--cpu-used=0` entropy desync.
 >
 > **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

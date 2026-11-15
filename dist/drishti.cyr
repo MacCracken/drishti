@@ -24677,13 +24677,88 @@ fn av1_dpb_ref_frame(dpb, fh, refFrame): i64 {
 }
 
 # ================================================================
-# av1_decode_stream — multi-frame OBU-stream driver: walk buf[0..sz), decode
-# EVERY coded frame into `dpb`, serve show_existing_frame from it, and return the
-# last OUTPUT (shown) frame (writes *out_err; *out_count, if non-null, gets the
-# number of frames processed). This is av1_decode_obus's multi-frame superset —
-# where that returns the first frame and stops, this keeps walking, running the
-# reference frame update after each frame so a later frame can reference an
-# earlier one through the DPB.
+# Av1Decoder — the STREAMING decoder (0.8.3). The DPB, the reference metadata
+# (Av1RefState), the active sequence header and any frame still waiting for tile
+# groups all PERSIST across calls, so a caller feeds a stream one temporal unit
+# at a time and gets each unit's shown frame back as it is decoded — the way a
+# player (or `aomdec`) consumes a stream. av1_decode_stream is the whole-buffer
+# form of the same walk.
+#
+# WHY IT EXISTS. av1_decode_stream returns only the LAST shown frame of its
+# input, so the conformance harness used to recover frame k by re-decoding the
+# k-unit PREFIX from the keyframe with a fresh DPB: O(n^2) decode work, and a cap
+# of 9 frames. A real GOP (hidden ARFs, show_existing overlays, a refresh pattern
+# that cycles all eight slots) needs dozens of frames before its interesting
+# reference states even occur. Streaming makes each frame cost one decode.
+#
+# One temporal unit carries exactly one shown frame per layer (7.5), and the
+# output process without all-layers output shows the LAST one (7.18), which is
+# what av1_decoder_decode returns for a call. NSHOWN counts them all, so a
+# caller can tell a unit with no shown frame (0) from one with several.
+#
+# Errors are STICKY: a failed call leaves the reference state mid-update, so every
+# later call returns the same error without reading its input (trust no input
+# byte — a decoder must never limp on from a state it cannot vouch for).
+# ================================================================
+enum Av1DecOff {
+    AV1DEC_DPB    = 0;    # Av1Dpb — the decoded-frame ring
+    AV1DEC_REFS   = 8;    # Av1RefState — the per-slot reference metadata
+    AV1DEC_SEQ    = 16;   # the active sequence header (0 until one is seen)
+    AV1DEC_FH     = 24;   # a FRAME_HEADER still awaiting its tile groups (0 = none)
+    AV1DEC_FDC    = 32;   # that frame's decode context (0 until its first tile group)
+    AV1DEC_SHOWN  = 40;   # the last frame SHOWN by the most recent av1_decoder_decode call
+    AV1DEC_NSHOWN = 48;   # how many frames that call showed
+    AV1DEC_COUNT  = 56;   # frames processed since av1_decoder_new (coded + show_existing)
+    AV1DEC_ERR    = 64;   # sticky error (DR_OK while healthy)
+    AV1DEC_SIZE   = 72;
+}
+
+# av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
+# one). Returns the handle, or 0 on OOM.
+fn av1_decoder_new(dpb): i64 {
+    var d = alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
+    if (d == 0) { return 0; }
+    memset(d, 0, AV1DEC_SIZE);
+    var ring = dpb;
+    if (ring == 0) { ring = av1_dpb_new(); }
+    var refs = av1_ref_state_new();
+    if ((ring == 0) || (refs == 0)) { return 0; }
+    store64(d + AV1DEC_DPB, ring);
+    store64(d + AV1DEC_REFS, refs);
+    store64(d + AV1DEC_ERR, DR_OK);
+    return d;
+}
+fn av1_decoder_dpb(dec): i64 { return load64(dec + AV1DEC_DPB); }
+fn av1_decoder_refs(dec): i64 { return load64(dec + AV1DEC_REFS); }
+fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
+fn av1_decoder_count(dec): i64 { return load64(dec + AV1DEC_COUNT); }
+fn av1_decoder_shown_count(dec): i64 { return load64(dec + AV1DEC_NSHOWN); }
+fn av1_decoder_error(dec): i64 { return load64(dec + AV1DEC_ERR); }
+
+# latch a decoder failure: the error becomes sticky and the call returns 0.
+fn av1_decoder_fail(dec, err, out_err): i64 {
+    store64(dec + AV1DEC_ERR, err);
+    store64(dec + AV1DEC_SHOWN, 0);
+    store64(out_err, err);
+    return 0;
+}
+# a frame finished decoding (or was shown from the DPB): count it, and record it as
+# this call's output when it is shown.
+fn av1_decoder_emit(dec, frame, shown): i64 {
+    store64(dec + AV1DEC_COUNT, load64(dec + AV1DEC_COUNT) + 1);
+    if (shown == 1) {
+        store64(dec + AV1DEC_SHOWN, frame);
+        store64(dec + AV1DEC_NSHOWN, load64(dec + AV1DEC_NSHOWN) + 1);
+    }
+    return 0;
+}
+
+# ================================================================
+# av1_decoder_decode — walk the OBUs in buf[0..sz) against the decoder's
+# persistent state, decoding every coded frame into the DPB and serving
+# show_existing_frame from it. Returns the last frame SHOWN by this call, or 0
+# (with *out_err DR_OK) when the call showed none — a sequence header alone, a
+# hidden frame, or a frame whose tile groups have not all arrived yet.
 #
 #   SEQUENCE_HEADER -> the active sequence.
 #   FRAME_HEADER    -> the active frame header. If show_existing_frame: load the
@@ -24696,102 +24771,139 @@ fn av1_dpb_ref_frame(dpb, fh, refFrame): i64 {
 # temporal_delimiter / metadata / padding / redundant_frame_header / tile_list are
 # skipped.
 #
-# Returns 0 with *out_err on any parse/decode fault. A stream with no coded frame
-# at all -> 0 + DR_ERR_BAD_HEADER (as av1_decode_obus). A stream whose frames are
-# all non-shown -> 0 + DR_OK (the frames are in the DPB; none were output).
-#
-# SCOPE (0.7.61): the tile decoder is intra-only, so the coded frames this driver
-# fully decodes are keyframe / intra-only frames; a genuine inter frame's tiles
-# await the inter mode-info bite. show_existing + the DPB ring are complete.
+# On any parse/decode fault: returns 0 with *out_err set, and the error is latched
+# (see Av1Decoder). A null decoder or buffer, or a negative size, is DR_ERR_BOUNDS
+# and latches nothing.
 # ================================================================
-fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
+fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     store64(out_err, DR_OK);
-    if (out_count != 0) { store64(out_count, 0); }
-    if ((dpb == 0) || (buf == 0) || (sz < 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if ((dec == 0) || (buf == 0) || (sz < 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if (load64(dec + AV1DEC_ERR) != DR_OK) {
+        store64(out_err, load64(dec + AV1DEC_ERR)); return 0;
+    }
+    store64(dec + AV1DEC_SHOWN, 0);
+    store64(dec + AV1DEC_NSHOWN, 0);
+    var dpb = load64(dec + AV1DEC_DPB);
+    var refs = load64(dec + AV1DEC_REFS);
     var it = av1_obu_iter_init(buf, sz);
-    if (it == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-    var refs = av1_ref_state_new();
-    if (refs == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-    var seq = 0;
-    var fh = 0;
-    var fdc = 0;      # frame-decode context, created at the first TILE_GROUP of a frame
-    var output = 0;   # last shown frame (the return value)
-    var count = 0;    # frames processed (coded or show_existing)
+    if (it == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
     var otype = 0;
     var ooff = 0;
     var osize = 0;
     var rc = av1_obu_next(it, &otype, &ooff, &osize);
     while (rc == DR_OK) {
+        var seq = load64(dec + AV1DEC_SEQ);
+        var fh = load64(dec + AV1DEC_FH);
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
             var serr = 0;
-            seq = av1_seq_parse(buf + ooff, osize, &serr);
-            if (serr != DR_OK) { store64(out_err, serr); return 0; }
-            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var nseq = av1_seq_parse(buf + ooff, osize, &serr);
+            if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
+            if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            store64(dec + AV1DEC_SEQ, nseq);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
-            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             var o = av1_obu_iter_obu(it);
             var ferr = 0;
-            fh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
+            var nfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
               av1_obu_sid(o), buf + ooff, osize, &ferr);
-            if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
-            if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
-            fdc = 0;   # a new frame begins; any prior context is retired
-            if (av1_fh_show_existing_frame(fh) == 1) {
+            if (ferr != DR_OK) { return av1_decoder_fail(dec, ferr, out_err); }
+            if (nfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            store64(dec + AV1DEC_FH, nfh);
+            store64(dec + AV1DEC_FDC, 0);   # a new frame begins; any prior context is retired
+            if (av1_fh_show_existing_frame(nfh) == 1) {
                 # 7.21 load + 7.20 update + output; no tile groups follow.
                 var lerr = 0;
-                var shown = av1_dpb_load(dpb, fh, &lerr);
-                if (lerr != DR_OK) { store64(out_err, lerr); return 0; }
-                var uerr = av1_dpb_update(dpb, refs, seq, fh, shown);
-                if (uerr != DR_OK) { store64(out_err, uerr); return 0; }
-                output = shown;
-                count = count + 1;
-                fh = 0;
+                var shown = av1_dpb_load(dpb, nfh, &lerr);
+                if (lerr != DR_OK) { return av1_decoder_fail(dec, lerr, out_err); }
+                var uerr = av1_dpb_update(dpb, refs, seq, nfh, shown);
+                if (uerr != DR_OK) { return av1_decoder_fail(dec, uerr, out_err); }
+                av1_decoder_emit(dec, shown, 1);
+                store64(dec + AV1DEC_FH, 0);
             }
         }
         if (otype == AV1_OBU_FRAME) {
-            if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             var of = av1_obu_iter_obu(it);
             var frr = 0;
             var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
               av1_obu_sid(of), buf + ooff, osize, &frr);
-            if (frr != DR_OK) { store64(out_err, frr); return 0; }
-            if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            if (frr != DR_OK) { return av1_decoder_fail(dec, frr, out_err); }
+            if (ffh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
-            if (hbytes > osize) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+            if (hbytes > osize) { return av1_decoder_fail(dec, DR_ERR_TRUNCATED, out_err); }
+            var derr = 0;
             var frame = av1_decode_frame_ref(seq, ffh, dpb, refs, buf + ooff + hbytes,
-              osize - hbytes, out_err);
-            if (frame == 0) { return 0; }   # av1_decode_frame wrote the precise cause
+              osize - hbytes, &derr);
+            if (frame == 0) {   # av1_decode_frame wrote the precise cause
+                if (derr == DR_OK) { derr = DR_ERR_BAD_HEADER; }
+                return av1_decoder_fail(dec, derr, out_err);
+            }
             var uerr2 = av1_dpb_update(dpb, refs, seq, ffh, frame);
-            if (uerr2 != DR_OK) { store64(out_err, uerr2); return 0; }
-            if (av1_fh_show_frame(ffh) == 1) { output = frame; }
-            count = count + 1;
-            fh = 0;
+            if (uerr2 != DR_OK) { return av1_decoder_fail(dec, uerr2, out_err); }
+            av1_decoder_emit(dec, frame, av1_fh_show_frame(ffh));
+            store64(dec + AV1DEC_FH, 0);
+            store64(dec + AV1DEC_FDC, 0);
         }
         if (otype == AV1_OBU_TILE_GROUP) {
-            if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            if ((seq == 0) || (fh == 0)) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var fdc = load64(dec + AV1DEC_FDC);
             if (fdc == 0) {
-                fdc = av1_frame_dec_new(seq, fh, out_err);
-                if (fdc == 0) { return 0; }
+                var nerr = 0;
+                fdc = av1_frame_dec_new(seq, fh, &nerr);
+                if (fdc == 0) {
+                    if (nerr == DR_OK) { nerr = DR_ERR_OOM; }
+                    return av1_decoder_fail(dec, nerr, out_err);
+                }
                 av1_frame_dec_set_inter(fdc, dpb, refs);
+                store64(dec + AV1DEC_FDC, fdc);
             }
-            var gdone = av1_frame_dec_group(fdc, buf + ooff, osize, out_err);
-            if (gdone < 0) { return 0; }
+            var gerr = 0;
+            var gdone = av1_frame_dec_group(fdc, buf + ooff, osize, &gerr);
+            if (gdone < 0) {
+                if (gerr == DR_OK) { gerr = DR_ERR_BAD_HEADER; }
+                return av1_decoder_fail(dec, gerr, out_err);
+            }
             if (gdone == 1) {
                 var gfin_err = 0;
                 var gframe = av1_frame_dec_finish(fdc, &gfin_err);
-                if (gfin_err != DR_OK) { store64(out_err, gfin_err); return 0; }
+                if (gfin_err != DR_OK) { return av1_decoder_fail(dec, gfin_err, out_err); }
                 var uerr3 = av1_dpb_update(dpb, refs, seq, fh, gframe);
-                if (uerr3 != DR_OK) { store64(out_err, uerr3); return 0; }
-                if (av1_fh_show_frame(fh) == 1) { output = gframe; }
-                count = count + 1;
-                fdc = 0;
-                fh = 0;
+                if (uerr3 != DR_OK) { return av1_decoder_fail(dec, uerr3, out_err); }
+                av1_decoder_emit(dec, gframe, av1_fh_show_frame(fh));
+                store64(dec + AV1DEC_FDC, 0);
+                store64(dec + AV1DEC_FH, 0);
             }
         }
         rc = av1_obu_next(it, &otype, &ooff, &osize);
     }
-    if (rc != AV1_OBU_END) { store64(out_err, rc); return 0; }
+    if (rc != AV1_OBU_END) { return av1_decoder_fail(dec, rc, out_err); }
+    return load64(dec + AV1DEC_SHOWN);
+}
+
+# ================================================================
+# av1_decode_stream — the WHOLE-BUFFER form of the streaming decoder: walk
+# buf[0..sz), decode EVERY coded frame into `dpb`, serve show_existing_frame from
+# it, and return the last OUTPUT (shown) frame (writes *out_err; *out_count, if
+# non-null, gets the number of frames processed). This is av1_decode_obus's
+# multi-frame superset — where that returns the first frame and stops, this keeps
+# walking, running the reference frame update after each frame so a later frame
+# can reference an earlier one through the DPB. It is one av1_decoder_decode call
+# over a fresh decoder (0.8.3); the walk itself lives there.
+#
+# Returns 0 with *out_err on any parse/decode fault. A stream with no coded frame
+# at all -> 0 + DR_ERR_BAD_HEADER (as av1_decode_obus). A stream whose frames are
+# all non-shown -> 0 + DR_OK (the frames are in the DPB; none were output).
+# ================================================================
+fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
+    store64(out_err, DR_OK);
+    if (out_count != 0) { store64(out_count, 0); }
+    if ((dpb == 0) || (buf == 0) || (sz < 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var dec = av1_decoder_new(dpb);
+    if (dec == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var output = av1_decoder_decode(dec, buf, sz, out_err);
+    if (load64(out_err) != DR_OK) { return 0; }
+    var count = av1_decoder_count(dec);
     if (count == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
     if (out_count != 0) { store64(out_count, count); }
     return output;
