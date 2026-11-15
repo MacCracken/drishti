@@ -283,12 +283,77 @@ fn test_superres_upscale_frame() {
     return 0;
 }
 
+# THE TAP CLAMP IS THE MI GRID (spec 7.16 maxX = (MiCols >> subX) * MI_SIZE - 1; fixed 0.8.3). A 13-wide
+# downscaled frame has MiCols = 2 * ((13 + 7) >> 3) = 4, so its taps clamp at luma column 15 / chroma column
+# 7 — three luma and one chroma OVERHANG column past the picture, which hold reconstructed samples, not
+# copies of the last visible one. Known answers from scripts/refs/superres_ref.py (spec-literal); under
+# the old visible-width clamp luma columns 19, 21..25 and chroma columns 7..12 come out different.
+fn test_superres_mi_clamp() {
+    var oe = alloc(8);
+    var down = dr_frame_new(13, 2, 3, 1, 1, 8, 8, oe);     # border 8 holds the overhang columns
+    var up = dr_frame_new(26, 2, 3, 1, 1, 8, 8, oe);
+    var y = 0;
+    while (y < 2) {
+        var x = 0;
+        while (x < 13) { dr_frame_set(down, 0, x, y, 20 + (15 * x)); x = x + 1; }   # visible ramp
+        dr_frame_set(down, 0, 13, y, 250);                  # OVERHANG columns 13..15 — unlike column 12
+        dr_frame_set(down, 0, 14, y, 3);
+        dr_frame_set(down, 0, 15, y, 200);
+        y = y + 1;
+    }
+    var pl = 1;
+    while (pl < 3) {
+        var cx = 0;
+        while (cx < 7) { dr_frame_set(down, pl, cx, 0, 40 + (20 * cx)); cx = cx + 1; }   # visible 0..6
+        dr_frame_set(down, pl, 7, 0, 0);                    # the chroma OVERHANG column 7
+        pl = pl + 1;
+    }
+    assert_eq(av1_superres_upscale_frame(down, up, 8), DR_OK, "mi-clamp: 13 -> 26 upscale ok");
+    var lk = alloc(26 * 8);
+    store64(lk + 0, 19);    store64(lk + 8, 23);    store64(lk + 16, 30);   store64(lk + 24, 39);
+    store64(lk + 32, 46);   store64(lk + 40, 54);   store64(lk + 48, 61);   store64(lk + 56, 69);
+    store64(lk + 64, 76);   store64(lk + 72, 84);   store64(lk + 80, 91);   store64(lk + 88, 99);
+    store64(lk + 96, 106);  store64(lk + 104, 114); store64(lk + 112, 121); store64(lk + 120, 129);
+    store64(lk + 128, 136); store64(lk + 136, 144); store64(lk + 144, 151); store64(lk + 152, 158);
+    store64(lk + 160, 166); store64(lk + 168, 177); store64(lk + 176, 184); store64(lk + 184, 179);
+    store64(lk + 192, 183); store64(lk + 200, 234);
+    var ck = alloc(13 * 8);
+    store64(ck + 0, 39);    store64(ck + 8, 45);    store64(ck + 16, 56);   store64(ck + 24, 68);
+    store64(ck + 32, 79);   store64(ck + 40, 89);   store64(ck + 48, 100);  store64(ck + 56, 114);
+    store64(ck + 64, 120);  store64(ck + 72, 125);  store64(ck + 80, 151);  store64(ck + 88, 173);
+    store64(ck + 96, 129);
+    var bad = 0;
+    y = 0;
+    while (y < 2) {
+        var x = 0;
+        while (x < 26) { if (dr_frame_get(up, 0, x, y) != load64(lk + (x * 8))) { bad = bad + 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad, 0, "mi-clamp: every upscaled luma sample matches the spec-literal port (both rows)");
+    assert_eq(dr_frame_get(up, 0, 25, 0), 234, "mi-clamp: the last luma column reads the overhang (234, not 200)");
+    bad = 0;
+    pl = 1;
+    while (pl < 3) {
+        var x = 0;
+        while (x < 13) { if (dr_frame_get(up, pl, x, 0) != load64(ck + (x * 8))) { bad = bad + 1; } x = x + 1; }
+        pl = pl + 1;
+    }
+    assert_eq(bad, 0, "mi-clamp: every upscaled chroma sample matches the port (U and V)");
+    # a source frame that cannot hold the MI grid's overhang is refused, never read out of bounds.
+    var thin = dr_frame_new(13, 2, 1, 0, 0, 8, 0, oe);     # border 0: columns 13..15 do not exist
+    var thin_up = dr_frame_new(26, 2, 1, 0, 0, 8, 0, oe);
+    assert_eq(av1_superres_upscale_frame(thin, thin_up, 8), DR_ERR_BOUNDS,
+      "mi-clamp: a frame that cannot cover the MI grid -> DR_ERR_BOUNDS");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Upscale_Filter table invariants (spec 7.16)");
     test_upscale_filter_invariants();
     test_group("superres per-plane frame upscale (spec 7.16)");
     test_superres_upscale_frame();
+    test_superres_mi_clamp();
     test_group("superres geometry (dav1d get_upscale_x0)");
     test_superres_geometry();
     test_group("superres upscale row (dav1d resize_c reference)");

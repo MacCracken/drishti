@@ -1828,7 +1828,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > **Harness (0.8.3 bite 1):** `programs/conformance.cyr` STREAMS through `av1_decoder_*` — one decode per
 > temporal unit, no frame cap (the old 9-unit `CONF_MAX_FRAMES` prefix re-decode is gone), output in the
 > `aomdec --rawvideo` layout as `build/conformance-out-<k>.yuv`. Bite 1 filed three defects for the next bites:
-> the superres tap clamp, the MI-grid (not superblock-grid) decode allocation (a heap overflow on 128-SB streams,
+> the superres tap clamp (FIXED in bite 3: the clamp is the MI-aligned width), the MI-grid (not superblock-grid) decode allocation (a heap overflow on 128-SB streams,
 > and the odd-MI inter chroma divergence — FIXED in bite 2: the allocation is the superblock grid), and the
 > `av1-1-b8-05-mv` / `--cpu-used=0` entropy desync.
 >

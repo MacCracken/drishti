@@ -149,10 +149,11 @@ fn av1_superres_filter_pixel(src, src_w, subpel_x, bit_depth): i64 {
 }
 
 # av1_superres_upscale_row (spec 7.16, == dav1d resize_c inner loop) — upscale one plane
-# row of `src_w` downscaled samples (i64 array `src`) into `dst_w` upscaled samples
-# (i64 array `dst`). `dx` is the subpel x-step and `mx0` the initial fractional x-offset
-# [0, SCALE_MASK]; both come from the per-plane geometry (spec 7.16 / dav1d
-# get_upscale_x0, computed by the caller — grows next, roadmap.md). A subpel accumulator
+# row of downscaled samples (i64 array `src`) into `dst_w` upscaled samples (i64 array
+# `dst`). `src_w` is the TAP CLAMP extent, maxX + 1 — the MI-aligned plane width, which
+# can exceed the visible one (see av1_superres_upscale_frame). `dx` is the subpel x-step
+# and `mx0` the initial fractional x-offset [0, SCALE_MASK]; both come from the per-plane
+# geometry (av1_superres_step / av1_superres_x0, from the VISIBLE widths). A subpel accumulator
 # starts at mx0 - (1 << SCALE_BITS) (dav1d keeps src_x = -1 and mx = mx0 separately; the
 # combined accumulator += dx is provably identical, verified in scratchpad/resize_ref.py)
 # and steps by dx; each output is one av1_superres_filter_pixel.
@@ -190,9 +191,22 @@ fn av1_superres_x0(down_w, up_w, step): i64 {
 # UpscaledWidth), one row at a time via av1_superres_upscale_row. Superres scales
 # ONLY horizontally, so plane heights are unchanged; the per-plane widths are read
 # straight off the DrFrames (chroma already carries the subsampled widths), and each
-# plane gets its own dx/mx0 from av1_superres_step/x0. Returns DR_OK or DR_ERR_OOM.
+# plane gets its own dx/mx0 from av1_superres_step/x0.
+#
+# THE TAP CLAMP IS THE MI GRID, NOT THE PICTURE (fixed 0.8.3). The spec clamps every
+# tap to [0, maxX] with maxX = (MiCols >> subX) * MI_SIZE - 1, so a tap past the
+# visible downscaled width reads the reconstructed OVERHANG columns, not a repeat of
+# the last visible one (dav1d: src_w = (4 * bw + ss_hor) >> ss_hor; libaom pads from
+# mi_col_end). The step and x0 still come from the VISIBLE widths. This used to clamp
+# at the visible width, which every 8-aligned fixture hid: a 282-wide superres frame
+# was off by 1 LSB in its last few upscaled columns, on every plane, on every frame.
+# MiCols is even (5.9.9: 2 * ((FrameWidth + 7) >> 3)), so (MiCols >> subX) * 4 is the
+# 8-aligned luma width shifted down. `down` must cover that span: the decoder's
+# reconstruction is MI-aligned and its CDEF frame has an 8-sample border, so both do.
+# Returns DR_OK, DR_ERR_OOM, or DR_ERR_BOUNDS when `down` cannot cover the MI grid.
 fn av1_superres_upscale_frame(down, up, bit_depth): i64 {
     var num_planes = dr_frame_num_planes(down);
+    var luma_mi_w = ((dr_frame_width(down) + 7) >> 3) << 3;   # MiCols * MI_SIZE
     var p = 0;
     while (p < num_planes) {
         var dw = dr_frame_plane_width(down, p);
@@ -200,16 +214,21 @@ fn av1_superres_upscale_frame(down, up, bit_depth): i64 {
         var h = dr_frame_plane_height(down, p);
         var uh = dr_frame_plane_height(up, p);
         if (uh < h) { h = uh; }                  # heights match; clamp defensively
+        var sx = 0;
+        if (p > 0) { sx = dr_frame_subx(down); }
+        var srcw = luma_mi_w >> sx;              # maxX + 1 = miW * MI_SIZE
+        if (srcw < dw) { srcw = dw; }
+        if (srcw > (dr_frame_plane_alloc_w(down, p) + dr_frame_border(down))) { return DR_ERR_BOUNDS; }
         var step = av1_superres_step(dw, uw);
         var mx0 = av1_superres_x0(dw, uw, step);
-        var srcrow = alloc(dw * 8);              # dw i64 samples
+        var srcrow = alloc(srcw * 8);            # srcw i64 samples
         var dstrow = alloc(uw * 8);              # uw i64 samples
         if ((srcrow == 0) || (dstrow == 0)) { return DR_ERR_OOM; }
         var y = 0;
         while (y < h) {
             var x = 0;
-            while (x < dw) { store64(srcrow + (x * 8), dr_frame_get(down, p, x, y)); x = x + 1; }
-            av1_superres_upscale_row(srcrow, dw, dstrow, uw, step, mx0, bit_depth);
+            while (x < srcw) { store64(srcrow + (x * 8), dr_frame_get(down, p, x, y)); x = x + 1; }
+            av1_superres_upscale_row(srcrow, srcw, dstrow, uw, step, mx0, bit_depth);
             x = 0;
             while (x < uw) { dr_frame_set(up, p, x, y, load64(dstrow + (x * 8))); x = x + 1; }
             y = y + 1;

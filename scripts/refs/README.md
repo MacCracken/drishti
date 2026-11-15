@@ -25,6 +25,7 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 | `bilinear_mc_ref.py` | BILINEAR motion compensation (7.11.3.4) + the whole unscaled single-ref translation MC path; written in the **spec** convention (16 phases, rows summing to 128) as a cross-convention check on drishti's halved dav1d one. Table machine-generated from the digest-pinned spec markdown; self-validates by reproducing all 17 pre-existing driver KATs first | `tests/av1_mc_driver.tcyr` (`test_mc_pred_bilinear`), `tests/av1_mc.tcyr` (`test_filter_set_selection`) |
 | `scaled_geom_ref.py` | the motion vector scaling process (7.11.3.3) — scale factors, `startX`/`startY`, `stepX`/`stepY`, `lastX`/`lastY`, `intermediateHeight` — cross-checked against libaom's different algebraic form of `startX` over 2688 combinations | `tests/av1_mc.tcyr` (`test_scaled_geometry`, `test_scaled_geometry_bounds`) |
 | `scaled_mc_ref.py` | the scaled convolve (7.11.3.4 with a non-unit step) — imports the geometry from `scaled_geom_ref` and the table from `bilinear_mc_ref` so each is transcribed exactly once | `tests/av1_mc_driver.tcyr` (`test_mc_scaled_known_answers`) |
+| `superres_ref.py` | the superres upscaling process (7.16) — geometry, the MI-grid tap clamp (`maxX = (MiCols >> subX) * MI_SIZE - 1`), the 8-tap `Upscale_Filter` (checked against the spec markdown when `build/spec-dl/` is present); its fixture puts unlike values in the overhang columns so a visible-width clamp shows | `tests/av1_superres.tcyr` (`test_superres_mi_clamp`) |
 
 ## Why these live in the repo
 

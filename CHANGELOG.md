@@ -4,6 +4,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.3 bite 3: superres reads the overhang columns (the 7.16 tap clamp is the MI grid)
+
+**Every superres frame whose downscaled width is not a multiple of 8 decoded 1 LSB wrong in its last upscaled
+columns, on every plane.** Spec 7.16 clamps each upscaling tap to `maxX = (MiCols >> subX) * MI_SIZE - 1`, the
+MI-ALIGNED plane width. A tap past the picture therefore reads the reconstructed OVERHANG columns. dav1d does the
+same (`src_w = (4 * bw + ss_hor) >> ss_hor`), and so does libaom (it pads from `mi_col_end`).
+`av1_superres_upscale_frame` clamped at the VISIBLE downscaled width, repeating the last visible column instead.
+The step and initial offset still come from the visible widths; only the clamp extent changed. A source frame
+that cannot hold the MI grid's overhang is refused with `DR_ERR_BOUNDS` and never read out of bounds. The decoder's
+reconstruction frame (the superblock grid since bite 2) and its CDEF frame (an 8-sample border) both cover it.
+The existing superres tests could not see this: every fixture was 8 or 16 wide, where the MI width equals the
+visible width.
+
+Evidence:
+- **Conformance: 929 matched / 6 known-gap / 0 regressed / 0 skipped** (was 817). A new superres section, every
+  frame hard:
+  - fixed denominators;
+  - random (`--superres-mode=2`);
+  - 128-SB;
+  - an odd 175x99;
+  - 4 tile columns at 640x360;
+  - realtime;
+  - loop restoration on superres frames;
+  - resize + superres together, with 6 distinct frame sizes.
+
+  Each case's `sr_property` guard requires ≥ 4 superres frames with overhang columns, plus LR or a changing size
+  where the case needs one. The guards were canary-tested: they reject a non-superres stream, an aligned
+  (denominator 16) one, a no-LR one and a fixed-size one. **All eight cases fail on the pre-fix decoder** (built
+  from `HEAD` in isolation): 101 frames.
+- **A variable-size judge** (`vs_judge`): aomdec writes one file per frame, so streams whose frame size changes
+  are judged frame by frame, with dav1d checking the concatenation. It was canary-tested to refuse a wrong frame
+  count and to flag all 12 frames of the pre-fix decoder. The dimension sweep will use it.
+- **A spec-literal port, `scripts/refs/superres_ref.py`**, transcribes 7.16 and checks its `Upscale_Filter`
+  against the spec markdown. Its known answers back a new test, `test_superres_mi_clamp`: a 13-wide downscaled
+  frame (MiCols 4) whose overhang columns hold values unlike the last visible one. All 26 luma and 13 chroma
+  outputs are asserted, plus the `DR_ERR_BOUNDS` refusal. Under a visible-width clamp, luma columns 19 and 21–25
+  and chroma columns 7–12 come out different. Six mutants were all killed: the old visible clamp, an unsubsampled
+  chroma clamp, no refusal, no MI rounding, the overhang not copied, and the step taken from the MI width.
+- Every denominator 9–15 at 197x113 with LR, and at 330x170 128-SB, is bit-exact on every frame.
+
 ### Fixed — 0.8.3 bite 2: the decode allocation covers the superblock grid (a 128-SB heap overflow, and the odd-MI inter chroma divergence)
 
 **One undersized allocation, two defects.** The reconstruction frame was allocated to the MI grid plus a 32-sample

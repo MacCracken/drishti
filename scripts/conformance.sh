@@ -88,6 +88,10 @@ SVT_CASES="svt_352x288_p8_crf35"
 # SWITCH frames, no order hints, no motion-field MVs, the realtime pattern).
 GOP_CASES="gopdef_176x144 goplag35_176x144 gop2pass_176x144 gopkf_176x144 goprt_176x144 goperr_176x144 \
 gopsf_176x144 gopnoord_176x144 gopnomfmv_176x144"
+# SUPERRES (0.8.3), kind_WxH, every frame hard. Each stream must show superres frames whose downscaled width is
+# NOT a multiple of 8 — the frames with overhang columns, which 7.16's MI-grid tap clamp reads (see sr_property).
+SR_CASES="srfix_352x288 srrand_352x288 srsb128_352x288 srodd_175x99 srtiles_640x360 srrt_352x288 srlr_197x113 \
+srresize_352x288"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv"
@@ -115,6 +119,7 @@ skip_external() { # reason
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
     for c in $GOP_CASES; do skip_case "$c" "$1"; done
+    for c in $SR_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -837,6 +842,101 @@ gopcase() { # name = KIND_WxH
     echo "  $n ($prop)"
     seg_judge "$n" "$w" "$h" "$fr"
 }
+# VARIABLE-SIZE judge (0.8.3): a stream whose frame size changes (reference scaling) cannot be sliced at a fixed
+# frame size, so aomdec writes ONE FILE PER FRAME (its `%6` output pattern), each at its own size, and drishti's
+# harness does the same. dav1d's guard compares the concatenation. The frame count comes from the reference and
+# must equal the frames encoded.
+vs_judge() { # n fr — decode, per-frame reference, dav1d guard, per-frame compare (every frame hard)
+    local n="$1" fr="$2"
+    run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    rm -f "${WORK:?}/$n.ref-"* "${WORK:?}/$n.ref" "${WORK:?}/$n.dav1d.yuv"
+    aomdec --rawvideo -o "$WORK/$n.ref-%6.yuv" "$WORK/$n.ivf" 2>/dev/null
+    local nref; nref=$(find "$WORK" -maxdepth 1 -name "$n.ref-*.yuv" | wc -l)
+    if [ "$nref" -ne "$fr" ]; then
+        echo "  $n: SETUP FAILED (aomdec wrote $nref frame(s), not $fr)"; fail=$((fail+1)); return
+    fi
+    if command -v dav1d >/dev/null 2>&1; then
+        dav1d -q -i "$WORK/$n.ivf" -o "$WORK/$n.dav1d.yuv" >/dev/null 2>&1
+        local k=1
+        while [ "$k" -le "$fr" ]; do cat "$WORK/$n.ref-$(printf %06d "$k").yuv"; k=$((k+1)); done > "$WORK/$n.ref"
+        if ! cmp -s "$WORK/$n.ref" "$WORK/$n.dav1d.yuv"; then
+            echo "  $n: SETUP FAILED (dav1d disagrees with aomdec — the reference cannot be trusted)"
+            fail=$((fail+1)); return
+        fi
+    fi
+    local line="  $n:" k=1
+    while [ "$k" -le "$fr" ]; do
+        local a b
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+        b=$(md5sum "$WORK/$n.ref-$(printf %06d "$k").yuv" 2>/dev/null | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line f$k=OK"; pass=$((pass+1))
+        else line="$line f$k=REGRESSED"; fail=$((fail+1)); fi
+        k=$((k+1))
+    done
+    echo "$line"
+    rm -f "${WORK:?}/$n.ref-"*
+}
+# superres property: >= 4 coded frames with use_superres = 1 and a downscaled frame_width that is not a multiple
+# of 8 (overhang columns exist); "lr" also needs one of them to use loop restoration, "resize" >= 2 distinct
+# upscaled sizes (the frame size really changes). Prints the counts either way.
+sr_property() { # want
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" '
+        function judge() {
+            if (!seen || se) return
+            if (sr && (fw % 8) != 0) { nsr++; if (lr) nlr++ }
+            sizes[uw "x" fh] = 1
+        }
+        /^ *frame_type=/ { judge(); seen = 1; se = 0; sr = 0; lr = 0 }
+        /^ *show_existing_frame=/ { split($0, a, "="); se = a[2] + 0 }
+        /^ *frame_width=/ { split($0, a, "="); fw = a[2] + 0 }
+        /^ *frame_height=/ { split($0, a, "="); fh = a[2] + 0 }
+        /^ *upscaled_width=/ { split($0, a, "="); uw = a[2] + 0 }
+        /^ *use_superres=/ { split($0, a, "="); sr = a[2] + 0 }
+        /^ *uses_lr=/ { split($0, a, "="); lr = a[2] + 0 }
+        END {
+            judge(); ns = 0; for (s in sizes) ns++
+            ok = (nsr >= 4)
+            if (want == "lr") ok = ok && (nlr >= 1)
+            if (want == "resize") ok = ok && (ns >= 2)
+            printf "superres_overhang_frames=%d with_lr=%d sizes=%d", nsr, nlr, ns
+            exit !ok
+        }'
+}
+srcase() { # name = KIND_WxH
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=12 want="sr" args
+    # fixed superres: denominator for inter frames, then for keyframes
+    srfixed() { echo "--superres-mode=1 --superres-denominator=$1 --superres-kf-denominator=$2"; }
+    case "$kind" in
+        srfix)    args="--cpu-used=6 $(srfixed 12 10)" ;;
+        srrand)   fr=16; args="--cpu-used=6 --superres-mode=2" ;;
+        srsb128)  args="--cpu-used=6 --sb-size=128 $(srfixed 9 14)" ;;
+        srodd)    args="--cpu-used=6 $(srfixed 13 11)" ;;
+        srtiles)  args="--cpu-used=6 --tile-columns=2 $(srfixed 11 13)" ;;
+        srrt)     fr=20; args="--rt --cpu-used=8 $(srfixed 12 12)" ;;
+        srlr)     fr=8; want="lr"; args="--cpu-used=4 --enable-restoration=1 $(srfixed 13 13)" ;;
+        srresize) fr=20; want="resize"; args="--cpu-used=6 --resize-mode=2 --superres-mode=2" ;;
+        *)        echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30,noise=alls=6:allf=t" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --limit="$fr" $args --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" \
+        >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(sr_property "$want"); then
+        echo "  $n: SETUP FAILED (no '$want' superres stream: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    vs_judge "$n" "$fr"
+}
 # odd-MI INTER frames (0.8.3). The probe must show an INTER frame whose MI extent leaves a bottom or right
 # superblock-row remainder that is not a multiple of 16 luma samples (mi_rows % 4 == 2 or mi_cols % 4 == 2): that
 # is where an edge block's chroma is cut to 4 rows or columns by an MI-grid-sized allocation (see oddmi-inter-*).
@@ -1008,6 +1108,9 @@ for c in $SVT_CASES; do svtcase "$c"; done
 
 echo "--- odd-MI inter frames (edge blocks past the MI grid; superblock-grid allocation); every frame hard ---"
 for c in $ODDMII_CASES; do oddmiicase "$c"; done
+
+echo "--- superres (7.16 upscaling with overhang columns; tiles, 128-SB, LR, resize); every frame hard ---"
+for c in $SR_CASES; do srcase "$c"; done
 
 echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
 for c in $GOP_CASES; do gopcase "$c"; done
