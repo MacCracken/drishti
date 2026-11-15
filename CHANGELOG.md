@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.3 bite 5: the compound_idx context's order-hint term (the `av1-1-b8-05-mv` / `--cpu-used=0` desync)
+
+**libaom's published `av1-1-b8-05-mv` vector desynced at frame 3, and every libaom `--cpu-used=0` stream tried
+desynced within a few frames.** Both failed with `AV1_ERR_BAD_FRAME`, the SymbolMaxBits exit bound. The symbol-level
+diff against the instrumented libaom found the first divergence at symbol 246,366: a binary symbol with the SAME
+value but a different `cdf0`, i.e. a context bug, not a bitstream one. The value 9334 is
+`Default_Compound_Idx_Cdf[4]`, so it was `compound_idx`. Its context is (spec 9.3; libaom `get_comp_index_context`;
+dav1d `get_jnt_comp_ctx`):
+
+    ctx = 3 * ( Abs(dist(RefFrame[0])) == Abs(dist(RefFrame[1])) ) + above + left
+
+drishti threaded the `fwd == bck` term in from the tile as a constant 0 (0.7.77). It is a property of the BLOCK's
+two references, so it can only be known after `read_ref_frames`. A source comment had recorded it as deferred until
+"an external jnt vector" could witness it, because a self-consistent round trip cannot: both lanes agree on the
+wrong row. libaom sets `enable_jnt_comp` only at its slowest presets, which is why no gated stream had carried it.
+- New `av1_compound_idx_fwd_eq_bck(s, fh, ref0, ref1)` (`src/av1_frame.cyr`) compares UNCLAMPED distances, as all
+  three sources do. The existing `av1_ref_dist` clamps to 31, under which 35 and 45 would wrongly compare equal.
+  A reference outside LAST..ALTREF returns 0 and never indexes `OrderHints` out of range.
+- `av1_inter_block_mode_info` and its encode mirror compute the term from the block's references. The
+  `fwd_eq_bck` parameter is GONE from both and from `av1_inter_frame_mode_info` / `av1_write_inter_frame_mode_info`.
+  The arity check flagged every caller: the two tile sites and 33 test calls, all of which passed a literal 0.
+
+Evidence:
+- **Conformance: 1256 matched / 4 known-gap / 0 regressed / 0 skipped** (was 1220 / 6). **`av1-1-b8-05-mv` frames
+  3–4 are no longer known gaps.** The only gaps left are the `--enable-qm=1` rejects (roadmap 0.8.4).
+- **A committed reproducer**, `tests/repro/jnt-ctx-96x64`: 1.8 KB, `--cpu-used=0`, 10 frames. The pre-fix decoder
+  desyncs at frame 6. dav1d agrees with aomdec.
+- **A generated `gopc0_176x144` case**, 24 frames at `--cpu-used=0`. Its new `jnt` guard requires
+  `enable_jnt_comp` plus ≥ 4 compound-capable frames (`reference_select`). The guard rejects the cpu-6, realtime
+  and no-order-hint GOPs, and the case fails on 20 of 24 frames on the pre-fix decoder.
+  `programs/vector-probe.cyr` now prints `enable_jnt_comp` and `reference_select`.
+- **Unit tests** (`tests/av1_intermode.tcyr`, +12 assertions):
+  - the helper: equidistant, unequal, the 35-vs-45 clamp collision, the wrap to -45, no order hints, and the
+    out-of-range guards (with a fixture where an unguarded read would collide);
+  - a WIRING test that decodes a compound block with CDF adaptation ON and asserts WHICH `compound_idx` row adapted
+    (row 3 for equidistant references, row 0 otherwise). A round trip alone cannot tell the rows apart.
+
+  Nine mutants were all killed: the original bug (both lanes 0), each lane alone, the helper always 0, clamped
+  distances, no Abs, ref0 twice, and each range guard. The ref1 guard SURVIVED the first draft, whose fixture made
+  the out-of-range read unequal by luck.
+
 ### Added — 0.8.3 bite 4: monochrome, 4:4:4 and 4:2:2 gated end-to-end (8-bit)
 
 **Every chroma format decodes bit-exact vs `aomdec` on every frame, as a standing section of `make conformance`.**

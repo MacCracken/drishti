@@ -87,7 +87,7 @@ SVT_CASES="svt_352x288_p8_crf35"
 # the eight slots; the others show what their flag exists for (repeated keyframes, error-resilient inter frames,
 # SWITCH frames, no order hints, no motion-field MVs, the realtime pattern).
 GOP_CASES="gopdef_176x144 goplag35_176x144 gop2pass_176x144 gopkf_176x144 goprt_176x144 goperr_176x144 \
-gopsf_176x144 gopnoord_176x144 gopnomfmv_176x144"
+gopsf_176x144 gopnoord_176x144 gopnomfmv_176x144 gopc0_176x144"
 # SUPERRES (0.8.3), kind_WxH, every frame hard. Each stream must show superres frames whose downscaled width is
 # NOT a multiple of 8 — the frames with overhang columns, which 7.16's MI-grid tap clamp reads (see sr_property).
 SR_CASES="srfix_352x288 srrand_352x288 srsb128_352x288 srodd_175x99 srtiles_640x360 srrt_352x288 srlr_197x113 \
@@ -249,6 +249,11 @@ repro_seq  oddmi-inter-136x96 8 8
 # decodes every format. 72x56 (MiCols and MiRows % 4 == 2), 8 frames each with inter frames and loop restoration
 # enabled; libaom 3.15.3 `--cpu-used=6 --end-usage=q --cq-level=40 --lag-in-frames=0`. Their md5s are the
 # aomdec --rawvideo layout, which for monochrome is the Y plane alone. dav1d agrees with aomdec on every frame.
+# COMPOUND_IDX CONTEXT (0.8.3): libaom 3.15.3 `--cpu-used=0 --lag-in-frames=19 --end-usage=q --cq-level=40`,
+# 96x64, 10 frames. Its compound blocks with equidistant references read compound_idx from context row 3+; drishti
+# threaded that order-hint term in as a constant 0, read row 0, and desynced at frame 6 (AV1_ERR_BAD_FRAME, the
+# SymbolMaxBits exit bound) — the same defect as the published av1-1-b8-05-mv. dav1d agrees with aomdec.
+repro_seq  jnt-ctx-96x64 10 10
 repro_seq  fmt-mono-72x56 8 8
 repro_seq  fmt-444-72x56 8 8
 repro_seq  fmt-422-72x56 8 8
@@ -402,12 +407,10 @@ AOM_BASE="${CONFORMANCE_AOM_BASE:-https://storage.googleapis.com/aom-test-data}"
 # Frames that are KNOWN GAPS, as name:frame. A named cause on a gap is a HYPOTHESIS until it
 # is fixed: quantizer-00 and mfmv were once filed here as "coded_lossless" and "loop
 # restoration", and both turned out to be the CDEF-grid heap overflow (av1_clear_cdef).
-#   av1-1-b8-05-mv frames 3-4: drishti stops at frame 3 with AV1_ERR_BAD_FRAME (12), the
-#   SymbolMaxBits >= -14 exit bound, i.e. an entropy DESYNC. Seen the first time inter frames
-#   of a published vector were scored (0.8.3); libaom --cpu-used=0 streams show the same
-#   symptom. Roadmap 0.8.3.
+# (av1-1-b8-05-mv frames 3-4 were listed here from 0.8.3 bite 1 until bite 5 fixed them: the
+# compound_idx context's order-hint term, threaded in as a constant 0 — see tests/repro/jnt-ctx-*.)
 # A listed frame that now MATCHES fails the gate, so this list cannot go stale.
-PUBLISHED_XFAIL_FRAMES="av1-1-b8-05-mv:3 av1-1-b8-05-mv:4"
+PUBLISHED_XFAIL_FRAMES=""
 
 mkdir -p "$VDIR"
 # Downloads land under a .part name and are moved into place only when complete, so an
@@ -805,6 +808,7 @@ svtcase() { # name = svt_WxH_pPRESET_crfCRF (9 frames, --aq-mode 1)
 #   realtime : no hidden frame, >= 40 inter frames, refreshes spread over >= 3 slots
 #   noorder  : the sequence header has enable_order_hint = 0
 #   nomfmv   : the sequence header has enable_ref_frame_mvs = 0
+#   jnt      : the slowest preset's tools: enable_jnt_comp = 1 and >= 4 frames with reference_select (compound)
 # Prints the measured counts either way, so a failed guard says what the stream did have.
 gop_property() { # want
     ./build/drishti-vector-probe 2>&1 | awk -v want="$1" '
@@ -814,13 +818,15 @@ gop_property() { # want
             else {
                 if (ft == 0) nkey++
                 if (ft == 3) nsf++
-                if (ft != 0) { ninter++; if (er) ner++; ref_or = or(ref_or, rf) }
+                if (ft != 0) { ninter++; if (er) ner++; ref_or = or(ref_or, rf); if (rs) nrs++ }
                 if (!sf) nhid++
             }
         }
         /^ *enable_order_hint=/ { split($0, a, "="); ordh = a[2] + 0 }
         /^ *enable_ref_frame_mvs=/ { split($0, a, "="); mfmv = a[2] + 0 }
-        /^ *frame_type=/ { judge(); seen = 1; split($0, a, "="); ft = a[2] + 0; se = 0; sf = 0; er = 0; rf = 0 }
+        /^ *enable_jnt_comp=/ { split($0, a, "="); jnt = a[2] + 0 }
+        /^ *reference_select=/ { split($0, a, "="); rs = a[2] + 0 }
+        /^ *frame_type=/ { judge(); seen = 1; split($0, a, "="); ft = a[2] + 0; se = 0; sf = 0; er = 0; rf = 0; rs = 0 }
         /^ *show_existing_frame=/ { split($0, a, "="); se = a[2] + 0 }
         /^ *show_frame=/ { split($0, a, "="); sf = a[2] + 0 }
         /^ *error_resilient_mode=/ { split($0, a, "="); er = a[2] + 0 }
@@ -836,8 +842,9 @@ gop_property() { # want
             if (want == "realtime") ok = (nhid == 0 && ninter >= 40 && nslot >= 3)
             if (want == "noorder")  ok = (ordh == 0)
             if (want == "nomfmv")   ok = (mfmv == 0)
-            printf "hidden=%d show_existing=%d keys=%d switch=%d inter=%d err_res=%d slots=%d", \
-                nhid, nse, nkey, nsf, ninter, ner, nslot
+            if (want == "jnt")      ok = (jnt == 1 && nrs >= 4)
+            printf "hidden=%d show_existing=%d keys=%d switch=%d inter=%d err_res=%d slots=%d compound=%d", \
+                nhid, nse, nkey, nsf, ninter, ner, nslot, nrs
             exit !ok
         }'
 }
@@ -855,6 +862,7 @@ gopcase() { # name = KIND_WxH
         gopsf)     args="--cpu-used=6 --sframe-dist=8 --sframe-mode=1"; want="sframe" ;;
         gopnoord)  args="--cpu-used=6 --enable-order-hint=0"; want="noorder" ;;
         gopnomfmv) args="--cpu-used=6 --enable-ref-frame-mvs=0"; want="nomfmv" ;;
+        gopc0)     fr=24; args="--cpu-used=0 --lag-in-frames=19"; want="jnt" ;;   # the bite-5 compound_idx desync
         *)         echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
     esac
     rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"

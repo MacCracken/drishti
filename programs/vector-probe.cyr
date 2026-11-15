@@ -70,6 +70,7 @@ fn probe_seq(seq): i64 {
     probe_kv("enable_intra_edge_filter", load64(seq + AV1_SEQ_ENABLE_INTRA_EDGE));
     probe_kv("enable_order_hint", load64(seq + AV1_SEQ_ENABLE_ORDER_HINT));
     probe_kv("enable_ref_frame_mvs", load64(seq + AV1_SEQ_ENABLE_REF_FRAME_MVS));
+    probe_kv("enable_jnt_comp", load64(seq + AV1_SEQ_ENABLE_JNT_COMP));
     probe_kv("enable_superres", load64(seq + AV1_SEQ_ENABLE_SUPERRES));
     return 0;
 }
@@ -97,6 +98,7 @@ fn probe_fh(fh, seq): i64 {
     probe_kv("tx_mode", load64(fh + AV1FH_TX_MODE));
     probe_kv("reduced_tx_set", load64(fh + AV1FH_REDUCED_TX_SET));
     probe_kv("primary_ref_frame", load64(fh + AV1FH_PRIMARY_REF_FRAME));
+    probe_kv("reference_select", load64(fh + AV1FH_REFERENCE_SELECT));   # compound prediction allowed
     probe_kv("refresh_frame_flags", load64(fh + AV1FH_REFRESH_FRAME_FLAGS));
     probe_kv("tile_cols", load64(fh + AV1FH_TILE_COLS));
     probe_kv("tile_rows", load64(fh + AV1FH_TILE_ROWS));

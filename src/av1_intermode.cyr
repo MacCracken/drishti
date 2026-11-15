@@ -1127,12 +1127,13 @@ fn av1_comp_group_idx_ctx(nb): i64 {
 # comp_group_idx but the single-neighbour ALTREF bump is 1 rather than 3, and there is NO
 # Min clamp — the spec relies on the maximum falling out at 5 (3 + 1 + 1).
 #
-# `fwd_eq_bck` is the caller's: the spec computes
+# `fwd_eq_bck` is av1_compound_idx_fwd_eq_bck(s, fh, RefFrame[0], RefFrame[1]) (src/av1_frame.cyr):
 #     fwd = Abs(get_relative_dist(OrderHints[RefFrame[0]], OrderHint))
 #     bck = Abs(get_relative_dist(OrderHints[RefFrame[1]], OrderHint))
 #     ctx = (fwd == bck) ? 3 : 0
-# which is FRAME-level order-hint state, not neighbour state — deferred to the caller (roadmap.md)
-# exactly like AvailU/AvailL (roadmap.md).
+# It is a property of the BLOCK's references, so the 5.11.23 orchestrators compute it after
+# read_ref_frames. Until 0.8.3 it was threaded in from the tile as a constant 0, which no drishti
+# round-trip could see (both lanes agreed) and which desynced libaom's av1-1-b8-05-mv vector.
 fn av1_compound_idx_ctx(nb, fwd_eq_bck): i64 {
     var ctx = 0;
     if (fwd_eq_bck != 0) { ctx = 3; }
@@ -2272,8 +2273,8 @@ fn av1_write_ref_frames(enc, cc, nb, fh, skip_mode, segment_id, mi_size, r0, r1)
 # `ctx` is the block's Av1MvCtx with grid/tile/block/precision configured by the caller;
 # the REFS and GLOBAL-MV candidates are set HERE (they depend on the decoded refs).
 # `nb` is the caller's Av1NbCtx (the 5.11.15 preamble). `ws` is caller-owned warp
-# samples. fwd_eq_bck is the frame-level order-hint state compound_idx's ctx needs
-# (0.7.77). PaletteSizeY/UV = 0 is intra-layer state (palette is roadmap-deferred) —
+# samples. compound_idx's order-hint term is derived HERE from the decoded refs
+# (av1_compound_idx_fwd_eq_bck, 0.8.3). PaletteSizeY/UV = 0 is intra-layer state —
 # nothing to store here. out is an Av1InterBlock.
 # ================================================================
 enum Av1InterBlockOff {
@@ -2315,7 +2316,7 @@ fn av1_ibmi_scratch(): i64 {
     return AV1IBMI_SCRATCH;
 }
 fn av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out, ctx, nb, ws, fh, refs, s,
-  skip_mode, segment_id, fwd_eq_bck): i64 {
+  skip_mode, segment_id): i64 {
     if ((out == 0) || (ctx == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1IB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -2393,7 +2394,8 @@ fn av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out, ctx, nb, ws, 
     av1_read_compound_type(sd, cc_ii, out + AV1IB_CT, is_comp, skip_mode, mi_size,
       av1_seq_enable_masked_compound(s), av1_seq_enable_jnt_comp(s),
       av1_interintra_on(out + AV1IB_II), av1_interintra_wedge(out + AV1IB_II),
-      av1_comp_group_idx_ctx(nb), av1_compound_idx_ctx(nb, fwd_eq_bck));
+      av1_comp_group_idx_ctx(nb),
+      av1_compound_idx_ctx(nb, av1_compound_idx_fwd_eq_bck(s, fh, ref0, load64(out + AV1IB_REF1))));
     # the interp-filter tail: GmType[RefFrame[1]] is only consulted for
     # GLOBAL_GLOBALMV (compound), but guard the post-interintra INTRA_FRAME anyway.
     var gt1n = 0;
@@ -2440,7 +2442,7 @@ fn av1_write_assign_mv_compound(enc, mvcc, mvctx, y_mode, ref_mv_idx, mv_ctx, al
 # writer applies the 5.11.28 side-effect internally for the later steps, exactly as
 # the reader does).
 fn av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, blk, ctx, nb, ws, fh,
-  refs, s, skip_mode, segment_id, fwd_eq_bck): i64 {
+  refs, s, skip_mode, segment_id): i64 {
     if ((blk == 0) || (ctx == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     var ref0 = load64(blk + AV1IB_REF0);
@@ -2516,7 +2518,8 @@ fn av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, blk, ctx, n
     av1_write_compound_type(enc, cc_ii, blk + AV1IB_CT, is_comp, skip_mode, mi_size,
       av1_seq_enable_masked_compound(s), av1_seq_enable_jnt_comp(s),
       av1_interintra_on(blk + AV1IB_II), av1_interintra_wedge(blk + AV1IB_II),
-      av1_comp_group_idx_ctx(nb), av1_compound_idx_ctx(nb, fwd_eq_bck));
+      av1_comp_group_idx_ctx(nb),
+      av1_compound_idx_ctx(nb, av1_compound_idx_fwd_eq_bck(s, fh, ref0, load64(blk + AV1IB_REF1))));
     var gt1n = 0;
     if (ref1 >= AV1_LAST_FRAME) { gt1n = av1_fh_gm_type(fh, ref1); }
     av1_write_interp_filters(enc, cc_im, blk + AV1IB_INTERP, av1_fh_interpolation_filter(fh),
@@ -2646,7 +2649,7 @@ fn av1_fb_set_vartx(b, plan): i64 { store64(b + AV1FB_VARTX, plan); return 0; }
 # wired below.
 fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb, ws,
   fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx, palctx): i64 {
+  has_chroma, enable_filter_intra, lossless_mask, sctx, dctx, palctx): i64 {
     if ((out == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     memset(out, 0, AV1FB_SIZE);
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -2707,13 +2710,13 @@ fn av1_inter_frame_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, ncc, out, ctx, nb,
           (lossless_mask >> segment_id) & 1, palctx, mi_row, mi_col, avail_u, avail_l);
     }
     return av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out + AV1FB_IB,
-      ctx, nb, ws, fh, refs, s, skip_mode, segment_id, fwd_eq_bck);
+      ctx, nb, ws, fh, refs, s, skip_mode, segment_id);
 }
 # the encoder inverse — replays the dispatch on the same state. blk is an
 # Av1BlockInfo whose IB region carries the 5.11.23 source (REF1 pre-interintra).
 fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, ctx, nb,
   ws, fh, refs, s, avail_u, avail_l, above_skip, left_skip, skip_mode_ctx, cdef_ctx,
-  fwd_eq_bck, has_chroma, enable_filter_intra, lossless_mask, sctx, dctx, palctx): i64 {
+  has_chroma, enable_filter_intra, lossless_mask, sctx, dctx, palctx): i64 {
     if ((blk == 0) || (ctx == 0) || (nb == 0) || (ws == 0)) { return DR_ERR_BOUNDS; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
     if ((mi_size < 0) || (mi_size >= AV1_BLOCK_SIZES)) { return DR_ERR_BOUNDS; }
@@ -2776,5 +2779,5 @@ fn av1_write_inter_frame_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv, ncc, blk, c
           (lossless_mask >> segid) & 1, palctx, mi_row, mi_col, avail_u, avail_l);
     }
     return av1_write_inter_block_mode_info(enc, cc_ref, cc_im, cc_ii, cc_mv,
-      blk + AV1FB_IB, ctx, nb, ws, fh, refs, s, skip_mode, segid, fwd_eq_bck);
+      blk + AV1FB_IB, ctx, nb, ws, fh, refs, s, skip_mode, segid);
 }

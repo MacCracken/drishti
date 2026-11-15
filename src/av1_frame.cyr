@@ -297,13 +297,35 @@ fn av1_get_relative_dist(s, a, b): i64 {
 # av1_ref_dist — the clamped ABSOLUTE order-hint distance from the current frame to the
 # reference indexed by `ref` (spec 7.11.3.15 dist[]): Clip3(0, 31, Abs(get_relative_dist(
 # OrderHints[ref], OrderHint))). 31 = MAX_FRAME_DISTANCE (spec §3). Abs is av1_max(d, 0-d)
-# (two's-complement negate, NOT ~). Feeds BOTH the jnt distance weights (7.11.3.15) and the
-# compound_idx fwd_eq_bck context (5.11.29). Returns 0 when enable_order_hint is off (via
+# (two's-complement negate, NOT ~). Feeds the jnt distance weights (7.11.3.15); the compound_idx
+# context compares UNCLAMPED distances (av1_compound_idx_fwd_eq_bck below). Returns 0 when enable_order_hint is off (via
 # av1_get_relative_dist). Caller must ensure `ref` is a real inter ref (LAST..ALTREF); a
 # single-ref/INTRA/NONE ref would index OrderHints out of range.
 fn av1_ref_dist(s, fh, ref): i64 {
     var d = av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, ref), av1_fh_order_hint(fh));
     return av1_clip3(0, 31, av1_max(d, 0 - d));
+}
+
+# The compound_idx context's order-hint term (spec 9.3, the compound_idx cdf selection):
+#     fwd = Abs( get_relative_dist( OrderHints[ RefFrame[ 0 ] ], OrderHint ) )
+#     bck = Abs( get_relative_dist( OrderHints[ RefFrame[ 1 ] ], OrderHint ) )
+#     ctx = ( fwd == bck ) ? 3 : 0   ...
+# Returns 1 when fwd == bck. It is a property of the BLOCK's two references, so it can only be
+# computed after read_ref_frames — until 0.8.3 it was threaded in from the tile as a constant 0,
+# which read compound_idx from the wrong CDF row whenever a compound block's references sat at
+# equal distances (the av1-1-b8-05-mv desync). The distances are UNCLAMPED, unlike av1_ref_dist:
+# the spec, libaom (get_comp_index_context) and dav1d (get_jnt_comp_ctx) all compare the raw
+# Abs, and two distances past 31 must not compare equal just because both clamp. Either ref
+# outside LAST..ALTREF (a single-reference or inter-intra block, which reads no compound_idx)
+# returns 0 rather than indexing OrderHints out of range.
+fn av1_compound_idx_fwd_eq_bck(s, fh, ref0, ref1): i64 {
+    if ((ref0 < AV1_LAST_FRAME) || (ref0 > AV1_ALTREF_FRAME)) { return 0; }
+    if ((ref1 < AV1_LAST_FRAME) || (ref1 > AV1_ALTREF_FRAME)) { return 0; }
+    var cur = av1_fh_order_hint(fh);
+    var fwd = av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, ref0), cur);
+    var bck = av1_get_relative_dist(s, av1_fh_order_hint_ref(fh, ref1), cur);
+    if (av1_max(fwd, 0 - fwd) == av1_max(bck, 0 - bck)) { return 1; }
+    return 0;
 }
 
 # RefFrameSignBias[ref] (spec 7.20 / the setup after the frame header): fills out[8] with the
