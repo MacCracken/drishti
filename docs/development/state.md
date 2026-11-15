@@ -477,6 +477,8 @@ THE FIX: dr_frame_new_ext allocates to an explicit (alloc_w, alloc_h) while REPO
 dr_frame_new is now a wrapper passing visible for both, so every other caller is unchanged. The AV1
 decode path allocates to the MI GRID (av1_decode_alloc_w/_h, which max() against the visible dims rather
 than trusting two header fields to agree) with a 32-sample border, covering the 28-sample worst case.
+(SUPERSEDED in 0.8.3: 128x128 superblocks raised the worst case to 60 samples, and the allocation is now the
+SUPERBLOCK grid — see the 0.8.3 CHANGELOG.)
 Reported plane dims untouched, so CDEF/LR/superres/output crop still measure the visible frame. NOT merely
 defensive padding: the overhang band is READ BACK by deblocking and CDEF into visible output, so clamping
 the write would have produced WRONG PIXELS rather than a fix (the intra-parity lens established this, with
@@ -1827,7 +1829,8 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > temporal unit, no frame cap (the old 9-unit `CONF_MAX_FRAMES` prefix re-decode is gone), output in the
 > `aomdec --rawvideo` layout as `build/conformance-out-<k>.yuv`. Bite 1 filed three defects for the next bites:
 > the superres tap clamp, the MI-grid (not superblock-grid) decode allocation (a heap overflow on 128-SB streams,
-> and the odd-MI inter chroma divergence), and the `av1-1-b8-05-mv` / `--cpu-used=0` entropy desync.
+> and the odd-MI inter chroma divergence — FIXED in bite 2: the allocation is the superblock grid), and the
+> `av1-1-b8-05-mv` / `--cpu-used=0` entropy desync.
 >
 > **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

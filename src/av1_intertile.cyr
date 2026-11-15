@@ -1444,15 +1444,18 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                     # multiple of 8 — and that band is NOT dead: av1_cdef_get_at gates sample
                     # availability on cand_r < mi_rows rather than the plane dims, and
                     # av1_deblock walks the full MI grid, so stale samples there reach VISIBLE
-                    # output through CDEF taps. The frame is allocated to the MI grid plus the
-                    # block overhang (av1_decode_alloc_w/_h), so the write is in bounds.
+                    # output through CDEF taps. The frame is allocated to the SUPERBLOCK grid
+                    # (av1_decode_alloc_w/_h), which contains every block, so the write is in bounds.
                     var w = pred_w;
                     var h = pred_h;
                     var nw = w;       # NOMINAL dims — also the warp >=8x8 gate
                     var nh = h;
                     # clamp only against the ALLOCATED extent, as a backstop for a frame that
-                    # was not allocated with the decode path's padding (tests build frames
-                    # directly); a conformant decode never trims here.
+                    # was not allocated by the decode path (tests build frames directly). A
+                    # decoder frame NEVER trims here, and must not: the trimmed w/h is what
+                    # av1_mc_filter_set sees, so trimming a dimension to <= 4 swaps in the 4-tap
+                    # filter — the 0.8.3 odd-MI chroma divergence, when the allocation was only
+                    # the MI grid and a bottom-edge block's chroma was cut to 4 rows.
                     if ((x + w) > apw) { w = apw - x; }
                     if ((y + h) > aph) { h = aph - y; }
                     if ((w > 0) && (h > 0)) {

@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.3 bite 2: the decode allocation covers the superblock grid (a 128-SB heap overflow, and the odd-MI inter chroma divergence)
+
+**One undersized allocation, two defects.** The reconstruction frame was allocated to the MI grid plus a 32-sample
+border (0.7.114). That border covered the worst block overhang of a 64x64 superblock: a block need only have its top
+or left HALF inside the MI grid, so a BLOCK_64X64 can hang 28 samples past it. 128x128 superblocks (0.7.126) raised
+that to 60 samples, and nobody revisited the bound. `av1_decode_alloc_w` / `_h` now round the MI extent UP TO THE
+SUPERBLOCK SIZE. Every block lies inside its superblock however the partition is coded, so no stream, conformant or
+hostile, can reach past the allocation. Both functions now take the sequence header (`av1_decode_sb_size`). Reported
+plane dims are unchanged.
+- **The heap overflow (128x128 superblocks).** Intra prediction and reconstruction write a block's nominal extent
+  through the unchecked `dr_frame_set`. On a 256x80 128-SB keyframe (MiRows 20), the BLOCK_128X128 at MI row 0
+  wrote rows 0..127 into a plane that held 80 + 32. An instrumented build counted **6144 samples written up to 16
+  rows past the luma plane**. The pixels still matched `aomdec` only because of what the writes landed on. The
+  instrumented count is now **0** on every 128-SB geometry tried.
+- **The odd-MI inter divergence** (filed in 0.8.2: 160x136 `--lag-in-frames=19`, frame 3, chroma, 1 LSB).
+  `av1_intertile` trims an edge block's MC to the allocated extent, and the TRIMMED height or width is what
+  `av1_mc_filter_set` sees. A bottom-edge 64x32 block on a frame with `MiRows % 4 == 2` had its chroma cut to 4
+  rows, which selects the 4-tap filter, where the spec's nominal 16 rows select the 8-tap one. The same happens to
+  columns when `MiCols % 4 == 2`. It reproduced with every in-loop filter off and at `--lag-in-frames=0`, which is
+  what pointed at prediction. A decoder frame is now never trimmed.
+
+Evidence:
+- **Conformance: 817 matched / 6 known-gap / 0 regressed / 0 skipped** (was 729).
+  - **Two committed reproducers**, which run without libaom, every frame hard, with dav1d agreeing with `aomdec`
+    on every frame: `tests/repro/oddmi-inter-160x136` (`MiRows % 4 == 2`, 4.8 KB) and `oddmi-inter-136x96`
+    (`MiCols % 4 == 2` alone, 3.7 KB).
+  - **Six generated odd-MI inter cases**, 12 frames each, both superblock sizes, lag 0 and 19, one on the width
+    axis alone. Each probe-guarded for an inter frame with `mi_rows` or `mi_cols % 4 == 2`; the guard was
+    canary-tested against an aligned stream.
+  - **All eight fail on the pre-fix decoder** (built from `HEAD` in isolation): 65 frames that were wrong are now
+    bit-exact.
+- **Unit tests** (`tests/av1_decode.tcyr`, 300 assertions):
+  - the extent at both superblock sizes, including 136 wide, where the two grids disagree (192 vs 256);
+  - a sweep of every block size and every partition-reachable start position, at every even MI extent up to 512
+    samples and both superblock sizes. Every nominal extent lies inside the allocation, and the old MI + 32-border
+    bound provably did not cover them all;
+  - a canary allocated ADJACENT to a decode-sized 256x80 128-SB plane, sized past the old 10240-byte blast radius,
+    survives a nominal BLOCK_128X128 write;
+  - the frame-decode context allocates a 65x33 128-SB frame to 128x128, not the MI 72x40.
+
+  Six mutants were all killed: the old MI-grid extent on either axis, 64-only superblocks, floor instead of ceil,
+  no `max()` guard, and the frame allocated from MI dims. The last one SURVIVED the first draft, whose decoded-frame
+  check used 128x64 at 64-SB, where the MI and superblock grids coincide. The 65x33 check was added for it.
+- A sweep of 22 further odd geometries (`MiRows` / `MiCols % 4 == 2`, both superblock sizes, tiles, realtime,
+  odd dims like 99x99 and 161x137) is bit-exact on every frame.
+
 ### Added — 0.8.3 bite 1: the streaming decoder; the gate scores long GOPs and every published frame
 
 **A real GOP now decodes bit-exact on every frame**, as a standing section of `make conformance`: libaom's

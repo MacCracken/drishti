@@ -866,7 +866,8 @@ fn av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
     # allocation PLUS its border — and NOT the visible plane. MaxLumaW/H come from the last
     # luma transform block (5.11.35 `startX + stepX*4`), and a bottom/right-edge block
     # legitimately overhangs: past the cropped frame, and past the MI grid too, by up to
-    # AV1_DECODE_BORDER's worst case. 7.11.5 averages the FULL w x h chroma block via
+    # half the block (the decode allocation covers the superblock grid for exactly this).
+    # 7.11.5 averages the FULL w x h chroma block via
     # `Min(lumaY, MaxLumaH - (1<<subY))`, so a bound that is too tight substitutes the last
     # in-bound luma row for the reconstructed overhang — which shifts lumaAvg and therefore
     # EVERY sample of the block, including the visible ones. Those overhang rows are real

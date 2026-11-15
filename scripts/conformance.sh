@@ -47,6 +47,10 @@ CORPUS_FRAME=$(( CORPUS_Y + (2 * CORPUS_C) ))
 # added below cannot run on one machine and silently vanish from the count on another.
 GEN_CASES="kf_only seq_filters seq_nofilt"
 ODDMI_CASES="160x136:64 160x136:128 288x152:64 288x152:128"
+# odd-MI INTER frames (0.8.3), oddmii_WxH_sbS_lagL_cC, 12 frames, every frame hard: MiRows % 4 == 2 and/or
+# MiCols % 4 == 2 at both superblock sizes. 264x176 is the WIDTH axis alone (MiRows % 4 == 0).
+ODDMII_CASES="oddmii_136x136_sb64_lag19_c6 oddmii_136x136_sb128_lag19_c6 oddmii_200x104_sb64_lag19_c6 \
+oddmii_264x152_sb128_lag0_c4 oddmii_264x176_sb128_lag19_c6 oddmii_328x200_sb128_lag19_c8"
 SB_CASES="64 128"
 # kind_WxH_sbN: dqlf = delta_q + delta_lf, dqonly = delta_q alone (0.8.2).
 DELTA_CASES="dqlf_352x288_sb64 dqlf_352x288_sb128 dqonly_352x288_sb64"
@@ -99,6 +103,7 @@ skip_external() { # reason
     local c
     for c in $GEN_CASES; do skip_case "$c" "$1"; done
     for c in $ODDMI_CASES; do skip_case "oddmi_${c%%:*}_sb${c##*:}" "$1"; done
+    for c in $ODDMII_CASES; do skip_case "$c" "$1"; done
     for c in $SB_CASES; do skip_case "sbrepro_sb$c" "$1"; done
     for c in $DELTA_CASES; do skip_case "$c" "$1"; done
     for c in $LL_CASES; do skip_case "$c" "$1"; done
@@ -218,6 +223,15 @@ repro_seq  inter-6frame 6 6   # ALL SIX frames bit-exact vs aomdec (hard)
 repro_seq  roi-skip-96x64 8 8
 repro_seq  roi-skip-176x144 8 8
 repro_seq  roi-skip-160x136 8 8
+# ODD-MI INTER FRAMES (0.8.3): libaom streams whose MI extent is not a multiple of 16 luma samples on ONE axis
+# (160x136: MiRows % 4 == 2; 136x96: MiCols % 4 == 2). Their bottom / right-edge inter blocks overhang the MI grid,
+# and drishti trimmed their MC to the MI-grid allocation, so 4 chroma rows (or columns) selected the 4-tap filter
+# where the nominal block height selects the 8-tap one: 1-LSB chroma differences on frames 3-8 / 4-8. Fixed by
+# allocating the decode frame to the SUPERBLOCK grid. libaom 3.15.3 `--cpu-used=8 --end-usage=q --cq-level=40
+# (36 for 136x96) --lag-in-frames=0 --enable-palette=0` on a noisy mandelbrot, 8 frames each, every frame hard; dav1d
+# agrees with aomdec on every frame.
+repro_seq  oddmi-inter-160x136 8 8
+repro_seq  oddmi-inter-136x96 8 8
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -823,6 +837,32 @@ gopcase() { # name = KIND_WxH
     echo "  $n ($prop)"
     seg_judge "$n" "$w" "$h" "$fr"
 }
+# odd-MI INTER frames (0.8.3). The probe must show an INTER frame whose MI extent leaves a bottom or right
+# superblock-row remainder that is not a multiple of 16 luma samples (mi_rows % 4 == 2 or mi_cols % 4 == 2): that
+# is where an edge block's chroma is cut to 4 rows or columns by an MI-grid-sized allocation (see oddmi-inter-*).
+oddmiicase() { # name = oddmii_WxH_sbS_lagL_cC
+    local n="$1" geo sbx lagx cx
+    IFS=_ read -r _ geo sbx lagx cx <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" sb="${sbx#sb}" lag="${lagx#lag}" cpu="${cx#c}" fr=12
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.ref" "${WORK:?}/$n.yuv" "${WORK:?}/$n.dav1d.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30,noise=alls=6:allf=t" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --codec=av1 -w "$w" -h "$h" --i420 --limit="$fr" --cpu-used="$cpu" --sb-size="$sb" \
+        --lag-in-frames="$lag" --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    if ! ./build/drishti-vector-probe 2>&1 | awk '
+        /^ *frame_type=/ { split($0, a, "="); inter = (a[2] + 0 != 0) }
+        /^ *mi_cols=/ { split($0, a, "="); mc = a[2] + 0 }
+        /^ *mi_rows=/ { split($0, a, "="); if (inter && ((mc % 4) == 2 || ((a[2] + 0) % 4) == 2)) f = 1 }
+        END { exit !f }'; then
+        echo "  $n: SETUP FAILED (no inter frame with mi_rows or mi_cols % 4 == 2 — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    seg_judge "$n" "$w" "$h" "$fr"
+}
 echo "--- segmentation on inter frames (libaom AQ; copied map + inherited data; every frame hard) ---"
 for c in $SEGI_CASES; do segicase "$c"; done
 echo "--- temporal segmentation (libaom realtime cyclic refresh; seg_id_predicted; every frame hard) ---"
@@ -965,6 +1005,9 @@ for c in $PAL_CASES; do palcase "$c"; done
 echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); every frame hard ---"
 for c in $RAV1E_CASES; do rav1ecase "$c"; done
 for c in $SVT_CASES; do svtcase "$c"; done
+
+echo "--- odd-MI inter frames (edge blocks past the MI grid; superblock-grid allocation); every frame hard ---"
+for c in $ODDMII_CASES; do oddmiicase "$c"; done
 
 echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
 for c in $GOP_CASES; do gopcase "$c"; done

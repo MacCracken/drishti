@@ -1226,49 +1226,170 @@ fn test_obus_metadata_padding_skipped() {
 }
 
 # ================================================================
-# REGRESSION (0.7.114): the decode frame allocation must cover a block's NOMINAL write extent.
-# The overflow this pins is proven in tests/frame.tcyr (test_alloc_covers_nominal_overhang);
-# these two assertions pin the DECODE SITE — that av1_decode_frame actually asks for it.
+# REGRESSION (0.7.114, superblock grid 0.8.3): the decode frame allocation must cover a block's
+# NOMINAL write extent. 0.7.114 sized it to the MI grid plus a 32-sample border, which covered a
+# BLOCK_64X64's 28-sample overhang but not a BLOCK_128X128's 60; it is now the MI extent rounded
+# up to the SUPERBLOCK size, which contains every block by construction.
 # ================================================================
+fn dec_seq_sb(sb128): i64 {
+    var s = frame_mk_seq(0);
+    store64(s + AV1_SEQ_SB128, sb128);
+    return s;
+}
 fn test_decode_alloc_extent() {
-    var fh = frame_mk_fh(1, 1, 0, 0);          # 128x64, MI 32x16 -> MI extent == visible
-    assert_eq(av1_decode_alloc_w(fh), 128, "alloc extent: MI grid covers a 128-wide frame exactly");
-    assert_eq(av1_decode_alloc_h(fh), 64, "alloc extent: ...and a 64-tall one");
-    # a width that is NOT a multiple of 8 is where MI-alignment actually does work:
-    # MiCols = 2*((65+7)>>3) = 18 -> 72 samples, seven past the visible 65.
+    var fh = frame_mk_fh(1, 1, 0, 0);          # 128x64, MI 32x16
+    var s64 = dec_seq_sb(0);
+    var s128 = dec_seq_sb(1);
+    assert_eq(av1_decode_sb_size(s64), 64, "sb size: 64 without use_128x128_superblock");
+    assert_eq(av1_decode_sb_size(s128), 128, "sb size: 128 with it");
+    assert_eq(av1_decode_sb_size(0), 64, "sb size: 64 with no sequence");
+    assert_eq(av1_decode_alloc_w(fh, s64), 128, "alloc extent: 128 wide is already 64-SB aligned");
+    assert_eq(av1_decode_alloc_h(fh, s64), 64, "alloc extent: ...and 64 tall");
+    assert_eq(av1_decode_alloc_h(fh, s128), 128, "alloc extent: a 128-SB stream rounds 64 rows up to 128");
+    # 65x33: MiCols = 2*((65+7)>>3) = 18 (72 samples), MiRows = 10 (40 samples).
     store64(fh + AV1FH_FRAME_WIDTH, 65);
     store64(fh + AV1FH_MI_COLS, 18);
-    assert_eq(av1_decode_alloc_w(fh), 72, "alloc extent: MI grid exceeds a 65-wide frame by 7");
     store64(fh + AV1FH_FRAME_HEIGHT, 33);
     store64(fh + AV1FH_MI_ROWS, 10);
-    assert_eq(av1_decode_alloc_h(fh), 40, "alloc extent: MI grid exceeds a 33-tall frame by 7");
+    assert_eq(av1_decode_alloc_w(fh, s64), 128, "alloc extent: MI 72 -> the 64-SB grid, 128");
+    assert_eq(av1_decode_alloc_h(fh, s64), 64, "alloc extent: MI 40 -> the 64-SB grid, 64");
+    assert_eq(av1_decode_alloc_w(fh, s128), 128, "alloc extent: MI 72 -> the 128-SB grid, 128");
+    assert_eq(av1_decode_alloc_h(fh, s128), 128, "alloc extent: MI 40 -> the 128-SB grid, 128");
+    # 136 wide: MI 136 -> 192 at 64-SB but 256 at 128-SB (the two grids disagree here).
+    store64(fh + AV1FH_FRAME_WIDTH, 136);
+    store64(fh + AV1FH_MI_COLS, 34);
+    assert_eq(av1_decode_alloc_w(fh, s64), 192, "alloc extent: MI 136 -> 192 on the 64-SB grid");
+    assert_eq(av1_decode_alloc_w(fh, s128), 256, "alloc extent: MI 136 -> 256 on the 128-SB grid");
     # ...and the max() guard: MI counts inconsistent with the dims must not shrink the alloc.
+    store64(fh + AV1FH_FRAME_WIDTH, 65);
     store64(fh + AV1FH_MI_COLS, 2);
-    assert_eq(av1_decode_alloc_w(fh), 65, "alloc extent: never smaller than the visible frame");
+    assert_eq(av1_decode_alloc_w(fh, s64), 65, "alloc extent: never smaller than the visible frame");
     return 0;
 }
 
-# the BORDER half of the invariant, on a genuinely decoded frame. frame_mk_seq(0) disables
-# CDEF and restoration, so av1_decode_frame returns the PREDICTION frame — the one whose
-# allocation prediction writes into.
+# The invariant, stated from the PARTITION rules rather than from the formula: for every block
+# size b (8..superblock) and every start position the partition can reach along one axis (a
+# multiple of b whose top half is inside the MI grid — has_rows, 5.11.4 — so PARTITION_NONE is
+# codeable there), the block's nominal end y + b must lie inside the allocation. Swept over every
+# MI extent up to 512 samples at both superblock sizes. The worst case per MI extent is recorded
+# so the assertion that the OLD bound (MI grid + 32-sample border) fails is real, not assumed.
+fn test_decode_alloc_covers_every_block() {
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    var bad = 0;
+    var old_short = 0;       # MI extents where MI grid + 32 border was too small (128-SB only)
+    var sbi = 0;
+    while (sbi < 2) {
+        var seq = dec_seq_sb(sbi);
+        var sb = av1_decode_sb_size(seq);
+        var mi = 2;
+        while (mi <= 128) {   # MiRows is always even; 2..128 MI = 8..512 samples
+            store64(fh + AV1FH_MI_ROWS, mi);
+            store64(fh + AV1FH_FRAME_HEIGHT, mi * 4);
+            var ah = av1_decode_alloc_h(fh, seq);
+            var worst = 0;
+            var b = 8;
+            while (b <= sb) {
+                var y = 0;
+                while ((y / 4) < mi) {
+                    if (((y / 4) + (b / 8)) < mi) {          # has_rows: r + halfBlock4x4 < MiRows
+                        if ((y + b) > worst) { worst = y + b; }
+                    }
+                    y = y + b;
+                }
+                b = b * 2;
+            }
+            if (worst > ah) { bad = bad + 1; }
+            if (worst > ((mi * 4) + AV1_DECODE_BORDER)) { old_short = old_short + 1; }
+            mi = mi + 2;
+        }
+        sbi = sbi + 1;
+    }
+    assert_eq(bad, 0, "every reachable block's nominal extent lies inside the superblock-grid allocation");
+    assert_eq(old_short > 0, 1, "...and the old MI-grid + 32-border bound provably did not cover them all");
+    return 0;
+}
+
+# The MEMORY consequence, witnessed with a canary: a 256x80 128-SB keyframe (MiRows 20) may code a
+# BLOCK_128X128 at MI row 0 (0 + 8 < 20), whose nominal extent is rows 0..127. Under the old
+# allocation (80 rows + a 32-row border = 112) its last 16 rows landed past the plane buffer —
+# this is the geometry an instrumented decode caught writing 6144 samples out of bounds. The
+# canary sits IMMEDIATELY after the plane buffer (bump allocator) and is sized past the old blast
+# radius (16 rows x 320-sample stride x 2 bytes = 10240 bytes).
+fn test_decode_alloc_canary_128() {
+    var fh = frame_mk_fh(1, 1, 0, 0);
+    store64(fh + AV1FH_FRAME_WIDTH, 256);
+    store64(fh + AV1FH_UPSCALED_WIDTH, 256);
+    store64(fh + AV1FH_MI_COLS, 64);
+    store64(fh + AV1FH_FRAME_HEIGHT, 80);
+    store64(fh + AV1FH_MI_ROWS, 20);
+    var seq = dec_seq_sb(1);
+    var oe = alloc(8);
+    var f = dr_frame_new_ext(256, 80, av1_decode_alloc_w(fh, seq), av1_decode_alloc_h(fh, seq),
+      1, 0, 0, 8, AV1_DECODE_BORDER, oe);
+    assert_eq(load64(oe), DR_OK, "canary-128: decode-sized frame allocated");
+    var stride = dr_frame_plane_stride(f, 0);
+    var border = dr_frame_border(f);
+    var plane_end = (dr_frame_plane_ptr(f, 0) - (((border * stride) + border) * 2))
+    + ((stride * (dr_frame_plane_alloc_h(f, 0) + (2 * border))) * 2);
+    var canary = alloc(16384);    # 2048 u64, past the 10240-byte old blast radius
+    assert_eq(canary, plane_end, "canary-128: the canary is ADJACENT to the plane buffer");
+    assert_eq((16 * (256 + (2 * 32))) * 2, 10240, "canary-128: the old blast radius is 10240 bytes");
+    var i = 0;
+    while (i < 2048) { store64(canary + (i * 8), 0 - 515151); i = i + 1; }
+    # the nominal extent of the BLOCK_128X128 at MI (0, 0): what av1_intra_predict writes.
+    var y = 0;
+    while (y < 128) {
+        var x = 0;
+        while (x < 128) { dr_frame_set(f, 0, x, y, 77); x = x + 1; }
+        y = y + 1;
+    }
+    var clobbered = 0;
+    i = 0;
+    while (i < 2048) {
+        if (load64(canary + (i * 8)) != (0 - 515151)) { clobbered = clobbered + 1; }
+        i = i + 1;
+    }
+    assert_eq(clobbered, 0, "canary-128: a nominal BLOCK_128X128 write stays INSIDE the allocation");
+    assert_eq(dr_frame_get(f, 0, 127, 127), 77, "canary-128: the block's last sample is stored");
+    return 0;
+}
+
+# the invariant on a genuinely decoded frame. frame_mk_seq(0) disables CDEF and restoration, so
+# av1_decode_frame returns the PREDICTION frame — the one whose allocation prediction writes into.
 fn test_decode_frame_alloc_invariant() {
     var olen = 0;
     var out = frame_enc_keyframe(&olen);
     var oe = alloc(8);
     var fh = frame_mk_fh(1, 1, 0, 0);
-    var frame = av1_decode_frame(frame_mk_seq(0), fh, out, olen, oe);
+    var seq = frame_mk_seq(0);
+    var frame = av1_decode_frame(seq, fh, out, olen, oe);
     assert_eq(load64(oe), DR_OK, "alloc invariant: frame decoded");
-    # the addressable extent right of the origin must reach the MI grid plus the worst-case
-    # 28-sample block overhang. With the old 8-sample border this is 136 against a required
-    # 156 and goes red.
-    var addressable = dr_frame_plane_stride(frame, 0) - dr_frame_border(frame);
-    assert_eq(addressable >= (av1_decode_alloc_w(fh) + 28), 1,
-      "alloc invariant: decoded frame covers MiCols*4 + the 28-sample block overhang");
-    assert_eq(dr_frame_border(frame) >= 28, 1,
-      "alloc invariant: the border alone covers the worst-case overhang past the MI grid");
+    assert_eq(dr_frame_plane_alloc_w(frame, 0), av1_decode_alloc_w(fh, seq),
+      "alloc invariant: the decoded frame is allocated to the superblock grid (width)");
+    assert_eq(dr_frame_plane_alloc_h(frame, 0), av1_decode_alloc_h(fh, seq),
+      "alloc invariant: ...and height");
+    assert_eq(dr_frame_border(frame), AV1_DECODE_BORDER, "alloc invariant: with the read-side border");
     # reported dims stay VISIBLE — CDEF / LR / superres / output crop must not see the pad.
     assert_eq(dr_frame_width(frame), 128, "alloc invariant: reported width is still visible");
     assert_eq(dr_frame_plane_width(frame, 0), 128, "alloc invariant: plane width is still visible");
+    # 128x64 at 64-SB is the geometry where the MI grid and the superblock grid COINCIDE, so the
+    # check above cannot tell them apart. The frame-decode context allocates the reconstruction
+    # frame before any tile is read: at 65x33 with 128-SB the MI grid is 72x40 and the superblock
+    # grid 128x128, so here the two differ on both axes.
+    var fh2 = frame_mk_fh(1, 1, 0, 0);
+    store64(fh2 + AV1FH_FRAME_WIDTH, 65);
+    store64(fh2 + AV1FH_UPSCALED_WIDTH, 65);
+    store64(fh2 + AV1FH_MI_COLS, 18);
+    store64(fh2 + AV1FH_FRAME_HEIGHT, 33);
+    store64(fh2 + AV1FH_MI_ROWS, 10);
+    var fdc = av1_frame_dec_new(dec_seq_sb(1), fh2, oe);
+    assert_eq(load64(oe), DR_OK, "alloc invariant: 65x33 128-SB frame context created");
+    if (fdc != 0) {
+        var f2 = load64(fdc + AV1FDEC_FRAME);
+        assert_eq(dr_frame_plane_alloc_w(f2, 0), 128, "alloc invariant: 65 wide -> allocated 128 (not MI 72)");
+        assert_eq(dr_frame_plane_alloc_h(f2, 0), 128, "alloc invariant: 33 tall -> allocated 128 (not MI 40)");
+        assert_eq(dr_frame_width(f2), 65, "alloc invariant: ...reporting the visible 65");
+    }
     return 0;
 }
 
@@ -1652,6 +1773,8 @@ fn main() {
     test_frame_mixed_lossless_decode();
     test_group("decode frame allocation extent (0.7.114 regression)");
     test_decode_alloc_extent();
+    test_decode_alloc_covers_every_block();
+    test_decode_alloc_canary_128();
     test_decode_frame_alloc_invariant();
     test_group("in-loop filter pipeline (deblock -> CDEF -> LR)");
     test_pipeline_none();
