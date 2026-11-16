@@ -52,7 +52,7 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
     #     frames, so both are upscaled — they alias when CDEF is disabled.
     var sr_curr = frame;
     var sr_cdef = cdef_frame;
-    if (av1_fh_use_superres(fh) != 0) {
+    if (av1_fh_superres_scaled(fh) != 0) {   # FrameWidth != UpscaledWidth, as libaom and dav1d gate it
         var up_w = av1_fh_upscaled_width(fh);
         sr_curr = av1_superres_upscale_new(frame, up_w, out_err);
         if (sr_curr == 0) { return 0; }
@@ -101,8 +101,9 @@ fn av1_lr_params_from_fh(fh, seq, uw, fh_h, np, out_err): i64 {
         }
         plane = plane + 1;
     }
+    # read_lr scales its unit columns by SuperresDenom only when superres scales the frame (av1_fh_superres_scaled)
     av1_lr_params_set_frame_flags(params, av1_fh_allow_intrabc(fh),
-      av1_fh_use_superres(fh), av1_fh_superres_denom(fh));
+      av1_fh_superres_scaled(fh), av1_fh_superres_denom(fh));
     return params;
 }
 

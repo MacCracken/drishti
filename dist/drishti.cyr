@@ -2737,6 +2737,16 @@ fn av1_fh_render_width(fh): i64 { return load64(fh + AV1FH_RENDER_WIDTH); }
 fn av1_fh_render_height(fh): i64 { return load64(fh + AV1FH_RENDER_HEIGHT); }
 fn av1_fh_superres_denom(fh): i64 { return load64(fh + AV1FH_SUPERRES_DENOM); }
 fn av1_fh_use_superres(fh): i64 { return load64(fh + AV1FH_USE_SUPERRES); }
+# Whether superres actually SCALES this frame: FrameWidth != UpscaledWidth. libaom (av1_superres_scaled, "more
+# accurate" than the flag, av1/common/resize.h) and dav1d (width[0] != width[1]) gate the 7.16 upscale and the
+# loop-restoration unit scaling on this, not on use_superres. On every frame that meets Annex A the two agree: with
+# superres the formula never returns UpscaledWidth for UpscaledWidth >= 16. They differ only where the Min(16,
+# UpscaledWidth) floor of av1_superres_downscaled_width makes the widths equal — and there 7.16 with
+# stepX = 1 << SUPERRES_SCALE_BITS would shift every row a sample right, where both reference decoders leave it.
+fn av1_fh_superres_scaled(fh): i64 {
+    if (av1_fh_frame_width(fh) != av1_fh_upscaled_width(fh)) { return 1; }
+    return 0;
+}
 fn av1_fh_mi_cols(fh): i64 { return load64(fh + AV1FH_MI_COLS); }
 fn av1_fh_mi_rows(fh): i64 { return load64(fh + AV1FH_MI_ROWS); }
 fn av1_fh_allow_intrabc(fh): i64 { return load64(fh + AV1FH_ALLOW_INTRABC); }
@@ -2830,7 +2840,23 @@ fn av1_compute_image_size(fh): i64 {
     return DR_OK;
 }
 
-# superres_params() — 5.9.8.
+# The superres downscaled width: 5.9.8's FrameWidth = (UpscaledWidth * SUPERRES_NUM + (SuperresDenom / 2)) /
+# SuperresDenom, floored at Min(16, UpscaledWidth). Annex A requires every conforming bitstream to have
+# FrameWidth >= 16, and the bare formula breaks that for small frames (UpscaledWidth 24 at denominator 16 gives 12)
+# — which libaom's ENCODER writes. Both reference decoders apply this floor, libaom in calculate_scaled_size_helper
+# (av1/common/resize.c) and dav1d in src/obu.c (imax(formula, imin(16, width)), on the found_ref path too), so their
+# output is what such a stream means. On a frame that meets Annex A (formula >= 16) the floor changes nothing; without
+# superres (denominator 8) the formula is UpscaledWidth itself. scripts/refs/superres_width_ref.py transcribes both and
+# finds them equal on every (UpscaledWidth, denominator) pair.
+fn av1_superres_downscaled_width(upscaled, denom): i64 {
+    var w = ((upscaled * AV1_SUPERRES_NUM) + (denom / 2)) / denom;   # 5.9.8
+    var floor = upscaled;
+    if (floor > 16) { floor = 16; }                                  # Min(16, UpscaledWidth)
+    if (w < floor) { w = floor; }
+    return w;
+}
+
+# superres_params() — 5.9.8, with the downscaled width floored as av1_superres_downscaled_width says.
 fn av1_superres_params(br, s, fh): i64 {
     var use_superres = 0;
     if (av1_seq_enable_superres(s)) {
@@ -2845,8 +2871,7 @@ fn av1_superres_params(br, s, fh): i64 {
     store64(fh + AV1FH_SUPERRES_DENOM, denom);
     var upscaled = av1_fh_frame_width(fh);
     store64(fh + AV1FH_UPSCALED_WIDTH, upscaled);
-    store64(fh + AV1FH_FRAME_WIDTH,
-      (upscaled * AV1_SUPERRES_NUM + (denom / 2)) / denom);
+    store64(fh + AV1FH_FRAME_WIDTH, av1_superres_downscaled_width(upscaled, denom));
     return dr_br_err(br);
 }
 
@@ -25698,7 +25723,7 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
     #     frames, so both are upscaled — they alias when CDEF is disabled.
     var sr_curr = frame;
     var sr_cdef = cdef_frame;
-    if (av1_fh_use_superres(fh) != 0) {
+    if (av1_fh_superres_scaled(fh) != 0) {   # FrameWidth != UpscaledWidth, as libaom and dav1d gate it
         var up_w = av1_fh_upscaled_width(fh);
         sr_curr = av1_superres_upscale_new(frame, up_w, out_err);
         if (sr_curr == 0) { return 0; }
@@ -25747,8 +25772,9 @@ fn av1_lr_params_from_fh(fh, seq, uw, fh_h, np, out_err): i64 {
         }
         plane = plane + 1;
     }
+    # read_lr scales its unit columns by SuperresDenom only when superres scales the frame (av1_fh_superres_scaled)
     av1_lr_params_set_frame_flags(params, av1_fh_allow_intrabc(fh),
-      av1_fh_use_superres(fh), av1_fh_superres_denom(fh));
+      av1_fh_superres_scaled(fh), av1_fh_superres_denom(fh));
     return params;
 }
 

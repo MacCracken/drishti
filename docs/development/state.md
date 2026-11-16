@@ -1803,9 +1803,20 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   libaom's OWN superres encodes below 32 samples wide: 24x24 / 30x40 match only on the keyframe, 16x16 fails.
 >
 > Deliberate: `invalid-oss-fuzz-10779`'s final OBU without `obu_size` (libaom refuses, dav1d and drishti decode, the
-> same pixels), so dav1d is its reference (`INVALID_DAV1D_REF`). Gate: 3832 matched / 2 known-gap / 0 / 0.
-> Next: fix the two gaps (the padding check; the superres minimum, with small-width superres cases), then the
-> `av1_sym_decode` bound, the 7.12.3 reconstruct guard, OOM fault injection, corpus-guided fuzzing.
+> same pixels), so dav1d is its reference (`INVALID_DAV1D_REF`). Gate: 3832 matched / 2 known-gap / 0 / 0 at bite 2.
+>
+> Bite 3 = **superres at small widths FIXED**:
+> - `av1_superres_downscaled_width` floors 5.9.8's FrameWidth at `Min(16, UpscaledWidth)`, as libaom
+>   (`calculate_scaled_size_helper`) and dav1d (`src/obu.c`) do;
+> - `av1_fh_superres_scaled` (FrameWidth != UpscaledWidth, libaom `av1_superres_scaled`, dav1d `width[0] !=
+>   width[1]`) now gates the 7.16 upscale and read_lr's unit scaling, where `use_superres` used to (at equal widths
+>   7.16 would shift a sample).
+>
+> Neither rule changes a frame that meets Annex A. libaom's superres encodes 8 to 30 wide now decode bit-exact: ten
+> cases and the reproducers `srmin-24x24` / `srmin-16x16`. TRAP: dav1d 1.5.4 decodes NOTHING of an equal-width
+> superres stream ("Cannot allocate memory"), so those are judged against aomdec alone. Gate: 3929 / 1 / 0 / 0
+> (10117 unit 1 left the known gaps). Next: the padding check (the last known gap), then the `av1_sym_decode` bound,
+> the 7.12.3 reconstruct guard, OOM fault injection, corpus-guided fuzzing.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

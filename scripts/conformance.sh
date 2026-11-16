@@ -137,10 +137,9 @@ INVALID_DAV1D_REF="invalid-oss-fuzz-10779"
 #  - invalid-oss-fuzz-10227:1 — the tile ends with ~12.7 KB unread, not padded with zeros. The 8.2.4 exit process
 #    requires the trailing bit and zero padding; drishti's exit enforces only SymbolMaxBits >= -14, while libaom
 #    (check_trailing_bits_after_symbol_coder) and dav1d refuse the frame.
-#  - invalid-oss-fuzz-10117-mc-buf-use-highbd:1 — a 2-wide superres frame. drishti takes the spec formula's
-#    FrameWidth 1; libaom and dav1d take max(formula, Min(16, UpscaledWidth)) = 2 (Annex A: FrameWidth >= 16).
-#    libaom's own small-width superres encodes hit the same split.
-INVALID_XFAIL_UNITS="invalid-oss-fuzz-10227:1 invalid-oss-fuzz-10117-mc-buf-use-highbd:1"
+# (invalid-oss-fuzz-10117-mc-buf-use-highbd:1, a 2-wide superres frame, was listed here until 0.8.5 bite 3 gave the
+# superres width the Min(16, UpscaledWidth) floor libaom and dav1d use; it matches now.)
+INVALID_XFAIL_UNITS="invalid-oss-fuzz-10227:1"
 IBC_CASES="ibc_352x288 ibc0_352x288 ibcodd_349x197 ibcodd_173x101 ibc444_176x144 ibc422_352x288 ibcb10_352x288 \
 ibcb12_352x288 ibcmono_352x288 ibcll_352x288 ibc128_352x288 ibctile_640x360 ibcaq_352x288 ibcgop_352x288"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
@@ -169,6 +168,14 @@ gopsf_176x144 gopnoord_176x144 gopnomfmv_176x144 gopc0_176x144"
 # NOT a multiple of 8 — the frames with overhang columns, which 7.16's MI-grid tap clamp reads (see sr_property).
 SR_CASES="srfix_352x288 srrand_352x288 srsb128_352x288 srodd_175x99 srtiles_640x360 srrt_352x288 srlr_197x113 \
 srresize_352x288"
+# SUPERRES AT SMALL WIDTHS (0.8.5), srmin_WxH[_dD][_b10][_eq|_rand], every frame hard: libaom superres encodes whose
+# downscaled width the Min(16, UpscaledWidth) floor decides (5.9.8 + Annex A, as libaom and dav1d compute it; see
+# av1_superres_downscaled_width). Denominator D (default 16); _eq frames come out as wide as their upscaled width
+# (UpscaledWidth <= 16), which libaom and dav1d then do NOT upscale (av1_fh_superres_scaled); _rand uses random
+# denominators. Every case failed on the 0.8.5-bite-2 decoder (the bare formula; 24x24 matched only its keyframe,
+# 16x16 refused its superres frames). srmin_property proves the floor bites (and, for _eq, equal widths).
+SRMIN_CASES="srmin_24x24 srmin_30x40 srmin_17x9 srmin_20x18_d12 srmin_24x24_b10 srmin_16x16_eq srmin_12x12_eq \
+srmin_8x16_d9_eq srmin_16x16_b10_eq srmin_28x28_rand"
 # THE FULL PUBLISHED CORPUS (0.8.5): every AV1 vector libaom's test/test_vectors.cc lists (kAV1TestVectors,
 # libaom 3.15.3) — 240 .ivf here plus the 2 .mkv in PUBLISHED_MKV. The quantizer and size families are generated
 # from libaom's naming (quantizer 00..63 at 8 and 10 bits; sizes WxH over {16,18,32,34,64,66} and over
@@ -240,6 +247,7 @@ skip_external() { # reason
     for c in $SVTOPEN_CASES; do skip_case "$c" "$1"; done
     for c in $GOP_CASES; do skip_case "$c" "$1"; done
     for c in $SR_CASES; do skip_case "$c" "$1"; done
+    for c in $SRMIN_CASES; do skip_case "$c" "$1"; done
     for c in $FMT_CASES; do skip_case "$c" "$1"; done
     for c in $DIM_CASES; do skip_case "$c" "$1"; done
     for c in $RS_CASES; do skip_case "$c" "$1"; done
@@ -432,6 +440,14 @@ repro_seq  ibc-352x288 2 2
 repro_seq  ibc-sb128-352x288 2 2
 repro_seq  ibc-odd-349x197 2 2
 repro_seq  ibc-b10-352x288 2 2
+# SUPERRES AT SMALL WIDTHS (0.8.5), libaom 3.15.3 `--superres-mode=1 --superres-denominator=16
+# --superres-kf-denominator=16 --lag-in-frames=0`, 8 frames of mandelbrot; md5s from aomdec, dav1d agreeing. In
+# srmin-24x24 the bare 5.9.8 formula gives FrameWidth 12, libaom / dav1d / drishti 16 (the Min(16, UpscaledWidth)
+# floor); in srmin-16x16 the floor makes FrameWidth = UpscaledWidth = 16, so nothing is upscaled. On the
+# 0.8.5-bite-2 decoder the first matched only its keyframe and the second refused its superres frames. dav1d 1.5.4
+# decodes nothing of srmin-16x16 ("Cannot allocate memory"), so its md5s are aomdec's alone.
+repro_seq  srmin-24x24 8 8
+repro_seq  srmin-16x16 8 8
 # LARGE SCALE TILE (0.8.4): libaom's lightfield pipeline (examples/lightfield_encoder -> lightfield_bitstream_parsing,
 # 8-bit 4:2:0, 64x64 tiles) on mandelbrot views: N anchor temporal units, the camera frame header, then tile list
 # OBUs. Each .md5 line is one temporal unit: an anchor (libaom's own anchor output), "-" for the camera header (no
@@ -1147,8 +1163,10 @@ gopcase() { # name = KIND_WxH
 # frame size, so aomdec writes ONE FILE PER FRAME (its `%6` output pattern), each at its own size, and drishti's
 # harness does the same. dav1d's guard compares the concatenation. The frame count comes from the reference and
 # must equal the frames encoded.
-vs_judge() { # n fr — decode, per-frame reference, dav1d guard, per-frame compare (every frame hard)
-    local n="$1" fr="$2"
+# A third argument "nodav1d" drops the dav1d guard, for streams dav1d cannot decode at all (each caller says why).
+vs_judge() { # n fr [nodav1d] — decode, per-frame reference, dav1d guard, per-frame compare (every frame hard)
+    local n="$1" fr="$2" guard=1
+    [ "${3:-}" = "nodav1d" ] && guard=0
     run_drishti "$WORK/$n.ivf" "$WORK/$n.log" || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
     rm -f "${WORK:?}/$n.ref-"* "${WORK:?}/$n.ref" "${WORK:?}/$n.dav1d.yuv"
     aomdec --rawvideo -o "$WORK/$n.ref-%6.yuv" "$WORK/$n.ivf" 2>/dev/null
@@ -1156,7 +1174,7 @@ vs_judge() { # n fr — decode, per-frame reference, dav1d guard, per-frame comp
     if [ "$nref" -ne "$fr" ]; then
         echo "  $n: SETUP FAILED (aomdec wrote $nref frame(s), not $fr)"; fail=$((fail+1)); return
     fi
-    if command -v dav1d >/dev/null 2>&1; then
+    if [ "$guard" = "1" ] && command -v dav1d >/dev/null 2>&1; then
         dav1d -q -i "$WORK/$n.ivf" -o "$WORK/$n.dav1d.yuv" >/dev/null 2>&1
         local k=1
         while [ "$k" -le "$fr" ]; do cat "$WORK/$n.ref-$(printf %06d "$k").yuv"; k=$((k+1)); done > "$WORK/$n.ref"
@@ -2107,6 +2125,56 @@ for c in $ODDMII_CASES; do oddmiicase "$c"; done
 
 echo "--- superres (7.16 upscaling with overhang columns; tiles, 128-SB, LR, resize); every frame hard ---"
 for c in $SR_CASES; do srcase "$c"; done
+# superres frames whose width the floor decides: "floored=N" counts superres frames whose FrameWidth exceeds the bare
+# 5.9.8 formula, "equal=N" those whose FrameWidth equals UpscaledWidth. Prints both; fails (exit 1) unless floored
+# reaches min_floored and, with want "eq", equal reaches 2 — or, without it, no frame is equal (they are scaled).
+srmin_property() { # want min_floored
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" -v minf="$2" '
+        /^  frame_width=/ { split($0, a, "="); fw = a[2] + 0 }
+        /^  upscaled_width=/ { split($0, a, "="); uw = a[2] + 0 }
+        /^  superres_denom=/ { split($0, a, "="); d = a[2] + 0
+            if (d > 8) { if (fw == uw) eq++; if (fw > int((uw * 8 + int(d / 2)) / d)) fl++ } }
+        END {
+            printf "floored=%d equal=%d", fl, eq
+            if (fl < minf) exit 1
+            if (want == "eq" && eq < 2) exit 1
+            if (want != "eq" && eq > 0) exit 1
+        }'
+}
+srmincase() { # name = srmin_WxH[_dD][_b10][_eq|_rand]
+    local n="$1" geo rest
+    geo="${n#srmin_}"; geo="${geo%%_*}"; rest="${n#srmin_"$geo"}"
+    local w="${geo%x*}" h="${geo#*x}" d=16 bd=8 want="floor" mode=1 minf=2 pix=yuv420p fr=8 t
+    for t in ${rest//_/ }; do
+        case "$t" in
+            d[0-9]*) d="${t#d}" ;;
+            b10) bd=10; pix=yuv420p10le ;;
+            eq) want="eq" ;;
+            rand) mode=2; minf=1 ;;
+            *) echo "  $n: SETUP FAILED (unknown case token $t)"; fail=$((fail+1)); return ;;
+        esac
+    done
+    local den=(--superres-denominator="$d" --superres-kf-denominator="$d")
+    [ "$mode" = "2" ] && den=()
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.y4m"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=25" -frames:v "$fr" -pix_fmt "$pix" \
+        -strict -1 "$WORK/$n.y4m" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    aomenc --quiet --limit="$fr" --bit-depth="$bd" --superres-mode="$mode" "${den[@]}" --lag-in-frames=0 \
+        -o "$WORK/$n.ivf" "$WORK/$n.y4m" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(srmin_property "$want" "$minf"); then
+        echo "  $n: SETUP FAILED (property: $prop — the case would prove nothing)"; fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    # dav1d 1.5.4 decodes NOTHING of an _eq stream ("Cannot allocate memory", the keyframe included), although its
+    # src/obu.c applies the same floor and its src/decode.c the same width test; aomdec is the only reference there.
+    if [ "$want" = "eq" ]; then vs_judge "$n" "$fr" nodav1d; else vs_judge "$n" "$fr"; fi
+}
+echo "--- superres at small widths (5.9.8 + Annex A: FrameWidth >= Min(16, UpscaledWidth); every frame hard) ---"
+for c in $SRMIN_CASES; do srmincase "$c"; done
 
 echo "--- chroma formats: monochrome, 4:4:4, 4:2:2 (palettes, LR, superres, 128-SB, odd MI); every frame hard ---"
 for c in $FMT_CASES; do fmtcase "$c"; done

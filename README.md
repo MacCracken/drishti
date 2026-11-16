@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 33 × `src/av1_*.cyr` — **`make conformance` 3832 matched / 2 known-gap / 0 regressed**: every hard case is BIT-EXACT vs libaom (`aomdec`; its lightfield decoder for tile lists); the 2 known gaps are defects libaom's invalid-stream corpus found (0.8.5). Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; scalable streams at every operating point; ALL 242 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, large-scale tile, operating points + `drop_obu`, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. No coding tool rejects |
+| **AV1** | decode + encode | dav1d + rav1e | 33 × `src/av1_*.cyr` — **`make conformance` 3929 matched / 1 known-gap / 0 regressed**: every hard case is BIT-EXACT vs libaom (`aomdec`; its lightfield decoder for tile lists); the known gap is a defect libaom's invalid-stream corpus found (0.8.5). Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; scalable streams at every operating point; ALL 242 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, large-scale tile, operating points + `drop_obu`, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. No coding tool rejects |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -22,7 +22,7 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.8.4 (AV1: **`make conformance` is 3832 matched / 2 KNOWN-GAP / 0 regressed / 0 skipped** — every hard case BIT-EXACT against libaom, with dav1d as a tiebreak. The gate is a standing matrix over every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome), GOPs to 90 frames with hidden frames and `show_existing_frame`, frame sizes from 1x1 up at both superblock sizes, superres and scaled references; it scores every frame of all 242 published libaom conformance vectors, and streams from three encoders (libaom, rav1e, SVT-AV1). Quantizer matrices decode (0.8.4: the 4 former known gaps, plus 13 libaom / SVT-AV1 QM cases), and film grain is synthesised on the output (0.8.4: before it, grain streams decoded grain-free without a word; both published grain vectors now match), intra block copy decodes (0.8.4: libaom screen-content keyframes, 14 cases), large-scale tile decodes (0.8.4: tile list OBUs against application-supplied anchors, every anchor and list of libaom's lightfield tools matched), and any operating point of a scalable stream decodes (0.8.4: 5.3.1's `drop_obu`; before it every layer was decoded whatever the point, which matched libaom only at point 0). Multi-tile, every segmentation feature, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
+## Status — 0.8.4 (AV1: **`make conformance` is 3929 matched / 1 KNOWN-GAP / 0 regressed / 0 skipped** — every hard case BIT-EXACT against libaom, with dav1d as a tiebreak. The gate is a standing matrix over every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome), GOPs to 90 frames with hidden frames and `show_existing_frame`, frame sizes from 1x1 up at both superblock sizes, superres and scaled references; it scores every frame of all 242 published libaom conformance vectors, and streams from three encoders (libaom, rav1e, SVT-AV1). Quantizer matrices decode (0.8.4: the 4 former known gaps, plus 13 libaom / SVT-AV1 QM cases), and film grain is synthesised on the output (0.8.4: before it, grain streams decoded grain-free without a word; both published grain vectors now match), intra block copy decodes (0.8.4: libaom screen-content keyframes, 14 cases), large-scale tile decodes (0.8.4: tile list OBUs against application-supplied anchors, every anchor and list of libaom's lightfield tools matched), and any operating point of a scalable stream decodes (0.8.4: 5.3.1's `drop_obu`; before it every layer was decoded whatever the point, which matched libaom only at point 0). Multi-tile, every segmentation feature, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
 derived, and adversarially tested (31,447 suite assertions + 7,410 fuzz
@@ -123,16 +123,14 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   VP9 uncompressed header
 
 AV1 decodes end-to-end to pixels, **keyframes and inter frames alike**, and
-`make conformance` is **3832 matched / 2 known-gap / 0 regressed** against
+`make conformance` is **3929 matched / 1 known-gap / 0 regressed** against
 `aomdec`, on every frame. The gate covers every profile, bit depth and chroma
 format, long GOPs, frame sizes from 1x1 up, superres, scaled references,
 scalable streams at every operating point, all 242 published libaom vectors,
 streams from three encoders, and committed reproducers that run without
 libaom. No coding tool rejects. Beyond it:
-- 2 known gaps, found by libaom's invalid-stream corpus and scheduled in
-  0.8.5: a tile with non-zero padding is accepted (the 8.2.4 exit check),
-  and superres frames below 32 samples wide mis-decode (libaom and dav1d
-  clamp FrameWidth to at least Min(16, UpscaledWidth));
+- 1 known gap, found by libaom's invalid-stream corpus and scheduled in
+  0.8.5: a tile with non-zero padding is accepted (the 8.2.4 exit check);
 - there is **no encoder** yet: what ships as "encode" is a plan-driven
   bitstream writer.
 

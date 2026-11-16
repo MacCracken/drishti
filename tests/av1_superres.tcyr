@@ -347,8 +347,134 @@ fn test_superres_mi_clamp() {
     return 0;
 }
 
+# ================================================================
+# The superres downscaled width (5.9.8 + Annex A's FrameWidth >= 16, as libaom and dav1d floor it at
+# Min(16, UpscaledWidth)). Known answers from scripts/refs/superres_width_ref.py, which transcribes libaom's
+# calculate_scaled_size_helper and dav1d's src/obu.c and asserts them equal on every (width, denominator) pair.
+# ================================================================
+fn sw_case(w, d, want, what): i64 {
+    assert_eq(av1_superres_downscaled_width(w, d), want, what);
+    return 0;
+}
+fn test_superres_width_table() {
+    sw_case(2, 16, 2, "2 at 16: the formula's 1 floors to 2 (invalid-oss-fuzz-10117)");
+    sw_case(1, 16, 1, "1 at 16: the floor never exceeds the upscaled width");
+    sw_case(24, 16, 16, "24 at 16: libaom's 24x24 superres encode (formula 12)");
+    sw_case(16, 16, 16, "16 at 16: libaom's 16x16 encode (formula 8)");
+    sw_case(30, 16, 16, "30 at 16: libaom's 30x40 encode (formula 15)");
+    sw_case(31, 16, 16, "31 at 16: the formula already gives 16");
+    sw_case(33, 16, 17, "33 at 16: 17, untouched");
+    sw_case(17, 16, 16, "17 at 16: formula 9");
+    sw_case(15, 16, 15, "15 at 16: below 16, no downscale at all (formula 8)");
+    sw_case(8, 9, 8, "8 at 9: formula 7");
+    sw_case(24, 9, 21, "24 at 9: 21, conforming");
+    sw_case(35, 16, 18, "35 at 16: 18");
+    sw_case(352, 16, 176, "352 at 16: 176");
+    sw_case(40, 8, 40, "no superres (denominator 8): the width itself");
+    return 0;
+}
+# every UpscaledWidth 1..65536 at every denominator 9..16: the floor changes the bare 5.9.8 formula on exactly the
+# pairs superres_width_ref.py counts (29 at 16 and 13 at 9 derived by hand there), and never a conforming one
+fn test_superres_width_sweep() {
+    var total = 0;
+    var conforming_changed = 0;
+    var d = 9;
+    while (d <= 16) {
+        var per = 0;
+        var w = 1;
+        while (w <= 65536) {
+            var formula = ((w * 8) + (d / 2)) / d;
+            var got = av1_superres_downscaled_width(w, d);
+            if (got != formula) { per = per + 1; }
+            if ((formula >= 16) && (got != formula)) { conforming_changed = conforming_changed + 1; }
+            w = w + 1;
+        }
+        if (d == 9) { assert_eq(per, 13, "denominator 9: 13 widths floored"); }
+        if (d == 16) { assert_eq(per, 29, "denominator 16: 29 widths floored"); }
+        total = total + per;
+        d = d + 1;
+    }
+    assert_eq(total, 179, "179 (width, denominator) pairs floored in all");
+    assert_eq(conforming_changed, 0, "no width that meets Annex A (formula >= 16) is changed");
+    return 0;
+}
+# superres_params itself uses the floored width: use_superres 1, coded_denom 7 (denominator 16) on a 24-wide frame
+fn test_superres_params_width() {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_ENABLE_SUPERRES, 1);
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_WIDTH, 24);
+    var b = alloc(8);   # bytes
+    store8(b, 240);     # 1111 0000: use_superres 1, coded_denom 111 = 7
+    var br = dr_br_init(b, 1);
+    assert_eq(av1_superres_params(br, s, fh), DR_OK, "superres_params parses");
+    assert_eq(av1_fh_superres_denom(fh), 16, "SuperresDenom 16");
+    assert_eq(av1_fh_upscaled_width(fh), 24, "UpscaledWidth 24");
+    assert_eq(av1_fh_frame_width(fh), 16, "FrameWidth 16, not the formula's 12");
+    store64(fh + AV1FH_FRAME_WIDTH, 24);
+    store8(b, 0);       # use_superres 0
+    br = dr_br_init(b, 1);
+    av1_superres_params(br, s, fh);
+    assert_eq(av1_fh_frame_width(fh), 24, "without superres FrameWidth stays 24");
+    assert_eq(av1_fh_superres_scaled(fh), 0, "...and nothing is scaled");
+    # 16 wide at denominator 16: use_superres 1, but the floor gives FrameWidth 16 = UpscaledWidth, so the frame is
+    # NOT scaled (libaom av1_superres_scaled, dav1d width[0] != width[1]); 7.16 would shift every row a sample
+    store64(fh + AV1FH_FRAME_WIDTH, 16);
+    store8(b, 240);
+    br = dr_br_init(b, 1);
+    av1_superres_params(br, s, fh);
+    assert_eq(av1_fh_use_superres(fh), 1, "16 at denominator 16: use_superres 1");
+    assert_eq(av1_fh_frame_width(fh), 16, "...FrameWidth 16");
+    assert_eq(av1_fh_superres_scaled(fh), 0, "...yet not scaled: the widths are equal");
+    store64(fh + AV1FH_FRAME_WIDTH, 24);
+    br = dr_br_init(b, 1);
+    av1_superres_params(br, s, fh);
+    assert_eq(av1_fh_superres_scaled(fh), 1, "24 at denominator 16 (FrameWidth 16): scaled");
+    return 0;
+}
+
+# read_lr's superres flag (the loop-restoration unit columns scaled by SuperresDenom) follows av1_fh_superres_scaled,
+# not use_superres: libaom's av1_loop_restoration_corners_in_sb and dav1d's read_restoration_info both key off the
+# widths. libaom never enables loop restoration on the equal-width frames, so no gated stream reaches this.
+fn sr_lr_fh(fw, uw): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_USES_LR, 1);
+    store64(fh + AV1FH_FRAME_RESTORATION_TYPE, AV1_RESTORE_WIENER);
+    store64(fh + AV1FH_LR_SIZE, 64);
+    store64(fh + AV1FH_USE_SUPERRES, 1);
+    store64(fh + AV1FH_SUPERRES_DENOM, 16);
+    store64(fh + AV1FH_FRAME_WIDTH, fw);
+    store64(fh + AV1FH_UPSCALED_WIDTH, uw);
+    store64(fh + AV1FH_FRAME_HEIGHT, 16);
+    return fh;
+}
+fn test_superres_lr_flag() {
+    var seq = alloc(AV1_SEQ_SIZE);
+    memset(seq, 0, AV1_SEQ_SIZE);
+    store64(seq + AV1_SEQ_NUM_PLANES, 1);
+    var e = 0;
+    var p = av1_lr_params_from_fh(sr_lr_fh(16, 16), seq, 16, 16, 1, &e);
+    assert_neq(p, 0, "LR params for a 16-wide frame at denominator 16");
+    if (p != 0) { assert_eq(av1_lr_superres(p), 0, "...whose widths are equal: read_lr does not scale"); }
+    var q = av1_lr_params_from_fh(sr_lr_fh(16, 24), seq, 24, 16, 1, &e);
+    assert_neq(q, 0, "LR params for 24 upscaled from 16");
+    if (q != 0) {
+        assert_eq(av1_lr_superres(q), 1, "...scaled: read_lr scales its unit columns");
+        assert_eq(av1_lr_srdenom(q), 16, "...by SuperresDenom 16");
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("the superres downscaled width (5.9.8, Annex A; libaom + dav1d)");
+    test_superres_lr_flag();
+    test_superres_width_table();
+    test_superres_width_sweep();
+    test_superres_params_width();
     test_group("Upscale_Filter table invariants (spec 7.16)");
     test_upscale_filter_invariants();
     test_group("superres per-plane frame upscale (spec 7.16)");

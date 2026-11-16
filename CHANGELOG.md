@@ -4,6 +4,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.5 bite 3: superres at small widths (the Min(16, UpscaledWidth) floor; equal widths are not scaled)
+
+**libaom's own superres encodes below 32 samples wide now decode.** Before, at 24x24 and 30x40 only the keyframe
+matched `aomdec`, and at 16x16 every superres frame was REFUSED. The gate never covered those widths; libaom's
+invalid-stream corpus found it (bite 2).
+- **The width.** 5.9.8 computes `FrameWidth = (UpscaledWidth * 8 + SuperresDenom / 2) / SuperresDenom`. For a
+  small frame that drops below 16, e.g. 24 at denominator 16 gives 12. Annex A forbids that ("FrameWidth is greater
+  than or equal to 16"), and both reference decoders floor it at `Min(16, UpscaledWidth)`: libaom in
+  `calculate_scaled_size_helper`, dav1d in `src/obu.c` (`imax(formula, imin(16, w))`, on the `found_ref` path too).
+  `av1_superres_downscaled_width` (`src/av1_frame.cyr`) does the same.
+- **When superres scales.** The floor can make `FrameWidth` equal `UpscaledWidth` (any upscaled width up to 16).
+  Then `use_superres` is 1 but nothing is scaled: libaom (`av1_superres_scaled`) and dav1d (`width[0] !=
+  width[1]`) skip the 7.16 upscale AND scale no loop-restoration unit by the denominator. A literal 7.16 at equal
+  widths has `stepX = 1 << 14` and would shift every row a sample right. `av1_fh_superres_scaled` is that width
+  test, and both sites use it (the upscale in `av1_frame_dec_finish`, `read_lr`'s flag in
+  `av1_lr_params_from_fh`).
+- **Conforming streams are unaffected.** On a frame that meets Annex A neither rule changes anything: the formula
+  is already >= 16, and with superres it never returns `UpscaledWidth` for widths of 16 or more.
+
+**The reference, `scripts/refs/superres_width_ref.py`,** transcribes libaom's and dav1d's rules separately and
+asserts them equal on all 524,288 (UpscaledWidth 1..65536, denominator 9..16) pairs, and asserts that no
+conforming width changes. The floored count is derived by hand for denominators 16 (29 widths) and 9 (13); 179 in
+all. **`tests/av1_superres.tcyr`** (+33 assertions, now 205) pins:
+- the 14-case table and the full sweep;
+- `superres_params`' wiring, at 24 and 16 wide, and the scaled / not-scaled distinction;
+- `read_lr`'s flag on an equal-width frame. libaom never enables loop restoration there, so no stream can show it.
+
+Mutation testing:
+- **Unit:** 7 of 8 go red. The survivor gates the upscale on `use_superres`, which the unit suite cannot see.
+- **Gate:** 2 of 3 go red. Removing the floor fails every small-width case, both reproducers and the corpus unit.
+  Gating the upscale on `use_superres` fails the four equal-width cases and `srmin-16x16`; that is the mutant the
+  unit suite missed. The survivor returns `read_lr`'s flag to `use_superres`, which no stream can show, and the
+  unit test kills it.
+
+**`make conformance`** gains a small-width superres section, every frame hard against `aomdec`:
+- 24x24, 30x40, 17x9 and 20x18 at denominator 12, and a 10-bit 24x24;
+- the equal-width 16x16, 12x12, 8x16 at denominator 9, and a 10-bit 16x16;
+- random denominators at 28x28.
+
+`srmin_property` proves the floor bites in each, and equal widths where claimed. dav1d agrees on all but the
+equal-width streams, of which **dav1d 1.5.4 decodes nothing** ("Cannot allocate memory", the keyframe included),
+although its source applies both rules; aomdec alone is their reference (`vs_judge ... nodav1d`). Two reproducers
+are committed: `srmin-24x24` (2.2 KB) and `srmin-16x16` (0.7 KB). The corpus's `invalid-oss-fuzz-10117` unit 1 now
+matches and leaves `INVALID_XFAIL_UNITS`.
+
+`make conformance` is **3929 matched / 1 known-gap / 0 regressed / 0 skipped** (was 3832 / 2).
+
+**Gates:** 44 suites, **31,480** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`,
+`version-check` and `distlib --check` all green.
+
 ### Added — 0.8.5 bite 2: libaom's invalid-stream corpus gated; two decoder defects found and held as known gaps
 
 **libaom's own fuzz and crash corpus runs in `make conformance`: the 23 streams of `test/invalid_file_test.cc`, with
