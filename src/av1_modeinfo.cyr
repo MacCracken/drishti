@@ -85,7 +85,7 @@ fn av1_mi_fill4(t, off, a, b, c, d) {
 }
 fn av1_blk_tables(): i64 {
     if (Av1_BlkTab != 0) { return Av1_BlkTab; }
-    var t = alloc(211 * 8);           # 211 i64
+    var t = dr_alloc(211 * 8);           # 211 i64
     if (t == 0) { return 0; }
     # Mi_Width_Log2[22]
     av1_mi_fill22(t, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4);
@@ -174,7 +174,7 @@ enum Av1ModeInfoOff {
     AV1MI_SIZE       = 320;
 }
 fn av1_modeinfo_new(): i64 {
-    var mi = alloc(AV1MI_SIZE);
+    var mi = dr_alloc(AV1MI_SIZE);
     if (mi == 0) { return 0; }
     store64(mi + AV1MI_SKIP, 0);
     store64(mi + AV1MI_YMODE, AV1_DC_PRED);
@@ -270,8 +270,18 @@ fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): 
 # read_segment_id (5.11.11) — the spatial map read. `skip` short-circuits to pred (no symbol); else
 # read @@segment_id from Segment_Id_Cdf[ctx], map via neg_deinterleave, clamp to [0, LastActiveSegId]
 # (a hostile stream cannot drive an OOB segment index — trust no input byte).
+# {pred, ctx} live in one persistent 2-entry scratch (0.8.5): it was allocated per block — arena growth per
+# block (the 0.7.60 lesson) and an unchecked OOM site. av1_tables_init builds it; a failed build latches
+# DR_ERR_OOM on the coder and reads segment 0 (an in-range index, so nothing downstream overruns).
+var Av1_SegIdPc = 0;
+fn av1_segid_scratch(): i64 {
+    if (Av1_SegIdPc != 0) { return Av1_SegIdPc; }
+    Av1_SegIdPc = dr_alloc(2 * 8);   # 2 u64: pred, ctx
+    return Av1_SegIdPc;
+}
 fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip): i64 {
-    var pc = alloc(16);
+    var pc = av1_segid_scratch();
+    if (pc == 0) { av1_sym_dec_fail(sd, DR_ERR_OOM); return 0; }
     av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, pc);
     var pred = load64(pc + 0);
     if (skip != 0) { return pred; }
@@ -286,7 +296,8 @@ fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, a
 # SegmentIds map than decode derives, desyncing every later block's spatial prediction. Surface it as
 # DR_ERR_BOUNDS (the av1_write_skip_mode / av1_write_is_inter convention), never a silently-desynced stream.
 fn av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip, segment_id): i64 {
-    var pc = alloc(16);
+    var pc = av1_segid_scratch();
+    if (pc == 0) { return DR_ERR_OOM; }
     av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, pc);
     var pred = load64(pc + 0);
     if (skip != 0) {
@@ -335,10 +346,10 @@ enum Av1SegCtx {
     AV1SC_SIZE     = 48;   # bytes
 }
 fn av1_segctx_new(segids, prev, fmi_cols, fmi_rows): i64 {
-    var sc = alloc(AV1SC_SIZE);   # AV1SC_SIZE bytes
+    var sc = dr_alloc(AV1SC_SIZE);   # AV1SC_SIZE bytes
     if (sc == 0) { return 0; }
-    var above = alloc((fmi_cols + 32) * 8);   # (FMI_COLS + 32) u64
-    var left = alloc((fmi_rows + 32) * 8);    # (FMI_ROWS + 32) u64
+    var above = dr_alloc((fmi_cols + 32) * 8);   # (FMI_COLS + 32) u64
+    var left = dr_alloc((fmi_rows + 32) * 8);    # (FMI_ROWS + 32) u64
     if ((above == 0) || (left == 0)) { return 0; }
     memset(above, 0, (fmi_cols + 32) * 8);   # alloc does not zero
     memset(left, 0, (fmi_rows + 32) * 8);
@@ -849,7 +860,7 @@ enum Av1DeltaConst {
     AV1_DQPLAN_W        = 5;    # plan cell: reduced delta_q, reduced delta_lf[0..3]
 }
 fn av1_dctx_new(dq_present, dq_res, lf_present, lf_res, lf_multi, num_planes, sb_size, base_q): i64 {
-    var d = alloc(AV1DQ_SIZE);
+    var d = dr_alloc(AV1DQ_SIZE);
     if (d == 0) { return 0; }
     store64(d + AV1DQ_DQ_PRESENT, dq_present);
     store64(d + AV1DQ_DQ_RES, dq_res);

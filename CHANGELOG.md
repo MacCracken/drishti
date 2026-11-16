@@ -4,6 +4,108 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 7: OOM fault injection — every allocation can fail, and every failure stops the decode with DR_ERR_OOM
+
+**Any allocation in drishti can now be made to fail, and every failure the decode lane can reach is reported as
+`DR_ERR_OOM`.** Before, there were ~140 `DR_ERR_OOM` branches and none was witnessed, because the stdlib allocator
+never fails under test. Injection found that many allocations had no branch at all. It also found that OOM produced
+silent mis-decodes, not just crashes.
+- **The injectable allocator.** All 225 `alloc` calls in `src/` now go through `dr_alloc` (`src/drishti.cyr`).
+  `dr_alloc_fail_at(k)` makes the k-th call from then on return 0, once; `dr_alloc_count()` counts the calls. With
+  injection off it is the stdlib `alloc`, and every suite and stream is unchanged.
+- **`dr_alloc_sweep(fp, arg, out_n)`.** This is the shared witness. It runs an operation once to build any lazy
+  state, once more to count its N allocations, then N more times with the k-th failing. Every failing run must
+  return `DR_ERR_OOM`, and a final fault-free run must succeed again. A crash, another code (a mislabelled OOM), or
+  a success (a swallowed failure) is caught at its k.
+- **The gate.** `programs/conformance.cyr` reads `build/conformance-input.oom` (k) before it builds anything, so the
+  IVF reader and decoder constructors are covered too. It prints each unit's allocation count. New
+  `scripts/oom-sweep.sh` builds a site-tagged copy of the harness, in which `dr_alloc(` becomes
+  `dr_alloc_at(site, `, and traces a fault-free decode. It then fails each allocation SITE at its first and last
+  occurrence and three spaced between, every occurrence when there are 5 or fewer. Each run is judged OOM, CRASH,
+  CORRUPT (a decoded unit differs from the fault-free decode), ERR (another code) or TOLERATED.
+- **The new `make conformance` section** runs over ten committed reproducers. Each fault-free baseline must first
+  match its committed reference md5s. `srmin-16x16` fails every k. The section reaches **157 of the 199 allocation
+  sites**, every one the decode lane reaches; the other 42 are on the encode lane or in the other codec families,
+  which their suites sweep. It takes ~45 s and needs python3 (without it the section is skipped, never passed).
+
+**What injection found, all fixed:**
+- **Crashes in lazily-built tables.** ~45 getters cache a table built on first use and are read unchecked
+  (`load64(av1_x_tables() + ...)`). A failed build dereferenced a null pointer wherever it was first touched.
+  `av1_tables_init` (`src/av1_intertile.cyr`) now builds every lazy table and persistent scratch, and
+  `av1_tile_new` refuses a tile without them. Two getters, `av1_mvbit_vals` and `av1_compmode_ctxmap`, also wrote
+  their table without checking it.
+- **Unchecked per-call scratch.** Its allocation was never checked: CDEF's direction and filter buffers (per 8x8
+  block); deblocking's F, masks and limits (per SAMPLE edge position); loop restoration's Wiener intermediate, box
+  A/B, flt0/flt1 and coefficient sets (per 4x4 block); the partition's synthesized CDF; the segment-id context;
+  palette's colour cache, used/rest/delta lists, colour-context scores (per map SAMPLE), ColorOrder and geometry.
+  Each now lives in one persistent scratch built by `av1_tables_init` (the 0.7.60 rule). Reuse is exact, since no
+  two users of a slot nest. Each stage checks its scratch once at entry: CDEF, deblock and LR now return
+  `DR_ERR_OOM`, which `av1_apply_loop_filters` reports; deblock and LR were ignored before. A fault-free decode
+  makes ~3x fewer allocations: `svc-l2t3-128x96` 90,423 -> 26,231, `ibc-352x288` 66,529 -> 17,456.
+- **SILENT MIS-DECODES on OOM:**
+  - **The quantizer-matrix table.** It was built one byte LOW when `Qm_Offset`'s own lazy allocation failed inside
+    its build: the first store landed at `t - 1`, outside the allocation, and the corrupt table was cached. The
+    offsets are now built first.
+  - **The same QM build, run at frame-header time** (before any tile), read the unbuilt transform tables (a crash).
+    The frame driver now calls `av1_tables_init` there.
+  - **The palette context.** It was built lazily, and a failed build read as "no palette grids", so every palette
+    block decoded without its palette. It is now built with the grids (`av1_tile_grids_new` /
+    `av1_tile_share_grids`).
+  - **The tile's segmentation context,** likewise. The inter lanes now check `av1_tile_segctx_oom`.
+  - **The motion-field save.** It was SKIPPED on OOM, leaving a later frame to project the slot's stale field.
+  - **The motion-field estimation's OOM** was "non-fatal", from before the temporal scan read the field. Since then
+    it silently dropped every temporal candidate. Both now fail the frame.
+- **Dropped or mislabelled errors:**
+  - the header parser dropped `av1_set_frame_refs`'s OOM;
+  - an intra-block-copy frame's DPB allocation failing was labelled `DR_ERR_UNSUPPORTED`;
+  - `av1_pal_store`'s OOM was dropped on all four lanes;
+  - on the encode lane, the partition walk dropped `av1_encode_block`'s result, including its `DR_ERR_BOUNDS`
+    refusals of an unrepresentable plan (now latched with the new `av1_sym_enc_fail`);
+  - `av1_sym_enc_finish`'s output allocation failing left `av1_sym_enc_err` at `DR_OK`;
+  - the encode walk's cursors were unchecked.
+- **The harness** dropped `av1_decoder_set_anchor`'s result, so a large-scale tile file decoded its tile lists with
+  no anchors. That is now a failed unit.
+
+**Also found (not fixed, now on the roadmap): the decoder's memory is never reclaimed.** Measured with
+`alloc_used()`, every decoded frame allocates ~35–60 bytes per pixel from the bump arena: frames, grids, CDF bundles
+and per-block records. Nothing is ever freed, so ~5.7 MB goes into each 352x288 frame and ~100 MB would go into each
+1080p one. A long stream ends in a real `DR_ERR_OOM`, which this bite now at least reports cleanly.
+
+**Tests** (+48, a `dr_alloc_sweep` case in each allocating module's own suite):
+- `tests/drishti.tcyr`: the injection semantics (count, single shot, off), and three canaries the sweep must catch:
+  a swallowed failure, a mislabelled OOM, and state a failed run leaves behind.
+- `tests/frame.tcyr`, `bits.tcyr`, `ivf.tcyr`, `h264.tcyr`, `h265.tcyr`, `vpx.tcyr`: every allocation of each
+  module's constructors, parsers, writers and buffer growth.
+- `tests/av1_tile.tcyr`, `av1_intertile.tcyr`, `av1_coeffs.tcyr`: an intra tile, an 8-tap inter tile and a dense
+  8x8 block, each encoded and decoded back inside the swept operation (both CDF modes where they apply).
+- `tests/av1_decode.tcyr`: the streaming decoder over `srmin-16x16` and `inter-6frame` in-process. Every fault-free
+  run must reproduce the first one's picture digest, so persistent state a failed run damaged shows as a picture.
+  Also a palette keyframe through `av1_decode_frame`, for the INTRA lane's palette path (no committed reproducer
+  has an intra-lane palette block: an intra block copy frame decodes on the inter lane).
+
+Mutation testing ran each mutation in an isolated copy of the tree:
+- **44 of 44** modules go red with one OOM branch deleted, in every module that allocates. Each is witnessed by a
+  stream traced to reach that check, or by the module's suite.
+- **13 of 13** of this bite's fixes go red when reverted:
+  - the `av1_sym_enc_finish` latch, the segmentation-context check and the encode walk's latch;
+  - the QM table building `Qm_Offset` first, and building the transform tables first (the latter with the frame
+    path's direct `av1_qm_table` call restored);
+  - the motion-field save and estimation, the eager palette context, and `av1_tables_init` in `av1_tile_new`;
+  - the palette store on both intra lanes, the loop filters' result, and `dr_alloc_sweep`'s final fault-free run.
+- **Two stay green, as expected.** The CDEF scratch's `av1_tables_init` term is backstopped by the stage-entry
+  check; two controls show such pairs hold only as pairs. `av1_set_frame_refs`'s propagation is reached by NOTHING:
+  no reproducer or suite uses `frame_refs_short_signaling`, so that fix rests on inspection.
+- **Two witnesses first stayed green for a plain reason:** `srmin-16x16` and `inter-6frame` never run the deblocker
+  (loop-filter level 0). The deblock pair is witnessed on `jnt-ctx-96x64`, which does.
+
+There is no reference port: OOM handling has no spec text. The oracle is the fault-free decode (itself gated against
+the committed reference md5s) plus the rule that an allocation failure is `DR_ERR_OOM`.
+
+`make conformance` is **3940 matched / 0 known-gap / 0 regressed / 0 skipped** (was 3930: the ten oom cases).
+
+**Gates:** 44 suites, **31,605** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Added — 0.8.5 bite 6: the reconstruct guard — every block-level frame writer bounds its footprint; intra-lane errors reach the tile
 
 **A block write outside the frame's memory is now refused, not performed.** 7.12.3's reconstruct step writes the

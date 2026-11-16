@@ -188,6 +188,11 @@ fn conf_read_uint(path): i64 {
 
 fn main() {
     alloc_init();
+    # build/conformance-input.oom, when present, holds k for OOM fault injection (0.8.5): k >= 1 makes drishti's
+    # k-th allocation fail (dr_alloc_fail_at) — the IVF reader and the decoder's own included — and 0 only counts
+    # them; the count is reported before the SUMMARY. The harness's own buffers use the raw allocator, never failed.
+    var oomk = conf_read_uint("build/conformance-input.oom");
+    if (oomk >= 0) { dr_alloc_fail_at(oomk); }
     var buf = alloc(CONF_MAX_INPUT);
     if (buf == 0) { conf_puts("SUMMARY oom\n"); return 1; }
     var n = file_read_all("build/conformance-input.ivf", buf, CONF_MAX_INPUT);
@@ -217,7 +222,7 @@ fn main() {
     conf_puts("\n");
 
     var dec = av1_decoder_new(0);
-    if (dec == 0) { conf_puts("SUMMARY oom\n"); return 1; }
+    if (dec == 0) { conf_puts("SUMMARY decoder-new err=9 (out of memory)\n"); return 1; }
     # build/conformance-input.op, when present, holds the operating point to decode (0.8.4 scalability): only its
     # layers' OBUs are decoded, and a temporal unit with none of them shows no frame
     var opreq = conf_read_uint("build/conformance-input.op");
@@ -251,8 +256,18 @@ fn main() {
             if ((nanch > 0) && (k > nanch)) { lst_out = 1; }
             var f = av1_decoder_decode(dec, pp, ps, &derr);
             if ((nanch > 0) && (k <= nanch) && (derr == DR_OK)) {
-                av1_decoder_set_anchor(dec, k - 1, av1_decoder_last_decoded(dec));
+                # a failed anchor registration (DR_ERR_OOM) fails this unit and ends the stream: every tile list
+                # after it would decode against a missing anchor (0.8.5 — the harness dropped this result)
+                derr = av1_decoder_set_anchor(dec, k - 1, av1_decoder_last_decoded(dec));
+                if (derr != DR_OK) { f = 0; go = 0; }
                 if (k == nanch) { av1_decoder_set_large_scale_tile(dec, 1); }
+            }
+            if (oomk >= 0) {   # the allocation count at this unit's end, so a sweep can aim at each unit's own calls
+                conf_puts("oom-unit ");
+                conf_putn(k);
+                conf_puts(" end ");
+                conf_putn(dr_alloc_count());
+                conf_puts("\n");
             }
             conf_puts("frame ");
             conf_putn(k);
@@ -293,6 +308,13 @@ fn main() {
                 }
             }
         }
+    }
+    if (oomk >= 0) {
+        conf_puts("oom: fail-at ");
+        conf_putn(oomk);
+        conf_puts(" allocations ");
+        conf_putn(dr_alloc_count());
+        conf_puts("\n");
     }
     if (opreq >= 0) {
         conf_puts("operating point chosen: ");

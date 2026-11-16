@@ -170,6 +170,8 @@ via a `[deps.drishti]` entry pointing at a git tag.
 - **Trust no input byte** — encoded video is hostile data: every
   length checked, lying headers rejected, sticky error discipline
   throughout, fuzz-tested from day one at the container/VLC layer (tests/drishti.fcyr), and the AV1 decode path since 0.7.118 (tests/av1_decode.fcyr — mutated OBU streams into av1_decode_obus / av1_decode_stream).
+  Fault-injected since 0.8.5: any allocation can be made to fail, and every failure must stop the
+  decode with `DR_ERR_OOM` (`scripts/oom-sweep.sh`, `dr_alloc_sweep`).
 
 ## License
 

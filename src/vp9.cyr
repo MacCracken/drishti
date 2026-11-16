@@ -102,7 +102,7 @@ enum Vp9SyncCode {
 
 # Internal: allocate a zeroed Vp9FrameHdr. Returns record or 0 on OOM.
 fn vp9_hdr_alloc(): i64 {
-    var h = alloc(128);
+    var h = dr_alloc(128);
     if (h == 0) { return 0; }
     var i = 0;
     while (i < 128) {

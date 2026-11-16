@@ -98,7 +98,7 @@ fn av1_sym_dec_init(buf, sz, disable_cdf_update): i64 {
     if (sz < 0) { return 0; }
     var br = dr_br_init(buf, sz);
     if (br == 0) { return 0; }
-    var sd = alloc(AV1SD_SIZE);
+    var sd = dr_alloc(AV1SD_SIZE);
     if (sd == 0) { return 0; }
     var num_bits = sz * 8;
     if (num_bits > 15) { num_bits = 15; }        # Min(sz*8, 15)
@@ -287,9 +287,9 @@ fn av1_sym_dec_exit(sd): i64 {
 fn av1_sym_enc_init(cap_hint, disable_cdf_update): i64 {
     var cap = cap_hint;
     if (cap < 64) { cap = 64; }
-    var pc = alloc(cap * 8);
+    var pc = dr_alloc(cap * 8);
     if (pc == 0) { return 0; }
-    var enc = alloc(AV1SE_SIZE);
+    var enc = dr_alloc(AV1SE_SIZE);
     if (enc == 0) { return 0; }
     store64(enc + AV1SE_LOW, 0);
     store64(enc + AV1SE_RNG, 32768);              # 0x8000
@@ -306,6 +306,12 @@ fn av1_sym_enc_init(cap_hint, disable_cdf_update): i64 {
 }
 
 fn av1_sym_enc_err(enc): i64 { return load64(enc + AV1SE_ERR); }
+# Latch an encoder-side failure the symbol layer did not see (an OOM in a caller's scratch): first error wins,
+# exactly as av1_sym_dec_fail on the decode lane. Returns e.
+fn av1_sym_enc_fail(enc, e): i64 {
+    if ((e != DR_OK) && (load64(enc + AV1SE_ERR) == DR_OK)) { store64(enc + AV1SE_ERR, e); }
+    return e;
+}
 
 # Append a pre-carry word (auto-grows by doubling).
 fn av1_sym_enc_push(enc, val): i64 {
@@ -315,7 +321,7 @@ fn av1_sym_enc_push(enc, val): i64 {
     var cap = load64(enc + AV1SE_CAP);
     if (len >= cap) {
         var new_cap = cap << 1;
-        var new_buf = alloc(new_cap * 8);
+        var new_buf = dr_alloc(new_cap * 8);
         if (new_buf == 0) {
             store64(enc + AV1SE_ERR, DR_ERR_OOM);
             return DR_ERR_OOM;
@@ -442,8 +448,9 @@ fn av1_sym_enc_finish(enc, out_len): i64 {
     # from the word after it becomes one output byte.
     var len = load64(enc + AV1SE_LEN);
     var precarry = load64(enc + AV1SE_PRECARRY);
-    var out = alloc(len + 1);                       # +1 guards len == 0
-    if (out == 0) { return 0; }
+    var out = dr_alloc(len + 1);                       # +1 guards len == 0
+    # latched, so av1_sym_enc_err says why the finish returned 0 (it read DR_OK before 0.8.5)
+    if (out == 0) { store64(enc + AV1SE_ERR, DR_ERR_OOM); return 0; }
     var carry = 0;
     var offs = len;
     while (offs > 0) {

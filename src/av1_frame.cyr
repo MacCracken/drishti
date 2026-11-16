@@ -419,7 +419,7 @@ fn av1_remap_lr_type(t): i64 {
 # hints 0). Returns the handle or 0 on OOM.
 # ================================================================
 fn av1_ref_state_new(): i64 {
-    var r = alloc(AV1REF_SIZE);
+    var r = dr_alloc(AV1REF_SIZE);
     if (r == 0) { return 0; }
     memset(r, 0, AV1REF_SIZE);
     return r;
@@ -1842,7 +1842,7 @@ fn av1_set_frame_refs(s, refs, fh, last_idx, gold_idx): i64 {
     }
     store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_LAST_FRAME - AV1_LAST_FRAME) * 8), last_idx);
     store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_GOLDEN_FRAME - AV1_LAST_FRAME) * 8), gold_idx);
-    var scratch = alloc(128);   # used[8] + shifted[8], 64 bytes each
+    var scratch = dr_alloc(168);   # used[8] + shifted[8], 64 bytes each, then Ref_Frame_List[5] (40 bytes)
     if (scratch == 0) { return DR_ERR_OOM; }
     var used = scratch;
     var shifted = scratch + 64;
@@ -1878,7 +1878,7 @@ fn av1_set_frame_refs(s, refs, fh, last_idx, gold_idx): i64 {
     }
     # Remaining forward references in anti-chronological order.
     # Ref_Frame_List = {LAST2, LAST3, BWDREF, ALTREF2, ALTREF}.
-    var list = alloc(40);
+    var list = scratch + 128;   # the third part of the one checked allocation above
     store64(list + 0, AV1_LAST2_FRAME);
     store64(list + 8, AV1_LAST3_FRAME);
     store64(list + 16, AV1_BWDREF_FRAME);
@@ -1939,7 +1939,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
     }
     var br = dr_br_init(buf, len);
     if (br == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-    var fh = alloc(AV1FH_SIZE);
+    var fh = dr_alloc(AV1FH_SIZE);
     if (fh == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     memset(fh, 0, AV1FH_SIZE);
 
@@ -2151,7 +2151,8 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             if (short_sig) {
                 var last_idx = dr_br_read_bits(br, 3);   # last_frame_idx f(3)
                 var gold_idx = dr_br_read_bits(br, 3);   # gold_frame_idx f(3)
-                av1_set_frame_refs(s, refs, fh, last_idx, gold_idx);
+                var sfr = av1_set_frame_refs(s, refs, fh, last_idx, gold_idx);
+                if (sfr != DR_OK) { store64(out_err, sfr); return 0; }   # its scratch OOM was dropped before 0.8.5
             }
         }
         store64(fh + AV1FH_SHORT_SIGNALING, short_sig);

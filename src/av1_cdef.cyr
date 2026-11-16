@@ -31,7 +31,7 @@ var Av1_Cdef = 0;
 fn av1_cdef_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_cdef_tables(): i64 {
     if (Av1_Cdef != 0) { return Av1_Cdef; }
-    var t = alloc(81 * 8);
+    var t = dr_alloc(81 * 8);
     if (t == 0) { return 0; }
     # Div_Table[9].
     av1_cdef_store(t, 0, 0);    av1_cdef_store(t, 1, 840);  av1_cdef_store(t, 2, 420);
@@ -84,13 +84,36 @@ fn av1_cdef_constrain(diff, threshold, damping): i64 {
 }
 
 # ================================================================
+# Persistent CDEF scratch (0.8.5): one arena block reused by every call — partial[8][15] + cost[8] for the
+# direction search, the filter's 6-entry tap geometry + its 1-entry availability flag, and the block's
+# {yDir, var} pair. These were per-call allocations on the per-8x8 path: the arena grew with every block
+# (the 0.7.60 lesson) and every block was an unchecked OOM site. av1_tables_init builds it before any tile.
+# ================================================================
+enum Av1CdefScratch {
+    AV1CDS_PARTIAL = 0;      # partial[8][15]
+    AV1CDS_COST    = 960;    # cost[8]
+    AV1CDS_AV      = 1024;   # the filter's CdefAvailable flag
+    AV1CDS_G       = 1032;   # the filter's 6-entry geometry (av1_cdef_geom)
+    AV1CDS_DV      = 1080;   # the block's {yDir, var}
+    AV1CDS_SIZE    = 1096;   # bytes
+}
+var Av1_CdefScratch = 0;
+fn av1_cdef_scratch(): i64 {
+    if (Av1_CdefScratch != 0) { return Av1_CdefScratch; }
+    Av1_CdefScratch = dr_alloc(AV1CDS_SIZE);   # AV1CDS_SIZE bytes
+    return Av1_CdefScratch;
+}
+
+# ================================================================
 # CDEF direction process (7.15.2) — measure the edge direction + variance of the
 # 8x8 luma block at MI (r, c). out[0] = yDir (0..7), out[1] = var.
 # ================================================================
 fn av1_cdef_direction(frame, r, c, out): i64 {
     var bd = dr_frame_bit_depth(frame);
-    var partial = alloc(8 * 15 * 8);        # partial[8][15]
-    var cost = alloc(8 * 8);
+    var scr = av1_cdef_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var partial = scr + AV1CDS_PARTIAL;        # partial[8][15]
+    var cost = scr + AV1CDS_COST;
     var p = 0;
     while (p < (8 * 15)) { store64(partial + (p * 8), 0); p = p + 1; }
     var ci = 0;
@@ -207,8 +230,10 @@ fn av1_cdef_filter(curr, cdef, plane, r, c, pri_str, sec_str, damping, dir, mi_c
     var y0 = (r * 4) >> suby;
     var w = 8 >> subx;
     var h = 8 >> suby;
-    var av = alloc(8);
-    var g = alloc(6 * 8);
+    var scr = av1_cdef_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var av = scr + AV1CDS_AV;
+    var g = scr + AV1CDS_G;
     av1_cdef_geom(g, x0, y0, subx, suby, mi_cols, mi_rows);
     var i = 0;
     while (i < h) {
@@ -340,7 +365,9 @@ fn av1_cdef_block(curr, cdef, fh, tile, r, c, idx): i64 {
     if (skip) { skip = av1_grid_get(tile, AV1TILE_SKIPS, r + 1, c + 1); }
     if (skip) { return 0; }
     var coeff_shift = dr_frame_bit_depth(curr) - 8;
-    var dv = alloc(2 * 8);
+    var scr = av1_cdef_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var dv = scr + AV1CDS_DV;
     av1_cdef_direction(curr, r, c, dv);
     var ydir = load64(dv + 0);
     var var_v = load64(dv + 8);
@@ -381,6 +408,7 @@ fn av1_cdef_process(curr, cdef, fh, tile): i64 {
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);
     if (av1_cdef_coverage_ok(curr, mi_cols, mi_rows) == 0) { return DR_ERR_BOUNDS; }
     if (av1_cdef_coverage_ok(cdef, mi_cols, mi_rows) == 0) { return DR_ERR_BOUNDS; }
+    if (av1_cdef_scratch() == 0) { return DR_ERR_OOM; }   # the one OOM site; every block below reuses it
     var r = 0;
     while (r < mi_rows) {
         var c = 0;

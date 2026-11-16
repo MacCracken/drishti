@@ -670,6 +670,30 @@ fn test_ns_roundtrip() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5) ----
+var Bits_Oom_Buf = 0;
+fn bits_br_oom_op(a): i64 {
+    if (dr_br_init(Bits_Oom_Buf, 4) == 0) { return DR_ERR_OOM; }
+    return DR_OK;
+}
+# a 16-byte writer grown past its capacity: dr_bw_init's two allocations, then every dr_bw_ensure growth
+fn bits_bw_oom_op(nbytes): i64 {
+    var bw = dr_bw_init(16);
+    if (bw == 0) { return DR_ERR_OOM; }
+    var i = 0;
+    while (i < nbytes) { dr_bw_put_bits(bw, i & 255, 8); i = i + 1; }
+    return dr_bw_err(bw);
+}
+fn test_bits_oom() {
+    Bits_Oom_Buf = alloc(4);   # bytes
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&bits_br_oom_op, 0, &n), 0, "dr_br_init: its allocation failing -> 0");
+    assert_eq(n, 1, "...one allocation");
+    assert_eq(dr_alloc_sweep(&bits_bw_oom_op, 100, &n), 0, "dr_bw_init + 100 bytes: every failure -> DR_ERR_OOM");
+    assert_eq(n, 5, "...the buffer, the record, and three doublings (16 -> 32 -> 64 -> 128)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("bitreader bits");
@@ -700,6 +724,8 @@ fn main() {
     test_su_read();
     test_su_roundtrip();
     test_ns_roundtrip();
+    test_group("OOM fault injection");
+    test_bits_oom();
     return assert_summary();
 }
 

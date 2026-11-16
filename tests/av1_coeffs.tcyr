@@ -393,6 +393,52 @@ fn test_ccdf_copy() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): one 8x8 transform block's coefficients encoded and decoded back inside the swept
+# operation — the CDF contexts, the symbol coders and the encoder's abs-level work array ----
+var Co_Oom_Q = 0;
+fn coeffs_oom_op(disable): i64 {
+    var al = alloc(256 * 8);   # the neighbour arrays: raw, never failed
+    var ll = alloc(256 * 8);
+    var ad = alloc(256 * 8);
+    var ld = alloc(256 * 8);
+    az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
+    var ttx = av1_txtypectx_new();
+    if (ttx == 0) { return DR_ERR_OOM; }
+    var cce = av1_ccdf_new(0);
+    if (cce == 0) { return DR_ERR_OOM; }
+    var nce = av1_ncdf_new();
+    if (nce == 0) { return DR_ERR_OOM; }
+    var enc = av1_sym_enc_init(16, disable);
+    if (enc == 0) { return DR_ERR_OOM; }
+    var rc = av1_coeffs_encode(enc, cce, nce, 0, 1, ttx, AV1_DCT_DCT, 0, 0, 100, 100, 8, 8, al, ll, ad, ld,
+      Co_Oom_Q, 64);
+    if (rc != DR_OK) { return rc; }
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    if (out == 0) { return av1_sym_enc_err(enc); }
+    az(al, 256); az(ll, 256); az(ad, 256); az(ld, 256);
+    var ccd = av1_ccdf_new(0);
+    if (ccd == 0) { return DR_ERR_OOM; }
+    var ncd = av1_ncdf_new();
+    if (ncd == 0) { return DR_ERR_OOM; }
+    var sd = av1_sym_dec_init(out, olen, disable);
+    if (sd == 0) { return DR_ERR_OOM; }
+    var dq = alloc(64 * 8);
+    var ott = alloc(8);
+    av1_coeffs_decode(sd, ccd, ncd, 0, 1, ttx, 0, 0, 100, 100, 8, 8, al, ll, ad, ld, dq, ott);
+    return av1_sym_dec_err(sd);
+}
+fn test_coeffs_oom() {
+    Co_Oom_Q = alloc(64 * 8);   # a dense TX_8X8 block, every position coded: raw
+    var i = 0;
+    while (i < 64) { store64(Co_Oom_Q + (i * 8), ((i * 7) % 23) - 11); i = i + 1; }
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&coeffs_oom_op, 1, &n), 0, "8x8 coefficients encode + decode: every failure -> OOM");
+    assert_gt(n, 6, "...over every allocation of both lanes");
+    assert_eq(dr_alloc_sweep(&coeffs_oom_op, 0, &n), 0, "...and with adapting CDFs");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("adaptive cdf context copy");
@@ -412,6 +458,8 @@ fn main() {
     test_group("coeffs() adaptive CDF context");
     test_coeffs_adaptive();
     test_coeffs_adaptive_multiblock();
+    test_group("OOM fault injection");
+    test_coeffs_oom();
     return assert_summary();
 }
 

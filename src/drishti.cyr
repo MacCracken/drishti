@@ -78,12 +78,64 @@ fn drishti_version(): i64 {
 }
 
 # ================================================================
+# dr_alloc — every allocation in src/ goes through here (0.8.5), so an allocation FAILURE can be injected and every
+# DR_ERR_OOM branch exercised. With injection off it is the stdlib alloc. dr_alloc_fail_at(n), n >= 1, makes the
+# n-th dr_alloc from then on return 0 (one failure, as if memory ran out at that call and only that call), then
+# carries on normally; dr_alloc_fail_at(0) turns injection off. dr_alloc_count() is the number of dr_alloc calls
+# since the last dr_alloc_fail_at. Test-only machinery: no decode or encode path calls dr_alloc_fail_at or
+# dr_alloc_sweep.
+# ================================================================
+var Dr_Alloc_Fail_Left = 0;   # 0 = off; else the countdown to the failing call
+var Dr_Alloc_Calls = 0;       # dr_alloc calls since the last dr_alloc_fail_at
+fn dr_alloc(size): i64 {
+    Dr_Alloc_Calls = Dr_Alloc_Calls + 1;
+    if (Dr_Alloc_Fail_Left > 0) {
+        Dr_Alloc_Fail_Left = Dr_Alloc_Fail_Left - 1;
+        if (Dr_Alloc_Fail_Left == 0) { return 0; }
+    }
+    return alloc(size);
+}
+fn dr_alloc_fail_at(n): i64 {
+    Dr_Alloc_Fail_Left = n;
+    if (n < 0) { Dr_Alloc_Fail_Left = 0; }
+    Dr_Alloc_Calls = 0;
+    return 0;
+}
+fn dr_alloc_count(): i64 { return Dr_Alloc_Calls; }
+# dr_alloc_sweep(fp, arg, out_n) — the OOM witness the suites share. fp(arg) runs one operation and returns DR_OK,
+# or the error it stopped with. The sweep runs it once to build any lazily-built state, once more to count its
+# allocations N (written to *out_n), then N times more with the k-th allocation failing, k = 1..N. Every one of
+# those must return DR_ERR_OOM: a crash is a crash, another code is a mislabelled OOM, and DR_OK means the failure
+# was swallowed. A last fault-free run must be DR_OK again (no failed run left state behind). Returns 0 when all of
+# that holds, the first k that broke it, or -1 when a fault-free run failed. Lazy state built by the first run is
+# never failed here — make conformance's oom section fails it, in a fresh process per k.
+fn dr_alloc_sweep(fp, arg, out_n): i64 {
+    store64(out_n, 0);
+    dr_alloc_fail_at(0);
+    if (callptr(fp, arg) != DR_OK) { return 0 - 1; }
+    dr_alloc_fail_at(0);
+    if (callptr(fp, arg) != DR_OK) { return 0 - 1; }
+    var n = dr_alloc_count();
+    store64(out_n, n);
+    var k = 1;
+    while (k <= n) {
+        dr_alloc_fail_at(k);
+        var rc = callptr(fp, arg);
+        dr_alloc_fail_at(0);
+        if (rc != DR_ERR_OOM) { return k; }
+        k = k + 1;
+    }
+    if (callptr(fp, arg) != DR_OK) { return 0 - 1; }
+    return 0;
+}
+
+# ================================================================
 # DrErr — 16-byte error record {code, detail-ptr}
 # ================================================================
 
 # Create a DrErr with code and an optional detail cstring (0 = none).
 fn dr_err_new(code, detail): i64 {
-    var e = alloc(16);
+    var e = dr_alloc(16);
     if (e == 0) { return 0; }
     store64(e, code);
     store64(e + 8, detail);

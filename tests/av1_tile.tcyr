@@ -272,6 +272,55 @@ fn test_refused_write_ends_tile() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): keyframe_rt's 2-superblock tile, encoded then decoded inside the swept
+# operation — the frames, tiles, grids, CDF contexts, symbol coders, the encode walk's cursors and the per-block
+# allocations of both lanes. A valid plan cannot fail to encode, so a 0 encode is its allocation failing. ----
+var Tile_Oom_Pp = 0;
+var Tile_Oom_Pm = 0;
+var Tile_Oom_Pt = 0;
+fn tile_oom_op(disable): i64 {
+    var mi = av1_modeinfo_new();
+    if (mi == 0) { return DR_ERR_OOM; }
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var k = 0;
+    while (k < 5) { store64(Tile_Oom_Pm + (k * 8), mi); k = k + 1; }
+    var e = 0;
+    var ef = dr_frame_new(128, 64, 1, 0, 0, 8, 8, &e);
+    if (ef == 0) { return e; }
+    var et = av1_tile_new(ef, 32, 16, 40, 1, 0, 1);
+    if (et == 0) { return DR_ERR_OOM; }
+    var rc = av1_tile_grids_new(et);
+    if (rc != DR_OK) { return rc; }
+    var olen = 0;
+    var out = av1_encode_intra_tile(et, Tile_Oom_Pp, Tile_Oom_Pm, Tile_Oom_Pt, disable, &olen);
+    if (out == 0) { return DR_ERR_OOM; }
+    var df = dr_frame_new(128, 64, 1, 0, 0, 8, 8, &e);
+    if (df == 0) { return e; }
+    var dt = av1_tile_new(df, 32, 16, 40, 1, 0, 1);
+    if (dt == 0) { return DR_ERR_OOM; }
+    rc = av1_tile_grids_new(dt);
+    if (rc != DR_OK) { return rc; }
+    return av1_decode_intra_tile(dt, out, olen, disable);
+}
+fn test_tile_oom() {
+    Tile_Oom_Pp = alloc(6 * 8);   # the plan: raw allocations, never failed
+    store64(Tile_Oom_Pp + 0, AV1_PARTITION_SPLIT);
+    var k = 1;
+    while (k < 6) { store64(Tile_Oom_Pp + (k * 8), AV1_PARTITION_NONE); k = k + 1; }
+    Tile_Oom_Pm = alloc(5 * 8);
+    Tile_Oom_Pt = alloc(5 * 8);
+    k = 0;
+    while (k < 4) { store64(Tile_Oom_Pt + (k * 8), 3); k = k + 1; }
+    store64(Tile_Oom_Pt + (4 * 8), 4);
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&tile_oom_op, 1, &n), 0, "intra tile encode + decode (fixed CDFs): every failure -> OOM");
+    assert_gt(n, 20, "...over every allocation of both lanes");
+    assert_eq(dr_alloc_sweep(&tile_oom_op, 0, &n), 0, "...and with adapting CDFs");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("a refused block write ends the tile (0.8.5)");
@@ -285,6 +334,8 @@ fn main() {
     test_lr_tile_wiring();
     test_group("frame-header LR activation end-to-end");
     test_lr_activation_from_fh();
+    test_group("OOM fault injection");
+    test_tile_oom();
     return assert_summary();
 }
 

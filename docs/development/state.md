@@ -1785,7 +1785,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >
 > **NEXT: 0.8.5, "decode is conformance-clean"** (roadmap table): the FULL published `aom-test-data` corpus, every
 > frame; the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection;
-> corpus-guided fuzzing.
+> corpus-guided fuzzing; bounding the decoder's memory (found in bite 7).
 >
 > **0.8.5 progress (bites, uncut):** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,
@@ -1836,9 +1836,21 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > `av1_residual` (and `decode_block` dropped `av1_residual`'s), so a refused write or a prediction OOM vanished. It now
 > reaches the tile through the symbol decoder's sticky error (`av1_sym_dec_fail`). It caught `dir_flat` in
 > `tests/av1_intra.tcyr` writing 8 rows past a border-0 frame (fixed). The CfL / reconstruct result checks are
-> equivalent for BOUNDS and kept for OOM, for the OOM-injection bite to witness. Gate: 3930 / 0 / 0 / 0. Next: OOM
-> fault injection, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two streams
-> others refuse.
+> equivalent for BOUNDS and kept for OOM, for the OOM-injection bite to witness. Gate: 3930 / 0 / 0 / 0.
+>
+> Bite 7 = **OOM fault injection**: every `src/` allocation goes through `dr_alloc` (`src/drishti.cyr`), and
+> `dr_alloc_fail_at(k)` fails the k-th call once. `dr_alloc_sweep` is the shared in-process witness (each module's
+> suite sweeps its own operations); `scripts/oom-sweep.sh` + the `make conformance` oom section fail every
+> allocation SITE of ten committed reproducers (a site-tagged harness copy traces them), 157 of 199 sites — every one
+> the decode lane reaches. The rule: a failed allocation stops the decode with `DR_ERR_OOM`; a crash, a changed
+> picture, another code or a silent success is a defect. It found ~45 unchecked allocations (per-block / per-sample
+> scratch, now persistent and built by `av1_tables_init`, which `av1_tile_new` and the QM frame path call), crashes in
+> lazy tables, SILENT mis-decodes (QM table cached one byte low; lazy palette / segmentation contexts read as absent;
+> motion-field save skipped and estimation dropped), and dropped / mislabelled errors on both lanes (encode-lane
+> refusals were dropped by the partition walk). ALSO FOUND, roadmapped not fixed: the arena grows ~35–60 bytes per
+> pixel per decoded frame and is never reclaimed (~100 MB per 1080p frame). Gate: 3940 / 0 / 0 / 0. Next: the memory
+> bound, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two streams others
+> refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

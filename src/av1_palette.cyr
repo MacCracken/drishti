@@ -36,11 +36,33 @@ enum Av1PalCtx {
     AV1PC_SIZE   = 72;   # bytes
 }
 
+# Persistent palette scratch (0.8.5): the colour cache, the encoder's used / rest / V-delta lists, the colour
+# context's scores, ColorOrder and the map geometry — one arena block reused by every call. These were per-call
+# allocations, the colour context's per map SAMPLE: the arena grew with every palette block (the 0.7.60
+# lesson) and each was an unchecked OOM site. No two users of a slot nest. av1_tables_init builds it; a failed
+# build is DR_ERR_OOM, latched on the coder on the read lane.
+enum Av1PalScratch {
+    AV1PS_CACHE  = 0;     # 16 u64: at most 8 above + 8 left
+    AV1PS_USED   = 128;   # 8 u64: which plan colours a cache flag already took (encode)
+    AV1PS_REST   = 192;   # 8 u64: the colours coded as literal + deltas (encode)
+    AV1PS_DELTAS = 256;   # 8 u64: the V deltas (encode)
+    AV1PS_SCORES = 320;   # 8 u64: the colour context's scores
+    AV1PS_ORDER  = 384;   # 8 u64: ColorOrder
+    AV1PS_G      = 448;   # 4 u64: the map geometry (av1_pal_geom)
+    AV1PS_SIZE   = 480;   # bytes
+}
+var Av1_PalScratch = 0;
+fn av1_pal_scratch(): i64 {
+    if (Av1_PalScratch != 0) { return Av1_PalScratch; }
+    Av1_PalScratch = dr_alloc(AV1PS_SIZE);   # AV1PS_SIZE bytes
+    return Av1_PalScratch;
+}
+
 fn av1_palctx_new(szy, szuv, ptr, stride, rows, allow, bd): i64 {
-    var pc = alloc(AV1PC_SIZE);   # AV1PC_SIZE bytes
+    var pc = dr_alloc(AV1PC_SIZE);   # AV1PC_SIZE bytes
     if (pc == 0) { return 0; }
-    var my = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);    # 64 x 64 u64
-    var muv = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);   # 64 x 64 u64
+    var my = dr_alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);    # 64 x 64 u64
+    var muv = dr_alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);   # 64 x 64 u64
     if ((my == 0) || (muv == 0)) { return 0; }
     store64(pc + AV1PC_SZY, szy);
     store64(pc + AV1PC_SZUV, szuv);
@@ -148,7 +170,9 @@ fn av1_pal_sort(arr, n): i64 {
 # delta and shrinks its range by one more than U, so Y colours are distinct and U ones may repeat), then sort.
 fn av1_pal_read_colors(sd, pc, colors, plane, n, mi_row, mi_col, avail_l): i64 {
     var bd = load64(pc + AV1PC_BD);
-    var cache = alloc(16 * 8);   # 16 u64: at most 8 above + 8 left
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
+    var cache = scr + AV1PS_CACHE;   # 16 u64: at most 8 above + 8 left
     var cn = av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, cache);
     var idx = 0;
     var i = 0;
@@ -241,9 +265,11 @@ fn av1_pal_write_colors(enc, pc, colors, plane, n, mi_row, mi_col, avail_l): i64
         if ((plane == 0) && (b == a)) { return DR_ERR_BOUNDS; }
         k = k + 1;
     }
-    var cache = alloc(16 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var cache = scr + AV1PS_CACHE;
     var cn = av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, cache);
-    var used = alloc(8 * 8);   # which plan colours a cache flag already took
+    var used = scr + AV1PS_USED;   # which plan colours a cache flag already took
     memset(used, 0, 8 * 8);
     var idx = 0;
     var i = 0;
@@ -265,7 +291,7 @@ fn av1_pal_write_colors(enc, pc, colors, plane, n, mi_row, mi_col, avail_l): i64
         i = i + 1;
     }
     # the rest, ascending (a subsequence of the sorted plan).
-    var rest = alloc(8 * 8);
+    var rest = scr + AV1PS_REST;
     var rn = 0;
     var t = 0;
     while (t < n) {
@@ -350,7 +376,9 @@ fn av1_write_palette_mode_info(enc, ncc, pc, mi, mi_size, mi_row, mi_col, avail_
 fn av1_pal_write_v(enc, v, n, bd, want_delta): i64 {
     var max_val = 1 << bd;
     var minb = bd - 4;
-    var deltas = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_enc_fail(enc, DR_ERR_OOM); }
+    var deltas = scr + AV1PS_DELTAS;
     var maxa = 0;
     var k = 1;
     while (k < n) {
@@ -396,7 +424,7 @@ fn av1_pal_store(pc, mi, mi_row, mi_col, bw4, bh4): i64 {
     var nuv = load64(mi + AV1MI_PAL_NUV);
     var copy = 0;
     if ((ny != 0) || (nuv != 0)) {
-        copy = alloc(16 * 8);   # Y[8] then U[8]
+        copy = dr_alloc(16 * 8);   # Y[8] then U[8]
         if (copy == 0) { return DR_ERR_OOM; }
         var i = 0;
         while (i < 8) {
@@ -429,8 +457,11 @@ fn av1_pal_store(pc, mi, mi_row, mi_col, bw4, bh4): i64 {
 # get_palette_color_context( colorMap, r, c, n ) (5.11.50): writes ColorOrder[ 0..7 ] into `order`, returns
 # ctx = Palette_Color_Context[ ColorContextHash ] (hash 2 -> 0, 5 -> 4, 6 -> 3, 7 -> 2, 8 -> 1; the other hashes
 # cannot occur for a coded position).
+# Both map coders check the same scratch before calling, so its null branch here is defensive only (ctx 0).
 fn av1_pal_color_ctx(map, stride, r, c, n, order): i64 {
-    var scores = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return 0; }
+    var scores = scr + AV1PS_SCORES;
     var i = 0;
     while (i < 8) { store64(scores + (i * 8), 0); store64(order + (i * 8), i); i = i + 1; }
     if (c > 0) {
@@ -522,7 +553,9 @@ fn av1_pal_extend(map, bw, bh, ow, oh): i64 {
 # palette_color_idx symbols, each mapped through ColorOrder; then the off-screen extension.
 fn av1_pal_read_map(sd, ncc, map, uv, n, bw, bh, ow, oh): i64 {
     var s = AV1_PAL_MAP_STRIDE;
-    var order = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
+    var order = scr + AV1PS_ORDER;
     store64(map, av1_sym_read_ns(sd, n));   # color_index_map_{y,uv} NS(n)
     var i = 1;
     while (i < ((oh + ow) - 1)) {
@@ -540,7 +573,9 @@ fn av1_pal_read_map(sd, ncc, map, uv, n, bw, bh, ow, oh): i64 {
 }
 fn av1_read_palette_tokens(sd, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby): i64 {
     if (pc == 0) { return DR_OK; }
-    var g = alloc(4 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
+    var g = scr + AV1PS_G;
     var ny = load64(mi + AV1MI_PAL_NY);
     if (ny != 0) {
         av1_pal_geom(pc, mi_size, mi_row, mi_col, 0, subx, suby, g);
@@ -560,7 +595,9 @@ fn av1_read_palette_tokens(sd, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby)
 # map value that is not a palette index is unrepresentable -> DR_ERR_BOUNDS.
 fn av1_pal_write_map(enc, ncc, plan, map, uv, n, bw, bh, ow, oh): i64 {
     var s = AV1_PAL_MAP_STRIDE;
-    var order = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var order = scr + AV1PS_ORDER;
     var r = 0;
     while (r < oh) {
         var c = 0;
@@ -591,7 +628,9 @@ fn av1_pal_write_map(enc, ncc, plan, map, uv, n, bw, bh, ow, oh): i64 {
 }
 fn av1_write_palette_tokens(enc, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby): i64 {
     if (pc == 0) { return DR_OK; }
-    var g = alloc(4 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var g = scr + AV1PS_G;
     var ny = load64(mi + AV1MI_PAL_NY);
     if (ny != 0) {
         if (load64(mi + AV1MI_PAL_MAPY) == 0) { return DR_ERR_BOUNDS; }

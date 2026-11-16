@@ -136,8 +136,10 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
     var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);   # frame row bound for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
-    var pc = alloc(8);
-    var bc = alloc(8);
+    var pc = dr_alloc(8);
+    var bc = dr_alloc(8);
+    # latched on the encoder: both callers report av1_sym_enc_finish, not this return
+    if ((pc == 0) || (bc == 0)) { return av1_sym_enc_fail(load64(tile + AV1TILE_ENC), DR_ERR_OOM); }
     store64(pc, 0);
     store64(bc, 0);
     var dctx = av1_tile_dctx(tile);

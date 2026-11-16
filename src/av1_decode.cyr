@@ -35,7 +35,8 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
     store64(out_err, DR_OK);
     var frame = load64(tile + AV1TILE_FRAME);
     # 1. deblocking (in place).
-    av1_deblock(tile, fh);
+    var drc = av1_deblock(tile, fh);
+    if (drc != DR_OK) { store64(out_err, drc); return 0; }
     var result = frame;
     # 2. CDEF.
     var cdef_frame = frame;
@@ -68,7 +69,8 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
     if ((av1_fh_uses_lr(fh) != 0) && (lr_params != 0)) {
         var lr_frame = av1_cdef_frame_new(sr_cdef, out_err);
         if (lr_frame == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-        av1_lr_process(sr_curr, sr_cdef, lr_frame, lr_params);
+        var lrc = av1_lr_process(sr_curr, sr_cdef, lr_frame, lr_params);
+        if (lrc != DR_OK) { store64(out_err, lrc); return 0; }
         result = lr_frame;
     }
     return result;
@@ -224,10 +226,10 @@ enum Av1TgOff {
 # init -1 = absent). Returns 0 on bad arg / OOM.
 fn av1_tile_group_new(max_tiles): i64 {
     if (max_tiles <= 0) { return 0; }
-    var tg = alloc(AV1TG_SIZE);
+    var tg = dr_alloc(AV1TG_SIZE);
     if (tg == 0) { return 0; }
-    var offs = alloc(max_tiles * 8);
-    var sizes = alloc(max_tiles * 8);
+    var offs = dr_alloc(max_tiles * 8);
+    var sizes = dr_alloc(max_tiles * 8);
     if ((offs == 0) || (sizes == 0)) { return 0; }
     store64(tg + AV1TG_TGSTART, 0);
     store64(tg + AV1TG_TGEND, 0);
@@ -388,9 +390,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # reject here because reading neither desynced the intra path.
     # quantizer matrices (7.12.3 step 1b) apply as of 0.8.4 (src/av1_qm.cyr; both lanes pick the matrix per
     # transform block). They REJECTED here from 0.8.2, and before that were parsed and ignored — a silent
-    # mis-decode. The table is built here, once, so its allocation failing is a frame error up front.
+    # mis-decode. The table is built here, once, so its allocation failing is a frame error up front — with every
+    # other lazy table (av1_tables_init builds the QM table too), since the QM build reads the transform tables.
     if (av1_fh_qm_applies(fh, av1_seq_num_planes(seq)) != 0) {
-        if (av1_qm_table() == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        if (av1_tables_init() != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
     }
     # allow_intrabc decodes as of 0.8.4: such an intra frame runs on the INTER lane (av1_frame_dec_group), which
     # reads use_intrabc and predicts a block copy from the frame being decoded. It rejected here before.
@@ -419,7 +422,7 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     var lr_params = av1_lr_params_from_fh(fh, seq, av1_fh_upscaled_width(fh),
       av1_fh_frame_height(fh), num_planes, &terr);
     if (terr != DR_OK) { store64(out_err, terr); return 0; }
-    var fdc = alloc(AV1FDEC_SIZE);   # AV1FDEC_SIZE bytes
+    var fdc = dr_alloc(AV1FDEC_SIZE);   # AV1FDEC_SIZE bytes
     if (fdc == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(fdc + AV1FDEC_FRAME, frame);
     store64(fdc + AV1FDEC_TILE0, 0);
@@ -538,7 +541,7 @@ fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
         if (av1_tile_grids_new(tile) != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
         store64(fdc + AV1FDEC_TILE0, tile);
     } else {
-        av1_tile_share_grids(tile, tile0);
+        if (av1_tile_share_grids(tile, tile0) != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
     }
     # temporal segmentation (0.8.2): each tile's Av1SegCtx, carrying PrevSegmentIds — the primary
     # reference's saved map when load_previous_segment_ids (5.9.2) finds one, else all zero.
@@ -555,8 +558,8 @@ fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
         var idpb = load64(fdc + AV1FDEC_DPB);
         var irefs = load64(fdc + AV1FDEC_REFS);
         if (av1_fh_frame_is_intra(fh) != 0) {
-            if (idpb == 0) { idpb = av1_dpb_new(); }
-            if (irefs == 0) { irefs = av1_ref_state_new(); }
+            if (idpb == 0) { idpb = av1_dpb_new(); if (idpb == 0) { store64(out_err, DR_ERR_OOM); return 0; } }
+            if (irefs == 0) { irefs = av1_ref_state_new(); if (irefs == 0) { store64(out_err, DR_ERR_OOM); return 0; } }
         }
         if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
         var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
@@ -595,15 +598,16 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
         if (grid != 0) {
             var fmi_cols = av1_fh_mi_cols(fh);
             var fmi_rows = av1_fh_mi_rows(fh);
-            var buf = alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
-            if (buf != 0) {
-                av1_mv_save_field(grid, fmi_cols, fmi_rows, seq, fh, buf);
-                var rff = av1_fh_refresh_frame_flags(fh);
-                var i = 0;
-                while (i < 8) {
-                    if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
-                    i = i + 1;
-                }
+            var buf = dr_alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
+            # an OOM here must fail the frame: skipping the save left the slots' previous fields in place, and
+            # a later frame's motion-field estimation then projected a STALE field (silent mis-decode, 0.8.5).
+            if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+            av1_mv_save_field(grid, fmi_cols, fmi_rows, seq, fh, buf);
+            var rff = av1_fh_refresh_frame_flags(fh);
+            var i = 0;
+            while (i < 8) {
+                if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
+                i = i + 1;
             }
         }
     }

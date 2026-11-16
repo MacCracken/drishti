@@ -1159,6 +1159,37 @@ fn test_h264_stream_end_to_end() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): both parameter-set parsers and the four NAL-layer allocators, each failing
+# allocation reported as DR_ERR_OOM (the parsers through out_err; the scanner as a 0 handle) ----
+fn h264_oom_op(a): i64 {
+    var sl = 0;
+    var sps = fx_h264_sps_qcif(&sl);   # fixtures are raw allocations, never failed
+    var pl = 0;
+    var pps = fx_h264_pps_cabac(&pl);
+    var e = 0;
+    if (h264_sps_parse(sps, sl, &e) == 0) { return e; }
+    if (h264_pps_parse(pps, pl, &e) == 0) { return e; }
+    var nb = 0;
+    var nl = 0;
+    var rc = h264_annexb_wrap(3, H264_NAL_SPS, sps, sl, 1, &nb, &nl);   # 00 00 00 01 + header + payload
+    if (rc != DR_OK) { return rc; }
+    if (h264_scan_init(nb, nl) == 0) { return DR_ERR_OOM; }
+    var rb = 0;
+    var rl = 0;
+    rc = h264_rbsp_extract(nb + 5, nl - 5, &rb, &rl);
+    if (rc != DR_OK) { return rc; }
+    var eb = 0;
+    var el = 0;
+    return h264_epb_insert(sps, sl, &eb, &el);
+}
+fn test_h264_oom() {
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&h264_oom_op, 0, &n), 0,
+      "SPS + PPS parse, wrap, scan, extract, insert: every failure -> OOM");
+    assert_gt(n, 5, "...over every allocation they make");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("h264 start-code scan");
@@ -1185,6 +1216,8 @@ fn main() {
     test_h264_pps_reject();
     test_group("h264 end-to-end");
     test_h264_stream_end_to_end();
+    test_group("OOM fault injection");
+    test_h264_oom();
     return assert_summary();
 }
 

@@ -139,7 +139,7 @@ fn av1_obu_parse_header(buf, len, out_err): i64 {
         # 5.3.1: obu_size = sz - 1 - obu_extension_flag, sz = len.
         size = len - hdr_size;
     }
-    var o = alloc(56);
+    var o = dr_alloc(56);
     if (o == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -201,7 +201,7 @@ fn av1_obu_type_name(type): i64 {
 # or 0 on negative len / allocation failure.
 fn av1_obu_iter_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var it = alloc(40);
+    var it = dr_alloc(40);
     if (it == 0) { return 0; }
     store64(it, buf);
     store64(it + 8, len);

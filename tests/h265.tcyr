@@ -984,6 +984,29 @@ fn test_h265_integration_sps_pipeline() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): the VPS / SPS / PPS parsers (profile_tier_level inside), the Annex-B scanner and
+# the EPB strip, each failing allocation reported as DR_ERR_OOM ----
+fn h265_oom_op(a): i64 {
+    var l = 0;
+    var e = 0;
+    var v = fx_h265_vps_main(&l);   # fixtures are raw allocations, never failed
+    if (h265_vps_parse(v, l, &e) == 0) { return e; }
+    var sp = fx_h265_sps_main64(&l);
+    if (h265_sps_parse(sp, l, &e) == 0) { return e; }
+    var pp = fx_h265_pps_min(&l);
+    if (h265_pps_parse(pp, l, &e) == 0) { return e; }
+    if (h265_ab_init(v, 16) == 0) { return DR_ERR_OOM; }
+    var rb = 0;
+    var rl = 0;
+    return h265_rbsp_extract(v, 16, &rb, &rl);
+}
+fn test_h265_oom() {
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&h265_oom_op, 0, &n), 0, "VPS + SPS + PPS parse, scan, extract: every failure -> OOM");
+    assert_gt(n, 5, "...over every allocation they make");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("h265 nal header");
@@ -1023,6 +1046,8 @@ fn main() {
     test_h265_pps_reject();
     test_group("h265 integration");
     test_h265_integration_sps_pipeline();
+    test_group("OOM fault injection");
+    test_h265_oom();
     return assert_summary();
 }
 

@@ -110,8 +110,8 @@ fn av1_reconstruct_qm(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_d
     # (0.8.3's superblock-grid overflow wrote up to 16 rows past a plane this way).
     if (dr_frame_block_inside(frame, plane, x, y, w, h) == 0) { return DR_ERR_BOUNDS; }
 
-    var dequant = alloc(w * h * 8);
-    var residual = alloc(w * h * 8);
+    var dequant = dr_alloc(w * h * 8);
+    var residual = dr_alloc(w * h * 8);
     if ((dequant == 0) || (residual == 0)) { return DR_ERR_OOM; }
     memset(dequant, 0, w * h * 8);
 

@@ -50,7 +50,7 @@ fn av1_upfill8(t, row, v0, v1, v2, v3, v4, v5, v6, v7) {
 # dav1d_resize_filter negated -> the spec's positive-centre Upscale_Filter.
 fn av1_upscale_filter_blob(): i64 {
     if (Av1_UpscaleFilter != 0) { return Av1_UpscaleFilter; }
-    var t = alloc(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
+    var t = dr_alloc(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
     if (t == 0) { return 0; }
     av1_upfill8(t,  0,  0,  0,  0, 128,   0,   0,  0,  0);
     av1_upfill8(t,  1,  0,  0, 0 - 1, 128,   2, 0 - 1,  0,  0);
@@ -221,8 +221,8 @@ fn av1_superres_upscale_frame(down, up, bit_depth): i64 {
         if (srcw > (dr_frame_plane_alloc_w(down, p) + dr_frame_border(down))) { return DR_ERR_BOUNDS; }
         var step = av1_superres_step(dw, uw);
         var mx0 = av1_superres_x0(dw, uw, step);
-        var srcrow = alloc(srcw * 8);            # srcw i64 samples
-        var dstrow = alloc(uw * 8);              # uw i64 samples
+        var srcrow = dr_alloc(srcw * 8);            # srcw i64 samples
+        var dstrow = dr_alloc(uw * 8);              # uw i64 samples
         if ((srcrow == 0) || (dstrow == 0)) { return DR_ERR_OOM; }
         var y = 0;
         while (y < h) {

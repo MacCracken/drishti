@@ -227,6 +227,13 @@ fn av1_tile_segctx(tile): i64 {
     store64(sc + AV1SC_SEGIDS, segids);
     return sc;
 }
+# 1 when the tile has a SegmentIds grid but its Av1SegCtx cannot be built (OOM). av1_tile_segctx's 0 otherwise means
+# "no grid", which the inter mode-info lanes read as no temporal prediction: without this check a failed lazy build
+# decoded on without it (0.8.5, found by OOM injection).
+fn av1_tile_segctx_oom(tile): i64 {
+    if (load64(tile + AV1TILE_SEGIDS) == 0) { return 0; }
+    return av1_tile_segctx(tile) == 0;
+}
 # DeltaLFs[ r ][ c ][ i ] — 0 when the grids were never allocated (a tile-level test without grids).
 fn av1_dlf_get(tile, i, r, c): i64 {
     if (load64(tile + AV1TILE_DLF + (i * 8)) == 0) { return 0; }
@@ -264,7 +271,8 @@ fn av1_bd_set(tile, plane, r, c, v): i64 {
 # are sized to the tile's plane extent; BlockDecoded to one superblock. Returns
 # the tile pointer, or 0 on OOM. sd/cc/ncc are set by the caller each tile.
 fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_planes): i64 {
-    var tile = alloc(AV1TILE_SIZE);
+    if (av1_tables_init() != DR_OK) { return 0; }   # every lazy table first (OOM: no tile, as for its own alloc)
+    var tile = dr_alloc(AV1TILE_SIZE);
     if (tile == 0) { return 0; }
     store64(tile + AV1TILE_FRAME, frame);
     store64(tile + AV1TILE_SD, 0);
@@ -345,10 +353,10 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
-    var quant = alloc(1024 * 8);
+    var quant = dr_alloc(1024 * 8);
     if (quant == 0) { return 0; }
     store64(tile + AV1TILE_QUANT, quant);
-    var ott = alloc(8);
+    var ott = dr_alloc(8);
     if (ott == 0) { return 0; }
     store64(tile + AV1TILE_OTT, ott);
     store64(tile + AV1TILE_MAXLW, 0);
@@ -364,11 +372,11 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
         var ad = 0;
         var ld = 0;
         if (p < num_planes) {
-            bd = alloc(AV1_BD_STRIDE * AV1_BD_STRIDE * 8);
-            al = alloc(above_sz * 8);
-            ll = alloc(left_sz * 8);
-            ad = alloc(above_sz * 8);
-            ld = alloc(left_sz * 8);
+            bd = dr_alloc(AV1_BD_STRIDE * AV1_BD_STRIDE * 8);
+            al = dr_alloc(above_sz * 8);
+            ll = dr_alloc(left_sz * 8);
+            ad = dr_alloc(above_sz * 8);
+            ld = dr_alloc(left_sz * 8);
             if ((bd == 0) || (al == 0) || (ll == 0) || (ad == 0) || (ld == 0)) { return 0; }
         }
         store64(tile + AV1TILE_BD + (p * 8), bd);
@@ -394,7 +402,7 @@ fn av1_tile_frame_mi_cols(tile): i64 { return load64(tile + AV1TILE_FMI_COLS); }
 
 # Share the frame-sized MI grids (+ frame dims) of `src` with `dst` so a second
 # tile writes into the SAME frame grids as the first (each in its own MI window).
-# Call after av1_tile_grids_new(src) + av1_tile_new(dst), before dst's window/decode.
+# Call after av1_tile_grids_new(src) + av1_tile_new(dst), before dst's window/decode. Returns DR_OK or DR_ERR_OOM.
 fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_FMI_COLS, load64(src + AV1TILE_FMI_COLS));
     store64(dst + AV1TILE_FMI_ROWS, load64(src + AV1TILE_FMI_ROWS));
@@ -428,7 +436,9 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_DLF + 8, load64(src + AV1TILE_DLF + 8));
     store64(dst + AV1TILE_DLF + 16, load64(src + AV1TILE_DLF + 16));
     store64(dst + AV1TILE_DLF + 24, load64(src + AV1TILE_DLF + 24));
-    return 0;
+    # the dst's Av1PalCtx, built now (av1_tile_grids_new says why): DR_ERR_OOM when that fails.
+    if ((load64(dst + AV1TILE_PALSZY) != 0) && (av1_tile_palctx(dst) == 0)) { return DR_ERR_OOM; }
+    return DR_OK;
 }
 
 # The inter decode context wiring (av1_tile_set_inter_ctx) and the inter block/tile
@@ -458,7 +468,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(18 * 8);
+    var offs = dr_alloc(18 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -478,7 +488,7 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 136, AV1TILE_PALPTR);  # the per-MI palette colour copy, 0 = none
     var g = 0;
     while (g < 18) {
-        var arr = alloc(n * 8);
+        var arr = dr_alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;
         while (i < n) { store64(arr + (i * 8), 0); i = i + 1; }
@@ -486,11 +496,14 @@ fn av1_tile_grids_new(tile): i64 {
         g = g + 1;
     }
     # CdefIdx grid — init to -1 (clear_cdef: no filtering until read_cdef sets it).
-    var cix = alloc(n * 8);
+    var cix = dr_alloc(n * 8);
     if (cix == 0) { return DR_ERR_OOM; }
     var ci = 0;
     while (ci < n) { store64(cix + (ci * 8), 0 - 1); ci = ci + 1; }
     store64(tile + AV1TILE_CDEFIDX, cix);
+    # the Av1PalCtx, built NOW (0.8.5): built lazily, a failed build read as "no palette grids" and every palette
+    # block decoded without its palette — a silent mis-decode. With the grids present, 0 here can only be OOM.
+    if (av1_tile_palctx(tile) == 0) { return DR_ERR_OOM; }
     return DR_OK;
 }
 # Restore one tile window of the frame grids to the state av1_tile_grids_new (and av1_tile_set_inter_ctx, for the MV
@@ -502,7 +515,7 @@ fn av1_tile_grids_new(tile): i64 {
 # read the symbol at all (a stale index skips it, a desync).
 fn av1_tile_grids_reset_window(tile, rs, re, cs, ce, subx, suby): i64 {
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
-    var offs = alloc(16 * 8);   # the 16 luma-addressed zeroed grids
+    var offs = dr_alloc(16 * 8);   # the 16 luma-addressed zeroed grids
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -588,7 +601,7 @@ fn av1_tile_set_cdef_ctx(tile, enable_cdef, cdef_bits, coded_lossless, allow_int
     # Must run after av1_tile_grids_new: we capture the CdefIdx grid pointer, so a
     # null grid here would give read_cdef a null deref. Fail fast instead.
     if (load64(tile + AV1TILE_CDEFIDX) == 0) { return DR_ERR_BOUNDS; }
-    var ctx = alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
+    var ctx = dr_alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
     if (ctx == 0) { return DR_ERR_OOM; }
     store64(ctx + 0, enable_cdef);
     store64(ctx + 8, cdef_bits);
@@ -661,7 +674,7 @@ enum Av1BlockOff {
     AV1BLK_SIZE        = 96;
 }
 fn av1_block_new(): i64 {
-    var b = alloc(AV1BLK_SIZE);
+    var b = dr_alloc(AV1BLK_SIZE);
     if (b == 0) { return 0; }
     var i = 0;
     while (i < (AV1BLK_SIZE / 8)) { store64(b + (i * 8), 0); i = i + 1; }

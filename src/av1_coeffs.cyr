@@ -126,7 +126,7 @@ fn av1_ccdf_copy(dst, src, n): i64 {
 # Allocate + initialise a mutable coeff-CDF context for quantizer bucket q
 # (0..3). Returns the buffer pointer, or 0 on OOM.
 fn av1_ccdf_new(q): i64 {
-    var cc = alloc(3999 * 8);
+    var cc = dr_alloc(3999 * 8);
     if (cc == 0) { return 0; }
     var sb = av1_coeff_cdf_blob();
     av1_ccdf_copy(cc + (0 * 8), sb + ((0 + (q * 195)) * 8), 195);
@@ -380,7 +380,7 @@ fn av1_coeffs_encode(enc, cc, ncc, plane, tx_size, ttx, tx_type, x4, y4, max_x4,
         }
         # abs-level work array mirrors the decoder's quant[] state during the
         # base/br loop (needed so the neighbour contexts match).
-        var absl = alloc(seg_eob * 8);
+        var absl = dr_alloc(seg_eob * 8);
         if (absl == 0) { return DR_ERR_OOM; }
         var z = 0;
         while (z < seg_eob) { store64(absl + (z * 8), 0); z = z + 1; }

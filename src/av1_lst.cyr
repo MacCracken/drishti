@@ -52,8 +52,8 @@ fn av1_tile_list_parse(buf, sz, out_err): i64 {
     var count = ((load8(buf + 2) << 8) | load8(buf + 3)) + 1;    # tile_count_minus_1 f(16)
     if (count > 512) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
     if (count > (ow * oh)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
-    var tl = alloc(AV1TL_SIZE);
-    var ents = alloc(count * AV1TLE_SIZE);   # count entries
+    var tl = dr_alloc(AV1TL_SIZE);
+    var ents = dr_alloc(count * AV1TLE_SIZE);   # count entries
     if ((tl == 0) || (ents == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(tl + AV1TL_OUT_W, ow);
     store64(tl + AV1TL_OUT_H, oh);
@@ -121,7 +121,7 @@ fn av1_decoder_set_anchor(dec, idx, frame): i64 {
     if ((idx < 0) || (idx > 127)) { return DR_ERR_BOUNDS; }
     var a = load64(dec + AV1DEC_ANCH);
     if (a == 0) {
-        a = alloc(128 * 8);   # 128 DrFrame pointers
+        a = dr_alloc(128 * 8);   # 128 DrFrame pointers
         if (a == 0) { return DR_ERR_OOM; }
         memset(a, 0, 128 * 8);
         store64(dec + AV1DEC_ANCH, a);
@@ -198,7 +198,7 @@ fn av1_decode_tile_list(dec, buf, sz, out_err): i64 {
     # 5-13); and a DPB holding nothing but the anchor in that slot. A tile decode reads only RefUpscaledWidth and
     # RefFrameHeight of it (the 7.11.3.3 scale factors); the other fields are set to keep the slot whole.
     var refs = load64(dec + AV1DEC_REFS);
-    var srefs = alloc(AV1REF_SIZE);
+    var srefs = dr_alloc(AV1REF_SIZE);
     var sdpb = av1_dpb_new();
     if ((srefs == 0) || (sdpb == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     memcpy(srefs, refs, AV1REF_SIZE);

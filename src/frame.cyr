@@ -118,7 +118,7 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
         store64(out_err, DR_ERR_BOUNDS);
         return 0;
     }
-    var f = alloc(DR_FRAME_SIZE);
+    var f = dr_alloc(DR_FRAME_SIZE);
     if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(f + DR_FRAME_NUM_PLANES, num_planes);
     store64(f + DR_FRAME_BIT_DEPTH, bit_depth);
@@ -142,7 +142,7 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
         # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
         var stride = apw + (2 * border);
         var rows = aph + (2 * border);
-        var buf = alloc(stride * rows * 2);   # u16 samples
+        var buf = dr_alloc(stride * rows * 2);   # u16 samples
         if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
         memset(buf, 0, stride * rows * 2);
         # origin = sample (0,0): skip `border` rows and `border` columns.

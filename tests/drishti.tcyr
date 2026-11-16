@@ -159,6 +159,56 @@ fn test_fourcc_constants() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): dr_alloc, dr_alloc_fail_at, dr_alloc_sweep ----
+fn test_dr_alloc_inject() {
+    dr_alloc_fail_at(0);
+    assert_neq(dr_alloc(8), 0, "injection off: dr_alloc allocates");
+    assert_eq(dr_alloc_count(), 1, "...and counts the call");
+    dr_alloc_fail_at(3);
+    assert_eq(dr_alloc_count(), 0, "dr_alloc_fail_at resets the count");
+    assert_neq(dr_alloc(8), 0, "k = 3: call 1 allocates");
+    assert_neq(dr_alloc(8), 0, "...call 2 allocates");
+    assert_eq(dr_alloc(8), 0, "...call 3 fails");
+    assert_neq(dr_alloc(8), 0, "...call 4 allocates again: one failure, not a cliff");
+    assert_eq(dr_alloc_count(), 4, "...four calls counted");
+    dr_alloc_fail_at(0 - 5);
+    assert_neq(dr_alloc(8), 0, "a negative k turns injection off");
+    dr_alloc_fail_at(1);
+    assert_eq(dr_err(DR_ERR_BOUNDS), 0, "dr_err_new: its record allocation failing returns 0");
+    dr_alloc_fail_at(0);
+    return 0;
+}
+fn oom_err_op(code): i64 {
+    if (dr_err(code) == 0) { return DR_ERR_OOM; }
+    return DR_OK;
+}
+# three broken operations, one per failure the sweep exists to catch
+fn oom_swallow_op(a): i64 {   # the first allocation's failure is ignored
+    var p = dr_alloc(8);
+    if (dr_alloc(8) == 0) { return DR_ERR_OOM; }
+    return DR_OK;
+}
+fn oom_mislabel_op(a): i64 {   # an allocation failure reported as another error
+    if (dr_alloc(8) == 0) { return DR_ERR_BOUNDS; }
+    return DR_OK;
+}
+var Oom_Poisoned = 0;
+fn oom_poison_op(a): i64 {   # a failed run leaves state that breaks every later run
+    if (Oom_Poisoned != 0) { return DR_ERR_OTHER; }
+    if (dr_alloc(8) == 0) { Oom_Poisoned = 1; return DR_ERR_OOM; }
+    return DR_OK;
+}
+fn test_dr_alloc_sweep() {
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&oom_err_op, DR_ERR_BOUNDS, &n), 0, "dr_err_new: its allocation failing -> OOM");
+    assert_eq(n, 1, "...over its one allocation");
+    assert_eq(dr_alloc_sweep(&oom_swallow_op, 0, &n), 1, "canary: a swallowed failure is caught, at k = 1");
+    assert_eq(n, 2, "...of 2");
+    assert_eq(dr_alloc_sweep(&oom_mislabel_op, 0, &n), 1, "canary: a mislabelled OOM is caught");
+    assert_eq(dr_alloc_sweep(&oom_poison_op, 0, &n), 0 - 1, "canary: state a failed run left behind is caught");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("error codes");
@@ -175,6 +225,9 @@ fn main() {
     test_sniff_annexb();
     test_sniff_unknown();
     test_fourcc_constants();
+    test_group("OOM fault injection");
+    test_dr_alloc_inject();
+    test_dr_alloc_sweep();
     return assert_summary();
 }
 

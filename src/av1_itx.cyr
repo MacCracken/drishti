@@ -80,7 +80,7 @@ var Av1_ITx_Tables = 0;
 
 fn av1_itx_tables(): i64 {
     if (Av1_ITx_Tables != 0) { return Av1_ITx_Tables; }
-    var t = alloc((65 + 19 + 19 + 19) * 8);
+    var t = dr_alloc((65 + 19 + 19 + 19) * 8);
     if (t == 0) { return 0; }
     # Cos128_Lookup — 4096 * cos(a*pi/128) rounded (7.13.2.1).
     store64(t + 0, 4096);   store64(t + 8, 4095);   store64(t + 16, 4091);  store64(t + 24, 4085);
@@ -206,7 +206,7 @@ fn av1_itx_h(T, a, b, flip, r): i64 {
 # ================================================================
 fn av1_itx_dct_permute(T, n): i64 {
     var len = 1 << n;
-    var copy = alloc(len * 8);
+    var copy = dr_alloc(len * 8);
     if (copy == 0) { return DR_ERR_OOM; }
     memcpy(copy, T, len * 8);
     var i = 0;
@@ -355,7 +355,7 @@ fn av1_itx_dct(T, n, r): i64 {
 # ================================================================
 fn av1_itx_adst_ipermute(T, n): i64 {
     var n0 = 1 << n;
-    var copy = alloc(n0 * 8);
+    var copy = dr_alloc(n0 * 8);
     if (copy == 0) { return DR_ERR_OOM; }
     memcpy(copy, T, n0 * 8);
     var i = 0;
@@ -370,7 +370,7 @@ fn av1_itx_adst_ipermute(T, n): i64 {
 
 fn av1_itx_adst_opermute(T, n): i64 {
     var n0 = 1 << n;
-    var copy = alloc(n0 * 8);
+    var copy = dr_alloc(n0 * 8);
     if (copy == 0) { return DR_ERR_OOM; }
     memcpy(copy, T, n0 * 8);
     var i = 0;
@@ -592,7 +592,7 @@ fn av1_inverse_transform_2d(dequant, residual, tx_size, tx_type, lossless, bit_d
     if (av1_itx_abs(log2w - log2h) == 1) { rect = 1; }
     var row_kind = av1_tx_row_kind(tx_type);
     var col_kind = av1_tx_col_kind(tx_type);
-    var T = alloc(64 * 8);
+    var T = dr_alloc(64 * 8);
     if (T == 0) { return DR_ERR_OOM; }
 
     # --- Row transforms ---

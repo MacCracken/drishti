@@ -252,7 +252,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
         store64(out_err, DR_ERR_OOM);
         return 0;
     }
-    var s = alloc(AV1_SEQ_SIZE);
+    var s = dr_alloc(AV1_SEQ_SIZE);
     if (s == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;

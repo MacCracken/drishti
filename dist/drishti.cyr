@@ -89,12 +89,64 @@ fn drishti_version(): i64 {
 }
 
 # ================================================================
+# dr_alloc — every allocation in src/ goes through here (0.8.5), so an allocation FAILURE can be injected and every
+# DR_ERR_OOM branch exercised. With injection off it is the stdlib alloc. dr_alloc_fail_at(n), n >= 1, makes the
+# n-th dr_alloc from then on return 0 (one failure, as if memory ran out at that call and only that call), then
+# carries on normally; dr_alloc_fail_at(0) turns injection off. dr_alloc_count() is the number of dr_alloc calls
+# since the last dr_alloc_fail_at. Test-only machinery: no decode or encode path calls dr_alloc_fail_at or
+# dr_alloc_sweep.
+# ================================================================
+var Dr_Alloc_Fail_Left = 0;   # 0 = off; else the countdown to the failing call
+var Dr_Alloc_Calls = 0;       # dr_alloc calls since the last dr_alloc_fail_at
+fn dr_alloc(size): i64 {
+    Dr_Alloc_Calls = Dr_Alloc_Calls + 1;
+    if (Dr_Alloc_Fail_Left > 0) {
+        Dr_Alloc_Fail_Left = Dr_Alloc_Fail_Left - 1;
+        if (Dr_Alloc_Fail_Left == 0) { return 0; }
+    }
+    return alloc(size);
+}
+fn dr_alloc_fail_at(n): i64 {
+    Dr_Alloc_Fail_Left = n;
+    if (n < 0) { Dr_Alloc_Fail_Left = 0; }
+    Dr_Alloc_Calls = 0;
+    return 0;
+}
+fn dr_alloc_count(): i64 { return Dr_Alloc_Calls; }
+# dr_alloc_sweep(fp, arg, out_n) — the OOM witness the suites share. fp(arg) runs one operation and returns DR_OK,
+# or the error it stopped with. The sweep runs it once to build any lazily-built state, once more to count its
+# allocations N (written to *out_n), then N times more with the k-th allocation failing, k = 1..N. Every one of
+# those must return DR_ERR_OOM: a crash is a crash, another code is a mislabelled OOM, and DR_OK means the failure
+# was swallowed. A last fault-free run must be DR_OK again (no failed run left state behind). Returns 0 when all of
+# that holds, the first k that broke it, or -1 when a fault-free run failed. Lazy state built by the first run is
+# never failed here — make conformance's oom section fails it, in a fresh process per k.
+fn dr_alloc_sweep(fp, arg, out_n): i64 {
+    store64(out_n, 0);
+    dr_alloc_fail_at(0);
+    if (callptr(fp, arg) != DR_OK) { return 0 - 1; }
+    dr_alloc_fail_at(0);
+    if (callptr(fp, arg) != DR_OK) { return 0 - 1; }
+    var n = dr_alloc_count();
+    store64(out_n, n);
+    var k = 1;
+    while (k <= n) {
+        dr_alloc_fail_at(k);
+        var rc = callptr(fp, arg);
+        dr_alloc_fail_at(0);
+        if (rc != DR_ERR_OOM) { return k; }
+        k = k + 1;
+    }
+    if (callptr(fp, arg) != DR_OK) { return 0 - 1; }
+    return 0;
+}
+
+# ================================================================
 # DrErr — 16-byte error record {code, detail-ptr}
 # ================================================================
 
 # Create a DrErr with code and an optional detail cstring (0 = none).
 fn dr_err_new(code, detail): i64 {
-    var e = alloc(16);
+    var e = dr_alloc(16);
     if (e == 0) { return 0; }
     store64(e, code);
     store64(e + 8, detail);
@@ -302,7 +354,7 @@ fn dr_wr_be32(p, v): i64 {
 # handle, or 0 on allocation failure / negative len.
 fn dr_br_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var br = alloc(32);
+    var br = dr_alloc(32);
     if (br == 0) { return 0; }
     store64(br, buf);
     store64(br + 8, len);
@@ -636,9 +688,9 @@ fn dr_bw_init(cap_hint): i64 {
     var cap = cap_hint;
     if (cap < 16) { cap = 16; }
     if (cap > DR_BW_MAX_BYTES) { return 0; }
-    var buf = alloc(cap);
+    var buf = dr_alloc(cap);
     if (buf == 0) { return 0; }
-    var bw = alloc(32);
+    var bw = dr_alloc(32);
     if (bw == 0) { return 0; }
     store64(bw, buf);
     store64(bw + 8, cap);
@@ -692,7 +744,7 @@ fn dr_bw_ensure(bw, extra_bits): i64 {
             return DR_ERR_OVERSIZE;
         }
     }
-    var new_buf = alloc(new_cap);
+    var new_buf = dr_alloc(new_cap);
     if (new_buf == 0) {
         store64(bw + 24, DR_ERR_OOM);
         return DR_ERR_OOM;
@@ -964,7 +1016,7 @@ fn dr_ivf_parse_header(buf, len, out_err): i64 {
         store64(out_err, DR_ERR_TRUNCATED);
         return 0;
     }
-    var h = alloc(64);
+    var h = dr_alloc(64);
     if (h == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -1002,7 +1054,7 @@ fn dr_ivf_hdr_version(h): i64 { return load64(h + 56); }
 fn dr_ivf_reader_init(buf, len, out_err): i64 {
     var h = dr_ivf_parse_header(buf, len, out_err);
     if (h == 0) { return 0; }
-    var r = alloc(40);
+    var r = dr_alloc(40);
     if (r == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -1079,7 +1131,7 @@ fn dr_ivf_writer_ensure(w, extra): i64 {
     var new_cap = cap;
     while (new_cap < need) { new_cap = new_cap << 1; }
     if (new_cap > DR_IVF_MAX_TOTAL) { new_cap = DR_IVF_MAX_TOTAL; }
-    var new_buf = alloc(new_cap);
+    var new_buf = dr_alloc(new_cap);
     if (new_buf == 0) {
         store64(w + 32, DR_ERR_OOM);
         return DR_ERR_OOM;
@@ -1102,9 +1154,9 @@ fn dr_ivf_writer_init(fourcc, width, height, tb_num, tb_den): i64 {
     if ((tb_num < 0) || (tb_num > 0xFFFFFFFF)) { return 0; }
     if ((tb_den < 0) || (tb_den > 0xFFFFFFFF)) { return 0; }
     if ((fourcc < 0) || (fourcc > 0xFFFFFFFF)) { return 0; }
-    var buf = alloc(1024);
+    var buf = dr_alloc(1024);
     if (buf == 0) { return 0; }
-    var w = alloc(40);
+    var w = dr_alloc(40);
     if (w == 0) { return 0; }
     store64(w, buf);
     store64(w + 8, 1024);
@@ -1295,7 +1347,7 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
         store64(out_err, DR_ERR_BOUNDS);
         return 0;
     }
-    var f = alloc(DR_FRAME_SIZE);
+    var f = dr_alloc(DR_FRAME_SIZE);
     if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(f + DR_FRAME_NUM_PLANES, num_planes);
     store64(f + DR_FRAME_BIT_DEPTH, bit_depth);
@@ -1319,7 +1371,7 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
         # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
         var stride = apw + (2 * border);
         var rows = aph + (2 * border);
-        var buf = alloc(stride * rows * 2);   # u16 samples
+        var buf = dr_alloc(stride * rows * 2);   # u16 samples
         if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
         memset(buf, 0, stride * rows * 2);
         # origin = sample (0,0): skip `border` rows and `border` columns.
@@ -1547,7 +1599,7 @@ fn av1_obu_parse_header(buf, len, out_err): i64 {
         # 5.3.1: obu_size = sz - 1 - obu_extension_flag, sz = len.
         size = len - hdr_size;
     }
-    var o = alloc(56);
+    var o = dr_alloc(56);
     if (o == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -1609,7 +1661,7 @@ fn av1_obu_type_name(type): i64 {
 # or 0 on negative len / allocation failure.
 fn av1_obu_iter_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var it = alloc(40);
+    var it = dr_alloc(40);
     if (it == 0) { return 0; }
     store64(it, buf);
     store64(it + 8, len);
@@ -1976,7 +2028,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
         store64(out_err, DR_ERR_OOM);
         return 0;
     }
-    var s = alloc(AV1_SEQ_SIZE);
+    var s = dr_alloc(AV1_SEQ_SIZE);
     if (s == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -2635,7 +2687,7 @@ fn av1_remap_lr_type(t): i64 {
 # hints 0). Returns the handle or 0 on OOM.
 # ================================================================
 fn av1_ref_state_new(): i64 {
-    var r = alloc(AV1REF_SIZE);
+    var r = dr_alloc(AV1REF_SIZE);
     if (r == 0) { return 0; }
     memset(r, 0, AV1REF_SIZE);
     return r;
@@ -4058,7 +4110,7 @@ fn av1_set_frame_refs(s, refs, fh, last_idx, gold_idx): i64 {
     }
     store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_LAST_FRAME - AV1_LAST_FRAME) * 8), last_idx);
     store64(fh + AV1FH_REF_FRAME_IDX + ((AV1_GOLDEN_FRAME - AV1_LAST_FRAME) * 8), gold_idx);
-    var scratch = alloc(128);   # used[8] + shifted[8], 64 bytes each
+    var scratch = dr_alloc(168);   # used[8] + shifted[8], 64 bytes each, then Ref_Frame_List[5] (40 bytes)
     if (scratch == 0) { return DR_ERR_OOM; }
     var used = scratch;
     var shifted = scratch + 64;
@@ -4094,7 +4146,7 @@ fn av1_set_frame_refs(s, refs, fh, last_idx, gold_idx): i64 {
     }
     # Remaining forward references in anti-chronological order.
     # Ref_Frame_List = {LAST2, LAST3, BWDREF, ALTREF2, ALTREF}.
-    var list = alloc(40);
+    var list = scratch + 128;   # the third part of the one checked allocation above
     store64(list + 0, AV1_LAST2_FRAME);
     store64(list + 8, AV1_LAST3_FRAME);
     store64(list + 16, AV1_BWDREF_FRAME);
@@ -4155,7 +4207,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
     }
     var br = dr_br_init(buf, len);
     if (br == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-    var fh = alloc(AV1FH_SIZE);
+    var fh = dr_alloc(AV1FH_SIZE);
     if (fh == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     memset(fh, 0, AV1FH_SIZE);
 
@@ -4367,7 +4419,8 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             if (short_sig) {
                 var last_idx = dr_br_read_bits(br, 3);   # last_frame_idx f(3)
                 var gold_idx = dr_br_read_bits(br, 3);   # gold_frame_idx f(3)
-                av1_set_frame_refs(s, refs, fh, last_idx, gold_idx);
+                var sfr = av1_set_frame_refs(s, refs, fh, last_idx, gold_idx);
+                if (sfr != DR_OK) { store64(out_err, sfr); return 0; }   # its scratch OOM was dropped before 0.8.5
             }
         }
         store64(fh + AV1FH_SHORT_SIGNALING, short_sig);
@@ -4658,7 +4711,7 @@ fn av1_sym_dec_init(buf, sz, disable_cdf_update): i64 {
     if (sz < 0) { return 0; }
     var br = dr_br_init(buf, sz);
     if (br == 0) { return 0; }
-    var sd = alloc(AV1SD_SIZE);
+    var sd = dr_alloc(AV1SD_SIZE);
     if (sd == 0) { return 0; }
     var num_bits = sz * 8;
     if (num_bits > 15) { num_bits = 15; }        # Min(sz*8, 15)
@@ -4847,9 +4900,9 @@ fn av1_sym_dec_exit(sd): i64 {
 fn av1_sym_enc_init(cap_hint, disable_cdf_update): i64 {
     var cap = cap_hint;
     if (cap < 64) { cap = 64; }
-    var pc = alloc(cap * 8);
+    var pc = dr_alloc(cap * 8);
     if (pc == 0) { return 0; }
-    var enc = alloc(AV1SE_SIZE);
+    var enc = dr_alloc(AV1SE_SIZE);
     if (enc == 0) { return 0; }
     store64(enc + AV1SE_LOW, 0);
     store64(enc + AV1SE_RNG, 32768);              # 0x8000
@@ -4866,6 +4919,12 @@ fn av1_sym_enc_init(cap_hint, disable_cdf_update): i64 {
 }
 
 fn av1_sym_enc_err(enc): i64 { return load64(enc + AV1SE_ERR); }
+# Latch an encoder-side failure the symbol layer did not see (an OOM in a caller's scratch): first error wins,
+# exactly as av1_sym_dec_fail on the decode lane. Returns e.
+fn av1_sym_enc_fail(enc, e): i64 {
+    if ((e != DR_OK) && (load64(enc + AV1SE_ERR) == DR_OK)) { store64(enc + AV1SE_ERR, e); }
+    return e;
+}
 
 # Append a pre-carry word (auto-grows by doubling).
 fn av1_sym_enc_push(enc, val): i64 {
@@ -4875,7 +4934,7 @@ fn av1_sym_enc_push(enc, val): i64 {
     var cap = load64(enc + AV1SE_CAP);
     if (len >= cap) {
         var new_cap = cap << 1;
-        var new_buf = alloc(new_cap * 8);
+        var new_buf = dr_alloc(new_cap * 8);
         if (new_buf == 0) {
             store64(enc + AV1SE_ERR, DR_ERR_OOM);
             return DR_ERR_OOM;
@@ -5002,8 +5061,9 @@ fn av1_sym_enc_finish(enc, out_len): i64 {
     # from the word after it becomes one output byte.
     var len = load64(enc + AV1SE_LEN);
     var precarry = load64(enc + AV1SE_PRECARRY);
-    var out = alloc(len + 1);                       # +1 guards len == 0
-    if (out == 0) { return 0; }
+    var out = dr_alloc(len + 1);                       # +1 guards len == 0
+    # latched, so av1_sym_enc_err says why the finish returned 0 (it read DR_OK before 0.8.5)
+    if (out == 0) { store64(enc + AV1SE_ERR, DR_ERR_OOM); return 0; }
     var carry = 0;
     var offs = len;
     while (offs > 0) {
@@ -5196,7 +5256,7 @@ var Av1_ITx_Tables = 0;
 
 fn av1_itx_tables(): i64 {
     if (Av1_ITx_Tables != 0) { return Av1_ITx_Tables; }
-    var t = alloc((65 + 19 + 19 + 19) * 8);
+    var t = dr_alloc((65 + 19 + 19 + 19) * 8);
     if (t == 0) { return 0; }
     # Cos128_Lookup — 4096 * cos(a*pi/128) rounded (7.13.2.1).
     store64(t + 0, 4096);   store64(t + 8, 4095);   store64(t + 16, 4091);  store64(t + 24, 4085);
@@ -5322,7 +5382,7 @@ fn av1_itx_h(T, a, b, flip, r): i64 {
 # ================================================================
 fn av1_itx_dct_permute(T, n): i64 {
     var len = 1 << n;
-    var copy = alloc(len * 8);
+    var copy = dr_alloc(len * 8);
     if (copy == 0) { return DR_ERR_OOM; }
     memcpy(copy, T, len * 8);
     var i = 0;
@@ -5471,7 +5531,7 @@ fn av1_itx_dct(T, n, r): i64 {
 # ================================================================
 fn av1_itx_adst_ipermute(T, n): i64 {
     var n0 = 1 << n;
-    var copy = alloc(n0 * 8);
+    var copy = dr_alloc(n0 * 8);
     if (copy == 0) { return DR_ERR_OOM; }
     memcpy(copy, T, n0 * 8);
     var i = 0;
@@ -5486,7 +5546,7 @@ fn av1_itx_adst_ipermute(T, n): i64 {
 
 fn av1_itx_adst_opermute(T, n): i64 {
     var n0 = 1 << n;
-    var copy = alloc(n0 * 8);
+    var copy = dr_alloc(n0 * 8);
     if (copy == 0) { return DR_ERR_OOM; }
     memcpy(copy, T, n0 * 8);
     var i = 0;
@@ -5708,7 +5768,7 @@ fn av1_inverse_transform_2d(dequant, residual, tx_size, tx_type, lossless, bit_d
     if (av1_itx_abs(log2w - log2h) == 1) { rect = 1; }
     var row_kind = av1_tx_row_kind(tx_type);
     var col_kind = av1_tx_col_kind(tx_type);
-    var T = alloc(64 * 8);
+    var T = dr_alloc(64 * 8);
     if (T == 0) { return DR_ERR_OOM; }
 
     # --- Row transforms ---
@@ -5862,7 +5922,7 @@ var Av1_SmW = 0;
 
 fn av1_sm_weights(): i64 {
     if (Av1_SmW != 0) { return Av1_SmW; }
-    var t = alloc(124 * 8);
+    var t = dr_alloc(124 * 8);
     if (t == 0) { return 0; }
     av1_smw_fill(t + 0, 255, 149, 85, 64, 0, 0, 0, 0);                 # 4x4 (first 4 used)
     av1_smw_fill(t + (4 * 8), 255, 197, 146, 105, 73, 50, 37, 32);     # 8x8
@@ -6037,7 +6097,7 @@ fn av1_intra_horizontal(left, w, h, pred): i64 {
 var Av1_DrDeriv = 0;
 fn av1_dr_intra_derivative(angle): i64 {
     if (Av1_DrDeriv == 0) {
-        var t = alloc(90 * 8);
+        var t = dr_alloc(90 * 8);
         if (t == 0) { return 0; }
         memset(t, 0, 90 * 8);
         store64(t + (3 * 8), 1023);  store64(t + (6 * 8), 547);   store64(t + (9 * 8), 372);
@@ -6141,7 +6201,7 @@ fn av1_edge_upsample_sel(w, h, filter_type, delta): i64 {
 # rewritten from a snapshot; buf[-1] is left intact.
 fn av1_intra_edge_filter(buf, sz, strength): i64 {
     if (strength == 0) { return DR_OK; }
-    var edge = alloc(sz * 8);
+    var edge = dr_alloc(sz * 8);
     if (edge == 0) { return DR_ERR_OOM; }
     var i = 0;
     while (i < sz) {
@@ -6167,7 +6227,7 @@ fn av1_intra_edge_filter(buf, sz, strength): i64 {
 # valid; on exit buf[-2..2*numPx-2] hold the upsampled edge. `buf` is the
 # ORIGIN pointer (with headroom for index -2).
 fn av1_intra_edge_upsample(buf, num_px, bit_depth): i64 {
-    var dup = alloc((num_px + 3) * 8);
+    var dup = dr_alloc((num_px + 3) * 8);
     if (dup == 0) { return DR_ERR_OOM; }
     store64(dup + 0, load64(buf + (0 - 8)));   # dup[0] = buf[-1]
     var i = 0 - 1;
@@ -6340,7 +6400,7 @@ fn av1_ftaps_fill7(p, t0, t1, t2, t3, t4, t5, t6) {
 }
 fn av1_filter_taps(): i64 {
     if (Av1_FTaps != 0) { return Av1_FTaps; }
-    var t = alloc((5 * 8 * 7) * 8);
+    var t = dr_alloc((5 * 8 * 7) * 8);
     if (t == 0) { return 0; }
     var s = 7 * 8;   # bytes per position row
     # mode 0
@@ -6402,7 +6462,7 @@ fn av1_filter_tap(mode, pos, tap): i64 {
 fn av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred): i64 {
     var w4 = w >> 2;
     var h2 = h >> 1;
-    var p = alloc(7 * 8);
+    var p = dr_alloc(7 * 8);
     if (p == 0) { return DR_ERR_OOM; }
     var i2 = 0;
     while (i2 < h2) {
@@ -6515,8 +6575,8 @@ fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
     # in (supports index -2 .. 2*(w+h)+5). Non-directional modes use the
     # -1..w+h-1 subset.
     var span = (2 * (w + h)) + 8;
-    var abuf = alloc(span * 8);
-    var lbuf = alloc(span * 8);
+    var abuf = dr_alloc(span * 8);
+    var lbuf = dr_alloc(span * 8);
     if ((abuf == 0) || (lbuf == 0)) { return DR_ERR_OOM; }
     var above = abuf + (2 * 8);   # above[-2] == abuf[0]
     var left = lbuf + (2 * 8);
@@ -6576,7 +6636,7 @@ fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
     store64(left + (0 - 8), corner);
 
     # Dispatch.
-    var pred = alloc(w * h * 8);
+    var pred = dr_alloc(w * h * 8);
     if (pred == 0) { return DR_ERR_OOM; }
     var rc = DR_ERR_UNSUPPORTED;
     if ((plane == 0) && use_filter_intra) {
@@ -6674,7 +6734,7 @@ fn av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
     if (max_luma_w > luma_pw) { max_luma_w = luma_pw; }
     if (max_luma_h > luma_ph) { max_luma_h = luma_ph; }
     # L[i][j]: subsampled luma with 3 fractional bits (w*h i64, <= 32*32).
-    var lbuf = alloc(w * h * 8);
+    var lbuf = dr_alloc(w * h * 8);
     if (lbuf == 0) { return DR_ERR_OOM; }
     var luma_avg = 0;
     var lim_x = max_luma_w - (1 << sub_x);
@@ -6752,7 +6812,7 @@ fn av1_qfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_dc_qlookup(): i64 {
     if (Av1_DcQ != 0) { return Av1_DcQ; }
-    var t = alloc(768 * 8);
+    var t = dr_alloc(768 * 8);
     if (t == 0) { return 0; }
     av1_qfill8(t, 0, 4, 8, 8, 9, 10, 11, 12, 12);
     av1_qfill8(t, 8, 13, 14, 15, 16, 17, 18, 19, 19);
@@ -6856,7 +6916,7 @@ fn av1_dc_qlookup(): i64 {
 
 fn av1_ac_qlookup(): i64 {
     if (Av1_AcQ != 0) { return Av1_AcQ; }
-    var t = alloc(768 * 8);
+    var t = dr_alloc(768 * 8);
     if (t == 0) { return 0; }
     av1_qfill8(t, 0, 4, 8, 9, 10, 11, 12, 13, 14);
     av1_qfill8(t, 8, 15, 16, 17, 18, 19, 20, 21, 22);
@@ -7051,7 +7111,7 @@ var Av1_QmOff = 0;      # Qm_Offset[19] (9.5.3), i64 slots (19 * 8 bytes)
 fn av1_qm_offset(tx_size): i64 {
     if ((tx_size < 0) || (tx_size > 18)) { return 0 - 1; }
     if (Av1_QmOff == 0) {
-        var t = alloc(19 * 8);   # 19 i64 slots
+        var t = dr_alloc(19 * 8);   # 19 i64 slots
         if (t == 0) { return 0 - 1; }
         store64(t + (0 * 8), 0);       store64(t + (1 * 8), 16);      store64(t + (2 * 8), 80);
         store64(t + (3 * 8), 336);     store64(t + (4 * 8), 336);     store64(t + (5 * 8), 1360);
@@ -7105,7 +7165,14 @@ fn av1_qm_table(): i64 {
     if (Av1_QmTbl != 0) { return Av1_QmTbl; }
     var pk = av1_qm_packed();
     if (pk == 0) { return 0; }
-    var t = alloc(15 * 2 * 3344);   # 100,320 BYTES
+    # Qm_Offset is lazy too, and its failure is -1: built inside the loop below, a failed build wrote every region
+    # one byte LOW (the first store at t - 1, outside the allocation) and cached the corrupt table (0.8.5, found
+    # by OOM injection). Build it first; once built it cannot fail.
+    if (av1_qm_offset(0) < 0) { return 0; }
+    # the loop sizes regions by av1_tx_width / height, which read the transform tables UNCHECKED: built here at
+    # frame-header time (before av1_tables_init), a failed build of those was a null dereference (0.8.5).
+    if (av1_itx_tables() == 0) { return 0; }
+    var t = dr_alloc(15 * 2 * 3344);   # 100,320 BYTES
     if (t == 0) { return 0; }
     var g = 0;
     while (g < 30) {   # g = level * 2 + ptype
@@ -7174,7 +7241,7 @@ fn av1_qm_matrix(fh, plane, tx_size, tx_type, lossless): i64 {
 # Quantizer_Matrix. Returns the blob, or 0 when the allocation fails.
 fn av1_qm_packed(): i64 {
     if (Av1_QmPacked != 0) { return Av1_QmPacked; }
-    var t = alloc(31200);   # 31,200 BYTES
+    var t = dr_alloc(31200);   # 31,200 BYTES
     if (t == 0) { return 0; }
     # level 0, luma: 32x32 lower triangle (528) then 32x16 (512)
     av1_qm_hex(t, 0, "201f201f20201f2020201f2020212120202021222322222122232527232222232425292b24232223");
@@ -8104,8 +8171,8 @@ fn av1_reconstruct_qm(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_d
     # (0.8.3's superblock-grid overflow wrote up to 16 rows past a plane this way).
     if (dr_frame_block_inside(frame, plane, x, y, w, h) == 0) { return DR_ERR_BOUNDS; }
 
-    var dequant = alloc(w * h * 8);
-    var residual = alloc(w * h * 8);
+    var dequant = dr_alloc(w * h * 8);
+    var residual = dr_alloc(w * h * 8);
     if ((dequant == 0) || (residual == 0)) { return DR_ERR_OOM; }
     memset(dequant, 0, w * h * 8);
 
@@ -8187,7 +8254,7 @@ fn av1_scanfill19(t, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13,
 
 fn av1_scan_blob(): i64 {
     if (Av1_ScanBlob != 0) { return Av1_ScanBlob; }
-    var t = alloc(4912 * 8);
+    var t = dr_alloc(4912 * 8);
     if (t == 0) { return 0; }
     av1_scanfill8(t, 0, 0, 1, 4, 8, 5, 2, 3, 6);
     av1_scanfill8(t, 8, 9, 12, 13, 10, 7, 11, 14, 15);
@@ -8810,7 +8877,7 @@ fn av1_scan_blob(): i64 {
 # Selector offset tables (entry offsets into the blob), indexed by TxSize.
 fn av1_scan_sel(): i64 {
     if (Av1_ScanSel != 0) { return Av1_ScanSel; }
-    var t = alloc(3 * 19 * 8);
+    var t = dr_alloc(3 * 19 * 8);
     if (t == 0) { return 0; }
     av1_scanfill19(t + (0 * 8),
       0, 80, 400, 1680, 1680, 16, 48, 144, 272, 656,
@@ -8915,7 +8982,7 @@ fn av1_cbfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_cbco(): i64 {
     if (Av1_CBCO != 0) { return Av1_CBCO; }
-    var t = alloc(480 * 8);
+    var t = dr_alloc(480 * 8);
     if (t == 0) { return 0; }
     av1_cbfill8(t, 0, 0, 1, 6, 6, 0, 1, 6, 6);
     av1_cbfill8(t, 8, 21, 0, 6, 6, 21, 21, 0, 6);
@@ -8986,7 +9053,7 @@ fn av1_coeff_base_ctx_offset(tx_size, r, c): i64 {
 
 fn av1_ctabs(): i64 {
     if (Av1_CTabs != 0) { return Av1_CTabs; }
-    var t = alloc(70 * 8);
+    var t = dr_alloc(70 * 8);
     if (t == 0) { return 0; }
     # Adjusted_Tx_Size[19]
     store64(t + ((0+0) * 8), 0);
@@ -9191,7 +9258,7 @@ fn av1_cdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_coeff_cdf_blob(): i64 {
     if (Av1_CoeffCdf != 0) { return Av1_CoeffCdf; }
-    var t = alloc(3400 * 8);
+    var t = dr_alloc(3400 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 31849, 32768, 0, 5892, 32768, 0, 12112, 32768);
     av1_cdffill8(t, 8, 0, 21935, 32768, 0, 20289, 32768, 0, 27473);
@@ -9671,7 +9738,7 @@ fn av1_coeff_base_eob_cdf(q, txsz_ctx, ptype, ctx): i64 {
 var Av1_CoeffBaseCdf = 0;
 fn av1_coeff_base_blob(): i64 {
     if (Av1_CoeffBaseCdf != 0) { return Av1_CoeffBaseCdf; }
-    var t = alloc(8400 * 8);
+    var t = dr_alloc(8400 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 4034, 8930, 12727, 32768, 0, 18082, 29741, 31877);
     av1_cdffill8(t, 8, 32768, 0, 12596, 26124, 30493, 32768, 0, 9446);
@@ -10740,7 +10807,7 @@ fn av1_coeff_base_cdf(q, txsz_ctx, ptype, ctx): i64 {
 var Av1_CoeffBrCdf = 0;
 fn av1_coeff_br_blob(): i64 {
     if (Av1_CoeffBrCdf != 0) { return Av1_CoeffBrCdf; }
-    var t = alloc(4200 * 8);
+    var t = dr_alloc(4200 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 14298, 20718, 24174, 32768, 0, 12536, 19601, 23789);
     av1_cdffill8(t, 8, 32768, 0, 8712, 15051, 19503, 32768, 0, 6170);
@@ -11325,7 +11392,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = alloc((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
+    var t = dr_alloc((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -11767,7 +11834,7 @@ fn av1_ncdf_fill_palette(t): i64 {
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
 # quantizer selection). Returns the buffer, or 0 on OOM.
 fn av1_ncdf_new(): i64 {
-    var cc = alloc(AV1_NCDF_N * 8);
+    var cc = dr_alloc(AV1_NCDF_N * 8);
     if (cc == 0) { return 0; }
     var sb = av1_noncoeff_cdf_blob();
     var i = 0;
@@ -11929,7 +11996,7 @@ fn av1_mi_fill4(t, off, a, b, c, d) {
 }
 fn av1_blk_tables(): i64 {
     if (Av1_BlkTab != 0) { return Av1_BlkTab; }
-    var t = alloc(211 * 8);           # 211 i64
+    var t = dr_alloc(211 * 8);           # 211 i64
     if (t == 0) { return 0; }
     # Mi_Width_Log2[22]
     av1_mi_fill22(t, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4);
@@ -12018,7 +12085,7 @@ enum Av1ModeInfoOff {
     AV1MI_SIZE       = 320;
 }
 fn av1_modeinfo_new(): i64 {
-    var mi = alloc(AV1MI_SIZE);
+    var mi = dr_alloc(AV1MI_SIZE);
     if (mi == 0) { return 0; }
     store64(mi + AV1MI_SKIP, 0);
     store64(mi + AV1MI_YMODE, AV1_DC_PRED);
@@ -12114,8 +12181,18 @@ fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): 
 # read_segment_id (5.11.11) — the spatial map read. `skip` short-circuits to pred (no symbol); else
 # read @@segment_id from Segment_Id_Cdf[ctx], map via neg_deinterleave, clamp to [0, LastActiveSegId]
 # (a hostile stream cannot drive an OOB segment index — trust no input byte).
+# {pred, ctx} live in one persistent 2-entry scratch (0.8.5): it was allocated per block — arena growth per
+# block (the 0.7.60 lesson) and an unchecked OOM site. av1_tables_init builds it; a failed build latches
+# DR_ERR_OOM on the coder and reads segment 0 (an in-range index, so nothing downstream overruns).
+var Av1_SegIdPc = 0;
+fn av1_segid_scratch(): i64 {
+    if (Av1_SegIdPc != 0) { return Av1_SegIdPc; }
+    Av1_SegIdPc = dr_alloc(2 * 8);   # 2 u64: pred, ctx
+    return Av1_SegIdPc;
+}
 fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip): i64 {
-    var pc = alloc(16);
+    var pc = av1_segid_scratch();
+    if (pc == 0) { av1_sym_dec_fail(sd, DR_ERR_OOM); return 0; }
     av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, pc);
     var pred = load64(pc + 0);
     if (skip != 0) { return pred; }
@@ -12130,7 +12207,8 @@ fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, a
 # SegmentIds map than decode derives, desyncing every later block's spatial prediction. Surface it as
 # DR_ERR_BOUNDS (the av1_write_skip_mode / av1_write_is_inter convention), never a silently-desynced stream.
 fn av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip, segment_id): i64 {
-    var pc = alloc(16);
+    var pc = av1_segid_scratch();
+    if (pc == 0) { return DR_ERR_OOM; }
     av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, pc);
     var pred = load64(pc + 0);
     if (skip != 0) {
@@ -12179,10 +12257,10 @@ enum Av1SegCtx {
     AV1SC_SIZE     = 48;   # bytes
 }
 fn av1_segctx_new(segids, prev, fmi_cols, fmi_rows): i64 {
-    var sc = alloc(AV1SC_SIZE);   # AV1SC_SIZE bytes
+    var sc = dr_alloc(AV1SC_SIZE);   # AV1SC_SIZE bytes
     if (sc == 0) { return 0; }
-    var above = alloc((fmi_cols + 32) * 8);   # (FMI_COLS + 32) u64
-    var left = alloc((fmi_rows + 32) * 8);    # (FMI_ROWS + 32) u64
+    var above = dr_alloc((fmi_cols + 32) * 8);   # (FMI_COLS + 32) u64
+    var left = dr_alloc((fmi_rows + 32) * 8);    # (FMI_ROWS + 32) u64
     if ((above == 0) || (left == 0)) { return 0; }
     memset(above, 0, (fmi_cols + 32) * 8);   # alloc does not zero
     memset(left, 0, (fmi_rows + 32) * 8);
@@ -12693,7 +12771,7 @@ enum Av1DeltaConst {
     AV1_DQPLAN_W        = 5;    # plan cell: reduced delta_q, reduced delta_lf[0..3]
 }
 fn av1_dctx_new(dq_present, dq_res, lf_present, lf_res, lf_multi, num_planes, sb_size, base_q): i64 {
-    var d = alloc(AV1DQ_SIZE);
+    var d = dr_alloc(AV1DQ_SIZE);
     if (d == 0) { return 0; }
     store64(d + AV1DQ_DQ_PRESENT, dq_present);
     store64(d + AV1DQ_DQ_RES, dq_res);
@@ -13058,11 +13136,33 @@ enum Av1PalCtx {
     AV1PC_SIZE   = 72;   # bytes
 }
 
+# Persistent palette scratch (0.8.5): the colour cache, the encoder's used / rest / V-delta lists, the colour
+# context's scores, ColorOrder and the map geometry — one arena block reused by every call. These were per-call
+# allocations, the colour context's per map SAMPLE: the arena grew with every palette block (the 0.7.60
+# lesson) and each was an unchecked OOM site. No two users of a slot nest. av1_tables_init builds it; a failed
+# build is DR_ERR_OOM, latched on the coder on the read lane.
+enum Av1PalScratch {
+    AV1PS_CACHE  = 0;     # 16 u64: at most 8 above + 8 left
+    AV1PS_USED   = 128;   # 8 u64: which plan colours a cache flag already took (encode)
+    AV1PS_REST   = 192;   # 8 u64: the colours coded as literal + deltas (encode)
+    AV1PS_DELTAS = 256;   # 8 u64: the V deltas (encode)
+    AV1PS_SCORES = 320;   # 8 u64: the colour context's scores
+    AV1PS_ORDER  = 384;   # 8 u64: ColorOrder
+    AV1PS_G      = 448;   # 4 u64: the map geometry (av1_pal_geom)
+    AV1PS_SIZE   = 480;   # bytes
+}
+var Av1_PalScratch = 0;
+fn av1_pal_scratch(): i64 {
+    if (Av1_PalScratch != 0) { return Av1_PalScratch; }
+    Av1_PalScratch = dr_alloc(AV1PS_SIZE);   # AV1PS_SIZE bytes
+    return Av1_PalScratch;
+}
+
 fn av1_palctx_new(szy, szuv, ptr, stride, rows, allow, bd): i64 {
-    var pc = alloc(AV1PC_SIZE);   # AV1PC_SIZE bytes
+    var pc = dr_alloc(AV1PC_SIZE);   # AV1PC_SIZE bytes
     if (pc == 0) { return 0; }
-    var my = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);    # 64 x 64 u64
-    var muv = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);   # 64 x 64 u64
+    var my = dr_alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);    # 64 x 64 u64
+    var muv = dr_alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);   # 64 x 64 u64
     if ((my == 0) || (muv == 0)) { return 0; }
     store64(pc + AV1PC_SZY, szy);
     store64(pc + AV1PC_SZUV, szuv);
@@ -13170,7 +13270,9 @@ fn av1_pal_sort(arr, n): i64 {
 # delta and shrinks its range by one more than U, so Y colours are distinct and U ones may repeat), then sort.
 fn av1_pal_read_colors(sd, pc, colors, plane, n, mi_row, mi_col, avail_l): i64 {
     var bd = load64(pc + AV1PC_BD);
-    var cache = alloc(16 * 8);   # 16 u64: at most 8 above + 8 left
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
+    var cache = scr + AV1PS_CACHE;   # 16 u64: at most 8 above + 8 left
     var cn = av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, cache);
     var idx = 0;
     var i = 0;
@@ -13263,9 +13365,11 @@ fn av1_pal_write_colors(enc, pc, colors, plane, n, mi_row, mi_col, avail_l): i64
         if ((plane == 0) && (b == a)) { return DR_ERR_BOUNDS; }
         k = k + 1;
     }
-    var cache = alloc(16 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var cache = scr + AV1PS_CACHE;
     var cn = av1_pal_cache(pc, plane, mi_row, mi_col, avail_l, cache);
-    var used = alloc(8 * 8);   # which plan colours a cache flag already took
+    var used = scr + AV1PS_USED;   # which plan colours a cache flag already took
     memset(used, 0, 8 * 8);
     var idx = 0;
     var i = 0;
@@ -13287,7 +13391,7 @@ fn av1_pal_write_colors(enc, pc, colors, plane, n, mi_row, mi_col, avail_l): i64
         i = i + 1;
     }
     # the rest, ascending (a subsequence of the sorted plan).
-    var rest = alloc(8 * 8);
+    var rest = scr + AV1PS_REST;
     var rn = 0;
     var t = 0;
     while (t < n) {
@@ -13372,7 +13476,9 @@ fn av1_write_palette_mode_info(enc, ncc, pc, mi, mi_size, mi_row, mi_col, avail_
 fn av1_pal_write_v(enc, v, n, bd, want_delta): i64 {
     var max_val = 1 << bd;
     var minb = bd - 4;
-    var deltas = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_enc_fail(enc, DR_ERR_OOM); }
+    var deltas = scr + AV1PS_DELTAS;
     var maxa = 0;
     var k = 1;
     while (k < n) {
@@ -13418,7 +13524,7 @@ fn av1_pal_store(pc, mi, mi_row, mi_col, bw4, bh4): i64 {
     var nuv = load64(mi + AV1MI_PAL_NUV);
     var copy = 0;
     if ((ny != 0) || (nuv != 0)) {
-        copy = alloc(16 * 8);   # Y[8] then U[8]
+        copy = dr_alloc(16 * 8);   # Y[8] then U[8]
         if (copy == 0) { return DR_ERR_OOM; }
         var i = 0;
         while (i < 8) {
@@ -13451,8 +13557,11 @@ fn av1_pal_store(pc, mi, mi_row, mi_col, bw4, bh4): i64 {
 # get_palette_color_context( colorMap, r, c, n ) (5.11.50): writes ColorOrder[ 0..7 ] into `order`, returns
 # ctx = Palette_Color_Context[ ColorContextHash ] (hash 2 -> 0, 5 -> 4, 6 -> 3, 7 -> 2, 8 -> 1; the other hashes
 # cannot occur for a coded position).
+# Both map coders check the same scratch before calling, so its null branch here is defensive only (ctx 0).
 fn av1_pal_color_ctx(map, stride, r, c, n, order): i64 {
-    var scores = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return 0; }
+    var scores = scr + AV1PS_SCORES;
     var i = 0;
     while (i < 8) { store64(scores + (i * 8), 0); store64(order + (i * 8), i); i = i + 1; }
     if (c > 0) {
@@ -13544,7 +13653,9 @@ fn av1_pal_extend(map, bw, bh, ow, oh): i64 {
 # palette_color_idx symbols, each mapped through ColorOrder; then the off-screen extension.
 fn av1_pal_read_map(sd, ncc, map, uv, n, bw, bh, ow, oh): i64 {
     var s = AV1_PAL_MAP_STRIDE;
-    var order = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
+    var order = scr + AV1PS_ORDER;
     store64(map, av1_sym_read_ns(sd, n));   # color_index_map_{y,uv} NS(n)
     var i = 1;
     while (i < ((oh + ow) - 1)) {
@@ -13562,7 +13673,9 @@ fn av1_pal_read_map(sd, ncc, map, uv, n, bw, bh, ow, oh): i64 {
 }
 fn av1_read_palette_tokens(sd, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby): i64 {
     if (pc == 0) { return DR_OK; }
-    var g = alloc(4 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
+    var g = scr + AV1PS_G;
     var ny = load64(mi + AV1MI_PAL_NY);
     if (ny != 0) {
         av1_pal_geom(pc, mi_size, mi_row, mi_col, 0, subx, suby, g);
@@ -13582,7 +13695,9 @@ fn av1_read_palette_tokens(sd, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby)
 # map value that is not a palette index is unrepresentable -> DR_ERR_BOUNDS.
 fn av1_pal_write_map(enc, ncc, plan, map, uv, n, bw, bh, ow, oh): i64 {
     var s = AV1_PAL_MAP_STRIDE;
-    var order = alloc(8 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var order = scr + AV1PS_ORDER;
     var r = 0;
     while (r < oh) {
         var c = 0;
@@ -13613,7 +13728,9 @@ fn av1_pal_write_map(enc, ncc, plan, map, uv, n, bw, bh, ow, oh): i64 {
 }
 fn av1_write_palette_tokens(enc, ncc, pc, mi, mi_size, mi_row, mi_col, subx, suby): i64 {
     if (pc == 0) { return DR_OK; }
-    var g = alloc(4 * 8);
+    var scr = av1_pal_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var g = scr + AV1PS_G;
     var ny = load64(mi + AV1MI_PAL_NY);
     if (ny != 0) {
         if (load64(mi + AV1MI_PAL_MAPY) == 0) { return DR_ERR_BOUNDS; }
@@ -13745,7 +13862,7 @@ fn av1_txsz_fill19(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11,
 }
 fn av1_txsz_tables(): i64 {
     if (Av1_TxSzTab != 0) { return Av1_TxSzTab; }
-    var t = alloc(63 * 8);          # 63 i64
+    var t = dr_alloc(63 * 8);          # 63 i64
     if (t == 0) { return 0; }
     # Max_Tx_Size_Rect[22] (TxSize indices).
     av1_txsz_fill22(t, 0, 0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18);
@@ -13767,7 +13884,7 @@ fn av1_split_tx_size(txsize): i64 { return load64(av1_txsz_tables() + ((44 + txs
 var Av1_TxSqr = 0;
 fn av1_txsqr_tables(): i64 {
     if (Av1_TxSqr != 0) { return Av1_TxSqr; }
-    var t = alloc(38 * 8);          # 2 * 19 i64
+    var t = dr_alloc(38 * 8);          # 2 * 19 i64
     if (t == 0) { return 0; }
     # Tx_Size_Sqr[19] at slot 0.
     av1_itx_fill19(t + 0, 0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2);
@@ -13921,7 +14038,7 @@ fn av1_txt_fill16(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12,
 }
 fn av1_txtype_tables(): i64 {
     if (Av1_TxType != 0) { return Av1_TxType; }
-    var t = alloc(173 * 8);         # 173 i64
+    var t = dr_alloc(173 * 8);         # 173 i64
     if (t == 0) { return 0; }
     # Mode_To_Txfm[14]: DC,V,H,D45,D135,D113,D157,D203,D67,SMOOTH,SMOOTH_V,SMOOTH_H,PAETH,CFL
     store64(t + (0 * 8), AV1_DCT_DCT);    store64(t + (1 * 8), AV1_ADST_DCT);
@@ -14037,7 +14154,7 @@ enum Av1TxTypeCtxOff {
     AV1TTC_SIZE        = 72;
 }
 fn av1_txtypectx_new(): i64 {
-    var c = alloc(AV1TTC_SIZE);
+    var c = dr_alloc(AV1TTC_SIZE);
     if (c == 0) { return 0; }
     store64(c + AV1TTC_YMODE, 0);
     store64(c + AV1TTC_UVMODE, 0);
@@ -14286,7 +14403,7 @@ fn av1_ccdf_copy(dst, src, n): i64 {
 # Allocate + initialise a mutable coeff-CDF context for quantizer bucket q
 # (0..3). Returns the buffer pointer, or 0 on OOM.
 fn av1_ccdf_new(q): i64 {
-    var cc = alloc(3999 * 8);
+    var cc = dr_alloc(3999 * 8);
     if (cc == 0) { return 0; }
     var sb = av1_coeff_cdf_blob();
     av1_ccdf_copy(cc + (0 * 8), sb + ((0 + (q * 195)) * 8), 195);
@@ -14540,7 +14657,7 @@ fn av1_coeffs_encode(enc, cc, ncc, plane, tx_size, ttx, tx_type, x4, y4, max_x4,
         }
         # abs-level work array mirrors the decoder's quant[] state during the
         # base/br loop (needed so the neighbour contexts match).
-        var absl = alloc(seg_eob * 8);
+        var absl = dr_alloc(seg_eob * 8);
         if (absl == 0) { return DR_ERR_OOM; }
         var z = 0;
         while (z < seg_eob) { store64(absl + (z * 8), 0); z = z + 1; }
@@ -14859,6 +14976,13 @@ fn av1_tile_segctx(tile): i64 {
     store64(sc + AV1SC_SEGIDS, segids);
     return sc;
 }
+# 1 when the tile has a SegmentIds grid but its Av1SegCtx cannot be built (OOM). av1_tile_segctx's 0 otherwise means
+# "no grid", which the inter mode-info lanes read as no temporal prediction: without this check a failed lazy build
+# decoded on without it (0.8.5, found by OOM injection).
+fn av1_tile_segctx_oom(tile): i64 {
+    if (load64(tile + AV1TILE_SEGIDS) == 0) { return 0; }
+    return av1_tile_segctx(tile) == 0;
+}
 # DeltaLFs[ r ][ c ][ i ] — 0 when the grids were never allocated (a tile-level test without grids).
 fn av1_dlf_get(tile, i, r, c): i64 {
     if (load64(tile + AV1TILE_DLF + (i * 8)) == 0) { return 0; }
@@ -14896,7 +15020,8 @@ fn av1_bd_set(tile, plane, r, c, v): i64 {
 # are sized to the tile's plane extent; BlockDecoded to one superblock. Returns
 # the tile pointer, or 0 on OOM. sd/cc/ncc are set by the caller each tile.
 fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_planes): i64 {
-    var tile = alloc(AV1TILE_SIZE);
+    if (av1_tables_init() != DR_OK) { return 0; }   # every lazy table first (OOM: no tile, as for its own alloc)
+    var tile = dr_alloc(AV1TILE_SIZE);
     if (tile == 0) { return 0; }
     store64(tile + AV1TILE_FRAME, frame);
     store64(tile + AV1TILE_SD, 0);
@@ -14977,10 +15102,10 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     var ttx = av1_txtypectx_new();
     if (ttx == 0) { return 0; }
     store64(tile + AV1TILE_TTX, ttx);
-    var quant = alloc(1024 * 8);
+    var quant = dr_alloc(1024 * 8);
     if (quant == 0) { return 0; }
     store64(tile + AV1TILE_QUANT, quant);
-    var ott = alloc(8);
+    var ott = dr_alloc(8);
     if (ott == 0) { return 0; }
     store64(tile + AV1TILE_OTT, ott);
     store64(tile + AV1TILE_MAXLW, 0);
@@ -14996,11 +15121,11 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
         var ad = 0;
         var ld = 0;
         if (p < num_planes) {
-            bd = alloc(AV1_BD_STRIDE * AV1_BD_STRIDE * 8);
-            al = alloc(above_sz * 8);
-            ll = alloc(left_sz * 8);
-            ad = alloc(above_sz * 8);
-            ld = alloc(left_sz * 8);
+            bd = dr_alloc(AV1_BD_STRIDE * AV1_BD_STRIDE * 8);
+            al = dr_alloc(above_sz * 8);
+            ll = dr_alloc(left_sz * 8);
+            ad = dr_alloc(above_sz * 8);
+            ld = dr_alloc(left_sz * 8);
             if ((bd == 0) || (al == 0) || (ll == 0) || (ad == 0) || (ld == 0)) { return 0; }
         }
         store64(tile + AV1TILE_BD + (p * 8), bd);
@@ -15026,7 +15151,7 @@ fn av1_tile_frame_mi_cols(tile): i64 { return load64(tile + AV1TILE_FMI_COLS); }
 
 # Share the frame-sized MI grids (+ frame dims) of `src` with `dst` so a second
 # tile writes into the SAME frame grids as the first (each in its own MI window).
-# Call after av1_tile_grids_new(src) + av1_tile_new(dst), before dst's window/decode.
+# Call after av1_tile_grids_new(src) + av1_tile_new(dst), before dst's window/decode. Returns DR_OK or DR_ERR_OOM.
 fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_FMI_COLS, load64(src + AV1TILE_FMI_COLS));
     store64(dst + AV1TILE_FMI_ROWS, load64(src + AV1TILE_FMI_ROWS));
@@ -15060,7 +15185,9 @@ fn av1_tile_share_grids(dst, src): i64 {
     store64(dst + AV1TILE_DLF + 8, load64(src + AV1TILE_DLF + 8));
     store64(dst + AV1TILE_DLF + 16, load64(src + AV1TILE_DLF + 16));
     store64(dst + AV1TILE_DLF + 24, load64(src + AV1TILE_DLF + 24));
-    return 0;
+    # the dst's Av1PalCtx, built now (av1_tile_grids_new says why): DR_ERR_OOM when that fails.
+    if ((load64(dst + AV1TILE_PALSZY) != 0) && (av1_tile_palctx(dst) == 0)) { return DR_ERR_OOM; }
+    return DR_OK;
 }
 
 # The inter decode context wiring (av1_tile_set_inter_ctx) and the inter block/tile
@@ -15090,7 +15217,7 @@ fn av1_tile_set_window(tile, col_start, row_start, col_end, row_end): i64 {
 # defaults FMI to the tile dims). Returns DR_OK, or DR_ERR_OOM.
 fn av1_tile_grids_new(tile): i64 {
     var n = load64(tile + AV1TILE_FMI_COLS) * load64(tile + AV1TILE_FMI_ROWS);
-    var offs = alloc(18 * 8);
+    var offs = dr_alloc(18 * 8);
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -15110,7 +15237,7 @@ fn av1_tile_grids_new(tile): i64 {
     store64(offs + 136, AV1TILE_PALPTR);  # the per-MI palette colour copy, 0 = none
     var g = 0;
     while (g < 18) {
-        var arr = alloc(n * 8);
+        var arr = dr_alloc(n * 8);
         if (arr == 0) { return DR_ERR_OOM; }
         var i = 0;
         while (i < n) { store64(arr + (i * 8), 0); i = i + 1; }
@@ -15118,11 +15245,14 @@ fn av1_tile_grids_new(tile): i64 {
         g = g + 1;
     }
     # CdefIdx grid — init to -1 (clear_cdef: no filtering until read_cdef sets it).
-    var cix = alloc(n * 8);
+    var cix = dr_alloc(n * 8);
     if (cix == 0) { return DR_ERR_OOM; }
     var ci = 0;
     while (ci < n) { store64(cix + (ci * 8), 0 - 1); ci = ci + 1; }
     store64(tile + AV1TILE_CDEFIDX, cix);
+    # the Av1PalCtx, built NOW (0.8.5): built lazily, a failed build read as "no palette grids" and every palette
+    # block decoded without its palette — a silent mis-decode. With the grids present, 0 here can only be OOM.
+    if (av1_tile_palctx(tile) == 0) { return DR_ERR_OOM; }
     return DR_OK;
 }
 # Restore one tile window of the frame grids to the state av1_tile_grids_new (and av1_tile_set_inter_ctx, for the MV
@@ -15134,7 +15264,7 @@ fn av1_tile_grids_new(tile): i64 {
 # read the symbol at all (a stale index skips it, a desync).
 fn av1_tile_grids_reset_window(tile, rs, re, cs, ce, subx, suby): i64 {
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
-    var offs = alloc(16 * 8);   # the 16 luma-addressed zeroed grids
+    var offs = dr_alloc(16 * 8);   # the 16 luma-addressed zeroed grids
     if (offs == 0) { return DR_ERR_OOM; }
     store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
     store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
@@ -15220,7 +15350,7 @@ fn av1_tile_set_cdef_ctx(tile, enable_cdef, cdef_bits, coded_lossless, allow_int
     # Must run after av1_tile_grids_new: we capture the CdefIdx grid pointer, so a
     # null grid here would give read_cdef a null deref. Fail fast instead.
     if (load64(tile + AV1TILE_CDEFIDX) == 0) { return DR_ERR_BOUNDS; }
-    var ctx = alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
+    var ctx = dr_alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
     if (ctx == 0) { return DR_ERR_OOM; }
     store64(ctx + 0, enable_cdef);
     store64(ctx + 8, cdef_bits);
@@ -15293,7 +15423,7 @@ enum Av1BlockOff {
     AV1BLK_SIZE        = 96;
 }
 fn av1_block_new(): i64 {
-    var b = alloc(AV1BLK_SIZE);
+    var b = dr_alloc(AV1BLK_SIZE);
     if (b == 0) { return 0; }
     var i = 0;
     while (i < (AV1BLK_SIZE / 8)) { store64(b + (i * 8), 0); i = i + 1; }
@@ -15649,7 +15779,7 @@ enum Av1PartitionConst {
 var Av1_PartSub = 0;
 fn av1_partsub_tables(): i64 {
     if (Av1_PartSub != 0) { return Av1_PartSub; }
-    var t = alloc(220 * 8);          # 10 * 22 i64
+    var t = dr_alloc(220 * 8);          # 10 * 22 i64
     if (t == 0) { return 0; }
     av1_mi_fill22(t, 0, 0, 0 - 1, 0 - 1, 3, 0 - 1, 0 - 1, 6, 0 - 1, 0 - 1, 9, 0 - 1,
       0 - 1, 12, 0 - 1, 0 - 1, 15, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
@@ -15755,23 +15885,36 @@ fn av1_synth_vert_cdf(pcdf, bsl, out): i64 {
     store64(out + 16, 0);
     return 0;
 }
+# The synthesized cdf lives in one persistent 3-entry scratch (0.8.5): it was allocated per partition read —
+# arena growth per block (the 0.7.60 lesson) and an unchecked OOM site. Never adapted, so reuse is exact.
+# av1_tables_init builds it; a failed build latches DR_ERR_OOM on the coder and reads symbol 0.
+var Av1_PartSynthCdf = 0;
+fn av1_part_synth_scratch(): i64 {
+    if (Av1_PartSynthCdf != 0) { return Av1_PartSynthCdf; }
+    Av1_PartSynthCdf = dr_alloc(3 * 8);   # 3 u64: cdf[0], 1 << 15, the (unused) count
+    return Av1_PartSynthCdf;
+}
 fn av1_read_split_or_horz(sd, ncc, ctx, bsl): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { av1_sym_dec_fail(sd, DR_ERR_OOM); return 0; }
     av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_decode(sd, out, 2, 0);
 }
 fn av1_read_split_or_vert(sd, ncc, ctx, bsl): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { av1_sym_dec_fail(sd, DR_ERR_OOM); return 0; }
     av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_decode(sd, out, 2, 0);
 }
 fn av1_write_split_or_horz(enc, ncc, ctx, bsl, sym): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { return av1_sym_enc_fail(enc, DR_ERR_OOM); }
     av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_encode(enc, out, 2, sym, 0);
 }
 fn av1_write_split_or_vert(enc, ncc, ctx, bsl, sym): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { return av1_sym_enc_fail(enc, DR_ERR_OOM); }
     av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_encode(enc, out, 2, sym, 0);
 }
@@ -16016,10 +16159,12 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
         avail_lc = 0;
     }
     var enable_fi = load64(tile + AV1TILE_ENABLE_FI);
-    var nb = alloc(6 * 8);
+    var nb = dr_alloc(6 * 8);
+    if (nb == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
     var mi = av1_modeinfo_new();
+    if (mi == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
     # the mode info gets LosslessArray (as a mask) and picks Lossless for its segment_id itself, because
     # CfL's uv_mode CDF needs it before this function returns.
     av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
@@ -16037,7 +16182,8 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     # palette_tokens (5.11.49): after mode_info, before read_block_tx_size; then PaletteSizes / PaletteColors.
     var pc = av1_tile_palctx(tile);
     av1_read_palette_tokens(sd, ncc, pc, mi, sub_size, r, c, subx, suby);
-    av1_pal_store(pc, mi, r, c, bw4, bh4);
+    var psr = av1_pal_store(pc, mi, r, c, bw4, bh4);
+    if (psr != DR_OK) { return av1_sym_dec_fail(sd, psr); }
 
     var max_rect = av1_max_tx_size_rect(sub_size);
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40), max_rect);
@@ -16048,6 +16194,7 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     if (skip) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
 
     var blk = av1_block_new();
+    if (blk == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
     store64(blk + AV1BLK_MI_ROW, r);
     store64(blk + AV1BLK_MI_COL, c);
     store64(blk + AV1BLK_MI_SIZE, sub_size);
@@ -16085,7 +16232,8 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
     var avail_u = av1_is_inside(tile, r - 1, c);
     var avail_l = av1_is_inside(tile, r, c - 1);
-    var nb = alloc(6 * 8);
+    var nb = dr_alloc(6 * 8);
+    if (nb == 0) { return DR_ERR_OOM; }
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
     var eme = av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
@@ -16104,7 +16252,8 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var epc = av1_tile_palctx(tile);   # palette_tokens + the palette store, mirror of decode
     var ewt = av1_write_palette_tokens(enc, ncc, epc, mi, sub_size, r, c, subx, suby);
     if (ewt != DR_OK) { return ewt; }
-    av1_pal_store(epc, mi, r, c, bw4, bh4);
+    var eps = av1_pal_store(epc, mi, r, c, bw4, bh4);
+    if (eps != DR_OK) { return eps; }
 
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40),
       av1_max_tx_size_rect(sub_size));
@@ -16239,7 +16388,10 @@ fn av1_decode_partition(tile, r, c, bsize): i64 {
 # round-trip test exercises; the A/B/4 encode is grown with the encoder arc.)
 fn av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur): i64 {
     var i = load64(blk_cur);
-    av1_encode_block(tile, r, c, sub_size, load64(plan_mi + (i * 8)), load64(plan_tx + (i * 8)));
+    # a block's own refusal (an unrepresentable plan, an OOM) is latched on the encoder — the walk above drops
+    # return codes, and av1_encode_tile reports av1_sym_enc_err. It was DROPPED here before 0.8.5.
+    var e = av1_encode_block(tile, r, c, sub_size, load64(plan_mi + (i * 8)), load64(plan_tx + (i * 8)));
+    if (e != DR_OK) { av1_sym_enc_fail(load64(tile + AV1TILE_ENC), e); }
     store64(blk_cur, i + 1);
     return 0;
 }
@@ -16369,13 +16521,39 @@ fn av1_lr_get_source_sample(curr, cdef, plane, x, y, pex, pey, ssy, sey): i64 {
 # then a vertical 7-tap pass into `lr` (LrFrame). Reads via get_source_sample
 # (curr/cdef + stripe bounds); rounding per bit depth (isCompound = 0).
 # ================================================================
+# Persistent loop-restoration scratch (0.8.5): every restoration block is at most 4x4 (av1_lr_restore_block
+# clips w, h to 4 >> sub), so the Wiener intermediate, the box filter's A / B and the self-guided flt0 / flt1
+# have fixed maxima. They were allocated per 4x4 block (with the two 7-tap coefficient sets) — the arena grew
+# with every restored block (the 0.7.60 lesson) and each was an unchecked OOM site. Reused by every call;
+# a caller passing w or h over AV1_LR_MAX_BLK is refused (DR_ERR_BOUNDS) rather than overrun. av1_tables_init
+# builds it.
+enum Av1LrScratch {
+    AV1_LR_MAX_BLK = 4;      # the largest restoration block side
+    AV1LRS_INTER = 0;        # intermediate[h+6][w]: (4 + 6) * 4 u64
+    AV1LRS_A     = 320;      # A[h+2][w+2]: 6 * 6 u64
+    AV1LRS_B     = 608;      # B[h+2][w+2]
+    AV1LRS_FLT0  = 896;      # flt0[h][w]: 16 u64
+    AV1LRS_FLT1  = 1024;     # flt1[h][w]
+    AV1LRS_VF    = 1152;     # vfilter[7]
+    AV1LRS_HF    = 1208;     # hfilter[7]
+    AV1LRS_SIZE  = 1264;     # bytes
+}
+var Av1_LrScratch = 0;
+fn av1_lr_scratch(): i64 {
+    if (Av1_LrScratch != 0) { return Av1_LrScratch; }
+    Av1_LrScratch = dr_alloc(AV1LRS_SIZE);   # AV1LRS_SIZE bytes
+    return Av1_LrScratch;
+}
 fn av1_lr_wiener_filter(curr, cdef, lr, plane, x, y, w, h, hfilter, vfilter, pex, pey, ssy, sey): i64 {
     var bd = dr_frame_bit_depth(cdef);
     var ir0 = av1_lr_inter_round0(bd);
     var ir1 = av1_lr_inter_round1(bd);
     var offset = 1 << ((bd + 7 - ir0) - 1);              # 1 << (BitDepth+FILTER_BITS-InterRound0-1)
     var limit = (1 << ((bd + 1 + 7) - ir0)) - 1;         # (1 << (BitDepth+1+FILTER_BITS-InterRound0))-1
-    var inter = alloc((h + 6) * w * 8);                  # intermediate[h+6][w]
+    if ((w > AV1_LR_MAX_BLK) || (h > AV1_LR_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    var scr = av1_lr_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var inter = scr + AV1LRS_INTER;                       # intermediate[h+6][w]
     # --- horizontal pass ---
     var r = 0;
     while (r < (h + 6)) {
@@ -16424,7 +16602,7 @@ var Av1_Sgr = 0;
 fn av1_lr_sgr_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_lr_sgr_tables(): i64 {
     if (Av1_Sgr != 0) { return Av1_Sgr; }
-    var t = alloc(64 * 8);
+    var t = dr_alloc(64 * 8);
     if (t == 0) { return 0; }
     av1_lr_sgr_store(t, 0, 2);  av1_lr_sgr_store(t, 1, 12);  av1_lr_sgr_store(t, 2, 1);  av1_lr_sgr_store(t, 3, 4);
     av1_lr_sgr_store(t, 4, 2);  av1_lr_sgr_store(t, 5, 15);  av1_lr_sgr_store(t, 6, 1);  av1_lr_sgr_store(t, 7, 6);
@@ -16462,8 +16640,11 @@ fn av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, pass, out_f, pex, pey, 
     var s = ((1 << 20) + (n2e / 2)) / n2e;               # SGRPROJ_MTABLE_BITS = 20
     var one_over_n = ((1 << 12) + (n / 2)) / n;           # SGRPROJ_RECIP_BITS = 12
     var stride = w + 2;                                   # A/B: i in [-1,h], j in [-1,w]
-    var abuf = alloc((h + 2) * stride * 8);
-    var bbuf = alloc((h + 2) * stride * 8);
+    if ((w > AV1_LR_MAX_BLK) || (h > AV1_LR_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    var scr = av1_lr_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var abuf = scr + AV1LRS_A;
+    var bbuf = scr + AV1LRS_B;
     var i = 0 - 1;
     while (i < (h + 1)) {
         var j = 0 - 1;
@@ -16538,8 +16719,11 @@ fn av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, pass, out_f, pex, pey, 
 # pass whose radius r == 0 uses the (up-shifted) source in place of its box output.
 fn av1_lr_self_guided(curr, cdef, lr, plane, x, y, w, h, set, xqd0, xqd1, pex, pey, ssy, sey): i64 {
     var bd = dr_frame_bit_depth(cdef);
-    var flt0 = alloc(h * w * 8);
-    var flt1 = alloc(h * w * 8);
+    if ((w > AV1_LR_MAX_BLK) || (h > AV1_LR_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    var scr = av1_lr_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var flt0 = scr + AV1LRS_FLT0;
+    var flt1 = scr + AV1LRS_FLT1;
     av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, 0, flt0, pex, pey, ssy, sey);
     av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, 1, flt1, pex, pey, ssy, sey);
     var r0 = av1_lr_sgr_params(set, 0);
@@ -16606,7 +16790,7 @@ fn av1_lr_ucols_of(params, plane): i64 { return load64(params + AV1LRP_UCOLS + (
 # Allocate an Av1LrParams for the given geometry; all planes default to
 # RESTORE_NONE (set per plane via av1_lr_params_set_plane).
 fn av1_lr_params_new(uw, fh_h, np, subx, suby, uses_lr): i64 {
-    var p = alloc(AV1LRP_SIZE);
+    var p = dr_alloc(AV1LRP_SIZE);
     if (p == 0) { return 0; }
     store64(p + AV1LRP_UW, uw);
     store64(p + AV1LRP_FH, fh_h);
@@ -16654,10 +16838,10 @@ fn av1_lr_params_set_plane(params, plane, rtype, unit_size): i64 {
     # RESTORE_NONE (from params_new) so the process never dispatches a plane whose
     # grids are null (never-crash contract).
     var n = urows * ucols;
-    var tg = alloc(n * 8);
-    var wg = alloc(n * 6 * 8);
-    var sg = alloc(n * 8);
-    var xg = alloc(n * 2 * 8);
+    var tg = dr_alloc(n * 8);
+    var wg = dr_alloc(n * 6 * 8);
+    var sg = dr_alloc(n * 8);
+    var xg = dr_alloc(n * 2 * 8);
     if ((tg == 0) || (wg == 0) || (sg == 0) || (xg == 0)) { return DR_ERR_OOM; }
     var i = 0;
     while (i < (n * 6)) { store64(wg + (i * 8), 0); i = i + 1; }
@@ -16739,8 +16923,10 @@ fn av1_lr_restore_block(curr, cdef, lr, params, plane, row, col): i64 {
     var h = av1_min(4 >> suby, (pey - y) + 1);
     var rtype = av1_lr_type_get(params, plane, unit_row, unit_col);
     if (rtype == AV1_RESTORE_WIENER) {
-        var vf = alloc(7 * 8);
-        var hf = alloc(7 * 8);
+        var scr = av1_lr_scratch();
+        if (scr == 0) { return DR_ERR_OOM; }
+        var vf = scr + AV1LRS_VF;
+        var hf = scr + AV1LRS_HF;
         av1_lr_wiener_coeff(av1_lr_wiener_ptr(params, plane, unit_row, unit_col, 0), vf);
         av1_lr_wiener_coeff(av1_lr_wiener_ptr(params, plane, unit_row, unit_col, 1), hf);
         av1_lr_wiener_filter(curr, cdef, lr, plane, x, y, w, h, hf, vf, pex, pey, ssy, sey);
@@ -16775,6 +16961,7 @@ fn av1_lr_copy_frame(cdef, lr): i64 {
 # is 0 return; else per 4x4 block, per plane whose FrameRestorationType != NONE,
 # invoke loop_restore_block. curr = UpscaledCurrFrame (pre-CDEF), cdef = post-CDEF.
 fn av1_lr_process(curr, cdef, lr, params): i64 {
+    if (av1_lr_scratch() == 0) { return DR_ERR_OOM; }   # the one OOM site; every block below reuses it
     av1_lr_copy_frame(cdef, lr);
     if (load64(params + AV1LRP_USES) == 0) { return 0; }
     var uw = load64(params + AV1LRP_UW);
@@ -16810,7 +16997,7 @@ fn av1_lr_process(curr, cdef, lr, params): i64 {
 var Av1_LrTaps = 0;
 fn av1_lr_taps(): i64 {
     if (Av1_LrTaps != 0) { return Av1_LrTaps; }
-    var t = alloc(18 * 8);
+    var t = dr_alloc(18 * 8);
     if (t == 0) { return 0; }
     store64(t + 0, 0 - 5);  store64(t + 8, 0 - 23); store64(t + 16, 0 - 17);   # Wiener_Taps_Min
     store64(t + 24, 10);    store64(t + 32, 8);     store64(t + 40, 46);       # Wiener_Taps_Max
@@ -17217,8 +17404,10 @@ fn av1_encode_tile(tile, plan_part, plan_mi, plan_tx): i64 {
     var fmi_cols = load64(tile + AV1TILE_FMI_COLS);   # frame stride for the CdefIdx grid
     var fmi_rows = load64(tile + AV1TILE_FMI_ROWS);   # frame row bound for the CdefIdx grid
     av1_clear_above_context(tile, num_planes);
-    var pc = alloc(8);
-    var bc = alloc(8);
+    var pc = dr_alloc(8);
+    var bc = dr_alloc(8);
+    # latched on the encoder: both callers report av1_sym_enc_finish, not this return
+    if ((pc == 0) || (bc == 0)) { return av1_sym_enc_fail(load64(tile + AV1TILE_ENC), DR_ERR_OOM); }
     store64(pc, 0);
     store64(bc, 0);
     var dctx = av1_tile_dctx(tile);
@@ -17370,6 +17559,22 @@ fn av1_lf_strength(fh, plane, pass, segment, ref, mode_type, delta_lf): i64 {
     return lvl;
 }
 
+# Persistent deblocking scratch (0.8.5): the wide filter's F[] (16 u64), the sample filter's 4 masks and the
+# edge's 3 limits, reused by every call. These were allocated per SAMPLE edge position — the arena grew with
+# every filtered sample (the 0.7.60 lesson) and each was an unchecked OOM site. av1_tables_init builds it.
+enum Av1LfScratch {
+    AV1LFS_F     = 0;     # F[-n .. n-1], offset by n (n <= 6 -> <= 12 of 16 slots)
+    AV1LFS_MASKS = 128;   # hev / filterMask / flatMask / flatMask2
+    AV1LFS_LIM   = 160;   # limit / blimit / thresh
+    AV1LFS_SIZE  = 184;   # bytes
+}
+var Av1_LfScratch = 0;
+fn av1_lf_scratch(): i64 {
+    if (Av1_LfScratch != 0) { return Av1_LfScratch; }
+    Av1_LfScratch = dr_alloc(AV1LFS_SIZE);   # AV1LFS_SIZE bytes
+    return Av1_LfScratch;
+}
+
 # adaptive filter strength (7.14.4): limit / blimit / thresh from lvl + sharpness.
 # out[0]=limit, out[1]=blimit, out[2]=thresh.
 fn av1_lf_limits(lvl, sharpness, out): i64 {
@@ -17498,7 +17703,9 @@ fn av1_lf_wide(frame, plane, x, y, dx, dy, log2size): i64 {
     }
     var n2 = 1;
     if ((log2size == 3) && (plane == 0)) { n2 = 0; }
-    var fbuf = alloc(16 * 8);        # F[-n .. n-1], offset by n (n<=6 -> <=12 slots)
+    var scr = av1_lf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var fbuf = scr + AV1LFS_F;          # F[-n .. n-1], offset by n (n<=6 -> <=12 slots)
     var i = 0 - n;
     while (i < n) {
         var t = 0;
@@ -17524,7 +17731,9 @@ fn av1_lf_wide(frame, plane, x, y, dx, dy, log2size): i64 {
 # sample filtering (7.14.6.1): compute the masks, then dispatch to the narrow or
 # wide filter (or none). limit/blimit/thresh + filter_size come from the edge.
 fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size): i64 {
-    var masks = alloc(4 * 8);
+    var scr = av1_lf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var masks = scr + AV1LFS_MASKS;
     av1_lf_mask(frame, plane, x, y, dx, dy, limit, blimit, thresh, filter_size, masks);
     if (load64(masks + 8) == 0) { return 0; }          # filterMask == 0 -> no filter
     var hev = load64(masks + 0);
@@ -17637,7 +17846,9 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
           av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)),
           av1_lf_delta(tile, fh, plane, pass, prev_row, prev_col));
     }
-    var lim = alloc(3 * 8);
+    var scr = av1_lf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var lim = scr + AV1LFS_LIM;
     av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);
     if ((apply != 0) && (lvl > 0)) {
         var i = 0;
@@ -17663,6 +17874,7 @@ fn av1_deblock(tile, fh): i64 {
     if ((av1_fh_loop_filter_level(fh, 0) == 0) && (av1_fh_loop_filter_level(fh, 1) == 0)) {
         return 0;
     }
+    if (av1_lf_scratch() == 0) { return DR_ERR_OOM; }   # the one OOM site; every edge below reuses it
     var frame = load64(tile + AV1TILE_FRAME);
     var num_planes = dr_frame_num_planes(frame);
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);
@@ -17735,7 +17947,7 @@ var Av1_Cdef = 0;
 fn av1_cdef_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_cdef_tables(): i64 {
     if (Av1_Cdef != 0) { return Av1_Cdef; }
-    var t = alloc(81 * 8);
+    var t = dr_alloc(81 * 8);
     if (t == 0) { return 0; }
     # Div_Table[9].
     av1_cdef_store(t, 0, 0);    av1_cdef_store(t, 1, 840);  av1_cdef_store(t, 2, 420);
@@ -17788,13 +18000,36 @@ fn av1_cdef_constrain(diff, threshold, damping): i64 {
 }
 
 # ================================================================
+# Persistent CDEF scratch (0.8.5): one arena block reused by every call — partial[8][15] + cost[8] for the
+# direction search, the filter's 6-entry tap geometry + its 1-entry availability flag, and the block's
+# {yDir, var} pair. These were per-call allocations on the per-8x8 path: the arena grew with every block
+# (the 0.7.60 lesson) and every block was an unchecked OOM site. av1_tables_init builds it before any tile.
+# ================================================================
+enum Av1CdefScratch {
+    AV1CDS_PARTIAL = 0;      # partial[8][15]
+    AV1CDS_COST    = 960;    # cost[8]
+    AV1CDS_AV      = 1024;   # the filter's CdefAvailable flag
+    AV1CDS_G       = 1032;   # the filter's 6-entry geometry (av1_cdef_geom)
+    AV1CDS_DV      = 1080;   # the block's {yDir, var}
+    AV1CDS_SIZE    = 1096;   # bytes
+}
+var Av1_CdefScratch = 0;
+fn av1_cdef_scratch(): i64 {
+    if (Av1_CdefScratch != 0) { return Av1_CdefScratch; }
+    Av1_CdefScratch = dr_alloc(AV1CDS_SIZE);   # AV1CDS_SIZE bytes
+    return Av1_CdefScratch;
+}
+
+# ================================================================
 # CDEF direction process (7.15.2) — measure the edge direction + variance of the
 # 8x8 luma block at MI (r, c). out[0] = yDir (0..7), out[1] = var.
 # ================================================================
 fn av1_cdef_direction(frame, r, c, out): i64 {
     var bd = dr_frame_bit_depth(frame);
-    var partial = alloc(8 * 15 * 8);        # partial[8][15]
-    var cost = alloc(8 * 8);
+    var scr = av1_cdef_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var partial = scr + AV1CDS_PARTIAL;        # partial[8][15]
+    var cost = scr + AV1CDS_COST;
     var p = 0;
     while (p < (8 * 15)) { store64(partial + (p * 8), 0); p = p + 1; }
     var ci = 0;
@@ -17911,8 +18146,10 @@ fn av1_cdef_filter(curr, cdef, plane, r, c, pri_str, sec_str, damping, dir, mi_c
     var y0 = (r * 4) >> suby;
     var w = 8 >> subx;
     var h = 8 >> suby;
-    var av = alloc(8);
-    var g = alloc(6 * 8);
+    var scr = av1_cdef_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var av = scr + AV1CDS_AV;
+    var g = scr + AV1CDS_G;
     av1_cdef_geom(g, x0, y0, subx, suby, mi_cols, mi_rows);
     var i = 0;
     while (i < h) {
@@ -18044,7 +18281,9 @@ fn av1_cdef_block(curr, cdef, fh, tile, r, c, idx): i64 {
     if (skip) { skip = av1_grid_get(tile, AV1TILE_SKIPS, r + 1, c + 1); }
     if (skip) { return 0; }
     var coeff_shift = dr_frame_bit_depth(curr) - 8;
-    var dv = alloc(2 * 8);
+    var scr = av1_cdef_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var dv = scr + AV1CDS_DV;
     av1_cdef_direction(curr, r, c, dv);
     var ydir = load64(dv + 0);
     var var_v = load64(dv + 8);
@@ -18085,6 +18324,7 @@ fn av1_cdef_process(curr, cdef, fh, tile): i64 {
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);
     if (av1_cdef_coverage_ok(curr, mi_cols, mi_rows) == 0) { return DR_ERR_BOUNDS; }
     if (av1_cdef_coverage_ok(cdef, mi_cols, mi_rows) == 0) { return DR_ERR_BOUNDS; }
+    if (av1_cdef_scratch() == 0) { return DR_ERR_OOM; }   # the one OOM site; every block below reuses it
     var r = 0;
     while (r < mi_rows) {
         var c = 0;
@@ -18153,7 +18393,7 @@ fn av1_upfill8(t, row, v0, v1, v2, v3, v4, v5, v6, v7) {
 # dav1d_resize_filter negated -> the spec's positive-centre Upscale_Filter.
 fn av1_upscale_filter_blob(): i64 {
     if (Av1_UpscaleFilter != 0) { return Av1_UpscaleFilter; }
-    var t = alloc(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
+    var t = dr_alloc(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
     if (t == 0) { return 0; }
     av1_upfill8(t,  0,  0,  0,  0, 128,   0,   0,  0,  0);
     av1_upfill8(t,  1,  0,  0, 0 - 1, 128,   2, 0 - 1,  0,  0);
@@ -18324,8 +18564,8 @@ fn av1_superres_upscale_frame(down, up, bit_depth): i64 {
         if (srcw > (dr_frame_plane_alloc_w(down, p) + dr_frame_border(down))) { return DR_ERR_BOUNDS; }
         var step = av1_superres_step(dw, uw);
         var mx0 = av1_superres_x0(dw, uw, step);
-        var srcrow = alloc(srcw * 8);            # srcw i64 samples
-        var dstrow = alloc(uw * 8);              # uw i64 samples
+        var srcrow = dr_alloc(srcw * 8);            # srcw i64 samples
+        var dstrow = dr_alloc(uw * 8);              # uw i64 samples
         if ((srcrow == 0) || (dstrow == 0)) { return DR_ERR_OOM; }
         var y = 0;
         while (y < h) {
@@ -18420,13 +18660,13 @@ enum Av1GrainCtxOff {
 }
 
 fn av1_grain_ctx_new(): i64 {
-    var gc = alloc(AV1GC_SIZE);   # AV1GC_SIZE bytes
+    var gc = dr_alloc(AV1GC_SIZE);   # AV1GC_SIZE bytes
     if (gc == 0) { return 0; }
     memset(gc, 0, AV1GC_SIZE);
-    var l = alloc(73 * 82 * 8);   # 73 * 82 i64
-    var cb = alloc(73 * 82 * 8);
-    var cr = alloc(73 * 82 * 8);
-    var lut = alloc(3 * 256 * 8);   # 3 * 256 i64
+    var l = dr_alloc(73 * 82 * 8);   # 73 * 82 i64
+    var cb = dr_alloc(73 * 82 * 8);
+    var cr = dr_alloc(73 * 82 * 8);
+    var lut = dr_alloc(3 * 256 * 8);   # 3 * 256 i64
     if ((l == 0) || (cb == 0) || (cr == 0) || (lut == 0)) { return 0; }
     store64(gc + AV1GC_LUMA, l);
     store64(gc + AV1GC_CB, cb);
@@ -18756,7 +18996,7 @@ fn av1_grain_apply(gc, g, mc, src, out_err): i64 {
     if (load64(gc + AV1GC_SW) < sw) {
         var b = 0;
         while (b < 6) {
-            var sb = alloc(34 * sw * 8);   # 34 rows * sw i64
+            var sb = dr_alloc(34 * sw * 8);   # 34 rows * sw i64
             if (sb == 0) { store64(out_err, DR_ERR_OOM); return 0; }
             store64(gc + AV1GC_STRIPE + (b * 8), sb);
             b = b + 1;
@@ -18879,7 +19119,7 @@ fn av1_grain_apply(gc, g, mc, src, out_err): i64 {
 # table, or 0 when the allocation fails.
 fn av1_grain_gauss(): i64 {
     if (Av1_GrainGauss != 0) { return Av1_GrainGauss; }
-    var t = alloc(2048 * 8);   # 2048 i64
+    var t = dr_alloc(2048 * 8);   # 2048 i64
     if (t == 0) { return 0; }
     av1_grain_hex(t, 0, "838a3874c8ac87c7ac8ac7c047c818b348e0ce0be49107f846c67c524798744b208705746c068888c704");
     av1_grain_hex(t, 28, "9ec75882c4eca4c5b89f471c80caa8910624bcc79ca8c9709b073c530740be86b4a8c7785d85a47fc8c0");
@@ -19018,7 +19258,7 @@ fn av1_mcfill8(t, set, phase, v0, v1, v2, v3, v4, v5, v6, v7) {
 # Build (once) and return the Subpel_Filters[6][15][8] blob (dav1d order + convention).
 fn av1_subpel_filters_blob(): i64 {
     if (Av1_SubpelFilters != 0) { return Av1_SubpelFilters; }
-    var t = alloc(AV1_SUBPEL_SETS * AV1_SUBPEL_PHASES * AV1_SUBPEL_TAPS * 8);
+    var t = dr_alloc(AV1_SUBPEL_SETS * AV1_SUBPEL_PHASES * AV1_SUBPEL_TAPS * 8);
     if (t == 0) { return 0; }
     av1_mcfill8(t, 0,  0, 0, 1, 0 - 3, 63, 4, 0 - 1, 0, 0);
     av1_mcfill8(t, 0,  1, 0, 1, 0 - 5, 61, 9, 0 - 2, 0, 0);
@@ -19152,7 +19392,7 @@ fn av1_wfill8(t, row, v0, v1, v2, v3, v4, v5, v6, v7) {
 }
 fn av1_warp_filter_tbl(): i64 {
     if (Av1_WarpFilter != 0) { return Av1_WarpFilter; }
-    var t = alloc(AV1_WARP_FILTER_ROWS * AV1_WARP_FILTER_TAPS * 8);
+    var t = dr_alloc(AV1_WARP_FILTER_ROWS * AV1_WARP_FILTER_TAPS * 8);
     if (t == 0) { return 0; }
     av1_wfill8(t,   0, 0, 0, 127, 1, 0, 0, 0, 0);
     av1_wfill8(t,   1, 0, 0 - 1, 127, 2, 0, 0, 0, 0);
@@ -19541,7 +19781,7 @@ enum Av1McScaledBuf {
 var Av1_McScaledMid = 0;
 fn av1_mc_scaled_mid_scratch(): i64 {
     if (Av1_McScaledMid != 0) { return Av1_McScaledMid; }
-    Av1_McScaledMid = alloc((AV1_MC_MAX_MID * AV1_MC_MAX_BLK) * 8);
+    Av1_McScaledMid = dr_alloc((AV1_MC_MAX_MID * AV1_MC_MAX_BLK) * 8);
     return Av1_McScaledMid;
 }
 
@@ -19834,20 +20074,20 @@ var Av1_McWarp8 = 0;
 # reference) from put_8tap, which fully writes the (h+7)*w cells before reading them.
 fn av1_mc_mid_scratch(): i64 {
     if (Av1_McMid != 0) { return Av1_McMid; }
-    Av1_McMid = alloc(((AV1_MC_MAX_BLK + 7) * AV1_MC_MAX_BLK) * 8);
+    Av1_McMid = dr_alloc(((AV1_MC_MAX_BLK + 7) * AV1_MC_MAX_BLK) * 8);
     return Av1_McMid;
 }
 
 fn av1_mc_drv_scratch(): i64 {
     if (Av1_McOut != 0) { return DR_OK; }
     var g = AV1_MC_MAX_GATHER * AV1_MC_MAX_GATHER * 8;
-    Av1_McRect = alloc(g);
-    Av1_McGather = alloc(g);
-    Av1_McOut = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);
-    Av1_McTmp = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);   # 2nd compound intermediate
-    Av1_McMask = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # DIFFWTD luma mask
-    Av1_McIntra = alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # inter-intra intra half
-    Av1_McWarp8 = alloc(8 * 8 * 8);                           # per-8x8 warp kernel output
+    Av1_McRect = dr_alloc(g);
+    Av1_McGather = dr_alloc(g);
+    Av1_McOut = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);
+    Av1_McTmp = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);   # 2nd compound intermediate
+    Av1_McMask = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # DIFFWTD luma mask
+    Av1_McIntra = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # inter-intra intra half
+    Av1_McWarp8 = dr_alloc(8 * 8 * 8);                           # per-8x8 warp kernel output
     if ((Av1_McRect == 0) || (Av1_McGather == 0) || (Av1_McOut == 0) || (Av1_McTmp == 0)
       || (Av1_McMask == 0) || (Av1_McWarp8 == 0) || (Av1_McIntra == 0)) {
         Av1_McOut = 0;
@@ -20416,7 +20656,7 @@ fn av1_wm_vert(i): i64 {
 var Av1_WedgeMaster = 0;
 fn av1_wedge_master_tbl(): i64 {
     if (Av1_WedgeMaster != 0) { return Av1_WedgeMaster; }
-    var m = alloc(6 * 64 * 64 * 8);
+    var m = dr_alloc(6 * 64 * 64 * 8);
     if (m == 0) { return 0; }
     # Stage 1 (spec 7.11.3.11): OBLIQUE63 (dir 3) + VERTICAL (dir 1). shift decrements ONCE
     # between the even row and the odd row, and PERSISTS across the outer iteration (the slope).
@@ -20465,7 +20705,7 @@ fn av1_wedge_master_tbl(): i64 {
 var Av1_WedgeCb = 0;
 fn av1_wedge_cb_tbl(): i64 {
     if (Av1_WedgeCb != 0) { return Av1_WedgeCb; }
-    var t = alloc(48 * 8);
+    var t = dr_alloc(48 * 8);
     if (t == 0) { return 0; }
     # shape 0 TALL
     store64(t + (0 * 8), 164);
@@ -20591,7 +20831,7 @@ fn av1_iifill8(t, o, v0, v1, v2, v3, v4, v5, v6, v7) {
 }
 fn av1_ii_weight_tbl(): i64 {
     if (Av1_IiWeights != 0) { return Av1_IiWeights; }
-    var t = alloc(128 * 8);
+    var t = dr_alloc(128 * 8);
     if (t == 0) { return 0; }
     av1_iifill8(t, 0, 60, 58, 56, 54, 52, 50, 48, 47);
     av1_iifill8(t, 8, 45, 44, 42, 41, 39, 38, 37, 35);
@@ -20631,7 +20871,7 @@ fn av1_ii_weight(idx): i64 {
 var Av1_ObmcMask = 0;
 fn av1_obmc_mask_tbl(): i64 {
     if (Av1_ObmcMask != 0) { return Av1_ObmcMask; }
-    var t = alloc(64 * 8);
+    var t = dr_alloc(64 * 8);
     if (t == 0) { return 0; }
     av1_iifill8(t, 0, 0, 0, 45, 64, 39, 50, 59, 64);       # pad[0,1] + len2{45,64} + len4{39,50,59,64}
     av1_iifill8(t, 8, 36, 42, 48, 53, 57, 61, 64, 64);      # len8
@@ -20917,7 +21157,7 @@ enum Av1MvOff {
 
 # av1_mv_new — allocate a zeroed (row, col) MV, or 0 on OOM.
 fn av1_mv_new(): i64 {
-    var m = alloc(AV1MV_SIZE);
+    var m = dr_alloc(AV1MV_SIZE);
     if (m == 0) { return 0; }
     store64(m + AV1MV_ROW, 0);
     store64(m + AV1MV_COL, 0);
@@ -21070,7 +21310,7 @@ enum Av1MvStackOff {
 # need no per-entry init (each is written before read), but zeroing is cheap and
 # leaves NumMvFound / NewMvCount at 0.
 fn av1_mv_stack_new(): i64 {
-    var m = alloc(AV1MVS_SIZE);
+    var m = dr_alloc(AV1MVS_SIZE);
     if (m == 0) { return 0; }
     memset(m, 0, AV1MVS_SIZE);
     return m;
@@ -21268,7 +21508,7 @@ enum Av1MiGridConst {
 fn av1_mv_grid_new(fmi_cols, fmi_rows): i64 {
     var n = fmi_cols * fmi_rows;
     if (n <= 0) { return 0; }
-    var g = alloc(n * AV1MIR_SIZE);
+    var g = dr_alloc(n * AV1MIR_SIZE);
     if (g == 0) { return 0; }
     memset(g, 0, n * AV1MIR_SIZE);
     return g;
@@ -21480,7 +21720,7 @@ fn av1_mv_save_field(grid, fmi_cols, fmi_rows, s, fh, out): i64 {
 var Av1_DivMult = 0;
 fn av1_mv_div_mult_tbl(): i64 {
     if (Av1_DivMult != 0) { return Av1_DivMult; }
-    var t = alloc(32 * 8);
+    var t = dr_alloc(32 * 8);
     if (t == 0) { return 0; }
     store64(t, 0);                              # Div_Mult[0] = 0 (den is clamped to >=1 before indexing)
     var i = 1;
@@ -21550,6 +21790,10 @@ fn av1_get_block_position(x8, y8, dstSign, proj_row, proj_col, mi_rows, mi_cols,
 var Av1_MotionField    = 0;    # pointer to [h8, w8, then 8*h8*w8*2 i64], or 0
 var Av1_MotionFieldCap = 0;    # current cell capacity (h8*w8) — avoid re-alloc on same/smaller frames
 var Av1_MvProjScratch  = 0;    # reusable 48-byte projection scratch (pbuf|dbuf|qbuf), lazily allocated
+fn av1_mvproj_scratch(): i64 {   # the lazy 48-byte scratch (0 on OOM; av1_tables_init builds it up front)
+    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = dr_alloc(48); }
+    return Av1_MvProjScratch;
+}
 enum Av1MotionFieldOff {
     AV1MF_H8    = 0;
     AV1MF_W8    = 8;
@@ -21563,7 +21807,7 @@ fn av1_motionfield_alloc(h8, w8): i64 {
     var need = h8 * w8;
     if (need <= 0) { return 0; }                        # trust-no-input backstop (0x0 frame)
     if ((Av1_MotionField == 0) || (need > Av1_MotionFieldCap)) {
-        var t = alloc(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
+        var t = dr_alloc(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
         if (t == 0) { return 0; }
         Av1_MotionField    = t;
         Av1_MotionFieldCap = need;
@@ -21607,8 +21851,7 @@ fn av1_mv_projection(fh, refs, s, mf, srcRef, dstSign, h8, w8, mi_rows, mi_cols)
     var refToCur = av1_get_relative_dist(s, src_oh, oh);   # constant per call; posValid re-checks it per spec
     var mv_base  = saved + AV1SMF_REF + (h8 * w8 * 8);      # dims match, so saved stride == current stride
     # Scratch out-buffers: a reusable 48-byte module-global (pbuf|dbuf|qbuf) — no per-call/per-frame alloc.
-    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = alloc(48); }
-    if (Av1_MvProjScratch == 0) { return 0; }
+    if (av1_mvproj_scratch() == 0) { return 0; }   # built by av1_tables_init before any tile decodes
     var pbuf = Av1_MvProjScratch;         # get_block_position input proj MV (position finder)
     var dbuf = Av1_MvProjScratch + 16;    # per-dst stored proj MV
     var qbuf = Av1_MvProjScratch + 32;    # get_block_position output (PosY8, PosX8)
@@ -21753,7 +21996,7 @@ enum Av1MvCtxOff {
     AV1MVC_SIZE       = 520;
 }
 fn av1_mvctx_new(): i64 {
-    var c = alloc(AV1MVC_SIZE);
+    var c = dr_alloc(AV1MVC_SIZE);
     if (c == 0) { return 0; }
     memset(c, 0, AV1MVC_SIZE);
     return c;
@@ -22281,6 +22524,10 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 # at +0, s1 at +16. Hoisted like Av1_MvProjScratch. The estimation runs per-frame before the per-block scan,
 # so there is no lifetime overlap with Av1_MvProjScratch even if they aliased — this stays independent.
 var Av1_TplScratch = 0;
+fn av1_tpl_scratch(): i64 {   # the lazy 32-byte scratch (0 on OOM; av1_tables_init builds it up front)
+    if (Av1_TplScratch == 0) { Av1_TplScratch = dr_alloc(32); }
+    return Av1_TplScratch;
+}
 # check_sb_border (7.10.2.5) — does an extension sample at (dR, dC) stay inside the current 64x64 superblock?
 # Uses the block's position WITHIN the SB (MiRow & 15 / MiCol & 15). Separate from is_inside (frame/tile).
 fn av1_tpl_sb_ok(mi_row, mi_col, dR, dC): i64 {
@@ -22347,8 +22594,7 @@ fn av1_add_tpl_ref_mv(ctx, mf, delta_row, delta_col, is_compound): i64 {
     var at_origin = 0;
     if ((delta_row == 0) && (delta_col == 0)) { at_origin = 1; }
     if (at_origin == 1) { store64(ctx + AV1MVC_ZEROCTX, 1); }              # unconditional set, before the read
-    if (Av1_TplScratch == 0) { Av1_TplScratch = alloc(32); }
-    if (Av1_TplScratch == 0) { return DR_OK; }
+    if (av1_tpl_scratch() == 0) { return DR_ERR_OOM; }   # built by av1_tables_init before any tile decodes
     var s0 = Av1_TplScratch;
     var s1 = Av1_TplScratch + 16;
     var allow_hp = load64(ctx + AV1MVC_ALLOW_HP);
@@ -22406,10 +22652,11 @@ fn av1_add_tpl_ref_mv(ctx, mf, delta_row, delta_col, is_compound): i64 {
 fn av1_temporal_scan(ctx, mf, is_compound): i64 {
     if (mf == 0) { return DR_OK; }
     # Trust-no-input / dimension-bomb guard: the estimation sizes MotionFieldMvs to the current frame, but on
-    # a growth OOM av1_motionfield_alloc leaves Av1_MotionField pointing at a STALE smaller field (its return
-    # is discarded, non-fatal). y8/x8 are bounded by the CURRENT (larger) frame's tile, so a stale-field read
-    # would go OOB. Skip the scan whenever the field's header dims != the current frame's h8/w8 — graceful (no
-    # temporal candidates; ZeroMvContext stays at the driver's 0). Under normal decode the dims always match.
+    # a growth OOM av1_motionfield_alloc leaves Av1_MotionField pointing at a STALE smaller field (the tile
+    # setup now FAILS on that OOM, 0.8.5; this stays as defence). y8/x8 are bounded by the CURRENT (larger)
+    # frame's tile, so a stale-field read would go OOB. Skip the scan whenever the field's header dims != the
+    # current frame's h8/w8 — graceful (no temporal candidates; ZeroMvContext stays at the driver's 0). Under
+    # normal decode the dims always match.
     if (load64(mf + AV1MF_H8) != (load64(ctx + AV1MVC_FMI_ROWS) >> 1)) { return DR_OK; }
     if (load64(mf + AV1MF_W8) != (load64(ctx + AV1MVC_FMI_COLS) >> 1)) { return DR_OK; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -22530,7 +22777,7 @@ enum Av1WarpOff {
     AV1WS_SIZE    = 272;  # 16 + 8*4*8
 }
 fn av1_warp_new(): i64 {
-    var ws = alloc(AV1WS_SIZE);
+    var ws = dr_alloc(AV1WS_SIZE);
     if (ws == 0) { return 0; }
     memset(ws, 0, AV1WS_SIZE);
     return ws;
@@ -22733,7 +22980,7 @@ enum Av1WarpModelOff {
     AV1WM_SIZE       = 96;   # 8 + 6*8 + 4*8 + 8
 }
 fn av1_warp_model_new(): i64 {
-    var m = alloc(AV1WM_SIZE);
+    var m = dr_alloc(AV1WM_SIZE);
     if (m == 0) { return 0; }
     memset(m, 0, AV1WM_SIZE);
     return m;
@@ -22753,7 +23000,7 @@ fn av1_warp_model_shear_valid(m): i64 { return load64(m + AV1WM_SHEARVALID); }
 var Av1_DivLut = 0;
 fn av1_div_lut_tbl(): i64 {
     if (Av1_DivLut != 0) { return Av1_DivLut; }
-    var t = alloc((AV1_DIV_LUT_NUM + 1) * 8);
+    var t = dr_alloc((AV1_DIV_LUT_NUM + 1) * 8);
     if (t == 0) { return 0; }
     var num = 1 << (AV1_DIV_LUT_PREC_BITS + AV1_DIV_LUT_BITS);   # 2^22
     var i = 0;
@@ -22817,7 +23064,7 @@ fn av1_warp_mult_clip(v, factor, shift, is_diag, one): i64 {
 var Av1_WarpDivScratch = 0;
 fn av1_warp_div_scratch(): i64 {
     if (Av1_WarpDivScratch != 0) { return Av1_WarpDivScratch; }
-    var s = alloc(16);
+    var s = dr_alloc(16);
     if (s == 0) { return 0; }
     Av1_WarpDivScratch = s;
     return s;
@@ -23141,7 +23388,8 @@ fn av1_mvcdf_put_class(p): i64 {
 var AV1_MVBIT_VALS = 0;
 fn av1_mvbit_vals(): i64 {
     if (AV1_MVBIT_VALS != 0) { return AV1_MVBIT_VALS; }
-    var p = alloc(10 * 8);
+    var p = dr_alloc(10 * 8);
+    if (p == 0) { return 0; }   # OOM: av1_tables_init reports it
     store64(p + 0, 17408);  store64(p + 8, 17920);  store64(p + 16, 18944);
     store64(p + 24, 20480); store64(p + 32, 22528); store64(p + 40, 24576);
     store64(p + 48, 28672); store64(p + 56, 29952); store64(p + 64, 29952);
@@ -23180,7 +23428,7 @@ fn av1_mvcdf_fill(cc): i64 {
 
 # av1_mvcdf_new — a fresh mutable MV CDF context (for the adaptive path). Or 0 on OOM.
 fn av1_mvcdf_new(): i64 {
-    var cc = alloc(AV1MVCDF_SIZE * 8);
+    var cc = dr_alloc(AV1MVCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_mvcdf_fill(cc);
     return cc;
@@ -23189,7 +23437,7 @@ fn av1_mvcdf_new(): i64 {
 var AV1_MVCDF_BLOB = 0;
 fn av1_mvcdf_blob(): i64 {
     if (AV1_MVCDF_BLOB != 0) { return AV1_MVCDF_BLOB; }
-    var cc = alloc(AV1MVCDF_SIZE * 8);
+    var cc = dr_alloc(AV1MVCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_mvcdf_fill(cc);
     AV1_MVCDF_BLOB = cc;
@@ -23544,7 +23792,7 @@ fn av1_imcdf_fill(cc): i64 {
     return DR_OK;
 }
 fn av1_imcdf_new(): i64 {
-    var cc = alloc(AV1IMCDF_SIZE * 8);
+    var cc = dr_alloc(AV1IMCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_imcdf_fill(cc);
     return cc;
@@ -23552,7 +23800,7 @@ fn av1_imcdf_new(): i64 {
 var AV1_IMCDF_BLOB = 0;
 fn av1_imcdf_blob(): i64 {
     if (AV1_IMCDF_BLOB != 0) { return AV1_IMCDF_BLOB; }
-    var cc = alloc(AV1IMCDF_SIZE * 8);
+    var cc = dr_alloc(AV1IMCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_imcdf_fill(cc);
     AV1_IMCDF_BLOB = cc;
@@ -23832,7 +24080,7 @@ enum Av1NbCtxOff {
     AV1NB_SIZE    = 144;
 }
 fn av1_nbctx_new(): i64 {
-    var nb = alloc(AV1NB_SIZE);
+    var nb = dr_alloc(AV1NB_SIZE);
     if (nb == 0) { return 0; }
     memset(nb, 0, AV1NB_SIZE);
     return nb;
@@ -24281,7 +24529,7 @@ fn av1_refcdf_fill(cc): i64 {
     return DR_OK;
 }
 fn av1_refcdf_new(): i64 {
-    var cc = alloc(AV1REFCDF_SIZE * 8);
+    var cc = dr_alloc(AV1REFCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_refcdf_fill(cc);
     return cc;
@@ -24289,7 +24537,7 @@ fn av1_refcdf_new(): i64 {
 var AV1_REFCDF_BLOB = 0;
 fn av1_refcdf_blob(): i64 {
     if (AV1_REFCDF_BLOB != 0) { return AV1_REFCDF_BLOB; }
-    var cc = alloc(AV1REFCDF_SIZE * 8);
+    var cc = dr_alloc(AV1REFCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_refcdf_fill(cc);
     AV1_REFCDF_BLOB = cc;
@@ -24498,7 +24746,8 @@ fn av1_write_compound_ref(enc, cc, cctx, r0, r1): i64 {
 var AV1_COMPMODE_CTXMAP = 0;
 fn av1_compmode_ctxmap(): i64 {
     if (AV1_COMPMODE_CTXMAP != 0) { return AV1_COMPMODE_CTXMAP; }
-    var p = alloc(3 * AV1_COMP_NEWMV_CTXS * 8);
+    var p = dr_alloc(3 * AV1_COMP_NEWMV_CTXS * 8);
+    if (p == 0) { return 0; }   # OOM: av1_tables_init reports it
     store64(p + 0, 0);  store64(p + 8, 1);  store64(p + 16, 1); store64(p + 24, 1); store64(p + 32, 1);
     store64(p + 40, 1); store64(p + 48, 2); store64(p + 56, 3); store64(p + 64, 4); store64(p + 72, 4);
     store64(p + 80, 4); store64(p + 88, 4); store64(p + 96, 5); store64(p + 104, 6); store64(p + 112, 7);
@@ -24726,7 +24975,7 @@ fn av1_iicdf_fill(cc): i64 {
     return DR_OK;
 }
 fn av1_iicdf_new(): i64 {
-    var cc = alloc(AV1IICDF_SIZE * 8);
+    var cc = dr_alloc(AV1IICDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_iicdf_fill(cc);
     return cc;
@@ -24734,7 +24983,7 @@ fn av1_iicdf_new(): i64 {
 var AV1_IICDF_BLOB = 0;
 fn av1_iicdf_blob(): i64 {
     if (AV1_IICDF_BLOB != 0) { return AV1_IICDF_BLOB; }
-    var cc = alloc(AV1IICDF_SIZE * 8);
+    var cc = dr_alloc(AV1IICDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_iicdf_fill(cc);
     AV1_IICDF_BLOB = cc;
@@ -24810,7 +25059,7 @@ fn av1_write_wedge_index(enc, cc, mi_size, wedge_idx): i64 {
 var AV1_WEDGE_BITS_TBL = 0;
 fn av1_wedge_bits_tbl(): i64 {
     if (AV1_WEDGE_BITS_TBL != 0) { return AV1_WEDGE_BITS_TBL; }
-    var t = alloc(AV1_BLOCK_SIZES * 8);
+    var t = dr_alloc(AV1_BLOCK_SIZES * 8);
     if (t == 0) { return 0; }
     # {0,0,0, 4,4,4,4,4,4,4, 0,0,0,0,0,0,0,0, 4,4, 0,0}
     store64(t + 0, 0);   store64(t + 8, 0);   store64(t + 16, 0);  store64(t + 24, 4);
@@ -24826,7 +25075,7 @@ fn av1_wedge_bits(mi_size): i64 { return load64(av1_wedge_bits_tbl() + (mi_size 
 
 # the read_compound_type output record.
 fn av1_comptype_new(): i64 {
-    var r = alloc(AV1CT_SIZE);
+    var r = dr_alloc(AV1CT_SIZE);
     if (r == 0) { return 0; }
     store64(r + AV1CT_TYPE, AV1_COMPOUND_AVERAGE);
     store64(r + AV1CT_GROUPIDX, 0);
@@ -24967,7 +25216,7 @@ enum Av1InterIntraRec {
     AV1II_SIZE       = 48;
 }
 fn av1_interintra_new(): i64 {
-    var r = alloc(AV1II_SIZE);
+    var r = dr_alloc(AV1II_SIZE);
     if (r == 0) { return 0; }
     memset(r, 0, AV1II_SIZE);
     return r;
@@ -25182,7 +25431,7 @@ fn av1_write_motion_mode(enc, cc, ctx, ws, fh, refs, skip_mode, y_mode, ref0, re
 var AV1RRF_SCRATCH = 0;
 fn av1_rrf_scratch(): i64 {
     if (AV1RRF_SCRATCH != 0) { return AV1RRF_SCRATCH; }
-    AV1RRF_SCRATCH = alloc(AV1CCTX_SIZE);
+    AV1RRF_SCRATCH = dr_alloc(AV1CCTX_SIZE);
     return AV1RRF_SCRATCH;
 }
 fn av1_read_ref_frames(sd, cc, out_ref, nb, fh, skip_mode, segment_id, mi_size): i64 {
@@ -25291,7 +25540,7 @@ enum Av1InterBlockOff {
     AV1IB_SIZE       = 192;
 }
 fn av1_interblock_new(): i64 {
-    var b = alloc(AV1IB_SIZE);
+    var b = dr_alloc(AV1IB_SIZE);
     if (b == 0) { return 0; }
     memset(b, 0, AV1IB_SIZE);
     return b;
@@ -25311,7 +25560,7 @@ fn av1_ib_ct(b): i64 { return b + AV1IB_CT; }
 var AV1IBMI_SCRATCH = 0;
 fn av1_ibmi_scratch(): i64 {
     if (AV1IBMI_SCRATCH != 0) { return AV1IBMI_SCRATCH; }
-    AV1IBMI_SCRATCH = alloc(32);
+    AV1IBMI_SCRATCH = dr_alloc(32);
     return AV1IBMI_SCRATCH;
 }
 fn av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out, ctx, nb, ws, fh, refs, s,
@@ -25619,7 +25868,7 @@ enum Av1BlockInfoOff {
     AV1FB_SIZE     = 560;
 }
 fn av1_blockinfo_new(): i64 {
-    var b = alloc(AV1FB_SIZE);
+    var b = dr_alloc(AV1FB_SIZE);
     if (b == 0) { return 0; }
     memset(b, 0, AV1FB_SIZE);
     return b;
@@ -25820,7 +26069,8 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
     store64(out_err, DR_OK);
     var frame = load64(tile + AV1TILE_FRAME);
     # 1. deblocking (in place).
-    av1_deblock(tile, fh);
+    var drc = av1_deblock(tile, fh);
+    if (drc != DR_OK) { store64(out_err, drc); return 0; }
     var result = frame;
     # 2. CDEF.
     var cdef_frame = frame;
@@ -25853,7 +26103,8 @@ fn av1_apply_loop_filters(tile, fh, seq, lr_params, out_err): i64 {
     if ((av1_fh_uses_lr(fh) != 0) && (lr_params != 0)) {
         var lr_frame = av1_cdef_frame_new(sr_cdef, out_err);
         if (lr_frame == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-        av1_lr_process(sr_curr, sr_cdef, lr_frame, lr_params);
+        var lrc = av1_lr_process(sr_curr, sr_cdef, lr_frame, lr_params);
+        if (lrc != DR_OK) { store64(out_err, lrc); return 0; }
         result = lr_frame;
     }
     return result;
@@ -26009,10 +26260,10 @@ enum Av1TgOff {
 # init -1 = absent). Returns 0 on bad arg / OOM.
 fn av1_tile_group_new(max_tiles): i64 {
     if (max_tiles <= 0) { return 0; }
-    var tg = alloc(AV1TG_SIZE);
+    var tg = dr_alloc(AV1TG_SIZE);
     if (tg == 0) { return 0; }
-    var offs = alloc(max_tiles * 8);
-    var sizes = alloc(max_tiles * 8);
+    var offs = dr_alloc(max_tiles * 8);
+    var sizes = dr_alloc(max_tiles * 8);
     if ((offs == 0) || (sizes == 0)) { return 0; }
     store64(tg + AV1TG_TGSTART, 0);
     store64(tg + AV1TG_TGEND, 0);
@@ -26173,9 +26424,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # reject here because reading neither desynced the intra path.
     # quantizer matrices (7.12.3 step 1b) apply as of 0.8.4 (src/av1_qm.cyr; both lanes pick the matrix per
     # transform block). They REJECTED here from 0.8.2, and before that were parsed and ignored — a silent
-    # mis-decode. The table is built here, once, so its allocation failing is a frame error up front.
+    # mis-decode. The table is built here, once, so its allocation failing is a frame error up front — with every
+    # other lazy table (av1_tables_init builds the QM table too), since the QM build reads the transform tables.
     if (av1_fh_qm_applies(fh, av1_seq_num_planes(seq)) != 0) {
-        if (av1_qm_table() == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        if (av1_tables_init() != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
     }
     # allow_intrabc decodes as of 0.8.4: such an intra frame runs on the INTER lane (av1_frame_dec_group), which
     # reads use_intrabc and predicts a block copy from the frame being decoded. It rejected here before.
@@ -26204,7 +26456,7 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     var lr_params = av1_lr_params_from_fh(fh, seq, av1_fh_upscaled_width(fh),
       av1_fh_frame_height(fh), num_planes, &terr);
     if (terr != DR_OK) { store64(out_err, terr); return 0; }
-    var fdc = alloc(AV1FDEC_SIZE);   # AV1FDEC_SIZE bytes
+    var fdc = dr_alloc(AV1FDEC_SIZE);   # AV1FDEC_SIZE bytes
     if (fdc == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(fdc + AV1FDEC_FRAME, frame);
     store64(fdc + AV1FDEC_TILE0, 0);
@@ -26323,7 +26575,7 @@ fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
         if (av1_tile_grids_new(tile) != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
         store64(fdc + AV1FDEC_TILE0, tile);
     } else {
-        av1_tile_share_grids(tile, tile0);
+        if (av1_tile_share_grids(tile, tile0) != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
     }
     # temporal segmentation (0.8.2): each tile's Av1SegCtx, carrying PrevSegmentIds — the primary
     # reference's saved map when load_previous_segment_ids (5.9.2) finds one, else all zero.
@@ -26340,8 +26592,8 @@ fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
         var idpb = load64(fdc + AV1FDEC_DPB);
         var irefs = load64(fdc + AV1FDEC_REFS);
         if (av1_fh_frame_is_intra(fh) != 0) {
-            if (idpb == 0) { idpb = av1_dpb_new(); }
-            if (irefs == 0) { irefs = av1_ref_state_new(); }
+            if (idpb == 0) { idpb = av1_dpb_new(); if (idpb == 0) { store64(out_err, DR_ERR_OOM); return 0; } }
+            if (irefs == 0) { irefs = av1_ref_state_new(); if (irefs == 0) { store64(out_err, DR_ERR_OOM); return 0; } }
         }
         if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
         var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
@@ -26380,15 +26632,16 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
         if (grid != 0) {
             var fmi_cols = av1_fh_mi_cols(fh);
             var fmi_rows = av1_fh_mi_rows(fh);
-            var buf = alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
-            if (buf != 0) {
-                av1_mv_save_field(grid, fmi_cols, fmi_rows, seq, fh, buf);
-                var rff = av1_fh_refresh_frame_flags(fh);
-                var i = 0;
-                while (i < 8) {
-                    if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
-                    i = i + 1;
-                }
+            var buf = dr_alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
+            # an OOM here must fail the frame: skipping the save left the slots' previous fields in place, and
+            # a later frame's motion-field estimation then projected a STALE field (silent mis-decode, 0.8.5).
+            if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+            av1_mv_save_field(grid, fmi_cols, fmi_rows, seq, fh, buf);
+            var rff = av1_fh_refresh_frame_flags(fh);
+            var i = 0;
+            while (i < 8) {
+                if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
+                i = i + 1;
             }
         }
     }
@@ -26638,7 +26891,7 @@ enum Av1DpbOff {
 # av1_dpb_new — allocate an empty DPB (all eight slots null). Returns the handle
 # or 0 on OOM.
 fn av1_dpb_new(): i64 {
-    var d = alloc(AV1DPB_SIZE);
+    var d = dr_alloc(AV1DPB_SIZE);
     if (d == 0) { return 0; }
     memset(d, 0, AV1DPB_SIZE);
     return d;
@@ -26790,7 +27043,7 @@ enum Av1DecOff {
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
 # one). Returns the handle, or 0 on OOM.
 fn av1_decoder_new(dpb): i64 {
-    var d = alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
+    var d = dr_alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
     if (d == 0) { return 0; }
     memset(d, 0, AV1DEC_SIZE);
     var ring = dpb;
@@ -27125,8 +27378,8 @@ fn av1_tile_list_parse(buf, sz, out_err): i64 {
     var count = ((load8(buf + 2) << 8) | load8(buf + 3)) + 1;    # tile_count_minus_1 f(16)
     if (count > 512) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
     if (count > (ow * oh)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
-    var tl = alloc(AV1TL_SIZE);
-    var ents = alloc(count * AV1TLE_SIZE);   # count entries
+    var tl = dr_alloc(AV1TL_SIZE);
+    var ents = dr_alloc(count * AV1TLE_SIZE);   # count entries
     if ((tl == 0) || (ents == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(tl + AV1TL_OUT_W, ow);
     store64(tl + AV1TL_OUT_H, oh);
@@ -27194,7 +27447,7 @@ fn av1_decoder_set_anchor(dec, idx, frame): i64 {
     if ((idx < 0) || (idx > 127)) { return DR_ERR_BOUNDS; }
     var a = load64(dec + AV1DEC_ANCH);
     if (a == 0) {
-        a = alloc(128 * 8);   # 128 DrFrame pointers
+        a = dr_alloc(128 * 8);   # 128 DrFrame pointers
         if (a == 0) { return DR_ERR_OOM; }
         memset(a, 0, 128 * 8);
         store64(dec + AV1DEC_ANCH, a);
@@ -27271,7 +27524,7 @@ fn av1_decode_tile_list(dec, buf, sz, out_err): i64 {
     # 5-13); and a DPB holding nothing but the anchor in that slot. A tile decode reads only RefUpscaledWidth and
     # RefFrameHeight of it (the 7.11.3.3 scale factors); the other fields are set to keep the slot whole.
     var refs = load64(dec + AV1DEC_REFS);
-    var srefs = alloc(AV1REF_SIZE);
+    var srefs = dr_alloc(AV1REF_SIZE);
     var sdpb = av1_dpb_new();
     if ((srefs == 0) || (sdpb == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     memcpy(srefs, refs, AV1REF_SIZE);
@@ -27398,7 +27651,7 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
     }
     if (load64(tile + AV1TILE_SKIPMODES) == 0) {
         var n = fmi_cols * fmi_rows;
-        var sm = alloc(n * 8);
+        var sm = dr_alloc(n * 8);
         if (sm == 0) { return DR_ERR_OOM; }
         memset(sm, 0, n * 8);
         store64(tile + AV1TILE_SKIPMODES, sm);
@@ -27414,7 +27667,7 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
     # Both lanes compute it here so the MV candidate dedup (which negates cross-bias MVs) agrees.
     var sbias = load64(tile + AV1TILE_SIGNBIAS);
     if (sbias == 0) {
-        sbias = alloc(AV1_NUM_REF_FRAMES * 8);
+        sbias = dr_alloc(AV1_NUM_REF_FRAMES * 8);
         if (sbias == 0) { return DR_ERR_OOM; }
         store64(tile + AV1TILE_SIGNBIAS, sbias);
     }
@@ -27427,7 +27680,7 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
     var cctx = load64(tile + AV1TILE_CDEF_CTX);
     var cgrid = load64(tile + AV1TILE_CDEFIDX);
     if ((cctx != 0) && (cgrid != 0)) {
-        var ic = alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
+        var ic = dr_alloc(AV1CDC_SIZE);   # AV1CDC_SIZE bytes
         if (ic == 0) { return DR_ERR_OOM; }
         store64(ic + 0, load64(cctx + 0));       # enable_cdef
         store64(ic + 8, load64(cctx + 8));       # cdef_bits
@@ -27443,9 +27696,10 @@ fn av1_tile_set_inter_ctx(tile, fh, refs, seq, dpb): i64 {
     # fields before decoding this tile's blocks. OUTPUT-NEUTRAL in 0.7.103 — the temporal scan (7.10.2.5/6,
     # roadmap.md) is the first reader; until then this only populates the reusable module-global scratch, so a
     # per-tile rebuild is harmless (the estimation is a pure fn of fh/refs/seq — identical across a frame's
-    # tiles; hoist to a once-per-frame call when the scan lands). A build failure (OOM) is non-fatal here.
+    # tiles). A build failure (OOM) FAILS the tile (0.8.5): it was non-fatal, from before the temporal scan read
+    # the field, and since then it silently dropped every temporal candidate — a mis-decode, not a degradation.
     if (av1_fh_use_ref_frame_mvs(fh) != 0) {
-        av1_motion_field_estimation(fh, refs, seq);
+        if (av1_motion_field_estimation(fh, refs, seq) == 0) { return DR_ERR_OOM; }
     }
     return DR_OK;
 }
@@ -27702,11 +27956,12 @@ fn av1_intrabc_dv_valid(tile, r, c, sub_size, has_chroma, mv_row, mv_col): i64 {
 # in the tile's first superblock row (MiRow - sbSize4 < MiRowStart) — one superblock plus INTRABC_DELAY_PIXELS (256)
 # to the left. Returns a scratch Av1Mv (1/8-sample units), overwritten by the next call.
 var Av1_IbcPred = 0;
+fn av1_ibc_pred_scratch(): i64 {   # one Av1Mv (0 on OOM; av1_tables_init builds it up front)
+    if (Av1_IbcPred == 0) { Av1_IbcPred = dr_alloc(16); }
+    return Av1_IbcPred;
+}
 fn av1_intrabc_default_pred(mi_row, mi_row_start, sb128): i64 {
-    if (Av1_IbcPred == 0) {
-        Av1_IbcPred = alloc(16);   # one Av1Mv: row, col
-        if (Av1_IbcPred == 0) { return 0; }
-    }
+    if (av1_ibc_pred_scratch() == 0) { return 0; }
     var sb4 = 16;   # Num_4x4_Blocks_High[ BLOCK_64X64 ]
     if (sb128 != 0) { sb4 = 32; }
     store64(Av1_IbcPred + AV1MV_ROW, 0);
@@ -27741,7 +27996,7 @@ fn av1_intra_frame_mode_info_ibc(tile, sd, fb, r, c, sub_size, st, has_chroma): 
     var mi = fb + AV1FB_MI;
     var avail_u = load64(st + 0);
     var avail_l = load64(st + 8);
-    var nb = alloc(6 * 8);   # 6 i64: above / left Y mode, skip, tx size
+    var nb = dr_alloc(6 * 8);   # 6 i64: above / left Y mode, skip, tx size
     if (nb == 0) { return DR_ERR_OOM; }
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
     var e = av1_intra_frame_mode_info_decode(sd, load64(tile + AV1TILE_NCC), mi, sub_size, has_chroma,
@@ -28594,7 +28849,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     var bw4 = av1_num_4x4_w(sub_size);
     var bh4 = av1_num_4x4_h(sub_size);
     var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
-    var st = alloc(40);
+    var st = dr_alloc(40);
     if (st == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
     av1_inter_block_setup(tile, r, c, sub_size, st);
     var fb = av1_blockinfo_new();
@@ -28604,6 +28859,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
         # an allow_intrabc INTRA frame (0.8.4): intra_frame_mode_info (5.11.7) with use_intrabc
         e = av1_intra_frame_mode_info_ibc(tile, sd, fb, r, c, sub_size, st, has_chroma);
     } else {
+        if (av1_tile_segctx_oom(tile)) { return av1_ierr_latch(tile, DR_ERR_OOM); }
         e = av1_inter_frame_mode_info(sd, load64(tile + AV1TILE_CCREF),
           load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
           load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
@@ -28639,14 +28895,15 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             iavuc = 0;
             iavlc = 0;
         }
-        var inb = alloc(6 * 8);
+        var inb = dr_alloc(6 * 8);
         if (inb == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
         av1_block_neighbours(tile, r, c, iavu, iavl, inb);
         var iloss = load64(tile + AV1TILE_CUR_LOSSLESS);
         # palette_tokens (5.11.49): after the mode info, before the tx size; then PaletteSizes / PaletteColors.
         var ipc = av1_tile_palctx(tile);
         av1_read_palette_tokens(sd, load64(tile + AV1TILE_NCC), ipc, imi, sub_size, r, c, subx, suby);
-        av1_pal_store(ipc, imi, r, c, bw4, bh4);
+        var ips = av1_pal_store(ipc, imi, r, c, bw4, bh4);
+        if (ips != DR_OK) { return av1_ierr_latch(tile, ips); }
         var itxc = av1_tx_depth_ctx_inter(tile, r, c, iavu, iavl, av1_max_tx_size_rect(sub_size));   # inter-aware (9.3)
         var itx = av1_read_tx_size(sd, load64(tile + AV1TILE_NCC), sub_size, iloss,
           load64(tile + AV1TILE_TX_MODE), 1, itxc);
@@ -29092,9 +29349,10 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
     var bw4 = av1_num_4x4_w(sub_size);
     var bh4 = av1_num_4x4_h(sub_size);
     var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
-    var st = alloc(40);
+    var st = dr_alloc(40);
     if (st == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
     av1_inter_block_setup(tile, r, c, sub_size, st);
+    if (av1_tile_segctx_oom(tile)) { return av1_ierr_latch(tile, DR_ERR_OOM); }
     var e = av1_write_inter_frame_mode_info(enc, load64(tile + AV1TILE_CCREF),
       load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
       load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
@@ -29117,7 +29375,7 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         var emi = fb + AV1FB_MI;
         var eavu = load64(st + 0);
         var eavl = load64(st + 8);
-        var enb = alloc(6 * 8);
+        var enb = dr_alloc(6 * 8);
         if (enb == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
         av1_block_neighbours(tile, r, c, eavu, eavl, enb);
         var eloss = load64(tile + AV1TILE_CUR_LOSSLESS);
@@ -29126,7 +29384,8 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
         var epc = av1_tile_palctx(tile);   # palette_tokens + the palette store, mirror of decode
         var ewt = av1_write_palette_tokens(enc, load64(tile + AV1TILE_NCC), epc, emi, sub_size, r, c, subx, suby);
         if (ewt != DR_OK) { return av1_ierr_latch(tile, ewt); }
-        av1_pal_store(epc, emi, r, c, bw4, bh4);
+        var eps = av1_pal_store(epc, emi, r, c, bw4, bh4);
+        if (eps != DR_OK) { return av1_ierr_latch(tile, eps); }
         var etxc = av1_tx_depth_ctx_inter(tile, r, c, eavu, eavl, av1_max_tx_size_rect(sub_size));   # mirror of decode
         av1_write_tx_size(enc, load64(tile + AV1TILE_NCC), sub_size, eloss,
           load64(tile + AV1TILE_TX_MODE), 1, etxc, etx);
@@ -29227,7 +29486,7 @@ enum Av1CdfBundle {
     AV1CB_MV  = 7601;    # 286
     AV1CB_N   = 7887;
 }
-fn av1_cdf_bundle_new(): i64 { return alloc(AV1CB_N * 8); }
+fn av1_cdf_bundle_new(): i64 { return dr_alloc(AV1CB_N * 8); }
 # Reset the per-row ADAPTATION COUNTERS in a saved bundle (libaom av1_reset_cdf_symbol_counters,
 # av1/decoder/decodeframe.c, called immediately after the frame context is captured). Every CDF
 # row is [c0 .. c(n-2), 32768, count]; av1_cdf_update reads count at cdf[n] to pick its rate
@@ -29383,6 +29642,52 @@ fn av1_encode_inter_tile(tile, plan_part, plan_fb, disable_cdf, out_len): i64 {
     return av1_sym_enc_finish(enc, out_len);
 }
 
+# ================================================================
+# av1_tables_init — build every lazily allocated table and scratch buffer the AV1 decode and encode lanes use, so no
+# tile ever starts with one missing (0.8.5, the OOM fault injection bite). Each getter allocates on first call and
+# returns 0 on OOM, but most are read by hot accessors that cannot report an error — an allocation failure there
+# would dereference 0. av1_tile_new calls this first, so a tile is only ever created once every table exists.
+# Returns DR_OK, or DR_ERR_OOM when any allocation fails (the next call retries the ones still missing).
+# ================================================================
+fn av1_tables_init(): i64 {
+    if ((av1_cdef_tables() == 0) || (av1_cbco() == 0) || (av1_ctabs() == 0) || (av1_coeff_cdf_blob() == 0)
+      || (av1_coeff_base_blob() == 0) || (av1_coeff_br_blob() == 0) || (av1_grain_gauss() == 0)) {
+        return DR_ERR_OOM;
+    }
+    if ((av1_mvbit_vals() == 0) || (av1_mvcdf_blob() == 0) || (av1_imcdf_blob() == 0) || (av1_refcdf_blob() == 0)
+      || (av1_compmode_ctxmap() == 0) || (av1_iicdf_blob() == 0) || (av1_wedge_bits_tbl() == 0)
+      || (av1_rrf_scratch() == 0) || (av1_ibmi_scratch() == 0)) {
+        return DR_ERR_OOM;
+    }
+    if ((av1_sm_weights() == 0) || (av1_filter_taps() == 0) || (av1_itx_tables() == 0) || (av1_lr_sgr_tables() == 0)
+      || (av1_lr_taps() == 0) || (av1_subpel_filters_blob() == 0) || (av1_warp_filter_tbl() == 0)
+      || (av1_mc_scaled_mid_scratch() == 0) || (av1_mc_mid_scratch() == 0) || (av1_wedge_master_tbl() == 0)) {
+        return DR_ERR_OOM;
+    }
+    if ((av1_wedge_cb_tbl() == 0) || (av1_ii_weight_tbl() == 0) || (av1_obmc_mask_tbl() == 0)
+      || (av1_blk_tables() == 0) || (av1_mv_div_mult_tbl() == 0) || (av1_div_lut_tbl() == 0)
+      || (av1_warp_div_scratch() == 0) || (av1_noncoeff_cdf_blob() == 0) || (av1_partsub_tables() == 0)) {
+        return DR_ERR_OOM;
+    }
+    if ((av1_qm_table() == 0) || (av1_qm_packed() == 0) || (av1_dc_qlookup() == 0) || (av1_ac_qlookup() == 0)
+      || (av1_scan_blob() == 0) || (av1_scan_sel() == 0) || (av1_upscale_filter_blob() == 0)
+      || (av1_txsz_tables() == 0) || (av1_txsqr_tables() == 0) || (av1_txtype_tables() == 0)) {
+        return DR_ERR_OOM;
+    }
+    # the lazies in other shapes: Dr_Intra_Derivative[3] = 1023, Qm_Offset[18] = 2192, the three scratch buffers,
+    # and motion compensation's driver scratch
+    if ((av1_dr_intra_derivative(3) != 1023) || (av1_qm_offset(18) != 2192) || (av1_tpl_scratch() == 0)
+      || (av1_mvproj_scratch() == 0) || (av1_ibc_pred_scratch() == 0) || (av1_mc_drv_scratch() != DR_OK)) {
+        return DR_ERR_OOM;
+    }
+    # the persistent per-call scratches (0.8.5) — each replaced a per-block / per-sample allocation
+    if ((av1_cdef_scratch() == 0) || (av1_lf_scratch() == 0) || (av1_lr_scratch() == 0)
+      || (av1_part_synth_scratch() == 0) || (av1_segid_scratch() == 0) || (av1_pal_scratch() == 0)) {
+        return DR_ERR_OOM;
+    }
+    return DR_OK;
+}
+
 # --- h264_nal.cyr ---
 
 # @public — drishti H.264/AVC NAL layer: Annex-B byte-stream scan
@@ -29500,7 +29805,7 @@ fn h264_find_start_code(buf, len, from, out_sc_len): i64 {
 # allocation failure / negative len.
 fn h264_scan_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var s = alloc(40);
+    var s = dr_alloc(40);
     if (s == 0) { return 0; }
     store64(s, buf);
     store64(s + 8, len);
@@ -29645,7 +29950,7 @@ fn h264_nal_type_name(t): i64 {
 # both cross-check sources.
 fn h264_rbsp_extract(buf, len, out_rbsp, out_len): i64 {
     if (len < 0) { return DR_ERR_BOUNDS; }
-    var dst = alloc(len + 1);
+    var dst = dr_alloc(len + 1);
     if (dst == 0) { return DR_ERR_OOM; }
     var zeros = 0;
     var o = 0;
@@ -29680,7 +29985,7 @@ fn h264_rbsp_extract(buf, len, out_rbsp, out_len): i64 {
 # h264_rbsp_extract(h264_epb_insert(x)) == x for every input x.
 fn h264_epb_insert(buf, len, out_buf, out_len): i64 {
     if (len < 0) { return DR_ERR_BOUNDS; }
-    var dst = alloc(len + (len >> 1) + 4);
+    var dst = dr_alloc(len + (len >> 1) + 4);
     if (dst == 0) { return DR_ERR_OOM; }
     var zeros = 0;
     var o = 0;
@@ -29743,7 +30048,7 @@ fn h264_annexb_wrap(ref_idc, type, rbsp, rbsp_len, long_sc, out_buf, out_len): i
     var sc_len = 3;
     if (long_sc) { sc_len = 4; }
     var total = sc_len + 1 + elen;
-    var dst = alloc(total);
+    var dst = dr_alloc(total);
     if (dst == 0) { return DR_ERR_OOM; }
     var o = 0;
     if (long_sc) {
@@ -30102,7 +30407,7 @@ fn h264_sps_parse(rbsp, len, out_err): i64 {
         return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
     }
 
-    var sps = alloc(224);
+    var sps = dr_alloc(224);
     if (sps == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
     store64(sps, profile_idc);
     store64(sps + 8, cflags);
@@ -30261,7 +30566,7 @@ fn h264_pps_parse(rbsp, len, out_err): i64 {
     e = dr_br_err(br);
     if (e != DR_OK) { return h264_ps_fail(out_err, e); }
 
-    var pps = alloc(120);
+    var pps = dr_alloc(120);
     if (pps == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
     store64(pps, pps_id);
     store64(pps + 8, sps_id);
@@ -30473,7 +30778,7 @@ fn h265_nal_hdr_parse(buf, len, out_type, out_layer, out_tid): i64 {
 # 0 on negative len / allocation failure.
 fn h265_ab_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var sc = alloc(32);
+    var sc = dr_alloc(32);
     if (sc == 0) { return 0; }
     store64(sc, buf);
     store64(sc + 8, len);
@@ -30579,7 +30884,7 @@ fn h265_ab_next(sc, out_nal, out_size): i64 {
 fn h265_rbsp_extract(ebsp, size, out_rbsp, out_size): i64 {
     if (size < 0) { return DR_ERR_BOUNDS; }
     # RBSP is never longer than the EBSP; +1 keeps alloc(0) out of play.
-    var rbsp = alloc(size + 1);
+    var rbsp = dr_alloc(size + 1);
     if (rbsp == 0) { return DR_ERR_OOM; }
     var i = 0;
     var n = 0;
@@ -30696,7 +31001,7 @@ fn h265_ptl_parse(br, profile_present, max_sub_layers_minus1): i64 {
         store64(br + 24, H265_ERR_RANGE);
         return 0;
     }
-    var ptl = alloc(96);
+    var ptl = dr_alloc(96);
     if (ptl == 0) {
         store64(br + 24, DR_ERR_OOM);
         return 0;
@@ -30834,7 +31139,7 @@ fn h265_vps_parse(rbsp, len, out_err): i64 {
         store64(out_err, dr_br_err(br));
         return 0;
     }
-    var vps = alloc(64);
+    var vps = dr_alloc(64);
     if (vps == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -31029,7 +31334,7 @@ fn h265_sps_parse(rbsp, len, out_err): i64 {
         store64(out_err, H265_ERR_RANGE);
         return 0;
     }
-    var sps = alloc(144);
+    var sps = dr_alloc(144);
     if (sps == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -31172,7 +31477,7 @@ fn h265_pps_parse(rbsp, len, out_err): i64 {
         rc = dr_ue_read(br, &diff_depth);     # diff_cu_qp_delta_depth
         if (rc != DR_OK) { store64(out_err, rc); return 0; }
     }
-    var pps = alloc(112);
+    var pps = dr_alloc(112);
     if (pps == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -31292,7 +31597,7 @@ enum VboolLimits {
 # DR_ERR_TRUNCATED so the caller sees a clean error, not garbage bools.
 fn vbool_dec_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var d = alloc(56);
+    var d = dr_alloc(56);
     if (d == 0) { return 0; }
     var value = 0;
     var pos = 0;
@@ -31433,9 +31738,9 @@ fn vbool_enc_init(cap_hint): i64 {
     var cap = cap_hint;
     if (cap < 16) { cap = 16; }
     if (cap > VBOOL_ENC_MAX_BYTES) { return 0; }
-    var buf = alloc(cap);
+    var buf = dr_alloc(cap);
     if (buf == 0) { return 0; }
-    var e = alloc(56);
+    var e = dr_alloc(56);
     if (e == 0) { return 0; }
     store64(e, buf);
     store64(e + 8, cap);
@@ -31480,7 +31785,7 @@ fn vbool_enc_ensure(e, extra): i64 {
             return DR_ERR_OVERSIZE;
         }
     }
-    var new_buf = alloc(new_cap);
+    var new_buf = dr_alloc(new_cap);
     if (new_buf == 0) {
         store64(e + 48, DR_ERR_OOM);
         return DR_ERR_OOM;
@@ -31788,7 +32093,7 @@ fn vp8_parse_frame_hdr(buf, len, out_err): i64 {
         store64(out_err, DR_ERR_TRUNCATED);
         return 0;
     }
-    var h = alloc(72);
+    var h = dr_alloc(72);
     if (h == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -31852,7 +32157,7 @@ fn vp8_hdr_new(key_frame, version, show_frame, part_size, width, height, hscale,
     if (key_frame) { norm_key = 1; }
     var hdr_size = 3;
     if (norm_key) { hdr_size = 10; }
-    var h = alloc(72);
+    var h = dr_alloc(72);
     if (h == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -31878,7 +32183,7 @@ fn vp8_hdr_new(key_frame, version, show_frame, part_size, width, height, hscale,
 fn vp8_write_frame_hdr(h, out_len): i64 {
     store64(out_len, 0);
     var hdr_size = load64(h + 64);
-    var buf = alloc(hdr_size);
+    var buf = dr_alloc(hdr_size);
     if (buf == 0) { return 0; }
     # 9.1 frame tag: bit 0 = !key_frame (inverted sense), bits 1-3
     # version, bit 4 show_frame, bits 5-23 first_part_size; packed LE.
@@ -32010,7 +32315,7 @@ enum Vp9SyncCode {
 
 # Internal: allocate a zeroed Vp9FrameHdr. Returns record or 0 on OOM.
 fn vp9_hdr_alloc(): i64 {
-    var h = alloc(128);
+    var h = dr_alloc(128);
     if (h == 0) { return 0; }
     var i = 0;
     while (i < 128) {

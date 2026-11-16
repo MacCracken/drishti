@@ -209,6 +209,26 @@ The next bite hit the same wall one level down. libaom's realtime ROI map enable
 ALT_LF on segment 1 of every inter frame, and codes no block into segment 1. A frame header that
 enables a feature says nothing about whether any block uses it. Count the blocks.
 
+### Defence in depth makes each check an equivalent mutant
+
+0.8.5's OOM fault injection made every allocation fail in turn and mutation-verified the checks it
+added. Three deletions stayed green, and none was a missing test. The deblocker's persistent scratch is
+checked twice: `av1_tables_init` builds it when a tile is created, and `av1_deblock` checks it again on
+entry. Delete either check and the other still stops the decode with `DR_ERR_OOM`. The pair holds, but
+each check alone is an EQUIVALENT mutant. The witness deletes the init term and then the entry check,
+with a control that deletes only the init term and must stay green.
+
+The first witness stream for that pair was `srmin-16x16`, and it stayed green for a plainer reason:
+its frames have loop-filter level 0, so the deblocker returns before it reaches its scratch. So does
+`inter-6frame`'s. A stream that never runs a stage cannot witness the stage, which is the flag lesson
+above in another form.
+
+> **Do:** choose each mutation's witness by TRACED reach: the stream must actually make the call the
+> mutation breaks (`scripts/oom-sweep.sh` traces every allocation site). For a check with a backstop,
+> mutate the pair and keep a control that must stay green. The OOM tooling: `dr_alloc_fail_at(k)` fails
+> the k-th allocation once. `dr_alloc_sweep` sweeps an in-process operation. `scripts/oom-sweep.sh
+> sweep NAME IVF sites` fails every allocation site of a stream, a fresh process per k.
+
 ### A spec-literal reference port is necessary and NOT sufficient
 
 The loop above says known answers come from a port in `scripts/refs/`, never from the Cyrius.

@@ -6405,6 +6405,66 @@ fn test_obmc_nominal_overlap() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): test_inter_tile_e2e's 64x64 inter tile (quarter-pel NEWMV, so the 8-tap MC
+# path), encoded then decoded inside the swept operation; the reference, DPB and headers are built once outside.
+# A valid plan cannot fail to encode, so a 0 encode is its allocation failing. ----
+var It_Oom_Dpb = 0;
+var It_Oom_Refs = 0;
+var It_Oom_Seq = 0;
+var It_Oom_Fh = 0;
+fn it_oom_op(a): i64 {
+    var blk = av1_blockinfo_new();
+    if (blk == 0) { return DR_ERR_OOM; }
+    store64(blk + AV1FB_SKIP, 1);
+    store64(blk + AV1FB_ISINTER, 1);
+    var ib = blk + AV1FB_IB;
+    store64(ib + AV1IB_REF0, AV1_LAST_FRAME);
+    store64(ib + AV1IB_REF1, AV1_REF_NONE);
+    store64(ib + AV1IB_YMODE, AV1_NEWMV);
+    store64(ib + AV1IB_MV0 + AV1MV_ROW, 6);
+    store64(ib + AV1IB_MV0 + AV1MV_COL, 10);
+    store64(ib + AV1IB_MOTIONMODE, AV1_MM_SIMPLE);
+    store64(ib + AV1IB_INTERP + 0, AV1_EIGHTTAP);
+    store64(ib + AV1IB_INTERP + 8, AV1_EIGHTTAP);
+    store64(ib + AV1IB_CT + AV1CT_COMPIDX, 1);
+    var e = 0;
+    var ef = dr_frame_new(64, 64, 1, 0, 0, 8, 8, &e);
+    if (ef == 0) { return e; }
+    var et = av1_tile_new(ef, 16, 16, 40, 1, 0, 1);
+    if (et == 0) { return DR_ERR_OOM; }
+    var rc = av1_tile_grids_new(et);
+    if (rc != DR_OK) { return rc; }
+    rc = av1_tile_set_inter_ctx(et, It_Oom_Fh, It_Oom_Refs, It_Oom_Seq, It_Oom_Dpb);
+    if (rc != DR_OK) { return rc; }
+    var pp = alloc(8);   # the plan: raw
+    store64(pp + 0, AV1_PARTITION_NONE);
+    var pf = alloc(8);
+    store64(pf + 0, blk);
+    var tlen = 0;
+    var tb = av1_encode_inter_tile(et, pp, pf, 1, &tlen);
+    if (tb == 0) { return DR_ERR_OOM; }
+    var df = dr_frame_new(64, 64, 1, 0, 0, 8, 8, &e);
+    if (df == 0) { return e; }
+    var dt = av1_tile_new(df, 16, 16, 40, 1, 0, 1);
+    if (dt == 0) { return DR_ERR_OOM; }
+    rc = av1_tile_grids_new(dt);
+    if (rc != DR_OK) { return rc; }
+    rc = av1_tile_set_inter_ctx(dt, It_Oom_Fh, It_Oom_Refs, It_Oom_Seq, It_Oom_Dpb);
+    if (rc != DR_OK) { return rc; }
+    return av1_decode_inter_tile(dt, tb, tlen, 1);
+}
+fn test_inter_tile_oom() {
+    It_Oom_Dpb = av1_dpb_new();
+    It_Oom_Fh = it_fh();
+    av1_dpb_store(It_Oom_Dpb, It_Oom_Fh, it_ref_frame());
+    It_Oom_Refs = it_refs();
+    It_Oom_Seq = it_seq();
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&it_oom_op, 0, &n), 0, "inter tile encode + decode: every failure -> OOM");
+    assert_gt(n, 20, "...over every allocation of both lanes");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("THE INTER TILE DECODE (0.7.84): a genuine inter frame, end to end");
@@ -6511,6 +6571,8 @@ fn main() {
     test_ir_reduced_tx();
     test_ir_one_luma_tx();
     test_ir_rect_txset();
+    test_group("OOM fault injection");
+    test_inter_tile_oom();
     return assert_summary();
 }
 

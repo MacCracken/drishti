@@ -73,6 +73,22 @@ fn av1_lf_strength(fh, plane, pass, segment, ref, mode_type, delta_lf): i64 {
     return lvl;
 }
 
+# Persistent deblocking scratch (0.8.5): the wide filter's F[] (16 u64), the sample filter's 4 masks and the
+# edge's 3 limits, reused by every call. These were allocated per SAMPLE edge position — the arena grew with
+# every filtered sample (the 0.7.60 lesson) and each was an unchecked OOM site. av1_tables_init builds it.
+enum Av1LfScratch {
+    AV1LFS_F     = 0;     # F[-n .. n-1], offset by n (n <= 6 -> <= 12 of 16 slots)
+    AV1LFS_MASKS = 128;   # hev / filterMask / flatMask / flatMask2
+    AV1LFS_LIM   = 160;   # limit / blimit / thresh
+    AV1LFS_SIZE  = 184;   # bytes
+}
+var Av1_LfScratch = 0;
+fn av1_lf_scratch(): i64 {
+    if (Av1_LfScratch != 0) { return Av1_LfScratch; }
+    Av1_LfScratch = dr_alloc(AV1LFS_SIZE);   # AV1LFS_SIZE bytes
+    return Av1_LfScratch;
+}
+
 # adaptive filter strength (7.14.4): limit / blimit / thresh from lvl + sharpness.
 # out[0]=limit, out[1]=blimit, out[2]=thresh.
 fn av1_lf_limits(lvl, sharpness, out): i64 {
@@ -201,7 +217,9 @@ fn av1_lf_wide(frame, plane, x, y, dx, dy, log2size): i64 {
     }
     var n2 = 1;
     if ((log2size == 3) && (plane == 0)) { n2 = 0; }
-    var fbuf = alloc(16 * 8);        # F[-n .. n-1], offset by n (n<=6 -> <=12 slots)
+    var scr = av1_lf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var fbuf = scr + AV1LFS_F;          # F[-n .. n-1], offset by n (n<=6 -> <=12 slots)
     var i = 0 - n;
     while (i < n) {
         var t = 0;
@@ -227,7 +245,9 @@ fn av1_lf_wide(frame, plane, x, y, dx, dy, log2size): i64 {
 # sample filtering (7.14.6.1): compute the masks, then dispatch to the narrow or
 # wide filter (or none). limit/blimit/thresh + filter_size come from the edge.
 fn av1_lf_sample(frame, plane, x, y, limit, blimit, thresh, dx, dy, filter_size): i64 {
-    var masks = alloc(4 * 8);
+    var scr = av1_lf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var masks = scr + AV1LFS_MASKS;
     av1_lf_mask(frame, plane, x, y, dx, dy, limit, blimit, thresh, filter_size, masks);
     if (load64(masks + 8) == 0) { return 0; }          # filterMask == 0 -> no filter
     var hev = load64(masks + 0);
@@ -340,7 +360,9 @@ fn av1_lf_edge(tile, fh, plane, pass, row, col): i64 {
           av1_lf_mode_type(av1_grid_get(tile, AV1TILE_YMODES, prev_row, prev_col)),
           av1_lf_delta(tile, fh, plane, pass, prev_row, prev_col));
     }
-    var lim = alloc(3 * 8);
+    var scr = av1_lf_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var lim = scr + AV1LFS_LIM;
     av1_lf_limits(lvl, av1_fh_loop_filter_sharpness(fh), lim);
     if ((apply != 0) && (lvl > 0)) {
         var i = 0;
@@ -366,6 +388,7 @@ fn av1_deblock(tile, fh): i64 {
     if ((av1_fh_loop_filter_level(fh, 0) == 0) && (av1_fh_loop_filter_level(fh, 1) == 0)) {
         return 0;
     }
+    if (av1_lf_scratch() == 0) { return DR_ERR_OOM; }   # the one OOM site; every edge below reuses it
     var frame = load64(tile + AV1TILE_FRAME);
     var num_planes = dr_frame_num_planes(frame);
     var mi_rows = load64(tile + AV1TILE_MI_ROWS);

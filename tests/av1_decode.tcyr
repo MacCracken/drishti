@@ -1763,6 +1763,131 @@ fn test_frame_mixed_lossless_decode() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): the streaming decoder in-process over committed reproducers. Each run decodes
+# every unit with a fresh decoder and digests every shown frame; the first fault-free run records the digest and
+# every later fault-free run must reproduce it, so a failed run that left the decoder's persistent state (its
+# lazily-built tables and scratch) damaged shows up as a different picture, not just a different code. make
+# conformance's oom section fails the lazy allocations themselves, a fresh process per k. ----
+var Dec_Oom_Buf = 0;
+var Dec_Oom_Len = 0;
+var Dec_Oom_Digest = 0 - 1;
+fn dec_oom_digest(f, d): i64 {
+    var p = 0;
+    while (p < dr_frame_num_planes(f)) {
+        var y = 0;
+        while (y < dr_frame_plane_height(f, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(f, p)) {
+                d = ((d * 31) + dr_frame_get(f, p, x, y)) & 0xFFFFFFFFFFFF;
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return d;
+}
+fn dec_oom_op(a): i64 {
+    var e = 0;
+    var r = dr_ivf_reader_init(Dec_Oom_Buf, Dec_Oom_Len, &e);
+    if (r == 0) { return e; }
+    var dec = av1_decoder_new(0);
+    if (dec == 0) { return DR_ERR_OOM; }
+    var d = 7;
+    var shown = 0;
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+        var derr = 0;
+        var f = av1_decoder_decode(dec, pp, ps, &derr);
+        if (derr != DR_OK) { return derr; }
+        if (f != 0) { d = dec_oom_digest(f, d); shown = shown + 1; }
+    }
+    if (shown == 0) { return DR_ERR_OTHER; }
+    if (Dec_Oom_Digest < 0) { Dec_Oom_Digest = d; }
+    if (d != Dec_Oom_Digest) { return DR_ERR_OTHER; }   # a fault-free decode that differs from the first one
+    return DR_OK;
+}
+fn dec_oom_case(path, what): i64 {
+    Dec_Oom_Buf = alloc(65536);   # bytes; the reproducers are under 64 KB
+    Dec_Oom_Len = file_read_all(path, Dec_Oom_Buf, 65536);
+    assert_gt(Dec_Oom_Len, 32, "the reproducer reads");
+    Dec_Oom_Digest = 0 - 1;
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&dec_oom_op, 0, &n), 0, what);
+    assert_gt(n, 100, "...over every per-frame allocation");
+    return 0;
+}
+# the palette keyframe of test_frame_palette_decode, encoded and decoded through av1_decode_frame inside the swept
+# operation: the INTRA lane's palette context, tokens and store (no committed reproducer has a palette block there —
+# an intra block copy frame decodes on the inter lane)
+var Pal_Oom_Fh = 0;
+var Pal_Oom_Seq = 0;
+var Pal_Oom_Pp = 0;
+var Pal_Oom_Pt = 0;
+var Pal_Oom_Map = 0;
+fn pal_oom_op(a): i64 {
+    var plain = av1_modeinfo_new();
+    if (plain == 0) { return DR_ERR_OOM; }
+    store64(plain + AV1MI_SKIP, 1);
+    var pmi = av1_modeinfo_new();
+    if (pmi == 0) { return DR_ERR_OOM; }
+    store64(pmi + AV1MI_SKIP, 1);
+    store64(pmi + AV1MI_PAL_NY, 2);
+    store64(pmi + AV1MI_PAL_Y + 0, 40);
+    store64(pmi + AV1MI_PAL_Y + 8, 220);
+    store64(pmi + AV1MI_PAL_MAPY, Pal_Oom_Map);
+    var pm = alloc(5 * 8);   # the plan: raw
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), plain); k = k + 1; }
+    store64(pm + (4 * 8), pmi);
+    var e = 0;
+    var ef = dr_frame_new(128, 64, 1, 0, 0, 8, 8, &e);
+    if (ef == 0) { return e; }
+    var et = av1_tile_new(ef, 32, 16, 40, 1, 0, 1);
+    if (et == 0) { return DR_ERR_OOM; }
+    var rc = av1_tile_grids_new(et);
+    if (rc != DR_OK) { return rc; }
+    store64(et + AV1TILE_SEG_FH, Pal_Oom_Fh);
+    var olen = 0;
+    var out = av1_encode_intra_tile(et, Pal_Oom_Pp, pm, Pal_Oom_Pt, 1, &olen);
+    if (out == 0) { return DR_ERR_OOM; }
+    var oe = 0;
+    if (av1_decode_frame(Pal_Oom_Seq, Pal_Oom_Fh, out, olen, &oe) == 0) { return oe; }
+    return DR_OK;
+}
+fn test_decoder_oom() {
+    Pal_Oom_Fh = frame_mk_fh(1, 1, 0, 0);
+    store64(Pal_Oom_Fh + AV1FH_ALLOW_SCT, 1);
+    Pal_Oom_Seq = frame_mk_seq(0);
+    Pal_Oom_Map = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);
+    var r = 0;
+    while (r < 64) {
+        var c = 0;
+        while (c < 64) {
+            store64(Pal_Oom_Map + (((r * AV1_PAL_MAP_STRIDE) + c) * 8), ((r / 8) + (c / 8)) & 1);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    Pal_Oom_Pp = alloc(6 * 8);
+    store64(Pal_Oom_Pp + 0, AV1_PARTITION_SPLIT);
+    var k = 1;
+    while (k < 6) { store64(Pal_Oom_Pp + (k * 8), AV1_PARTITION_NONE); k = k + 1; }
+    Pal_Oom_Pt = alloc(5 * 8);
+    k = 0;
+    while (k < 4) { store64(Pal_Oom_Pt + (k * 8), 3); k = k + 1; }
+    store64(Pal_Oom_Pt + (4 * 8), 4);
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&pal_oom_op, 0, &n), 0,
+      "palette keyframe encode + av1_decode_frame: every failure -> OOM");
+    assert_gt(n, 30, "...over every allocation of both lanes");
+    dec_oom_case("tests/repro/srmin-16x16.ivf", "srmin-16x16 (superres, 8 units): every failure -> OOM, same picture");
+    dec_oom_case("tests/repro/inter-6frame.ivf", "inter-6frame (6 inter units): every failure -> OOM, same picture");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
@@ -1821,6 +1946,8 @@ fn main() {
     test_obus_forbidden_bit();
     test_obus_bad_seq_payload();
     test_obus_metadata_padding_skipped();
+    test_group("OOM fault injection");
+    test_decoder_oom();
     return assert_summary();
 }
 

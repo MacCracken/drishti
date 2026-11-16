@@ -40,7 +40,7 @@ fn av1_scanfill19(t, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13,
 
 fn av1_scan_blob(): i64 {
     if (Av1_ScanBlob != 0) { return Av1_ScanBlob; }
-    var t = alloc(4912 * 8);
+    var t = dr_alloc(4912 * 8);
     if (t == 0) { return 0; }
     av1_scanfill8(t, 0, 0, 1, 4, 8, 5, 2, 3, 6);
     av1_scanfill8(t, 8, 9, 12, 13, 10, 7, 11, 14, 15);
@@ -663,7 +663,7 @@ fn av1_scan_blob(): i64 {
 # Selector offset tables (entry offsets into the blob), indexed by TxSize.
 fn av1_scan_sel(): i64 {
     if (Av1_ScanSel != 0) { return Av1_ScanSel; }
-    var t = alloc(3 * 19 * 8);
+    var t = dr_alloc(3 * 19 * 8);
     if (t == 0) { return 0; }
     av1_scanfill19(t + (0 * 8),
       0, 80, 400, 1680, 1680, 16, 48, 144, 272, 656,

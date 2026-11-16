@@ -101,7 +101,7 @@ fn dr_ivf_parse_header(buf, len, out_err): i64 {
         store64(out_err, DR_ERR_TRUNCATED);
         return 0;
     }
-    var h = alloc(64);
+    var h = dr_alloc(64);
     if (h == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -139,7 +139,7 @@ fn dr_ivf_hdr_version(h): i64 { return load64(h + 56); }
 fn dr_ivf_reader_init(buf, len, out_err): i64 {
     var h = dr_ivf_parse_header(buf, len, out_err);
     if (h == 0) { return 0; }
-    var r = alloc(40);
+    var r = dr_alloc(40);
     if (r == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -216,7 +216,7 @@ fn dr_ivf_writer_ensure(w, extra): i64 {
     var new_cap = cap;
     while (new_cap < need) { new_cap = new_cap << 1; }
     if (new_cap > DR_IVF_MAX_TOTAL) { new_cap = DR_IVF_MAX_TOTAL; }
-    var new_buf = alloc(new_cap);
+    var new_buf = dr_alloc(new_cap);
     if (new_buf == 0) {
         store64(w + 32, DR_ERR_OOM);
         return DR_ERR_OOM;
@@ -239,9 +239,9 @@ fn dr_ivf_writer_init(fourcc, width, height, tb_num, tb_den): i64 {
     if ((tb_num < 0) || (tb_num > 0xFFFFFFFF)) { return 0; }
     if ((tb_den < 0) || (tb_den > 0xFFFFFFFF)) { return 0; }
     if ((fourcc < 0) || (fourcc > 0xFFFFFFFF)) { return 0; }
-    var buf = alloc(1024);
+    var buf = dr_alloc(1024);
     if (buf == 0) { return 0; }
-    var w = alloc(40);
+    var w = dr_alloc(40);
     if (w == 0) { return 0; }
     store64(w, buf);
     store64(w + 8, 1024);

@@ -113,7 +113,7 @@ fn h264_find_start_code(buf, len, from, out_sc_len): i64 {
 # allocation failure / negative len.
 fn h264_scan_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var s = alloc(40);
+    var s = dr_alloc(40);
     if (s == 0) { return 0; }
     store64(s, buf);
     store64(s + 8, len);
@@ -258,7 +258,7 @@ fn h264_nal_type_name(t): i64 {
 # both cross-check sources.
 fn h264_rbsp_extract(buf, len, out_rbsp, out_len): i64 {
     if (len < 0) { return DR_ERR_BOUNDS; }
-    var dst = alloc(len + 1);
+    var dst = dr_alloc(len + 1);
     if (dst == 0) { return DR_ERR_OOM; }
     var zeros = 0;
     var o = 0;
@@ -293,7 +293,7 @@ fn h264_rbsp_extract(buf, len, out_rbsp, out_len): i64 {
 # h264_rbsp_extract(h264_epb_insert(x)) == x for every input x.
 fn h264_epb_insert(buf, len, out_buf, out_len): i64 {
     if (len < 0) { return DR_ERR_BOUNDS; }
-    var dst = alloc(len + (len >> 1) + 4);
+    var dst = dr_alloc(len + (len >> 1) + 4);
     if (dst == 0) { return DR_ERR_OOM; }
     var zeros = 0;
     var o = 0;
@@ -356,7 +356,7 @@ fn h264_annexb_wrap(ref_idc, type, rbsp, rbsp_len, long_sc, out_buf, out_len): i
     var sc_len = 3;
     if (long_sc) { sc_len = 4; }
     var total = sc_len + 1 + elen;
-    var dst = alloc(total);
+    var dst = dr_alloc(total);
     if (dst == 0) { return DR_ERR_OOM; }
     var o = 0;
     if (long_sc) {

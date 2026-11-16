@@ -72,7 +72,7 @@ enum Av1MvOff {
 
 # av1_mv_new — allocate a zeroed (row, col) MV, or 0 on OOM.
 fn av1_mv_new(): i64 {
-    var m = alloc(AV1MV_SIZE);
+    var m = dr_alloc(AV1MV_SIZE);
     if (m == 0) { return 0; }
     store64(m + AV1MV_ROW, 0);
     store64(m + AV1MV_COL, 0);
@@ -225,7 +225,7 @@ enum Av1MvStackOff {
 # need no per-entry init (each is written before read), but zeroing is cheap and
 # leaves NumMvFound / NewMvCount at 0.
 fn av1_mv_stack_new(): i64 {
-    var m = alloc(AV1MVS_SIZE);
+    var m = dr_alloc(AV1MVS_SIZE);
     if (m == 0) { return 0; }
     memset(m, 0, AV1MVS_SIZE);
     return m;
@@ -423,7 +423,7 @@ enum Av1MiGridConst {
 fn av1_mv_grid_new(fmi_cols, fmi_rows): i64 {
     var n = fmi_cols * fmi_rows;
     if (n <= 0) { return 0; }
-    var g = alloc(n * AV1MIR_SIZE);
+    var g = dr_alloc(n * AV1MIR_SIZE);
     if (g == 0) { return 0; }
     memset(g, 0, n * AV1MIR_SIZE);
     return g;
@@ -635,7 +635,7 @@ fn av1_mv_save_field(grid, fmi_cols, fmi_rows, s, fh, out): i64 {
 var Av1_DivMult = 0;
 fn av1_mv_div_mult_tbl(): i64 {
     if (Av1_DivMult != 0) { return Av1_DivMult; }
-    var t = alloc(32 * 8);
+    var t = dr_alloc(32 * 8);
     if (t == 0) { return 0; }
     store64(t, 0);                              # Div_Mult[0] = 0 (den is clamped to >=1 before indexing)
     var i = 1;
@@ -705,6 +705,10 @@ fn av1_get_block_position(x8, y8, dstSign, proj_row, proj_col, mi_rows, mi_cols,
 var Av1_MotionField    = 0;    # pointer to [h8, w8, then 8*h8*w8*2 i64], or 0
 var Av1_MotionFieldCap = 0;    # current cell capacity (h8*w8) — avoid re-alloc on same/smaller frames
 var Av1_MvProjScratch  = 0;    # reusable 48-byte projection scratch (pbuf|dbuf|qbuf), lazily allocated
+fn av1_mvproj_scratch(): i64 {   # the lazy 48-byte scratch (0 on OOM; av1_tables_init builds it up front)
+    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = dr_alloc(48); }
+    return Av1_MvProjScratch;
+}
 enum Av1MotionFieldOff {
     AV1MF_H8    = 0;
     AV1MF_W8    = 8;
@@ -718,7 +722,7 @@ fn av1_motionfield_alloc(h8, w8): i64 {
     var need = h8 * w8;
     if (need <= 0) { return 0; }                        # trust-no-input backstop (0x0 frame)
     if ((Av1_MotionField == 0) || (need > Av1_MotionFieldCap)) {
-        var t = alloc(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
+        var t = dr_alloc(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
         if (t == 0) { return 0; }
         Av1_MotionField    = t;
         Av1_MotionFieldCap = need;
@@ -762,8 +766,7 @@ fn av1_mv_projection(fh, refs, s, mf, srcRef, dstSign, h8, w8, mi_rows, mi_cols)
     var refToCur = av1_get_relative_dist(s, src_oh, oh);   # constant per call; posValid re-checks it per spec
     var mv_base  = saved + AV1SMF_REF + (h8 * w8 * 8);      # dims match, so saved stride == current stride
     # Scratch out-buffers: a reusable 48-byte module-global (pbuf|dbuf|qbuf) — no per-call/per-frame alloc.
-    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = alloc(48); }
-    if (Av1_MvProjScratch == 0) { return 0; }
+    if (av1_mvproj_scratch() == 0) { return 0; }   # built by av1_tables_init before any tile decodes
     var pbuf = Av1_MvProjScratch;         # get_block_position input proj MV (position finder)
     var dbuf = Av1_MvProjScratch + 16;    # per-dst stored proj MV
     var qbuf = Av1_MvProjScratch + 32;    # get_block_position output (PosY8, PosX8)
@@ -908,7 +911,7 @@ enum Av1MvCtxOff {
     AV1MVC_SIZE       = 520;
 }
 fn av1_mvctx_new(): i64 {
-    var c = alloc(AV1MVC_SIZE);
+    var c = dr_alloc(AV1MVC_SIZE);
     if (c == 0) { return 0; }
     memset(c, 0, AV1MVC_SIZE);
     return c;
@@ -1436,6 +1439,10 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 # at +0, s1 at +16. Hoisted like Av1_MvProjScratch. The estimation runs per-frame before the per-block scan,
 # so there is no lifetime overlap with Av1_MvProjScratch even if they aliased — this stays independent.
 var Av1_TplScratch = 0;
+fn av1_tpl_scratch(): i64 {   # the lazy 32-byte scratch (0 on OOM; av1_tables_init builds it up front)
+    if (Av1_TplScratch == 0) { Av1_TplScratch = dr_alloc(32); }
+    return Av1_TplScratch;
+}
 # check_sb_border (7.10.2.5) — does an extension sample at (dR, dC) stay inside the current 64x64 superblock?
 # Uses the block's position WITHIN the SB (MiRow & 15 / MiCol & 15). Separate from is_inside (frame/tile).
 fn av1_tpl_sb_ok(mi_row, mi_col, dR, dC): i64 {
@@ -1502,8 +1509,7 @@ fn av1_add_tpl_ref_mv(ctx, mf, delta_row, delta_col, is_compound): i64 {
     var at_origin = 0;
     if ((delta_row == 0) && (delta_col == 0)) { at_origin = 1; }
     if (at_origin == 1) { store64(ctx + AV1MVC_ZEROCTX, 1); }              # unconditional set, before the read
-    if (Av1_TplScratch == 0) { Av1_TplScratch = alloc(32); }
-    if (Av1_TplScratch == 0) { return DR_OK; }
+    if (av1_tpl_scratch() == 0) { return DR_ERR_OOM; }   # built by av1_tables_init before any tile decodes
     var s0 = Av1_TplScratch;
     var s1 = Av1_TplScratch + 16;
     var allow_hp = load64(ctx + AV1MVC_ALLOW_HP);
@@ -1561,10 +1567,11 @@ fn av1_add_tpl_ref_mv(ctx, mf, delta_row, delta_col, is_compound): i64 {
 fn av1_temporal_scan(ctx, mf, is_compound): i64 {
     if (mf == 0) { return DR_OK; }
     # Trust-no-input / dimension-bomb guard: the estimation sizes MotionFieldMvs to the current frame, but on
-    # a growth OOM av1_motionfield_alloc leaves Av1_MotionField pointing at a STALE smaller field (its return
-    # is discarded, non-fatal). y8/x8 are bounded by the CURRENT (larger) frame's tile, so a stale-field read
-    # would go OOB. Skip the scan whenever the field's header dims != the current frame's h8/w8 — graceful (no
-    # temporal candidates; ZeroMvContext stays at the driver's 0). Under normal decode the dims always match.
+    # a growth OOM av1_motionfield_alloc leaves Av1_MotionField pointing at a STALE smaller field (the tile
+    # setup now FAILS on that OOM, 0.8.5; this stays as defence). y8/x8 are bounded by the CURRENT (larger)
+    # frame's tile, so a stale-field read would go OOB. Skip the scan whenever the field's header dims != the
+    # current frame's h8/w8 — graceful (no temporal candidates; ZeroMvContext stays at the driver's 0). Under
+    # normal decode the dims always match.
     if (load64(mf + AV1MF_H8) != (load64(ctx + AV1MVC_FMI_ROWS) >> 1)) { return DR_OK; }
     if (load64(mf + AV1MF_W8) != (load64(ctx + AV1MVC_FMI_COLS) >> 1)) { return DR_OK; }
     var mi_size = load64(ctx + AV1MVC_MI_SIZE);
@@ -1685,7 +1692,7 @@ enum Av1WarpOff {
     AV1WS_SIZE    = 272;  # 16 + 8*4*8
 }
 fn av1_warp_new(): i64 {
-    var ws = alloc(AV1WS_SIZE);
+    var ws = dr_alloc(AV1WS_SIZE);
     if (ws == 0) { return 0; }
     memset(ws, 0, AV1WS_SIZE);
     return ws;
@@ -1888,7 +1895,7 @@ enum Av1WarpModelOff {
     AV1WM_SIZE       = 96;   # 8 + 6*8 + 4*8 + 8
 }
 fn av1_warp_model_new(): i64 {
-    var m = alloc(AV1WM_SIZE);
+    var m = dr_alloc(AV1WM_SIZE);
     if (m == 0) { return 0; }
     memset(m, 0, AV1WM_SIZE);
     return m;
@@ -1908,7 +1915,7 @@ fn av1_warp_model_shear_valid(m): i64 { return load64(m + AV1WM_SHEARVALID); }
 var Av1_DivLut = 0;
 fn av1_div_lut_tbl(): i64 {
     if (Av1_DivLut != 0) { return Av1_DivLut; }
-    var t = alloc((AV1_DIV_LUT_NUM + 1) * 8);
+    var t = dr_alloc((AV1_DIV_LUT_NUM + 1) * 8);
     if (t == 0) { return 0; }
     var num = 1 << (AV1_DIV_LUT_PREC_BITS + AV1_DIV_LUT_BITS);   # 2^22
     var i = 0;
@@ -1972,7 +1979,7 @@ fn av1_warp_mult_clip(v, factor, shift, is_diag, one): i64 {
 var Av1_WarpDivScratch = 0;
 fn av1_warp_div_scratch(): i64 {
     if (Av1_WarpDivScratch != 0) { return Av1_WarpDivScratch; }
-    var s = alloc(16);
+    var s = dr_alloc(16);
     if (s == 0) { return 0; }
     Av1_WarpDivScratch = s;
     return s;

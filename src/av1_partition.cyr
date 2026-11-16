@@ -43,7 +43,7 @@ enum Av1PartitionConst {
 var Av1_PartSub = 0;
 fn av1_partsub_tables(): i64 {
     if (Av1_PartSub != 0) { return Av1_PartSub; }
-    var t = alloc(220 * 8);          # 10 * 22 i64
+    var t = dr_alloc(220 * 8);          # 10 * 22 i64
     if (t == 0) { return 0; }
     av1_mi_fill22(t, 0, 0, 0 - 1, 0 - 1, 3, 0 - 1, 0 - 1, 6, 0 - 1, 0 - 1, 9, 0 - 1,
       0 - 1, 12, 0 - 1, 0 - 1, 15, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
@@ -149,23 +149,36 @@ fn av1_synth_vert_cdf(pcdf, bsl, out): i64 {
     store64(out + 16, 0);
     return 0;
 }
+# The synthesized cdf lives in one persistent 3-entry scratch (0.8.5): it was allocated per partition read —
+# arena growth per block (the 0.7.60 lesson) and an unchecked OOM site. Never adapted, so reuse is exact.
+# av1_tables_init builds it; a failed build latches DR_ERR_OOM on the coder and reads symbol 0.
+var Av1_PartSynthCdf = 0;
+fn av1_part_synth_scratch(): i64 {
+    if (Av1_PartSynthCdf != 0) { return Av1_PartSynthCdf; }
+    Av1_PartSynthCdf = dr_alloc(3 * 8);   # 3 u64: cdf[0], 1 << 15, the (unused) count
+    return Av1_PartSynthCdf;
+}
 fn av1_read_split_or_horz(sd, ncc, ctx, bsl): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { av1_sym_dec_fail(sd, DR_ERR_OOM); return 0; }
     av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_decode(sd, out, 2, 0);
 }
 fn av1_read_split_or_vert(sd, ncc, ctx, bsl): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { av1_sym_dec_fail(sd, DR_ERR_OOM); return 0; }
     av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_decode(sd, out, 2, 0);
 }
 fn av1_write_split_or_horz(enc, ncc, ctx, bsl, sym): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { return av1_sym_enc_fail(enc, DR_ERR_OOM); }
     av1_synth_horz_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_encode(enc, out, 2, sym, 0);
 }
 fn av1_write_split_or_vert(enc, ncc, ctx, bsl, sym): i64 {
-    var out = alloc(3 * 8);
+    var out = av1_part_synth_scratch();
+    if (out == 0) { return av1_sym_enc_fail(enc, DR_ERR_OOM); }
     av1_synth_vert_cdf(av1_partition_cdf(ncc, ctx, bsl), bsl, out);
     return av1_sym_encode(enc, out, 2, sym, 0);
 }
@@ -410,10 +423,12 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
         avail_lc = 0;
     }
     var enable_fi = load64(tile + AV1TILE_ENABLE_FI);
-    var nb = alloc(6 * 8);
+    var nb = dr_alloc(6 * 8);
+    if (nb == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
     var mi = av1_modeinfo_new();
+    if (mi == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
     # the mode info gets LosslessArray (as a mask) and picks Lossless for its segment_id itself, because
     # CfL's uv_mode CDF needs it before this function returns.
     av1_intra_frame_mode_info_decode(sd, ncc, mi, sub_size, has_chroma,
@@ -431,7 +446,8 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     # palette_tokens (5.11.49): after mode_info, before read_block_tx_size; then PaletteSizes / PaletteColors.
     var pc = av1_tile_palctx(tile);
     av1_read_palette_tokens(sd, ncc, pc, mi, sub_size, r, c, subx, suby);
-    av1_pal_store(pc, mi, r, c, bw4, bh4);
+    var psr = av1_pal_store(pc, mi, r, c, bw4, bh4);
+    if (psr != DR_OK) { return av1_sym_dec_fail(sd, psr); }
 
     var max_rect = av1_max_tx_size_rect(sub_size);
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40), max_rect);
@@ -442,6 +458,7 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     if (skip) { av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma); }
 
     var blk = av1_block_new();
+    if (blk == 0) { return av1_sym_dec_fail(sd, DR_ERR_OOM); }
     store64(blk + AV1BLK_MI_ROW, r);
     store64(blk + AV1BLK_MI_COL, c);
     store64(blk + AV1BLK_MI_SIZE, sub_size);
@@ -479,7 +496,8 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
     var avail_u = av1_is_inside(tile, r - 1, c);
     var avail_l = av1_is_inside(tile, r, c - 1);
-    var nb = alloc(6 * 8);
+    var nb = dr_alloc(6 * 8);
+    if (nb == 0) { return DR_ERR_OOM; }
     av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
 
     var eme = av1_intra_frame_mode_info_encode(enc, ncc, mi, sub_size, has_chroma,
@@ -498,7 +516,8 @@ fn av1_encode_block(tile, r, c, sub_size, mi, tx_size): i64 {
     var epc = av1_tile_palctx(tile);   # palette_tokens + the palette store, mirror of decode
     var ewt = av1_write_palette_tokens(enc, ncc, epc, mi, sub_size, r, c, subx, suby);
     if (ewt != DR_OK) { return ewt; }
-    av1_pal_store(epc, mi, r, c, bw4, bh4);
+    var eps = av1_pal_store(epc, mi, r, c, bw4, bh4);
+    if (eps != DR_OK) { return eps; }
 
     var tx_ctx = av1_tx_depth_ctx(avail_u, load64(nb + 32), avail_l, load64(nb + 40),
       av1_max_tx_size_rect(sub_size));
@@ -633,7 +652,10 @@ fn av1_decode_partition(tile, r, c, bsize): i64 {
 # round-trip test exercises; the A/B/4 encode is grown with the encoder arc.)
 fn av1_encode_block_next(tile, r, c, sub_size, plan_mi, plan_tx, blk_cur): i64 {
     var i = load64(blk_cur);
-    av1_encode_block(tile, r, c, sub_size, load64(plan_mi + (i * 8)), load64(plan_tx + (i * 8)));
+    # a block's own refusal (an unrepresentable plan, an OOM) is latched on the encoder — the walk above drops
+    # return codes, and av1_encode_tile reports av1_sym_enc_err. It was DROPPED here before 0.8.5.
+    var e = av1_encode_block(tile, r, c, sub_size, load64(plan_mi + (i * 8)), load64(plan_tx + (i * 8)));
+    if (e != DR_OK) { av1_sym_enc_fail(load64(tile + AV1TILE_ENC), e); }
     store64(blk_cur, i + 1);
     return 0;
 }

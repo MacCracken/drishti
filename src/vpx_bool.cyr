@@ -79,7 +79,7 @@ enum VboolLimits {
 # DR_ERR_TRUNCATED so the caller sees a clean error, not garbage bools.
 fn vbool_dec_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var d = alloc(56);
+    var d = dr_alloc(56);
     if (d == 0) { return 0; }
     var value = 0;
     var pos = 0;
@@ -220,9 +220,9 @@ fn vbool_enc_init(cap_hint): i64 {
     var cap = cap_hint;
     if (cap < 16) { cap = 16; }
     if (cap > VBOOL_ENC_MAX_BYTES) { return 0; }
-    var buf = alloc(cap);
+    var buf = dr_alloc(cap);
     if (buf == 0) { return 0; }
-    var e = alloc(56);
+    var e = dr_alloc(56);
     if (e == 0) { return 0; }
     store64(e, buf);
     store64(e + 8, cap);
@@ -267,7 +267,7 @@ fn vbool_enc_ensure(e, extra): i64 {
             return DR_ERR_OVERSIZE;
         }
     }
-    var new_buf = alloc(new_cap);
+    var new_buf = dr_alloc(new_cap);
     if (new_buf == 0) {
         store64(e + 48, DR_ERR_OOM);
         return DR_ERR_OOM;

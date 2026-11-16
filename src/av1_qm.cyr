@@ -31,7 +31,7 @@ var Av1_QmOff = 0;      # Qm_Offset[19] (9.5.3), i64 slots (19 * 8 bytes)
 fn av1_qm_offset(tx_size): i64 {
     if ((tx_size < 0) || (tx_size > 18)) { return 0 - 1; }
     if (Av1_QmOff == 0) {
-        var t = alloc(19 * 8);   # 19 i64 slots
+        var t = dr_alloc(19 * 8);   # 19 i64 slots
         if (t == 0) { return 0 - 1; }
         store64(t + (0 * 8), 0);       store64(t + (1 * 8), 16);      store64(t + (2 * 8), 80);
         store64(t + (3 * 8), 336);     store64(t + (4 * 8), 336);     store64(t + (5 * 8), 1360);
@@ -85,7 +85,14 @@ fn av1_qm_table(): i64 {
     if (Av1_QmTbl != 0) { return Av1_QmTbl; }
     var pk = av1_qm_packed();
     if (pk == 0) { return 0; }
-    var t = alloc(15 * 2 * 3344);   # 100,320 BYTES
+    # Qm_Offset is lazy too, and its failure is -1: built inside the loop below, a failed build wrote every region
+    # one byte LOW (the first store at t - 1, outside the allocation) and cached the corrupt table (0.8.5, found
+    # by OOM injection). Build it first; once built it cannot fail.
+    if (av1_qm_offset(0) < 0) { return 0; }
+    # the loop sizes regions by av1_tx_width / height, which read the transform tables UNCHECKED: built here at
+    # frame-header time (before av1_tables_init), a failed build of those was a null dereference (0.8.5).
+    if (av1_itx_tables() == 0) { return 0; }
+    var t = dr_alloc(15 * 2 * 3344);   # 100,320 BYTES
     if (t == 0) { return 0; }
     var g = 0;
     while (g < 30) {   # g = level * 2 + ptype
@@ -154,7 +161,7 @@ fn av1_qm_matrix(fh, plane, tx_size, tx_type, lossless): i64 {
 # Quantizer_Matrix. Returns the blob, or 0 when the allocation fails.
 fn av1_qm_packed(): i64 {
     if (Av1_QmPacked != 0) { return Av1_QmPacked; }
-    var t = alloc(31200);   # 31,200 BYTES
+    var t = dr_alloc(31200);   # 31,200 BYTES
     if (t == 0) { return 0; }
     # level 0, luma: 32x32 lower triangle (528) then 32x16 (512)
     av1_qm_hex(t, 0, "201f201f20201f2020201f2020212120202021222322222122232527232222232425292b24232223");

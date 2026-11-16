@@ -346,6 +346,22 @@ fn test_block_writers_guarded() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): every allocation of dr_frame_new failing -> 0 with DR_ERR_OOM ----
+fn frame_oom_op(planes): i64 {
+    var e = 0;
+    var f = dr_frame_new(64, 48, planes, 1, 1, 8, 8, &e);
+    if (f == 0) { return e; }
+    return DR_OK;
+}
+fn test_frame_oom() {
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&frame_oom_op, 3, &n), 0, "dr_frame_new (3 planes): every allocation failure -> OOM");
+    assert_eq(n, 4, "...the record and three planes");
+    assert_eq(dr_alloc_sweep(&frame_oom_op, 1, &n), 0, "dr_frame_new (mono)");
+    assert_eq(n, 2, "...the record and one plane");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("the block-write guard (0.8.5)");
@@ -369,6 +385,8 @@ fn main() {
     test_alloc_invariant();
     test_group("frame adversarial");
     test_frame_reject();
+    test_group("OOM fault injection");
+    test_frame_oom();
     return assert_summary();
 }
 

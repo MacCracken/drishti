@@ -60,13 +60,39 @@ fn av1_lr_get_source_sample(curr, cdef, plane, x, y, pex, pey, ssy, sey): i64 {
 # then a vertical 7-tap pass into `lr` (LrFrame). Reads via get_source_sample
 # (curr/cdef + stripe bounds); rounding per bit depth (isCompound = 0).
 # ================================================================
+# Persistent loop-restoration scratch (0.8.5): every restoration block is at most 4x4 (av1_lr_restore_block
+# clips w, h to 4 >> sub), so the Wiener intermediate, the box filter's A / B and the self-guided flt0 / flt1
+# have fixed maxima. They were allocated per 4x4 block (with the two 7-tap coefficient sets) — the arena grew
+# with every restored block (the 0.7.60 lesson) and each was an unchecked OOM site. Reused by every call;
+# a caller passing w or h over AV1_LR_MAX_BLK is refused (DR_ERR_BOUNDS) rather than overrun. av1_tables_init
+# builds it.
+enum Av1LrScratch {
+    AV1_LR_MAX_BLK = 4;      # the largest restoration block side
+    AV1LRS_INTER = 0;        # intermediate[h+6][w]: (4 + 6) * 4 u64
+    AV1LRS_A     = 320;      # A[h+2][w+2]: 6 * 6 u64
+    AV1LRS_B     = 608;      # B[h+2][w+2]
+    AV1LRS_FLT0  = 896;      # flt0[h][w]: 16 u64
+    AV1LRS_FLT1  = 1024;     # flt1[h][w]
+    AV1LRS_VF    = 1152;     # vfilter[7]
+    AV1LRS_HF    = 1208;     # hfilter[7]
+    AV1LRS_SIZE  = 1264;     # bytes
+}
+var Av1_LrScratch = 0;
+fn av1_lr_scratch(): i64 {
+    if (Av1_LrScratch != 0) { return Av1_LrScratch; }
+    Av1_LrScratch = dr_alloc(AV1LRS_SIZE);   # AV1LRS_SIZE bytes
+    return Av1_LrScratch;
+}
 fn av1_lr_wiener_filter(curr, cdef, lr, plane, x, y, w, h, hfilter, vfilter, pex, pey, ssy, sey): i64 {
     var bd = dr_frame_bit_depth(cdef);
     var ir0 = av1_lr_inter_round0(bd);
     var ir1 = av1_lr_inter_round1(bd);
     var offset = 1 << ((bd + 7 - ir0) - 1);              # 1 << (BitDepth+FILTER_BITS-InterRound0-1)
     var limit = (1 << ((bd + 1 + 7) - ir0)) - 1;         # (1 << (BitDepth+1+FILTER_BITS-InterRound0))-1
-    var inter = alloc((h + 6) * w * 8);                  # intermediate[h+6][w]
+    if ((w > AV1_LR_MAX_BLK) || (h > AV1_LR_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    var scr = av1_lr_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var inter = scr + AV1LRS_INTER;                       # intermediate[h+6][w]
     # --- horizontal pass ---
     var r = 0;
     while (r < (h + 6)) {
@@ -115,7 +141,7 @@ var Av1_Sgr = 0;
 fn av1_lr_sgr_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_lr_sgr_tables(): i64 {
     if (Av1_Sgr != 0) { return Av1_Sgr; }
-    var t = alloc(64 * 8);
+    var t = dr_alloc(64 * 8);
     if (t == 0) { return 0; }
     av1_lr_sgr_store(t, 0, 2);  av1_lr_sgr_store(t, 1, 12);  av1_lr_sgr_store(t, 2, 1);  av1_lr_sgr_store(t, 3, 4);
     av1_lr_sgr_store(t, 4, 2);  av1_lr_sgr_store(t, 5, 15);  av1_lr_sgr_store(t, 6, 1);  av1_lr_sgr_store(t, 7, 6);
@@ -153,8 +179,11 @@ fn av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, pass, out_f, pex, pey, 
     var s = ((1 << 20) + (n2e / 2)) / n2e;               # SGRPROJ_MTABLE_BITS = 20
     var one_over_n = ((1 << 12) + (n / 2)) / n;           # SGRPROJ_RECIP_BITS = 12
     var stride = w + 2;                                   # A/B: i in [-1,h], j in [-1,w]
-    var abuf = alloc((h + 2) * stride * 8);
-    var bbuf = alloc((h + 2) * stride * 8);
+    if ((w > AV1_LR_MAX_BLK) || (h > AV1_LR_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    var scr = av1_lr_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var abuf = scr + AV1LRS_A;
+    var bbuf = scr + AV1LRS_B;
     var i = 0 - 1;
     while (i < (h + 1)) {
         var j = 0 - 1;
@@ -229,8 +258,11 @@ fn av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, pass, out_f, pex, pey, 
 # pass whose radius r == 0 uses the (up-shifted) source in place of its box output.
 fn av1_lr_self_guided(curr, cdef, lr, plane, x, y, w, h, set, xqd0, xqd1, pex, pey, ssy, sey): i64 {
     var bd = dr_frame_bit_depth(cdef);
-    var flt0 = alloc(h * w * 8);
-    var flt1 = alloc(h * w * 8);
+    if ((w > AV1_LR_MAX_BLK) || (h > AV1_LR_MAX_BLK)) { return DR_ERR_BOUNDS; }
+    var scr = av1_lr_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    var flt0 = scr + AV1LRS_FLT0;
+    var flt1 = scr + AV1LRS_FLT1;
     av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, 0, flt0, pex, pey, ssy, sey);
     av1_lr_box_filter(curr, cdef, plane, x, y, w, h, set, 1, flt1, pex, pey, ssy, sey);
     var r0 = av1_lr_sgr_params(set, 0);
@@ -297,7 +329,7 @@ fn av1_lr_ucols_of(params, plane): i64 { return load64(params + AV1LRP_UCOLS + (
 # Allocate an Av1LrParams for the given geometry; all planes default to
 # RESTORE_NONE (set per plane via av1_lr_params_set_plane).
 fn av1_lr_params_new(uw, fh_h, np, subx, suby, uses_lr): i64 {
-    var p = alloc(AV1LRP_SIZE);
+    var p = dr_alloc(AV1LRP_SIZE);
     if (p == 0) { return 0; }
     store64(p + AV1LRP_UW, uw);
     store64(p + AV1LRP_FH, fh_h);
@@ -345,10 +377,10 @@ fn av1_lr_params_set_plane(params, plane, rtype, unit_size): i64 {
     # RESTORE_NONE (from params_new) so the process never dispatches a plane whose
     # grids are null (never-crash contract).
     var n = urows * ucols;
-    var tg = alloc(n * 8);
-    var wg = alloc(n * 6 * 8);
-    var sg = alloc(n * 8);
-    var xg = alloc(n * 2 * 8);
+    var tg = dr_alloc(n * 8);
+    var wg = dr_alloc(n * 6 * 8);
+    var sg = dr_alloc(n * 8);
+    var xg = dr_alloc(n * 2 * 8);
     if ((tg == 0) || (wg == 0) || (sg == 0) || (xg == 0)) { return DR_ERR_OOM; }
     var i = 0;
     while (i < (n * 6)) { store64(wg + (i * 8), 0); i = i + 1; }
@@ -430,8 +462,10 @@ fn av1_lr_restore_block(curr, cdef, lr, params, plane, row, col): i64 {
     var h = av1_min(4 >> suby, (pey - y) + 1);
     var rtype = av1_lr_type_get(params, plane, unit_row, unit_col);
     if (rtype == AV1_RESTORE_WIENER) {
-        var vf = alloc(7 * 8);
-        var hf = alloc(7 * 8);
+        var scr = av1_lr_scratch();
+        if (scr == 0) { return DR_ERR_OOM; }
+        var vf = scr + AV1LRS_VF;
+        var hf = scr + AV1LRS_HF;
         av1_lr_wiener_coeff(av1_lr_wiener_ptr(params, plane, unit_row, unit_col, 0), vf);
         av1_lr_wiener_coeff(av1_lr_wiener_ptr(params, plane, unit_row, unit_col, 1), hf);
         av1_lr_wiener_filter(curr, cdef, lr, plane, x, y, w, h, hf, vf, pex, pey, ssy, sey);
@@ -466,6 +500,7 @@ fn av1_lr_copy_frame(cdef, lr): i64 {
 # is 0 return; else per 4x4 block, per plane whose FrameRestorationType != NONE,
 # invoke loop_restore_block. curr = UpscaledCurrFrame (pre-CDEF), cdef = post-CDEF.
 fn av1_lr_process(curr, cdef, lr, params): i64 {
+    if (av1_lr_scratch() == 0) { return DR_ERR_OOM; }   # the one OOM site; every block below reuses it
     av1_lr_copy_frame(cdef, lr);
     if (load64(params + AV1LRP_USES) == 0) { return 0; }
     var uw = load64(params + AV1LRP_UW);
@@ -501,7 +536,7 @@ fn av1_lr_process(curr, cdef, lr, params): i64 {
 var Av1_LrTaps = 0;
 fn av1_lr_taps(): i64 {
     if (Av1_LrTaps != 0) { return Av1_LrTaps; }
-    var t = alloc(18 * 8);
+    var t = dr_alloc(18 * 8);
     if (t == 0) { return 0; }
     store64(t + 0, 0 - 5);  store64(t + 8, 0 - 23); store64(t + 16, 0 - 17);   # Wiener_Taps_Min
     store64(t + 24, 10);    store64(t + 32, 8);     store64(t + 40, 46);       # Wiener_Taps_Max

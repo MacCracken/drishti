@@ -171,7 +171,7 @@ fn h265_nal_hdr_parse(buf, len, out_type, out_layer, out_tid): i64 {
 # 0 on negative len / allocation failure.
 fn h265_ab_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var sc = alloc(32);
+    var sc = dr_alloc(32);
     if (sc == 0) { return 0; }
     store64(sc, buf);
     store64(sc + 8, len);
@@ -277,7 +277,7 @@ fn h265_ab_next(sc, out_nal, out_size): i64 {
 fn h265_rbsp_extract(ebsp, size, out_rbsp, out_size): i64 {
     if (size < 0) { return DR_ERR_BOUNDS; }
     # RBSP is never longer than the EBSP; +1 keeps alloc(0) out of play.
-    var rbsp = alloc(size + 1);
+    var rbsp = dr_alloc(size + 1);
     if (rbsp == 0) { return DR_ERR_OOM; }
     var i = 0;
     var n = 0;

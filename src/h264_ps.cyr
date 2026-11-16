@@ -337,7 +337,7 @@ fn h264_sps_parse(rbsp, len, out_err): i64 {
         return h264_ps_fail(out_err, H264_ERR_BAD_SPS);
     }
 
-    var sps = alloc(224);
+    var sps = dr_alloc(224);
     if (sps == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
     store64(sps, profile_idc);
     store64(sps + 8, cflags);
@@ -496,7 +496,7 @@ fn h264_pps_parse(rbsp, len, out_err): i64 {
     e = dr_br_err(br);
     if (e != DR_OK) { return h264_ps_fail(out_err, e); }
 
-    var pps = alloc(120);
+    var pps = dr_alloc(120);
     if (pps == 0) { return h264_ps_fail(out_err, DR_ERR_OOM); }
     store64(pps, pps_id);
     store64(pps + 8, sps_id);

@@ -87,7 +87,7 @@ fn h265_ptl_parse(br, profile_present, max_sub_layers_minus1): i64 {
         store64(br + 24, H265_ERR_RANGE);
         return 0;
     }
-    var ptl = alloc(96);
+    var ptl = dr_alloc(96);
     if (ptl == 0) {
         store64(br + 24, DR_ERR_OOM);
         return 0;
@@ -225,7 +225,7 @@ fn h265_vps_parse(rbsp, len, out_err): i64 {
         store64(out_err, dr_br_err(br));
         return 0;
     }
-    var vps = alloc(64);
+    var vps = dr_alloc(64);
     if (vps == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -420,7 +420,7 @@ fn h265_sps_parse(rbsp, len, out_err): i64 {
         store64(out_err, H265_ERR_RANGE);
         return 0;
     }
-    var sps = alloc(144);
+    var sps = dr_alloc(144);
     if (sps == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -563,7 +563,7 @@ fn h265_pps_parse(rbsp, len, out_err): i64 {
         rc = dr_ue_read(br, &diff_depth);     # diff_cu_qp_delta_depth
         if (rc != DR_OK) { store64(out_err, rc); return 0; }
     }
-    var pps = alloc(112);
+    var pps = dr_alloc(112);
     if (pps == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;

@@ -58,13 +58,13 @@ enum Av1GrainCtxOff {
 }
 
 fn av1_grain_ctx_new(): i64 {
-    var gc = alloc(AV1GC_SIZE);   # AV1GC_SIZE bytes
+    var gc = dr_alloc(AV1GC_SIZE);   # AV1GC_SIZE bytes
     if (gc == 0) { return 0; }
     memset(gc, 0, AV1GC_SIZE);
-    var l = alloc(73 * 82 * 8);   # 73 * 82 i64
-    var cb = alloc(73 * 82 * 8);
-    var cr = alloc(73 * 82 * 8);
-    var lut = alloc(3 * 256 * 8);   # 3 * 256 i64
+    var l = dr_alloc(73 * 82 * 8);   # 73 * 82 i64
+    var cb = dr_alloc(73 * 82 * 8);
+    var cr = dr_alloc(73 * 82 * 8);
+    var lut = dr_alloc(3 * 256 * 8);   # 3 * 256 i64
     if ((l == 0) || (cb == 0) || (cr == 0) || (lut == 0)) { return 0; }
     store64(gc + AV1GC_LUMA, l);
     store64(gc + AV1GC_CB, cb);
@@ -394,7 +394,7 @@ fn av1_grain_apply(gc, g, mc, src, out_err): i64 {
     if (load64(gc + AV1GC_SW) < sw) {
         var b = 0;
         while (b < 6) {
-            var sb = alloc(34 * sw * 8);   # 34 rows * sw i64
+            var sb = dr_alloc(34 * sw * 8);   # 34 rows * sw i64
             if (sb == 0) { store64(out_err, DR_ERR_OOM); return 0; }
             store64(gc + AV1GC_STRIPE + (b * 8), sb);
             b = b + 1;
@@ -517,7 +517,7 @@ fn av1_grain_apply(gc, g, mc, src, out_err): i64 {
 # table, or 0 when the allocation fails.
 fn av1_grain_gauss(): i64 {
     if (Av1_GrainGauss != 0) { return Av1_GrainGauss; }
-    var t = alloc(2048 * 8);   # 2048 i64
+    var t = dr_alloc(2048 * 8);   # 2048 i64
     if (t == 0) { return 0; }
     av1_grain_hex(t, 0, "838a3874c8ac87c7ac8ac7c047c818b348e0ce0be49107f846c67c524798744b208705746c068888c704");
     av1_grain_hex(t, 28, "9ec75882c4eca4c5b89f471c80caa8910624bcc79ca8c9709b073c530740be86b4a8c7785d85a47fc8c0");

@@ -47,7 +47,7 @@ enum Av1DpbOff {
 # av1_dpb_new — allocate an empty DPB (all eight slots null). Returns the handle
 # or 0 on OOM.
 fn av1_dpb_new(): i64 {
-    var d = alloc(AV1DPB_SIZE);
+    var d = dr_alloc(AV1DPB_SIZE);
     if (d == 0) { return 0; }
     memset(d, 0, AV1DPB_SIZE);
     return d;
@@ -199,7 +199,7 @@ enum Av1DecOff {
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
 # one). Returns the handle, or 0 on OOM.
 fn av1_decoder_new(dpb): i64 {
-    var d = alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
+    var d = dr_alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
     if (d == 0) { return 0; }
     memset(d, 0, AV1DEC_SIZE);
     var ring = dpb;

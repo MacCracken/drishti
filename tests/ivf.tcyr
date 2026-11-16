@@ -272,6 +272,33 @@ fn test_ivf_writer_edges() {
     return 0;
 }
 
+# ---- OOM fault injection (0.8.5): the writer (record, buffer, growth) and the reader (header, reader record) ----
+fn ivf_oom_op(nframes): i64 {
+    var w = dr_ivf_writer_init(DR_FOURCC_AV01, 64, 48, 1, 30);
+    if (w == 0) { return DR_ERR_OOM; }
+    var pay = alloc(200);   # bytes; the payload, raw (not under test)
+    memset(pay, 7, 200);
+    var i = 0;
+    while (i < nframes) {
+        var rc = dr_ivf_write_frame(w, pay, 200, i);
+        if (rc != DR_OK) { return rc; }
+        i = i + 1;
+    }
+    var len = 0;
+    var buf = dr_ivf_writer_finish(w, &len);
+    if (buf == 0) { return dr_ivf_writer_err(w); }
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, len, &e);
+    if (r == 0) { return e; }
+    return DR_OK;
+}
+fn test_ivf_oom() {
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&ivf_oom_op, 8, &n), 0, "IVF write 8 frames + read back: every failure -> OOM");
+    assert_gt(n, 4, "...the writer's two, its growth, and the reader's two");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("ivf header");
@@ -283,6 +310,8 @@ fn main() {
     test_group("ivf writer");
     test_ivf_write_read_roundtrip();
     test_ivf_writer_edges();
+    test_group("OOM fault injection");
+    test_ivf_oom();
     return assert_summary();
 }
 

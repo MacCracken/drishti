@@ -121,7 +121,7 @@ fn vp8_parse_frame_hdr(buf, len, out_err): i64 {
         store64(out_err, DR_ERR_TRUNCATED);
         return 0;
     }
-    var h = alloc(72);
+    var h = dr_alloc(72);
     if (h == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -185,7 +185,7 @@ fn vp8_hdr_new(key_frame, version, show_frame, part_size, width, height, hscale,
     if (key_frame) { norm_key = 1; }
     var hdr_size = 3;
     if (norm_key) { hdr_size = 10; }
-    var h = alloc(72);
+    var h = dr_alloc(72);
     if (h == 0) {
         store64(out_err, DR_ERR_OOM);
         return 0;
@@ -211,7 +211,7 @@ fn vp8_hdr_new(key_frame, version, show_frame, part_size, width, height, hscale,
 fn vp8_write_frame_hdr(h, out_len): i64 {
     store64(out_len, 0);
     var hdr_size = load64(h + 64);
-    var buf = alloc(hdr_size);
+    var buf = dr_alloc(hdr_size);
     if (buf == 0) { return 0; }
     # 9.1 frame tag: bit 0 = !key_frame (inverted sense), bits 1-3
     # version, bit 4 show_frame, bits 5-23 first_part_size; packed LE.

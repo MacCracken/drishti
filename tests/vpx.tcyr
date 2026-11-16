@@ -591,6 +591,36 @@ fn test_vpx_error_band() {
 
 # ================================================================
 
+# ---- OOM fault injection (0.8.5): the VP8 / VP9 header parsers, the VP8 header builder and writer, the bool
+# decoder, and the bool encoder grown past its capacity ----
+fn vpx_oom_op(a): i64 {
+    var l = 0;
+    var e = 0;
+    var b8 = fx_vp8_key(&l);   # fixtures are raw allocations, never failed
+    if (vp8_parse_frame_hdr(b8, l, &e) == 0) { return e; }
+    if (vbool_dec_init(b8 + 10, 100) == 0) { return DR_ERR_OOM; }
+    var h = vp8_hdr_new(1, 1, 1, 100, 176, 144, 2, 1, &e);
+    if (h == 0) { return e; }
+    var wl = 0;
+    if (vp8_write_frame_hdr(h, &wl) == 0) { return DR_ERR_OOM; }   # a valid header: 0 is its allocation failing
+    var l9 = 0;
+    var b9 = fx_vp9_key(&l9);
+    if (vp9_parse_uncompressed_header(b9, l9, &e) == 0) { return e; }
+    var enc = vbool_enc_init(16);
+    if (enc == 0) { return DR_ERR_OOM; }
+    var i = 0;
+    while (i < 200) { vbool_enc_literal(enc, i & 255, 8); i = i + 1; }
+    if (vbool_enc_flush(enc) == 0) { return vbool_enc_err(enc); }
+    return DR_OK;
+}
+fn test_vpx_oom() {
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&vpx_oom_op, 0, &n), 0,
+      "VP8 / VP9 parse, VP8 build + write, bool coders: every failure -> OOM");
+    assert_gt(n, 7, "...over every allocation they make");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("vbool known-answer");
@@ -618,6 +648,8 @@ fn main() {
     test_vp9_faults();
     test_group("error bands");
     test_vpx_error_band();
+    test_group("OOM fault injection");
+    test_vpx_oom();
     return assert_summary();
 }
 

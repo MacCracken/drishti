@@ -76,7 +76,7 @@ var Av1_SmW = 0;
 
 fn av1_sm_weights(): i64 {
     if (Av1_SmW != 0) { return Av1_SmW; }
-    var t = alloc(124 * 8);
+    var t = dr_alloc(124 * 8);
     if (t == 0) { return 0; }
     av1_smw_fill(t + 0, 255, 149, 85, 64, 0, 0, 0, 0);                 # 4x4 (first 4 used)
     av1_smw_fill(t + (4 * 8), 255, 197, 146, 105, 73, 50, 37, 32);     # 8x8
@@ -251,7 +251,7 @@ fn av1_intra_horizontal(left, w, h, pred): i64 {
 var Av1_DrDeriv = 0;
 fn av1_dr_intra_derivative(angle): i64 {
     if (Av1_DrDeriv == 0) {
-        var t = alloc(90 * 8);
+        var t = dr_alloc(90 * 8);
         if (t == 0) { return 0; }
         memset(t, 0, 90 * 8);
         store64(t + (3 * 8), 1023);  store64(t + (6 * 8), 547);   store64(t + (9 * 8), 372);
@@ -355,7 +355,7 @@ fn av1_edge_upsample_sel(w, h, filter_type, delta): i64 {
 # rewritten from a snapshot; buf[-1] is left intact.
 fn av1_intra_edge_filter(buf, sz, strength): i64 {
     if (strength == 0) { return DR_OK; }
-    var edge = alloc(sz * 8);
+    var edge = dr_alloc(sz * 8);
     if (edge == 0) { return DR_ERR_OOM; }
     var i = 0;
     while (i < sz) {
@@ -381,7 +381,7 @@ fn av1_intra_edge_filter(buf, sz, strength): i64 {
 # valid; on exit buf[-2..2*numPx-2] hold the upsampled edge. `buf` is the
 # ORIGIN pointer (with headroom for index -2).
 fn av1_intra_edge_upsample(buf, num_px, bit_depth): i64 {
-    var dup = alloc((num_px + 3) * 8);
+    var dup = dr_alloc((num_px + 3) * 8);
     if (dup == 0) { return DR_ERR_OOM; }
     store64(dup + 0, load64(buf + (0 - 8)));   # dup[0] = buf[-1]
     var i = 0 - 1;
@@ -554,7 +554,7 @@ fn av1_ftaps_fill7(p, t0, t1, t2, t3, t4, t5, t6) {
 }
 fn av1_filter_taps(): i64 {
     if (Av1_FTaps != 0) { return Av1_FTaps; }
-    var t = alloc((5 * 8 * 7) * 8);
+    var t = dr_alloc((5 * 8 * 7) * 8);
     if (t == 0) { return 0; }
     var s = 7 * 8;   # bytes per position row
     # mode 0
@@ -616,7 +616,7 @@ fn av1_filter_tap(mode, pos, tap): i64 {
 fn av1_intra_filter_intra(above, left, filter_intra_mode, w, h, bit_depth, pred): i64 {
     var w4 = w >> 2;
     var h2 = h >> 1;
-    var p = alloc(7 * 8);
+    var p = dr_alloc(7 * 8);
     if (p == 0) { return DR_ERR_OOM; }
     var i2 = 0;
     while (i2 < h2) {
@@ -729,8 +729,8 @@ fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
     # in (supports index -2 .. 2*(w+h)+5). Non-directional modes use the
     # -1..w+h-1 subset.
     var span = (2 * (w + h)) + 8;
-    var abuf = alloc(span * 8);
-    var lbuf = alloc(span * 8);
+    var abuf = dr_alloc(span * 8);
+    var lbuf = dr_alloc(span * 8);
     if ((abuf == 0) || (lbuf == 0)) { return DR_ERR_OOM; }
     var above = abuf + (2 * 8);   # above[-2] == abuf[0]
     var left = lbuf + (2 * 8);
@@ -790,7 +790,7 @@ fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
     store64(left + (0 - 8), corner);
 
     # Dispatch.
-    var pred = alloc(w * h * 8);
+    var pred = dr_alloc(w * h * 8);
     if (pred == 0) { return DR_ERR_OOM; }
     var rc = DR_ERR_UNSUPPORTED;
     if ((plane == 0) && use_filter_intra) {
@@ -888,7 +888,7 @@ fn av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
     if (max_luma_w > luma_pw) { max_luma_w = luma_pw; }
     if (max_luma_h > luma_ph) { max_luma_h = luma_ph; }
     # L[i][j]: subsampled luma with 3 fractional bits (w*h i64, <= 32*32).
-    var lbuf = alloc(w * h * 8);
+    var lbuf = dr_alloc(w * h * 8);
     if (lbuf == 0) { return DR_ERR_OOM; }
     var luma_avg = 0;
     var lim_x = max_luma_w - (1 << sub_x);

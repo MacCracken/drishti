@@ -514,6 +514,43 @@ repro_svc() { # name
 repro_svc svc-l2t3-128x96
 repro_svc svc-l2t3-layers-96x64
 
+# ---- OOM FAULT INJECTION (0.8.5) — scripts/oom-sweep.sh, over the committed reproducers (no libaom needed) ----
+# Every allocation in src/ goes through dr_alloc, and the harness's build/conformance-input.oom = k makes the k-th one
+# fail, once. Every such run must stop with DR_ERR_OOM and nothing else: not a crash or hang, not a decoded unit that
+# differs from the fault-free decode, not another error code, not a silent success (scripts/oom-sweep.sh says why
+# each is a defect). srmin-16x16 fails EVERY k; the others fail each allocation SITE (a site-tagged copy of the
+# harness traces which call is which) at its first, last and three spaced occurrences. Each fault-free baseline must
+# match the stream's committed reference md5s first. Together they reach every decode-lane site any committed
+# reproducer reaches (the summary line counts them); the encode lane and the other codec families are swept in their
+# own suites (dr_alloc_sweep). The site tagging needs python3: without it the section is skipped, never passed.
+OOM_CASES="srmin-16x16:full srmin-24x24:sites fg-b10-422-72x40:sites inter-6frame:sites jnt-ctx-96x64:sites
+obmc-edge-96x80:sites fmt-b12-444-72x56:sites qm-iq-128x96:sites ibc-sb128-352x288:sites lst-384x256:sites"
+oomcase() { # name:mode
+    local n="${1%%:*}" mode="${1##*:}" lst="" res rc
+    [ -f "tests/repro/$n.lst" ] && lst="tests/repro/$n.lst"
+    if [ ! -f "tests/repro/$n.ivf" ] || [ ! -f "tests/repro/$n.md5" ]; then
+        echo "  oom $n: FIXTURE MISSING"; fail=$((fail+1)); return
+    fi
+    res=$(OOM_SITES_ACC="$WORK/oom-sites.acc" scripts/oom-sweep.sh sweep "$n" "tests/repro/$n.ivf" "$mode" "$lst" \
+      "tests/repro/$n.md5"); rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "  oom $n ($mode): $(echo "$res" | sed -n "s/^RESULT $n //p")"; pass=$((pass+1))
+    else
+        echo "  oom $n ($mode): REGRESSED"; echo "$res" | sed 's/^/    /'; fail=$((fail+1))
+    fi
+}
+echo "--- OOM fault injection: every failed allocation must stop the decode with DR_ERR_OOM ---"
+mkdir -p "$WORK"
+if ! command -v python3 >/dev/null 2>&1; then
+    for c in $OOM_CASES; do skip_case "oom_${c%%:*}" "python3 not on PATH (the site tagging)"; done
+elif ! scripts/oom-sweep.sh sites > "$WORK/oom-sites.log" 2>&1; then
+    echo "  oom: the site-tagged harness did not build (see $WORK/oom-sites.log): REGRESSED"; fail=$((fail+1))
+else
+    : > "$WORK/oom-sites.acc"
+    for c in $OOM_CASES; do oomcase "$c"; done
+    echo "  oom: $(sort -u "$WORK/oom-sites.acc" | wc -l) of $(wc -l < build/oom/sites.txt) allocation sites reached"
+fi
+
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
     skip_external "libaom aomenc/aomdec not on PATH"

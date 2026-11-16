@@ -103,7 +103,7 @@ fn dr_wr_be32(p, v): i64 {
 # handle, or 0 on allocation failure / negative len.
 fn dr_br_init(buf, len): i64 {
     if (len < 0) { return 0; }
-    var br = alloc(32);
+    var br = dr_alloc(32);
     if (br == 0) { return 0; }
     store64(br, buf);
     store64(br + 8, len);
@@ -437,9 +437,9 @@ fn dr_bw_init(cap_hint): i64 {
     var cap = cap_hint;
     if (cap < 16) { cap = 16; }
     if (cap > DR_BW_MAX_BYTES) { return 0; }
-    var buf = alloc(cap);
+    var buf = dr_alloc(cap);
     if (buf == 0) { return 0; }
-    var bw = alloc(32);
+    var bw = dr_alloc(32);
     if (bw == 0) { return 0; }
     store64(bw, buf);
     store64(bw + 8, cap);
@@ -493,7 +493,7 @@ fn dr_bw_ensure(bw, extra_bits): i64 {
             return DR_ERR_OVERSIZE;
         }
     }
-    var new_buf = alloc(new_cap);
+    var new_buf = dr_alloc(new_cap);
     if (new_buf == 0) {
         store64(bw + 24, DR_ERR_OOM);
         return DR_ERR_OOM;

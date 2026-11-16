@@ -47,7 +47,7 @@ fn av1_cbfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_cbco(): i64 {
     if (Av1_CBCO != 0) { return Av1_CBCO; }
-    var t = alloc(480 * 8);
+    var t = dr_alloc(480 * 8);
     if (t == 0) { return 0; }
     av1_cbfill8(t, 0, 0, 1, 6, 6, 0, 1, 6, 6);
     av1_cbfill8(t, 8, 21, 0, 6, 6, 21, 21, 0, 6);
@@ -118,7 +118,7 @@ fn av1_coeff_base_ctx_offset(tx_size, r, c): i64 {
 
 fn av1_ctabs(): i64 {
     if (Av1_CTabs != 0) { return Av1_CTabs; }
-    var t = alloc(70 * 8);
+    var t = dr_alloc(70 * 8);
     if (t == 0) { return 0; }
     # Adjusted_Tx_Size[19]
     store64(t + ((0+0) * 8), 0);
