@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-15
+
+**Every AV1 coding tool decodes; the rejects left are deliberate.** Five bites, listed below newest first:
+- **Scalability:** operating point selection and 5.3.1's `drop_obu`, in both OBU walks. It never rejected: every
+  layer was decoded whatever the operating point, which equals libaom only at point 0.
+- **Large scale tile:** `OBU_TILE_LIST` decodes against application-supplied anchors (7.3). Tile lists used to be
+  skipped without a word.
+- **Intra block copy:** `allow_intrabc` frames decode on the inter lane, with `is_mv_valid` enforced.
+- **Film grain synthesis** (7.18.3) on the output. Grain streams used to decode GRAIN-FREE without a word.
+- **Quantizer matrices** (7.12.3 step 1b), both lanes: the 4 known gaps close.
+
+Two of the five "rejects" the docs listed were never rejects, but silent mis-decodes (film grain, scalability). Each
+was found only by running real streams.
+
+`drishti_version()` returns **8004**. Three modules are new (44 in all): `src/av1_qm.cyr`, `src/av1_grain.cyr` and
+`src/av1_lst.cyr`.
+
+`make conformance` is **3314 matched / 0 known-gap / 0 regressed / 0 skipped**, up from 1950 matched / 4 known-gap
+at 0.8.3. New in it:
+- 13 libaom / SVT-AV1 quantizer-matrix cases, plus the 4 former known gaps;
+- 27 film grain cases from three encoders, plus both published grain vectors (0 of 10 frames each matched before);
+- 14 libaom screen-content intra block copy cases;
+- 5 libaom lightfield configurations, every anchor and tile list against `lightfield_tile_list_decoder`;
+- 8 libaom SVC configurations at every operating point, in two packings;
+- the 3 published `av1-1-b8-22-svc-*` vectors at every operating point (25 published vectors in all);
+- 13 committed reproducers that run without libaom: 2 QM, 3 grain, 4 intra block copy, 2 large scale tile, 2 SVC.
+
+**What is still refused (`DR_ERR_UNSUPPORTED`), deliberately:**
+- defensive cases: tile groups out of order, a missing saved CDF context, references in another bit depth or
+  subsampling (no scaling reconciles them), and mode combinations no legal stream signals;
+- a tile list OBU outside large-scale tile mode, since only the application can supply its anchors;
+- on the encode lane, plan contents the bitstream writer cannot code (an intra block copy vector, for one).
+
+**Not externally witnessed** (unit tests only; no encoder tried emits them):
+- intra block copy's MI-grid read extent and `MV_INTRABC_CONTEXT`;
+- large scale tile's re-description of a stale reference slot;
+- scalability's never-dropped extension-less OBU, and the single-frame walk's drop;
+- from 0.8.3: the full 7.21 reload on a `show_existing` KEY frame.
+
+**Gates:** 44 suites, **31,447** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green; all three programs build.
+
+Next is 0.8.5: the full published `aom-test-data` corpus, every frame, plus fuzzing and fault injection of the decode
+path. One vector outside the gate already matches: `av1-1-b8-16-intra_only-intrabc-extreme-dv` (2 of 2 frames).
+
 ### Added — 0.8.4 bite 5: scalability — operating point selection and `drop_obu` (5.3.1), in both OBU walks
 
 **Scalability never rejected: the docs were wrong, as they were about film grain.** drishti decoded every OBU of every

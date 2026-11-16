@@ -6,6 +6,24 @@
 
 ## Version
 
+**0.8.4** — cut 2026-11-15, not yet tagged (user's git). **Every AV1 coding tool decodes; the rejects left are
+deliberate.** Five bites, listed newest first in the CHANGELOG:
+- scalability: operating point selection and 5.3.1's `drop_obu` in both OBU walks (it never rejected: every layer
+  was decoded whatever the point);
+- large scale tile: `OBU_TILE_LIST` against application-supplied anchors (tile lists were silently skipped);
+- intra block copy, on the inter lane, with `is_mv_valid` enforced;
+- film grain synthesis on the output (grain streams decoded grain-free, silently);
+- quantizer matrices, both lanes (the 4 known gaps close).
+
+`drishti_version()` = 8004.
+
+**ALL gates green:** 44 suites with **31,447** suite + **7,410** fuzz assertions, bench, vet, lint, fmt-check,
+version-check, `distlib --check`, all three programs build, and `make conformance` at **3314 matched / 0
+known-gap / 0 regressed / 0 skipped** (was 1950 / 4). New modules `src/av1_qm.cyr`, `src/av1_grain.cyr` and
+`src/av1_lst.cyr` make 44. The only `DR_ERR_UNSUPPORTED` left are defensive (malformed or out-of-order tile groups, a
+missing saved CDF context, references in another format, unreachable mode combinations), a tile list outside
+large-scale tile mode, and encode-lane plans the writer cannot code.
+
 **0.8.3** — cut 2026-11-15, not yet tagged (user's git). **Real streams in every shape: long GOPs and the full
 geometry/format matrix decode bit-exact vs `aomdec`, as a standing matrix in `make conformance`.** Seven bites,
 listed newest first in the CHANGELOG:
@@ -1535,7 +1553,7 @@ freeze/docs (0.13.x), each batched. See [`CHANGELOG.md`](../../CHANGELOG.md)
   per-suite breakdown — the biggest suites are av1_intermode ~4,255, av1_recon ~4,209,
   av1_coeffs ~3,851, av1_coeffcdf ~3,450, av1_mv ~2,157, av1_mc_driver ~703, av1_intertile
   ~660; an exact per-suite list is deliberately not pinned here since it moves every bite)
-- `make fuzz` — **1,140 assertions**, no crash/hang, all exits known codes
+- `make fuzz` — **7,410 assertions**, no crash/hang, all exits known codes
 - `make bench` — bitreader/VLC numbers in CHANGELOG
 - `make fmt-check` — exit 0; `make lint` — exit 0, clean for **every** module
   (80/80 targets report 0 untracked deferrals + 0 warnings), not just the AV1
@@ -1752,21 +1770,25 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.8.3, the second AV1 batch, cut).** **`make conformance` is 1950 matched / 4 KNOWN-GAP / 0
-> regressed / 0 skipped**, in about 4.5 minutes. Every hard case is BIT-EXACT against `aomdec` on EVERY frame,
-> with dav1d as a tiebreak. That covers:
+> **Where we are (0.8.4, the third AV1 batch, cut).** **`make conformance` is 3314 matched / 0 KNOWN-GAP / 0
+> regressed / 0 skipped.** Every hard case is BIT-EXACT against libaom on EVERY frame, with dav1d as a tiebreak.
+> That covers:
 > - every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome);
 > - GOPs to 90 frames: hidden frames, `show_existing_frame`, every refresh slot, SWITCH frames, error resilience;
 > - frame sizes from 1x1 up at both superblock sizes, superres, and scaled references;
-> - 20 published libaom vectors, every frame (`sizeup` / `sizedown` remuxed from .mkv);
-> - libaom streams for delta-q / delta-lf, mixed lossless, every segmentation config, multi-tile,
->   frame-parallel, realtime ROI-skip and palette; rav1e and SVT-AV1 streams;
-> - committed reproducers under `tests/repro/`, which run without libaom installed.
+> - every coding tool: quantizer matrices, film grain, intra block copy, palette, delta-q / delta-lf,
+>   segmentation, multi-tile, large-scale tile (vs libaom's lightfield tools), and scalable streams at every
+>   operating point;
+> - 25 published libaom vectors, every frame (`sizeup` / `sizedown` remuxed from .mkv; the svc vectors at every
+>   operating point);
+> - streams from libaom, rav1e and SVT-AV1, and committed reproducers under `tests/repro/` that run without libaom.
 >
-> The 4 known gaps are `--enable-qm=1` frames that must REJECT (quantizer matrices are 0.8.4).
+> **NEXT: 0.8.5, "decode is conformance-clean"** (roadmap table): the FULL published `aom-test-data` corpus, every
+> frame; the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection;
+> corpus-guided fuzzing. One unscored vector already matches: `av1-1-b8-16-intra_only-intrabc-extreme-dv` (2 of 2).
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
-> HONEST STATUS block and the batched release plan (0.8.4 → 0.8.11).
+> HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).
 >
 > **THE ONE HABIT THAT MATTERS, and 0.7.129 is the proof.** drishti's own round-trips and
 > hand-written oracles SHARE the implementation's reading of the spec, so they cannot catch a
@@ -1864,13 +1886,13 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > GOP, gated as `svtopen_176x144`, shows INTRA_ONLY frames instead), so the full 7.21 reload is unit-witnessed
 > only.
 >
-> **NEXT: 0.8.4, "every AV1 coding tool decodes"** (roadmap table): intra block copy (5.11.6), quantizer
-> matrices (7.12.3 with the per-segment `SegQMLevel`; the `qmon_*` case's 4 known gaps become matches),
-> film-grain synthesis (7.18.3; DONE in bite 2 — it was silently skipped, not rejected), scalability / operating-point select +
-> `drop_obu` (DONE in bite 5 — it decoded every layer, never rejected), and large-scale tile / `OBU_TILE_LIST` (DONE in
-> bite 4 — also silently skipped before). Any reject left after it must be deliberate and documented.
+> **0.8.4 shipped: "every AV1 coding tool decodes"** (the roadmap table has the batch): intra block copy,
+> quantizer matrices (the `qmon_*` case's 4 known gaps became matches), film-grain synthesis (it was silently
+> skipped, not rejected), scalability / operating-point select + `drop_obu` (it decoded every layer, never
+> rejected), and large-scale tile / `OBU_TILE_LIST` (also silently skipped before). The rejects left are deliberate
+> and listed in the 0.8.4 CHANGELOG.
 >
-> **0.8.4 progress (bites, uncut):** bite 1 = **quantizer matrices DONE**. `src/av1_qm.cyr` (42 modules) holds the
+> **0.8.4 bites (cut 2026-11-15):** bite 1 = **quantizer matrices DONE**. `src/av1_qm.cyr` (42 modules) holds the
 > packed fundamentals, expanded once by the 9.5.2 subsampling. `av1_dequant_block` / `av1_reconstruct_qm` apply
 > step 1b, and both lanes pick the matrix per transform block via `av1_qm_matrix`. `scripts/refs/qm_ref.py` proves
 > the table against the spec markdown and libaom. TRAP: libaom stores its table TRANSPOSED, so never copy it into
@@ -1939,7 +1961,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > Eight generated configurations at every operating point in two packings, the published vectors at every point, and
 > two reproducers are gated: 3314 matched / 0 / 0 / 0. That completes 0.8.4's bite list.
 >
-> **Known-and-tracked, not in 0.8.3:** the encode lane has NEVER run at 128 superblocks
+> **Known-and-tracked, not in 0.8.3 or 0.8.4:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).
 > It is scheduled in 0.8.6, where the encoder first runs.
 
