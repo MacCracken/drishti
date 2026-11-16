@@ -1832,6 +1832,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > and the odd-MI inter chroma divergence — FIXED in bite 2: the allocation is the superblock grid), and the
 > `av1-1-b8-05-mv` / `--cpu-used=0` entropy desync (FIXED in bite 5: the `compound_idx` context's order-hint
 > term was a constant 0). Bite 6 wired the dimension sweep in and fixed OBMC's visible-plane overlap trim.
+> Bite 7 gated 10/12-bit across every format (no decoder change), which completes the 0.8.3 batch.
 >
 > **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

@@ -81,6 +81,10 @@ CDF_CASES="mt2c_352x288 mt2x2_640x360 mt2csb128_640x360 mt4crt_640x360 fp_352x28
 PAL_CASES="palstock_640x360 palscreen_320x240 palbars_320x240"
 RAV1E_CASES="rav1e_352x288_s6_q100"
 SVT_CASES="svt_352x288_p8_crf35"
+# SVT-AV1 OPEN GOP (0.8.3): `--irefresh-type 1` codes each GOP start as a hidden INTRA_ONLY frame (frame_type 2)
+# shown later through show_existing_frame — the only intra-only frames in the gate. (It is not a show_existing KEY,
+# the full 7.21 reload, which no encoder tried emits; that path stays unit-witnessed.)
+SVTOPEN_CASES="svtopen_176x144"
 # LONG GOPs (0.8.3), kind_WxH, every frame hard: real reference patterns, which need far more frames than the 9
 # the harness could decode before it streamed. Each case PROVES its property through vector-probe first (see
 # gop_property): the default and 2-pass GOPs show hidden frames, show_existing_frame and a refresh of every one of
@@ -94,7 +98,16 @@ SR_CASES="srfix_352x288 srrand_352x288 srsb128_352x288 srodd_175x99 srtiles_640x
 srresize_352x288"
 PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
-av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-allintra"
+av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-allintra \
+av1-1-b10-24-monochrome av1-1-b10-00-quantizer-00 av1-1-b10-00-quantizer-10 av1-1-b10-00-quantizer-20 \
+av1-1-b10-00-quantizer-32 av1-1-b10-00-quantizer-40 av1-1-b10-00-quantizer-50 av1-1-b10-00-quantizer-63"
+# HIGH BIT DEPTH (0.8.3), kind_WxH, every frame hard. bNN = libaom at NN bits (4:2:0 / 4:4:4 / 4:2:2 / mono, superres +
+# LR, random resize at cpu-used 2, cpu-used 0, screen content, 128-SB, realtime, LOSSLESS, near-lossless quality);
+# r12* = rav1e, because libaom's aomenc cannot produce 12-bit 4:4:4 or 4:2:2. Each stream proves its bit depth and
+# format through vector-probe, plus the property its tool needs (see bd_property).
+BD_CASES="b10_176x144 b10444_176x144 b10422_176x144 b10mono_176x144 b10sr_352x288 b10rs_176x144 b10c0_176x144 \
+b10scr_320x240 b10sb128_352x288 b10rt_176x144 b10ll_176x144 b10hiq_176x144 b12_176x144 b12mono_176x144 \
+b12sr_352x288 b12c0_176x144 b12ll_176x144 r12444_176x144 r12422_176x144"
 # CHROMA FORMATS (0.8.3), kind_WxH, every frame hard: monochrome, 4:4:4 (profile 1) and 4:2:2 (profile 2), over
 # GOPs, realtime, screen content (chroma palettes), superres + loop restoration, 128-SB and an odd-MI geometry. Each
 # stream PROVES its format through vector-probe (num_planes / subsampling), and the restoration cases prove a
@@ -138,12 +151,14 @@ skip_external() { # reason
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
     for c in $SVT_CASES; do skip_case "$c" "$1"; done
+    for c in $SVTOPEN_CASES; do skip_case "$c" "$1"; done
     for c in $GOP_CASES; do skip_case "$c" "$1"; done
     for c in $SR_CASES; do skip_case "$c" "$1"; done
     for c in $FMT_CASES; do skip_case "$c" "$1"; done
     for c in $DIM_CASES; do skip_case "$c" "$1"; done
     for c in $RS_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED_MKV; do skip_case "$c" "$1"; done
+    for c in $BD_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
@@ -278,6 +293,13 @@ repro_seq  obmc-edge-96x80 12 12
 repro_seq  fmt-mono-72x56 8 8
 repro_seq  fmt-444-72x56 8 8
 repro_seq  fmt-422-72x56 8 8
+# HIGH BIT DEPTH (0.8.3): 10-bit 4:2:0 and 12-bit monochrome from libaom 3.15.3 (`--cpu-used=6 --end-usage=q
+# --cq-level=40 --lag-in-frames=0`, profile 2 for 12-bit), and 12-bit 4:4:4 from rav1e (`--speed 6 --quantizer 120`:
+# libaom's aomenc refuses 12-bit 4:4:4 / 4:2:2). 72x56, 8 frames each; md5s over the aomdec --rawvideo layout, two
+# bytes per sample. dav1d agrees with aomdec on every frame.
+repro_seq  fmt-b10-420-72x56 8 8
+repro_seq  fmt-b12-mono-72x56 8 8
+repro_seq  fmt-b12-444-72x56 8 8
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -1153,6 +1175,94 @@ rscase() { # name = KIND_WxH
     echo "  $n ($prop)"
     vs_judge "$n" "$fr"
 }
+# bit-depth property: the sequence header carries bit depth `bd` and the claimed format (420 / 444 / 422 / mono),
+# and `extra` is present: "lr" (a CHROMA plane restored; luma for mono), "sct" (screen-content tools), "lossless"
+# (a coded-lossless frame), "resize" (>= 2 coded sizes).
+bd_property() { # bd format extra
+    ./build/drishti-vector-probe 2>&1 | awk -v bd="$1" -v fmt="$2" -v extra="$3" '
+        /^ *bit_depth=/ { split($0, a, "="); b = a[2] + 0 }
+        /^ *num_planes=/ { split($0, a, "="); np = a[2] + 0 }
+        /^ *subsampling_x=/ { split($0, a, "="); sx = a[2] + 0 }
+        /^ *subsampling_y=/ { split($0, a, "="); sy = a[2] + 0 }
+        /^ *show_existing_frame=/ { split($0, a, "="); se = a[2] + 0 }
+        /^ *frame_width=/ { split($0, a, "="); fw = a[2] + 0 }
+        /^ *frame_height=/ { split($0, a, "="); if (!se) sz[fw "x" (a[2] + 0)] = 1 }
+        /^ *coded_lossless=1/ { nll++ }
+        /^ *allow_screen_content_tools=1/ { nsct++ }
+        /^ *lr_type_y=[1-3]/ { nly++ }
+        /^ *lr_type_[uv]=[1-3]/ { nlc++ }
+        END {
+            ns = 0; for (s in sz) ns++
+            ok = (b == bd)
+            if (fmt == "420") ok = ok && (np == 3 && sx == 1 && sy == 1)
+            if (fmt == "444") ok = ok && (np == 3 && sx == 0 && sy == 0)
+            if (fmt == "422") ok = ok && (np == 3 && sx == 1 && sy == 0)
+            if (fmt == "mono") ok = ok && (np == 1)
+            if (extra == "lr") ok = ok && ((fmt == "mono") ? (nly >= 1) : (nlc >= 1))
+            if (extra == "sct") ok = ok && (nsct >= 1)
+            if (extra == "lossless") ok = ok && (nll >= 1)
+            if (extra == "resize") ok = ok && (ns >= 2)
+            printf "bit_depth=%d planes=%d subsampling=%d/%d lossless_frames=%d sct_frames=%d lr_chroma=%d sizes=%d", \
+                b, np, sx, sy, nll, nsct, nlc, ns
+            exit !ok
+        }'
+}
+bdcase() { # name = KIND_WxH
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=12 bd fmt="420" extra="" enc="aomenc" src="mandelbrot" args=""
+    local srfix="--superres-mode=1 --superres-denominator=13 --superres-kf-denominator=11"
+    case "$kind" in
+        b10*) bd=10 ;;
+        b12*) bd=12; args="--profile=2" ;;
+        r12*) bd=12; enc="rav1e" ;;
+        *)    echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    case "$kind" in
+        b10|b12)       args="$args --cpu-used=6"; fr=20 ;;
+        b10444)        fmt="444"; args="--profile=1 --cpu-used=6" ;;
+        b10422)        fmt="422"; args="--profile=2 --cpu-used=6" ;;
+        b10mono|b12mono) fmt="mono"; args="$args --monochrome --cpu-used=6" ;;
+        b10sr|b12sr)   fr=10; extra="lr"; args="$args --cpu-used=6 $srfix" ;;
+        b10rs)         fr=16; extra="resize"; args="--cpu-used=2 --resize-mode=2" ;;
+        b10c0|b12c0)   args="$args --cpu-used=0" ;;
+        b10scr)        fr=8; extra="sct"; src="testsrc2"
+                       args="--cpu-used=6 --tune-content=screen --enable-intrabc=0" ;;
+        b10sb128)      fr=10; args="--cpu-used=4 --sb-size=128 --end-usage=q --cq-level=20" ;;
+        b10rt)         fr=30; args="--rt --cpu-used=8" ;;
+        b10ll|b12ll)   fr=4; extra="lossless"; args="$args --cpu-used=6 --lossless=1" ;;
+        b10hiq)        fr=10; args="--cpu-used=4 --end-usage=q --cq-level=5" ;;
+        r12444)        fmt="444"; fr=10 ;;
+        r12422)        fmt="422"; fr=10 ;;
+        *)             echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    local pf="yuv${fmt}p${bd}le" iflag="--i${fmt}" sfilt=",noise=alls=6:allf=t"
+    [ "$fmt" = "mono" ] && { pf="yuv420p${bd}le"; iflag="--i420"; }
+    [ "$src" = "testsrc2" ] && sfilt=""
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv" "${WORK:?}/$n.y4m"
+    if [ "$enc" = "rav1e" ]; then
+        if ! command -v rav1e >/dev/null 2>&1; then skip_case "$n" "rav1e not on PATH"; return; fi
+        ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30${sfilt}" -frames:v "$fr" -pix_fmt "$pf" \
+            -strict -1 "$WORK/$n.y4m" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+        rav1e "$WORK/$n.y4m" -o "$WORK/$n.ivf" --speed 6 --quantizer 100 -l "$fr" >/dev/null 2>&1
+    else
+        ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30${sfilt}" -frames:v "$fr" -pix_fmt "$pf" \
+            -f rawvideo "$WORK/$n.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+        # shellcheck disable=SC2086
+        aomenc --codec=av1 -w "$w" -h "$h" $iflag --input-bit-depth="$bd" --bit-depth="$bd" --limit="$fr" $args \
+            --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" >/dev/null 2>&1
+    fi
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED ($enc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(bd_property "$bd" "$fmt" "$extra"); then
+        echo "  $n: SETUP FAILED (not a $bd-bit $fmt${extra:+ + $extra} stream: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    vs_judge "$n" "$fr"
+}
 # odd-MI INTER frames (0.8.3). The probe must show an INTER frame whose MI extent leaves a bottom or right
 # superblock-row remainder that is not a multiple of 16 luma samples (mi_rows % 4 == 2 or mi_cols % 4 == 2): that
 # is where an edge block's chroma is cut to 4 rows or columns by an MI-grid-sized allocation (see oddmi-inter-*).
@@ -1321,6 +1431,33 @@ for c in $PAL_CASES; do palcase "$c"; done
 echo "--- other encoders: rav1e (inherited features) and SVT-AV1 (variance AQ); every frame hard ---"
 for c in $RAV1E_CASES; do rav1ecase "$c"; done
 for c in $SVT_CASES; do svtcase "$c"; done
+# open GOP: the stream must code >= 2 INTRA_ONLY frames and show >= 1 of them through show_existing_frame.
+svtopencase() { # name = svtopen_WxH (60 frames, keyint 16)
+    local n="$1" geo
+    IFS=_ read -r _ geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=60
+    if ! command -v SvtAv1EncApp >/dev/null 2>&1; then skip_case "$n" "SvtAv1EncApp not on PATH"; return; fi
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30,noise=alls=6:allf=t" -frames:v "$fr" \
+        -pix_fmt yuv420p -f rawvideo "$WORK/$n.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    SvtAv1EncApp -i "$WORK/$n.yuv" -w "$w" -h "$h" --fps-num 30 --fps-denom 1 -n "$fr" --preset 8 \
+        --irefresh-type 1 --keyint 16 --crf 35 -b "$WORK/$n.ivf" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (SVT-AV1 produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(./build/drishti-vector-probe 2>&1 | awk '
+        /^ *frame_type=/ { split($0, a, "="); ft = a[2] + 0 }
+        /^ *show_existing_frame=/ { split($0, a, "="); if (ft == 2) { if (a[2] + 0) nse++; else nio++ } }
+        END { printf "intra_only=%d shown_existing=%d", nio, nse; exit !(nio >= 2 && nse >= 1) }'); then
+        echo "  $n: SETUP FAILED (no shown intra-only frames: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    vs_judge "$n" "$fr"
+}
+for c in $SVTOPEN_CASES; do svtopencase "$c"; done
 
 echo "--- odd-MI inter frames (edge blocks past the MI grid; superblock-grid allocation); every frame hard ---"
 for c in $ODDMII_CASES; do oddmiicase "$c"; done
@@ -1335,6 +1472,9 @@ echo "--- dimension sweep: 1x1 .. 257x31, both superblock sizes; every frame har
 for c in $DIM_CASES; do dimcase "$c"; done
 echo "--- scaled references (resize): every denominator class, 2x both ways, random sizes; every frame hard ---"
 for c in $RS_CASES; do rscase "$c"; done
+
+echo "--- high bit depth: 10-bit and 12-bit, every format and the format-sensitive tools; every frame hard ---"
+for c in $BD_CASES; do bdcase "$c"; done
 
 echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
 for c in $GOP_CASES; do gopcase "$c"; done

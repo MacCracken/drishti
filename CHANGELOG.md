@@ -4,6 +4,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.3 bite 7: 10- and 12-bit gated end-to-end, every format; SVT-AV1 open-GOP intra-only frames
+
+**Every bit depth decodes bit-exact vs `aomdec` on every frame, as a standing section of `make conformance`.** No
+decoder change was needed. 10-bit and 12-bit were already right across about 25 hand-run configurations covering
+every chroma format and the tools whose arithmetic depends on bit depth. This bite makes them a gate.
+- **19 generated bit-depth cases**, every frame hard, judged by the variable-size judge:
+  - 10-bit 4:2:0, 4:4:4 (profile 1), 4:2:2 (profile 2) and monochrome;
+  - superres with chroma loop restoration;
+  - random resize at `--cpu-used=2`, and `--cpu-used=0`;
+  - screen content, 128-SB, realtime, LOSSLESS, and near-lossless (`--cq-level=5`);
+  - 12-bit (profile 2): 4:2:0, monochrome, superres + LR, `--cpu-used=0` and lossless;
+  - 12-bit 4:4:4 and 4:2:2 from **rav1e**. libaom's `aomenc` refuses those ("Failed to set chroma subsampling x"),
+    and its `--input-chroma-subsampling-*` flags silently produce 4:2:0 instead.
+
+  Each case's `bd_property` guard proves the bit depth and format from the sequence header, plus the property its
+  tool needs: chroma LR, screen-content tools, a coded-lossless frame, or ≥ 2 coded sizes.
+- **Three committed reproducers** (72x56, 8 frames, 1–3 KB), so a machine without libaom still decodes high bit
+  depth: `tests/repro/fmt-b10-420-72x56`, `fmt-b12-mono-72x56` (libaom) and `fmt-b12-444-72x56` (rav1e). dav1d
+  agrees with aomdec on every frame.
+- **Eight published 10-bit vectors**, every frame: `av1-1-b10-24-monochrome` and `av1-1-b10-00-quantizer-{00,10,20,
+  32,40,50,63}`. The monochrome one confirms the neutral-chroma checksum rule (bite 4) at 16 bits: libaom's `.md5`
+  covers Y plus two 4:2:0 planes of 512 as 16-bit little-endian. It gives 10/10 with the rule, and 0/10 both with the
+  rule off and with an 8-bit neutral value.
+- **SVT-AV1 open GOP** (`--irefresh-type 1`), `svtopen_176x144`, 60 frames. Each GOP starts with a hidden
+  INTRA_ONLY frame (`frame_type` 2) that is shown later through `show_existing_frame`. These are the first
+  intra-only frames in the gate. It was tried as a witness for the full 7.21 reload, but SVT emits no
+  `show_existing` KEY frame either, so that path stays unit-witnessed. The guard requires ≥ 2 intra-only frames
+  and ≥ 1 shown that way, and rejects the libaom default GOP.
+
+Evidence:
+- **Conformance: 1950 matched / 4 known-gap / 0 regressed / 0 skipped** (was 1608), in about 4½ minutes. The only
+  gaps are the `--enable-qm=1` rejects (0.8.4).
+- `bd_property` was canary-tested. It rejects:
+  - 10-bit claimed as 12 and the reverse;
+  - 4:2:2 claimed as 4:4:4 and the reverse;
+  - monochrome claimed as 4:2:0;
+  - a stream without lossless, LR, resize or screen content claimed with it.
+
+  It accepts each case's own stream.
+
+**This completes the 0.8.3 batch** ("real streams in every shape"). Everything in the roadmap row is gated except
+the `show_existing` KEY reload, for which no encoder emits a stream.
+
 ### Added — 0.8.3 bite 6: the dimension sweep in the gate; Fixed: OBMC's overlap trimmed to the visible plane
 
 **The dimension and scaled-reference matrix is now a standing section of `make conformance`, not a hand-run
