@@ -1,7 +1,8 @@
 # tests/av1_mc_kernel.tcyr — AV1 inter prediction, the put_8tap motion-compensation
-# kernel (spec 7.11.3.2 / dav1d put_8tap_c). Verified against a Python port of dav1d
-# put_8tap_c (scratchpad/mc_put8tap.py): all four branches (integer / H / V / H+V),
-# both filter-selection paths (w>4 sets 0-2, w<=4 sets 3-4), and a SHARP filter_type.
+# kernel (spec 7.11.3.4 / dav1d put_8tap_c): all four branches (integer / H / V / H+V), both filter-selection
+# paths (w>4 sets 0-2, w<=4 sets 3-4), and a SHARP filter_type. Known answers from scripts/refs/mc_put8tap_ref.py
+# (0.8.5), which runs the SPEC's two-pass convolve and a transcription of dav1d's put_8tap_c, asserts them equal on
+# 6,108 blocks, and reproduces every value below. (Their first generator, a scratchpad port of dav1d alone, was lost.)
 include "src/main.cyr"
 
 # a 16x16 padded reference plane, src[r][c] = (r*37 + c*11 + 20) & 255 (matches the
@@ -13,6 +14,21 @@ fn mc_src_plane(): i64 {
         var c = 0;
         while (c < 16) {
             store64(s + (((r * 16) + c) * 8), ((r * 37) + (c * 11) + 20) & 255);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return s;
+}
+# the nonlinear plane, src[r][c] = (r*592 + c*176 + 320 + r*c*7) & mask (mc_put8tap_ref.py plane16_nl): mask 255
+# for 8 bit, 4095 for 12. Its block sums spread over several residues mod 64, which the rounding cases need.
+fn mc_src_plane_nl(mask): i64 {
+    var s = alloc(16 * 16 * 8);
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            store64(s + (((r * 16) + c) * 8), ((r * 592) + (c * 176) + 320 + ((r * c) * 7)) & mask);
             c = c + 1;
         }
         r = r + 1;
@@ -38,6 +54,9 @@ fn test_put_8tap() {
     # 2. horizontal only, REGULAR half-pel (mx=8).
     av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 8, 0, 0, 8, 0);
     assert_eq(mc_checksum(d, 64), 298113, "put_8tap H-only 8x8 REGULAR mx8");
+    # by hand (derived in mc_put8tap_ref.py): taps over 179 190 201 212 223 234 245 0 with the spec's half-pel
+    # REGULAR row sum to 27840; Round2(27840, 3) = 3480; Round2(128 * 3480, 11) = 218
+    assert_eq(load64(d + 0), 218, "H-only out[0] = 218 (hand-derived)");
     # 3. vertical only, REGULAR half-pel (my=8).
     av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 0, 8, 0, 8, 0);
     assert_eq(mc_checksum(d, 64), 289226, "put_8tap V-only 8x8 REGULAR my8");
@@ -53,6 +72,30 @@ fn test_put_8tap() {
     # 6. H+V 8x8 SHARP (filter_type = SHARP|SHARP<<2 = 10), mx=3 my=13.
     av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 3, 13, 10, 8, 0);
     assert_eq(mc_checksum(d, 64), 274009, "put_8tap H+V 8x8 SHARP mx3my13");
+    # 7-9. dav1d's H-only rounding constant, 34 at 8 / 10 bit and 40 at 12 (0.8.5: a mutation of it to 32 survived
+    # cases 1-6, which never reach a sum where it matters). A wrong constant shows only at sums whose residue mod 64
+    # sits next to 64 - rnd, so a case catches EVERY wrong value when its sums include 63 - rnd and 64 - rnd
+    # (mc_put8tap_ref.py checks all 63 for cases 8 and 9).
+    # 7. REGULAR mx6: every halved-tap sum is 30 mod 64, so any constant below 34 changes all 64 pixels. By hand:
+    # out[0]'s sum is 13854; (13854 + 34) >> 6 = 217, as the spec's Round2(Round2(27708, 3) * 128, 11) = 217; the
+    # constant 32 gives 216.
+    av1_mc_put_8tap(d, 0, 8, src, soff, 16, 8, 8, 6, 0, 0, 8, 0);
+    assert_eq(mc_checksum(d, 64), 300354, "put_8tap H-only 8x8 REGULAR mx6 (residue 30)");
+    assert_eq(load64(d + 0), 217, "H-only mx6 out[0] = 217 (hand-derived; 216 under a constant below 34)");
+    # 8. 8 bit, residues 29 and 30: REGULAR mx15 on the nonlinear plane. out[24] goes to 219 under 35, out[48] to 46
+    # under 33.
+    var src8n = mc_src_plane_nl(255);
+    av1_mc_put_8tap(d, 0, 8, src8n, soff, 16, 8, 8, 15, 0, 0, 8, 0);
+    assert_eq(mc_checksum(d, 64), 268033, "put_8tap H-only 8x8 REGULAR mx15 (residues 29, 30)");
+    assert_eq(load64(d + (24 * 8)), 218, "H-only mx15 out[24] = 218 (219 under a constant above 34)");
+    assert_eq(load64(d + (48 * 8)), 47, "H-only mx15 out[48] = 47 (46 under a constant below 34)");
+    # 9. 12 bit, residues 23 and 24: SHARP mx15. out[24] goes to 1462 under 41, out[32] to 2087 under 39 (34, the
+    # 8-bit constant — a dropped ib = 2 — is among the values it catches).
+    var src12 = mc_src_plane_nl(4095);
+    av1_mc_put_8tap(d, 0, 8, src12, soff, 16, 8, 8, 15, 0, 2, 12, 0);
+    assert_eq(mc_checksum(d, 64), 4032277, "put_8tap H-only 8x8 SHARP mx15 12-bit (residues 23, 24)");
+    assert_eq(load64(d + (24 * 8)), 1461, "12-bit H-only out[24] = 1461 (1462 under a constant above 40)");
+    assert_eq(load64(d + (32 * 8)), 2088, "12-bit H-only out[32] = 2088 (2087 under a constant below 40)");
     return 0;
 }
 
@@ -105,7 +148,7 @@ fn test_warp_affine_8x8() {
 
 fn main() {
     alloc_init();
-    test_group("put_8tap motion-compensation kernel (7.11.3.2)");
+    test_group("put_8tap motion-compensation kernel (7.11.3.4)");
     test_put_8tap();
     test_group("warp_affine_8x8 kernel (7.11.3.5)");
     test_warp_affine_8x8();

@@ -1876,8 +1876,20 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > same outcome poisoned and plain (released pool frames now poisoned too), clean seeds reproduced after
 > `av1_decoder_reset`. NEW APIs: `av1_decoder_set_frame_size_limit` (DR_ERR_OVERSIZE) and `av1_decoder_reset`.
 > FOUND: a large-scale tile list's output frame escaped the frame size limit (fixed). `scripts/fuzz-campaign.sh`
-> runs long parallel campaigns. Gate: 3971 / 0 / 0 / 0. Next: the missing MC ref generators, the two streams others
-> refuse.
+> runs long parallel campaigns. Gate: 3971 / 0 / 0 / 0.
+>
+> Bite 11 = **the MC reference ports, restored**: `scripts/refs/mc_subpel_ref.py`, `mc_put8tap_ref.py` and
+> `emu_edge_ref.py` replace the lost dav1d-only scratch ports behind `tests/av1_mc.tcyr`, `av1_mc_kernel.tcyr` and
+> `av1_mc_emu_edge.tcyr`; each transcribes the SPEC and dav1d and asserts them equal (the table halved from the
+> spec's, `--dav1d` = dav1d's `tables.c` entry for entry; the two-pass convolve = `put_8tap_c` on 6,108 blocks; the
+> per-sample clamp = `emu_edge_c` on 186,624 fetches). `bilinear_mc_ref.py` already re-derives the driver's 17.
+> FOUND: dav1d's H-only rounding constant (`intermediate_rnd`, 34 / 40 at 12 bit) was untested: 34 -> 32 survived
+> every kernel case, because the test plane's linear rows give each block one residue mod 64. Three boundary cases
+> now pin it (one on a new nonlinear plane per depth, carrying the residues 63 - rnd and 64 - rnd, so every wrong
+> value is caught, the port checks all 63). Also: the MC kernels were cited to 7.11.3.2 (rounding variables), now
+> 7.11.3.4. STILL DEAD: the MV ports (`mv_ref` / `mvscan_ref` / `mvdriver_ref`) and the superres ones (`resize_ref`
+> / `upscale_geom` / `sr_ref`), roadmapped. No `src/` behaviour change (one comment). 44 suites, 31,855 suite +
+> 7,416 fuzz assertions. Gate: 3971 / 0 / 0 / 0. Next: the two streams others refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

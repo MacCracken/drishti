@@ -1,6 +1,8 @@
 # tests/av1_mc_emu_edge.tcyr — AV1 inter prediction, the frame-boundary block fetch
-# (av1_mc_emu_edge / dav1d emu_edge_c). Verified against a Python port of emu_edge_c
-# (scratchpad/emu_edge.py): a fully-inside block (no extension) and the four out-of-frame
+# (av1_mc_emu_edge / dav1d emu_edge_c). Known answers from scripts/refs/emu_edge_ref.py (0.8.5), which proves the
+# SPEC's per-sample clamp (7.11.3.4, ref[Clip3(0, lastY, ..)][Clip3(0, lastX, ..)]) equal to dav1d's emu_edge_c on
+# 186,624 fetches and reproduces every value below (their first generator, a scratchpad port, was lost):
+# a fully-inside block (no extension) and the four out-of-frame
 # cases (top-left, bottom-right, bottom-left, and wholly-left-of-frame — a single visible
 # column replicated across the block). The reference edge pixels must clamp outward.
 include "src/main.cyr"
@@ -61,7 +63,7 @@ fn test_emu_edge() {
 
 fn main() {
     alloc_init();
-    test_group("emu_edge frame-boundary block fetch (7.11.3.2)");
+    test_group("emu_edge frame-boundary block fetch (7.11.3.4)");
     test_emu_edge();
     return assert_summary();
 }

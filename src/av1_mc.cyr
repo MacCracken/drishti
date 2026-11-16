@@ -754,10 +754,12 @@ fn av1_warp_affine_8x8(dst, doff, dstride, src, soff, sstride,
 # reference plane `ref` (visible size iw x ih, row stride rstride, plane origin roff, all in
 # ELEMENT units of an i64 sample array) at source position (x, y), which MAY lie partly or
 # wholly outside the frame. Out-of-bounds reads clamp to the nearest edge pixel (the AV1
-# frame-boundary MC rule, spec 7.11.3.2): the visible portion is copied, then the top / bottom
-# rows and left / right columns are replicated outward to fill the block. Writes into dst[doff..]
+# frame-boundary MC rule, spec 7.11.3.4's ref[Clip3(0, lastY, y)][Clip3(0, lastX, x)], which
+# scripts/refs/emu_edge_ref.py proves equal to dav1d's form, the one followed here): the
+# visible portion is copied, then the top / bottom rows and left / right columns are replicated
+# outward to fill the block. Writes into dst[doff..]
 # (row stride dstride). This is the padded-block fetch that feeds av1_mc_put_8tap when a motion
-# vector points near or past a frame edge; the MC driver (grows next; roadmap.md) is the caller.
+# vector points near or past a frame edge; the MC driver av1_mc_pred_block is the caller.
 # Precondition (as in dav1d): the block overlaps the frame by >=1 pixel in each axis, i.e.
 # left+right < bw and top+bottom < bh — the MV clamp (spec 7.10.2.14) guarantees it. Returns DR_OK.
 fn av1_mc_emu_edge(bw, bh, iw, ih, x, y, dst, doff, dstride, ref, roff, rstride): i64 {

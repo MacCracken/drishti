@@ -4,6 +4,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 11: the motion-compensation reference ports, restored from the spec and dav1d
+
+**The MC suites' known answers come from committed ports again, and now from the SPEC, not from one
+implementation.** `tests/av1_mc.tcyr` (the sub-pel table), `tests/av1_mc_kernel.tcyr` (`put_8tap`) and
+`tests/av1_mc_emu_edge.tcyr` (`emu_edge`) cited generators written to a scratch path in 0.7.57–0.7.60 and wiped
+since (`mc_subpel.py`, `mc_put8tap.py`, `emu_edge.py`). Each transcribed dav1d alone, which was never the right
+oracle (CLAUDE.md: spec-first, multi-source). Each replacement in `scripts/refs/` transcribes the spec AND dav1d
+and asserts them equal:
+- **`mc_subpel_ref.py`** derives drishti's table from the spec's `Subpel_Filters`, which `bilinear_mc_ref.py`
+  machine-generates from the spec markdown. It asserts every tap is even (so halving is exact), halves the taps,
+  drops phase 0 and permutes the sets, then reproduces all 90 position-weighted checksums. `--dav1d PATH` also
+  parses dav1d's own `dav1d_mc_subpel_filters` (`src/tables.c`, set by designator) and checks it entry for entry:
+  equal.
+- **`mc_put8tap_ref.py`** runs the spec's two-pass convolve (128-sum taps, both passes always,
+  `InterRound0` / `InterRound1`, `Clip1`) and dav1d's `put_8tap_c` branch for branch (copy / H / V / H+V,
+  `intermediate_bits`, the H-only rounding constant, the `w <= 4` set). They are equal on 6,108 blocks: every
+  phase pair x filter-type pair at 8x8 and 4x4, plus a seeded sweep of sizes at 8 / 10 / 12 bit.
+- **`emu_edge_ref.py`** compares the spec's per-sample `ref[Clip3(0, lastY, y)][Clip3(0, lastX, x)]` with
+  dav1d's `emu_edge_c` (copy, extend, replicate; extensions clipped to `bw - 1` / `bh - 1`). They are equal on
+  186,624 fetches: every plane and block of 1..6 samples a side, at every position from fully outside on one side
+  to fully outside on the other.
+- `mc_driver_ref.py`'s 17 driver known answers were already re-derived by `bilinear_mc_ref.py` (0.7.108), which
+  asserts them before printing anything. The four suites now cite the committed ports.
+
+**What the restoration found: dav1d's H-only rounding constant was untested.** Mutating `put_8tap`'s
+`intermediate_rnd` from 34 to 32 left `tests/av1_mc_kernel.tcyr` green.
+- The constant is right: the port proves dav1d's `(s + 34) >> 6` equal to the spec's two roundings.
+- A wrong constant shows only at a sum whose residue mod 64 is next to `64 - rnd`. The test plane's rows are
+  linear, so each block's sums share a single residue, and no case reached one that mattered.
+- Three cases now pin it:
+  - REGULAR mx6 at 8 bit, residue 30, with out[0] derived by hand (217, and 216 under 32);
+  - REGULAR mx15 at 8 bit;
+  - SHARP mx15 at 12 bit, where the constant is 40 (`intermediate_bits` 2).
+
+  The last two use a new nonlinear plane whose sums include both critical residues (29 and 30 at 8 bit, 23 and 24
+  at 12 bit). The port checks they catch every one of the 63 wrong constants.
+- Six mutants of the constant are red: 32, ±1 at either depth, a `7 - ib` slip, a dropped 12-bit `ib`, and a
+  shifted rounding.
+
+**Verified.**
+- **Cyrius mutants**, each in an isolated tree copy: 14 red, plus a green control comment edit.
+  - the H+V mid-buffer rounding;
+  - the `w <= 4` set test;
+  - `emu_edge`'s right extension, top clamp and left fill;
+  - a sub-pel row's taps changed with the row sum kept, and two taps swapped;
+  - the H-only shift;
+  - the six rounding mutants above.
+- **Port canaries**, each red for the right reason:
+  - the set permutation;
+  - a kept phase 0;
+  - dav1d's designators swapped;
+  - a known answer flipped;
+  - the spec's vertical rounding;
+  - the `w <= 4` selection;
+  - dav1d's right extension;
+  - the spec clamp's bounds.
+
+  One canary stayed green: rounding the halving up. Every spec tap is even, so the mutation is equivalent; the
+  port now says so.
+- **A harness catch.** One canary's "red" was a file-not-found (a relative `--dav1d` path), not the assertion. It
+  was rerun with the reason checked; ports read with `python3 -I`.
+- **Gates:** 44 suites, 31,855 suite + 7,416 fuzz assertions; `make conformance` 3971 / 0 / 0 / 0, unchanged. The
+  only `src/` edit is a comment.
+
+**Also fixed:** the MC kernel citations named spec 7.11.3.2, the rounding-variables process. The block inter
+prediction process is 7.11.3.4. The fix touches `docs/sources.md`, the two suites' group names and
+`src/av1_mc.cyr`'s `emu_edge` comment. **Still dead:** the motion-vector ports (`mv_ref.py`, `mvscan_ref.py`,
+`mvdriver_ref.py`) and the superres ones (`resize_ref.py`, `upscale_geom.py`, `sr_ref.py`); roadmapped.
+
 ### Added — 0.8.5 bite 10: corpus-guided fuzzing of the streaming decoder
 
 **The streaming decoder is now fuzzed from real streams, by oracles that can see what an output check cannot.**

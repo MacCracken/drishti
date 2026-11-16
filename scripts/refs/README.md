@@ -23,6 +23,9 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 | `inter_block_ref.py` | `inter_block_mode_info` (5.11.23) symbol schedule — group order/presence, `get_mode`, `has_nearmv`, the DRL read counts | `tests/av1_intermode.tcyr` (`test_inter_block_single`, `test_inter_block_compound`, `test_inter_block_interintra`, `test_inter_block_seg_and_errors`) |
 | `inter_frame_ref.py` | `inter_frame_mode_info` (5.11.15) outer dispatch — the `read_skip_mode` gate (5.11.11), the skip forcing, the `is_inter` selection, the outer schedules | `tests/av1_intermode.tcyr` (`test_skip_mode_leaf`, `test_is_inter_dispatch`, `test_inter_frame_mode_info`) |
 | `bilinear_mc_ref.py` | BILINEAR motion compensation (7.11.3.4) + the whole unscaled single-ref translation MC path; written in the **spec** convention (16 phases, rows summing to 128) as a cross-convention check on drishti's halved dav1d one. Table machine-generated from the digest-pinned spec markdown; self-validates by reproducing all 17 pre-existing driver KATs first | `tests/av1_mc_driver.tcyr` (`test_mc_pred_bilinear`), `tests/av1_mc.tcyr` (`test_filter_set_selection`) |
+| `mc_subpel_ref.py` | drishti's sub-pel filter table (7.11.3.4 `Subpel_Filters` in dav1d's form: halved, phase 0 dropped, sets permuted) derived from the spec table `bilinear_mc_ref` machine-generates — every tap asserted even, so the halving is exact — and its 90 position-weighted checksums; `--dav1d PATH` also checks it against dav1d's own `dav1d_mc_subpel_filters` (`src/tables.c`) entry for entry, parsed by designator | `tests/av1_mc.tcyr` (`test_subpel_checksum`) |
+| `mc_put8tap_ref.py` | the `put_8tap` kernel, twice: the spec's two-pass convolve (7.11.3.4: 128-sum taps, both passes always, `InterRound0` / `InterRound1`) and dav1d's `put_8tap_c` branch for branch (copy / H / V / H+V, `intermediate_bits`, the H-only rounding constant, the `w <= 4` set) — ASSERTED equal on 6,108 blocks (every phase pair x filter pair at 8x8 and 4x4, plus a seeded sweep at 8 / 10 / 12 bit). Eight known answers, two pixels by hand; the two H-only rounding-boundary cases are shown to change under a wrong constant | `tests/av1_mc_kernel.tcyr` (`test_put_8tap`) |
+| `emu_edge_ref.py` | the frame-boundary block fetch, twice: the spec's per-sample `ref[Clip3(0, lastY, y)][Clip3(0, lastX, x)]` and dav1d's `emu_edge_c` (copy the visible part, extend, replicate rows; extensions clipped to `bw - 1` / `bh - 1`) — ASSERTED equal on 186,624 fetches (every plane and block of 1..6 samples a side at every position from fully outside to fully outside); five known answers, one by hand | `tests/av1_mc_emu_edge.tcyr` |
 | `scaled_geom_ref.py` | the motion vector scaling process (7.11.3.3) — scale factors, `startX`/`startY`, `stepX`/`stepY`, `lastX`/`lastY`, `intermediateHeight` — cross-checked against libaom's different algebraic form of `startX` over 2688 combinations | `tests/av1_mc.tcyr` (`test_scaled_geometry`, `test_scaled_geometry_bounds`) |
 | `scaled_mc_ref.py` | the scaled convolve (7.11.3.4 with a non-unit step) — imports the geometry from `scaled_geom_ref` and the table from `bilinear_mc_ref` so each is transcribed exactly once | `tests/av1_mc_driver.tcyr` (`test_mc_scaled_known_answers`) |
 | `superres_ref.py` | the superres upscaling process (7.16) — geometry, the MI-grid tap clamp (`maxX = (MiCols >> subX) * MI_SIZE - 1`), the 8-tap `Upscale_Filter` (checked against the spec markdown when `build/spec-dl/` is present); its fixture puts unlike values in the overhang columns so a visible-width clamp shows | `tests/av1_superres.tcyr` (`test_superres_mi_clamp`) |
@@ -39,10 +42,22 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 
 Earlier bites (0.7.52–0.7.65) generated ports named in `CHANGELOG.md` / `docs/sources.md` —
 `mvscan_ref.py`, `mvdriver_ref.py`, `mv_ref.py`, `mc_driver_ref.py`, `emu_edge.py`,
-`mc_put8tap.py`, `resize_ref.py`, `upscale_geom.py` — under a temporary scratch path that
-is wiped between sessions. **Those files are gone, and the docs citing them point at
-nothing.** Committing new ports here fixes that going forward; the dead citations are
-flagged for the 0.7.x doc-claim audit on the roadmap.
+`mc_put8tap.py`, `mc_subpel.py`, `resize_ref.py`, `upscale_geom.py`, `sr_ref.py` — under a
+temporary scratch path that is wiped between sessions. **Those files are gone.** Committing
+ports here fixes that going forward, and the lost ones are being restored:
+
+- **Motion compensation — restored (0.8.5).** `mc_subpel_ref.py`, `mc_put8tap_ref.py` and
+  `emu_edge_ref.py` replace `mc_subpel.py`, `mc_put8tap.py` and `emu_edge.py`, and
+  `bilinear_mc_ref.py` already re-derives `mc_driver_ref.py`'s 17 driver known answers
+  before it prints anything. The originals each transcribed dav1d alone; each replacement
+  transcribes the SPEC and dav1d and asserts them equal, so the MC suites' known answers are
+  now spec answers. The restoration found one gap the originals had left: dav1d's H-only
+  rounding constant survived a mutation against all six kernel cases, and two boundary
+  cases now pin it.
+- **Still dead:** the motion-vector prediction ports `mv_ref.py`, `mvscan_ref.py` and
+  `mvdriver_ref.py` (`tests/av1_mv.tcyr`, `tests/av1_intermode.tcyr`) and the superres
+  ports `resize_ref.py`, `upscale_geom.py` and `sr_ref.py` (`tests/av1_superres.tcyr`,
+  `src/av1_superres.cyr`) — roadmapped.
 
 To be precise about what was and wasn't lost, because it matters: the ports are
 transcriptions, not the authority. **The real oracle is the AV1 spec** — public,
