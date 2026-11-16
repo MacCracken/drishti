@@ -359,6 +359,45 @@ fn test_lst_scratch_slot() {
     return 0;
 }
 
+# THE FRAME SIZE LIMIT COVERS A TILE LIST'S OUTPUT (0.8.5, found by the corpus fuzzer): that frame is sized by the
+# tile list's own header — up to 256 x 256 tiles — not by a frame header, and it escaped
+# av1_decoder_set_frame_size_limit, so a hostile file could make the decoder allocate a 16384^2 output. The committed
+# reproducer's anchors are 256x256 (65536 samples) and its first tile list's output 512x512 (262144).
+fn lst_repro_limited(limit, out_err): i64 {
+    var buf = alloc(32768);   # bytes; the reproducer is 16115
+    var n = file_read_all("tests/repro/lst-256x256.ivf", buf, 32768);
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, n, &e);
+    var dec = av1_decoder_new(0);
+    av1_decoder_set_frame_size_limit(dec, limit);
+    var out = 0;
+    var k = 0;
+    while (k < 6) {   # 4 anchors, the camera header, the first tile list
+        var pp = 0;
+        var ps = 0;
+        var pt = 0;
+        dr_ivf_next_frame(r, &pp, &ps, &pt);
+        k = k + 1;
+        var derr = 0;
+        out = av1_decoder_decode(dec, pp, ps, &derr);
+        store64(out_err, derr);
+        if (derr != DR_OK) { return k; }   # the unit that failed
+        if (k <= 4) { av1_decoder_set_anchor(dec, k - 1, av1_decoder_last_decoded(dec)); }
+        if (k == 4) { av1_decoder_set_large_scale_tile(dec, 1); }
+    }
+    return 0;
+}
+fn test_lst_frame_size_limit() {
+    var e = 0;
+    assert_eq(lst_repro_limited(262143, &e), 6, "a limit 1 under 512x512: the anchors decode, the tile list...");
+    assert_eq(e, DR_ERR_OVERSIZE, "...is refused with DR_ERR_OVERSIZE before its output is allocated");
+    assert_eq(lst_repro_limited(262144, &e), 0, "a limit of exactly 512x512: the tile list decodes");
+    assert_eq(e, DR_OK, "...cleanly");
+    assert_eq(lst_repro_limited(65535, &e), 1, "a limit under the 256x256 anchors refuses the first frame header");
+    assert_eq(e, DR_ERR_OVERSIZE, "...with DR_ERR_OVERSIZE");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("tile_list_obu (5.12) and its limits");
@@ -370,6 +409,7 @@ fn main() {
     test_lst_reset_window();
     test_group("av1_decode_tile_list refusals");
     test_lst_refusals();
+    test_lst_frame_size_limit();
     test_lst_dispatch();
     test_group("the scratch reference slot (7.3.1)");
     test_lst_scratch_slot();

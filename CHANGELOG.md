@@ -4,6 +4,96 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 10: corpus-guided fuzzing of the streaming decoder
+
+**The streaming decoder is now fuzzed from real streams, by oracles that can see what an output check cannot.**
+`tests/av1_decode.fcyr` (0.7.118) mutates one synthetic seed: a 128x64 mono still picture with one tile and no
+inter frame. **`tests/av1_corpus.fcyr`** starts from 18 committed reproducers, real libaom / rav1e / SVT-AV1
+streams that between them reach every motion mode, superres, film grain, palette, intra block copy, scalable
+layers, large-scale tile files (their tile lists decoded against the anchors, as `make conformance` does),
+quantizer matrices, segmentation, 10/12 bit and every chroma format. Each mutant is fed through
+`av1_decoder_decode` one temporal unit at a time.
+- **Mutations** (1–3 per mutant):
+  - a bit flip;
+  - a byte set to an interesting value, weighted toward the STRUCTURAL bytes: OBU headers, leb128 sizes, and the
+    first payload bytes, where the frame header's fields are;
+  - an OBU type rewrite;
+  - a temporal unit truncated, dropped, duplicated or swapped;
+  - a unit SPLICED in from another stream (a frame against another stream's sequence header and references);
+  - inserted random bytes.
+- **Guidance.** A mutant whose outcome signature is new joins the pool later mutants are bred from. The signature
+  is which unit first failed, with which code, how many frames it showed, and how deep it got (the log2 of its
+  allocation count). Of 160 mutants about 80 outcomes are distinct: 17 decode every unit, 60 are refused at the
+  first, and the rest fail mid-stream after showing 425 frames between them. The search reaches inter frames, not
+  just headers.
+- **Oracles:**
+  - **It comes back.** No crash, and no hang: a 60 s `alarm` turns one into a kill.
+  - **FENCED input.** Each unit is copied into its own mapping against a `PROT_NONE` guard page, its last byte
+    against a trailing guard in one run and its first byte after a leading guard in the other. A read outside the
+    input faults, which no output check could see; there is no address sanitizer in Cyrius.
+  - **Codes.** Every error is a documented code, and STICKY: the next call reports it again.
+  - **Frames.** Every shown frame is sane (dimensions within the frame size limit, 1 or 3 planes, depth 8/10/12),
+    and every sample of it is read into a digest.
+  - **The same outcome twice.** Each mutant runs once with the decoder's memory poisoned at every frame start and
+    once without, and the codes and digests must agree. The poisoning now also fills RELEASED POOL FRAMES with
+    0xA5, not just the arena (`dr_frame_pool_poison_free`, also on in `make conformance`). Any use of reclaimed
+    memory reachable only through a malformed stream therefore shows.
+  - **Reset.** One decoder is reset between runs. Every clean seed decodes every unit first, and a clean seed
+    re-decoded every 32 mutants must reproduce the digest a fresh decoder gave it.
+- **`make fuzz` runs a short fixed campaign (160 mutants, ~15 s).** `scripts/fuzz-campaign.sh WORKERS ITERATIONS
+  [SEED]` runs long ones in parallel, saving every mutant before it is decoded so the input that kills a worker,
+  or trips an oracle, is on disk (`build/fuzz/found-<seed>.ivf`).
+
+**Two new decoder APIs**, which a fuzzer needs and any consumer of untrusted streams wants:
+- **`av1_decoder_set_frame_size_limit(dec, max_pixels)`**, dav1d's `frame_size_limit`: a frame over the limit is
+  refused with `DR_ERR_OVERSIZE` at its header, before anything is allocated for it.
+- **`av1_decoder_reset(dec)`**: back to a new decoder (no sequence header, empty slots, no sticky error, no anchors),
+  keeping its memory and its settings. A seek, or many independent streams, reuses one decoder instead of building
+  (and never freeing) one each time.
+
+**What it found: one hole, in the frame size limit itself.** A large-scale tile list's OUTPUT frame is sized by the
+tile list's own header (`output_frame_width_in_tiles_minus_1` / `_height_`, up to 256 x 256 tiles), not by any
+frame header, so it escaped the limit. The third campaign was the first to drive the large-scale tile seeds through
+their anchors, and seven of its fourteen workers saved mutants that made the decoder allocate outputs from
+512x1088 to 512x8256 and 9216x512, past the fuzzer's 2^19-sample limit. A hostile file could have asked for
+16384x16384 (~800 MB). Now `av1_decoder_over_limit_wh` is checked before the output is allocated, and
+`tests/av1_lst.tcyr` pins it on the committed reproducer: a limit one sample under its 512x512 output decodes the
+anchors and refuses the tile list with `DR_ERR_OVERSIZE`; exactly 512x512 decodes.
+
+**Nothing else, over 147,000 mutants in four campaigns of 14 workers:**
+- 21,000 before the fences;
+- 42,000 with the trailing fence;
+- 42,000 with both fences and the large-scale tile protocol (the seven findings);
+- the same 42,000 again on the fixed decoder, all clean: 125,443 frames shown, 4,916 mutants decoding every unit.
+
+No crash, hang, read outside the input, undocumented code, non-sticky error, insane frame, or poisoned / plain
+difference.
+
+**The oracles were checked against planted bugs**, each in an isolated copy of the tree:
+- **Red:** a sequence header left in the arena (a use-after-reset, which crashed); errors made non-sticky (the
+  fuzzer also hit a SIGFPE as the decoder carried on from a half-updated state, so the sticky error is load-bearing
+  for safety); an undocumented error code; a reset that keeps the sticky error; one-byte over- and under-reads in
+  the OBU iterator (SIGSEGV on the fences).
+- **The OBU iterator's size bound deleted stayed GREEN at first.** It read past the input into mapped heap, no crash
+  and the same garbage in both runs. The fences were built for it; with them it dies with SIGSEGV. (Recorded in
+  `docs/guides/verification.md`.)
+- **Two plants are equivalent, as expected:** the FRAME OBU's truncation check (the frame decoder refuses the
+  negative size anyway) and a reset that leaves the DPB (every seed opens with a keyframe that refreshes every
+  slot).
+
+**Tests** (+28): the two APIs (`tests/av1_decode.tcyr`: a limit one sample short refuses the 64x64 keyframe, exactly
+64x64 decodes the same pictures as no limit, a negative limit is refused; a reset clears a sticky error, the
+sequence header and the count, a reset mid-stream leaves nothing behind, and a reset-and-decode loop takes no new
+memory), the limit on a tile list's output (`tests/av1_lst.tcyr`), and the pool poisoning (`tests/frame.tcyr`).
+Mutation testing on those: **6 of 6** red (the fix reverted, the limit off by one, the frame-header check removed,
+a reset that keeps the sequence header or the count, poisoning that skips free frames).
+
+`make conformance` is **3971 matched / 0 known-gap / 0 regressed / 0 skipped** — now also with released pool frames
+poisoned at every frame start.
+
+**Gates:** 44 suites, **31,846** assertions, **7,416** fuzz (now three harnesses); bench, `vet`, `lint`, `fmt-check`,
+`version-check` and `distlib --check` all green.
+
 ### Changed — 0.8.5 bite 9: the warp LS_MAT accumulator clamp, settled — none exists, and none is needed
 
 **There is no accumulator clamp to model, and no stream can need one.** `src/av1_mv.cyr` carried "the

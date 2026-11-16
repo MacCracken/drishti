@@ -198,7 +198,8 @@ enum Av1DecOff {
     AV1DEC_IT     = 192;  # the OBU iterator, reused by every call
     AV1DEC_SEQBUF = 200;  # the decoder's own copy of the active sequence header (AV1DEC_SEQ points here)
     AV1DEC_CAMBUF = 208;  # its own copy of the camera frame header (AV1DEC_CAMFH points here)
-    AV1DEC_SIZE   = 216;
+    AV1DEC_MAXPIX = 216;  # the frame size limit in luma samples (0 = none): av1_decoder_set_frame_size_limit
+    AV1DEC_SIZE   = 224;
 }
 # MEMORY (0.8.5). drishti's allocator never frees, and a decoder that took everything from it grew by ~35-60 bytes per
 # pixel per frame, for ever. Now a decoder owns its memory, and a long stream settles at a fixed footprint:
@@ -231,6 +232,7 @@ fn av1_decoder_frame_start(dec): i64 {
         var j = 0;
         while (j < load64(dec + AV1DEC_NANCH)) { dr_frame_pool_root(pool, load64(anch + (j * 8))); j = j + 1; }
     }
+    dr_frame_pool_poison_free(pool);   # only with poisoning on (make conformance, the corpus fuzzer)
     dr_arena_reset(load64(dec + AV1DEC_ARENA));
     store64(dec + AV1DEC_FH, 0);    # anything pending died with the arena
     store64(dec + AV1DEC_FDC, 0);
@@ -276,6 +278,57 @@ fn av1_decoder_new_in(dpb): i64 {
     store64(d + AV1DEC_POOL, pool);
     store64(d + AV1DEC_IT, it);
     return d;
+}
+# Refuse any frame larger than max_pixels luma samples with DR_ERR_OVERSIZE, as dav1d's frame_size_limit does: a
+# stream that declares a huge frame cannot make the decoder allocate and clear it. Checked at every frame header
+# (UpscaledWidth x FrameHeight) and for every large-scale tile list's output frame. 0 (the default) is no limit beyond
+# DR_FRAME_MAX_DIM per side. A negative limit is DR_ERR_BOUNDS. Takes effect at the next frame header or tile list.
+fn av1_decoder_set_frame_size_limit(dec, max_pixels): i64 {
+    if (max_pixels < 0) { return DR_ERR_BOUNDS; }
+    store64(dec + AV1DEC_MAXPIX, max_pixels);
+    return DR_OK;
+}
+# 1 when the frame header fh is over the decoder's frame size limit
+fn av1_decoder_over_limit(dec, fh): i64 {
+    return av1_decoder_over_limit_wh(dec, av1_fh_upscaled_width(fh), av1_fh_frame_height(fh));
+}
+# 1 when a w x h frame is over it — every frame the decoder makes from stream-declared sizes is checked, a large-scale
+# tile list's OUTPUT frame included: that one is sized by the tile list's own header (up to 256 x 256 tiles), not by
+# any frame header, and until 0.8.5 bite 10 it escaped the limit (found by the corpus fuzzer)
+fn av1_decoder_over_limit_wh(dec, w, h): i64 {
+    var lim = load64(dec + AV1DEC_MAXPIX);
+    if (lim == 0) { return 0; }
+    return (w * h) > lim;
+}
+# Restart the decoder as if it were new — no sequence header, empty reference slots, no sticky error, no anchors or
+# large-scale tile mode — while it keeps its memory: its arena, its frame pool, its slots' own buffers, its header
+# copies, and its settings (the requested operating point, the frame size limit). A caller that seeks, or decodes
+# many independent streams, reuses one decoder instead of building (and never freeing) one each time. Every frame it
+# returned is invalid after this. Returns DR_OK.
+fn av1_decoder_reset(dec): i64 {
+    memset(load64(dec + AV1DEC_DPB), 0, AV1DPB_SIZE);
+    memset(load64(dec + AV1DEC_REFS), 0, AV1REF_OWN);   # everything up to the slots' own buffers, which stay
+    store64(dec + AV1DEC_SEQ, 0);
+    store64(dec + AV1DEC_FH, 0);
+    store64(dec + AV1DEC_FDC, 0);
+    store64(dec + AV1DEC_SHOWN, 0);
+    store64(dec + AV1DEC_NSHOWN, 0);
+    store64(dec + AV1DEC_COUNT, 0);
+    store64(dec + AV1DEC_ERR, DR_OK);
+    store64(dec + AV1DEC_LAST, 0);
+    store64(dec + AV1DEC_LST, 0);
+    var anch = load64(dec + AV1DEC_ANCH);
+    if (anch != 0) { memset(anch, 0, 128 * 8); }
+    store64(dec + AV1DEC_NANCH, 0);
+    store64(dec + AV1DEC_CAMFH, 0);
+    store64(dec + AV1DEC_TL_N, 0);
+    store64(dec + AV1DEC_TL_TW, 0);
+    store64(dec + AV1DEC_TL_TH, 0);
+    store64(dec + AV1DEC_TL_OW, 0);
+    store64(dec + AV1DEC_OPSEL, 0);
+    store64(dec + AV1DEC_OPIDC, 0);
+    av1_decoder_frame_start(dec);   # nothing is rooted now but the grain output: every pooled frame is free
+    return DR_OK;
 }
 # the decoder's memory, for a caller that bounds or reports it: the bytes its arena holds, and its pooled frames
 fn av1_decoder_arena_bytes(dec): i64 { return dr_arena_capacity(load64(dec + AV1DEC_ARENA)); }
@@ -438,6 +491,7 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var cfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &cerr);
             if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
             if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            if (av1_decoder_over_limit(dec, cfh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             # the decoder's own copy: every tile list after it is a frame start, which rewinds the arena
             cfh = av1_decoder_own_copy(dec, AV1DEC_CAMBUF, cfh, AV1FH_SIZE);
             if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
@@ -466,6 +520,7 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var nfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { return av1_decoder_fail(dec, ferr, out_err); }
             if (nfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            if (av1_decoder_over_limit(dec, nfh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             store64(dec + AV1DEC_FH, nfh);
             store64(dec + AV1DEC_FDC, 0);   # a new frame begins; any prior context is retired
             if (av1_fh_show_existing_frame(nfh) == 1) {
@@ -487,6 +542,7 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var ffh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &frr);
             if (frr != DR_OK) { return av1_decoder_fail(dec, frr, out_err); }
             if (ffh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            if (av1_decoder_over_limit(dec, ffh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
             if (hbytes > osize) { return av1_decoder_fail(dec, DR_ERR_TRUNCATED, out_err); }
             var derr = 0;

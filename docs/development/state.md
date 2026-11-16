@@ -1868,7 +1868,16 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > and that det is a multiple of 16 (the `divShift < 0` branch, where libaom's int16_t would wrap, never runs).
 > An assert-enabled, instrumented libaom (`ref/aom-build-ls`, `AOMLS` print) over the whole corpus: 44,206
 > estimations, 0 aborts, max sum 709,332. `av1_warp_ls_accumulate` factored out for the test. Gate: 3971 / 0 / 0 / 0.
-> Next: corpus-guided fuzzing, the missing MC ref generators, the two streams others refuse.
+>
+> Bite 10 = **corpus-guided fuzzing**: `tests/av1_corpus.fcyr` (in `make fuzz`, 160 mutants) mutates 18 committed
+> reproducers (structure-aware: OBU headers / sizes / first payload bytes, unit drop / dup / swap / splice across
+> streams, truncation, insertion) and keeps mutants with new outcome signatures. Oracles: no crash or hang (alarm),
+> FENCED units (each against a PROT_NONE page, trailing then leading), documented + sticky codes, sane frames, the
+> same outcome poisoned and plain (released pool frames now poisoned too), clean seeds reproduced after
+> `av1_decoder_reset`. NEW APIs: `av1_decoder_set_frame_size_limit` (DR_ERR_OVERSIZE) and `av1_decoder_reset`.
+> FOUND: a large-scale tile list's output frame escaped the frame size limit (fixed). `scripts/fuzz-campaign.sh`
+> runs long parallel campaigns. Gate: 3971 / 0 / 0 / 0. Next: the missing MC ref generators, the two streams others
+> refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

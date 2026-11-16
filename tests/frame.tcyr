@@ -425,6 +425,28 @@ fn test_frame_pool() {
     assert_eq(dr_frame_pool_root(pool, 12345), 0, "rooting a frame the pool does not own is ignored");
     return 0;
 }
+# with poisoning on, a sweep's FREE frames are filled with 0xA5 (each u16 sample reads 0xA5A5); held ones are not
+fn test_frame_pool_poison() {
+    var pool = dr_frame_pool_new();
+    var prev = dr_frame_pool_use(pool);
+    var e = 0;
+    var held = dr_frame_new(16, 16, 3, 1, 1, 8, 2, &e);
+    var freed = dr_frame_new(16, 16, 3, 1, 1, 8, 2, &e);
+    dr_frame_set(held, 0, 3, 3, 77);
+    dr_frame_set(freed, 2, 7, 7, 55);
+    dr_frame_pool_sweep(pool);
+    dr_frame_pool_root(pool, held);
+    dr_frame_pool_poison_free(pool);
+    assert_eq(dr_frame_get(freed, 2, 7, 7), 55, "poisoning off: a free frame keeps its samples");
+    dr_alloc_set_poison(1);
+    dr_frame_pool_poison_free(pool);
+    dr_alloc_set_poison(0);
+    assert_eq(dr_frame_get(freed, 2, 7, 7), 0xA5A5, "poisoning on: a free frame's samples read 0xA5A5");
+    assert_eq(dr_frame_get(freed, 0, 0 - 2, 0 - 2), 0xA5A5, "...border included");
+    assert_eq(dr_frame_get(held, 0, 3, 3), 77, "...a held frame is untouched");
+    dr_frame_pool_use(prev);
+    return 0;
+}
 # every allocation of a pooled take failing -> 0 with DR_ERR_OOM, and no half-built entry is left behind
 var Fp_Oom_Pool = 0;
 fn frame_pool_oom_op(a): i64 {
@@ -472,6 +494,7 @@ fn main() {
     test_group("frame pool");
     test_frame_pool();
     test_frame_pool_oom();
+    test_frame_pool_poison();
     return assert_summary();
 }
 

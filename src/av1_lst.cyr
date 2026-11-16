@@ -189,6 +189,10 @@ fn av1_decode_tile_list(dec, buf, sz, out_err): i64 {
         }
         vi = vi + 1;
     }
+    # the decoder's frame size limit holds for the output frame too (av1_decoder_over_limit_wh)
+    if (av1_decoder_over_limit_wh(dec, ow * tw, load64(tl + AV1TL_OUT_H) * th) != 0) {
+        store64(out_err, DR_ERR_OVERSIZE); return 0;
+    }
     var ferr = 0;
     var out = dr_frame_new(ow * tw, load64(tl + AV1TL_OUT_H) * th, np, subx, suby, bd, 0, &ferr);
     if (out == 0) { store64(out_err, ferr); return 0; }

@@ -236,6 +236,26 @@ fn dr_frame_pool_sweep(pool): i64 {
     }
     return 0;
 }
+# with poisoning on (dr_alloc_set_poison), fill every FREE frame's planes with 0xA5: a stale pointer to a frame the
+# owner released then reads garbage instead of plausible old pixels (0.8.5; a reused frame is zeroed regardless)
+fn dr_frame_pool_poison_free(pool): i64 {
+    if (Dr_Alloc_Poison == 0) { return 0; }
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        var e = load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE);
+        if (load64(e + DR_FPENT_INUSE) == 0) {
+            var p = 0;
+            while (p < 3) {
+                if (load64(e + DR_FPENT_BUF + (p * 8)) != 0) {
+                    dr_fill(load64(e + DR_FPENT_BUF + (p * 8)), 0xA5, load64(e + DR_FPENT_BCAP + (p * 8)));
+                }
+                p = p + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 # frame f is still held (a frame the pool does not own, or 0, is ignored)
 fn dr_frame_pool_root(pool, f): i64 {
     if (f == 0) { return 0; }

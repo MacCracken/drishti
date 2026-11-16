@@ -237,6 +237,23 @@ above in another form.
 > the k-th allocation once. `dr_alloc_sweep` sweeps an in-process operation. `scripts/oom-sweep.sh
 > sweep NAME IVF sites` fails every allocation site of a stream, a fresh process per k.
 
+### A read past the input is invisible until something makes it fault
+
+0.8.5's corpus fuzzer checked everything it could see: no crash, documented error codes, sticky
+errors, the same pictures with and without poisoned memory. Then a planted bug, the OBU iterator's
+size bound deleted, survived 300 mutants. The iterator read past the end of its input into heap that
+was mapped, so nothing crashed, and both runs read the same garbage, so nothing differed. Cyrius has
+no address sanitizer.
+
+The fix is the electric-fence technique. Each input unit is copied into its own mapping with its last
+byte against a `PROT_NONE` page, so the first byte read past it faults. The second run puts the unit
+after a leading guard page instead, so a read before it faults too. The same planted bug then died
+with SIGSEGV within the first mutants, and planted one-byte over- and under-reads both died.
+
+> **Do:** before trusting a fuzzer's silence, plant the bugs it exists to find — a missing bound, an
+> out-of-range code, state leaking across a reset — and watch each one go red. An oracle on outputs
+> cannot see a bad read whose value never reaches an output; make that read fault.
+
 ### A spec-literal reference port is necessary and NOT sufficient
 
 The loop above says known answers come from a port in `scripts/refs/`, never from the Cyrius.

@@ -1962,6 +1962,78 @@ fn test_decoder_memory_bound() {
     return 0;
 }
 
+# ---- av1_decoder_set_frame_size_limit / av1_decoder_reset (0.8.5) ----
+fn test_decoder_frame_size_limit() {
+    var buf = alloc(65536);   # bytes
+    var len = file_read_all("tests/repro/inter-6frame.ivf", buf, 65536);   # 64x64: 4096 samples
+    var dec = av1_decoder_new(0);
+    assert_eq(av1_decoder_set_frame_size_limit(dec, 0 - 1), DR_ERR_BOUNDS, "a negative limit is refused");
+    assert_eq(av1_decoder_set_frame_size_limit(dec, 4095), DR_OK, "a limit one sample short of 64x64");
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, len, &e);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    dr_ivf_next_frame(r, &pp, &ps, &pt);
+    var derr = 0;
+    assert_eq(av1_decoder_decode(dec, pp, ps, &derr), 0, "...the 64x64 keyframe is refused");
+    assert_eq(derr, DR_ERR_OVERSIZE, "...with DR_ERR_OVERSIZE");
+    av1_decoder_reset(dec);
+    assert_eq(av1_decoder_set_frame_size_limit(dec, 4096), DR_OK, "a limit of exactly 64x64");
+    var d = 0;
+    assert_gt(dec_mem_pass(dec, buf, len, &d), 0 - 1, "...decodes the whole stream");
+    var dfree = 0;
+    dec_mem_pass(av1_decoder_new(0), buf, len, &dfree);
+    assert_eq(d, dfree, "...the same pictures as a decoder without a limit");
+    return 0;
+}
+fn test_decoder_reset() {
+    var buf = alloc(65536);   # bytes
+    var len = file_read_all("tests/repro/inter-6frame.ivf", buf, 65536);
+    var dec = av1_decoder_new(0);
+    var d0 = 0;
+    dec_mem_pass(dec, buf, len, &d0);
+    # a sticky error, then a reset: the decoder works again
+    var junk = alloc(16);
+    memset(junk, 0xFF, 16);
+    var e1 = 0;
+    av1_decoder_decode(dec, junk, 16, &e1);
+    assert_neq(e1, DR_OK, "junk fails");
+    assert_eq(av1_decoder_error(dec), e1, "...and the error is sticky");
+    assert_eq(av1_decoder_reset(dec), DR_OK, "reset");
+    assert_eq(av1_decoder_error(dec), DR_OK, "...clears the sticky error");
+    assert_eq(av1_decoder_seq(dec), 0, "...and the sequence header");
+    assert_eq(av1_decoder_count(dec), 0, "...and the frame count");
+    var d1 = 0;
+    assert_gt(dec_mem_pass(dec, buf, len, &d1), 0 - 1, "the stream decodes after the reset");
+    assert_eq(d1, d0, "...showing the same pictures");
+    # a reset mid-stream leaves nothing behind: three units, a reset, then the whole stream from its keyframe
+    av1_decoder_reset(dec);
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, len, &e);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    var k = 0;
+    while ((k < 3) && (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK)) {
+        var derr = 0;
+        av1_decoder_decode(dec, pp, ps, &derr);
+        k = k + 1;
+    }
+    av1_decoder_reset(dec);
+    var d2 = 0;
+    dec_mem_pass(dec, buf, len, &d2);
+    assert_eq(d2, d0, "a reset mid-stream: the next stream decodes exactly as on a new decoder");
+    # and keeps the decoder's memory: a reset-and-decode loop takes nothing new
+    # (dec_mem_pass counts only the bytes taken inside the decode calls, not its own IVF reader)
+    av1_decoder_reset(dec);
+    var dx = 0;
+    assert_eq(dec_mem_pass(dec, buf, len, &dx), 0, "reset keeps the memory: decoding again takes nothing new");
+    av1_decoder_reset(dec);
+    assert_eq(dec_mem_pass(dec, buf, len, &dx), 0, "...nor again");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
@@ -2024,6 +2096,9 @@ fn main() {
     test_decoder_oom();
     test_group("the memory bound");
     test_decoder_memory_bound();
+    test_group("frame size limit and decoder reset");
+    test_decoder_frame_size_limit();
+    test_decoder_reset();
     return assert_summary();
 }
 

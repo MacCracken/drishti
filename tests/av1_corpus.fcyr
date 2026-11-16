@@ -1,0 +1,623 @@
+# tests/av1_corpus.fcyr — CORPUS-GUIDED fuzzing of the streaming AV1 decoder (0.8.5).
+#
+# tests/av1_decode.fcyr mutates one synthetic seed: a 128x64 mono still picture, one tile, no inter frame. This
+# harness starts from the committed reproducers instead (tests/repro/*.ivf, real libaom / rav1e / SVT-AV1 streams).
+# Between them they reach inter frames and every motion mode, superres, film grain, palette, intra block copy, scalable
+# layers, large-scale tile files, quantizer matrices, segmentation, 10 / 12 bit and every chroma format. It mutates
+# them with structure in mind, and feeds every mutant through av1_decoder_decode one temporal unit at a time.
+#
+# MUTATIONS (1 to 3 per mutant): a bit flip; a byte set to an interesting value, weighted toward the STRUCTURAL bytes
+# (OBU headers, leb128 sizes, and the first payload bytes, where the frame header's fields sit); an OBU type rewrite;
+# a temporal unit truncated, dropped, duplicated, swapped, or SPLICED in from another stream (a frame decoded against
+# another stream's sequence header and references); random bytes inserted.
+#
+# GUIDANCE: a mutant whose outcome signature is new — which unit failed, with which code, how many frames it
+# showed, and how deep it got (the log2 of its allocation count) — joins the pool that later mutants are bred from,
+# so the search keeps what got further into the decoder.
+#
+# THE ORACLES:
+#   * it comes back: no crash, and no hang (a SIGALRM after 60 s kills the run, x86_64 Linux) — and every unit is
+#     FENCED (its last byte against an unreadable page), so a read past the input is a crash too;
+#   * every error is a documented code, and STICKY: the next call reports it again;
+#   * every shown frame is sane (positive dimensions within the frame size limit, 1 or 3 planes, depth 8/10/12), and
+#     every sample of it is read into a digest;
+#   * the SAME outcome twice: each mutant is decoded once with the decoder's memory poisoned at every frame start
+#     (arena and released pool frames filled with 0xA5) and once without, and the codes and digests must agree. A
+#     pointer into reclaimed memory reads different garbage in the two runs, so a use-after-reset reachable only
+#     through a malformed stream shows here;
+#   * a decoder survives anything: one decoder, av1_decoder_reset between runs, and every clean seed it decodes
+#     again later must reproduce the digest a fresh decoder gave it at the start.
+#
+# `make fuzz` runs a short fixed campaign. scripts/fuzz-campaign.sh runs long ones: it gives each worker a directory
+# with a fuzz.cfg ("seed iterations save"), and with save = 1 every mutant is written to fuzz-cur.ivf before it is
+# decoded, so the input that kills a worker is on disk.
+include "src/main.cyr"
+
+var Fz_Seed = 0x8058;
+var Fz_Iters = 160;
+var Fz_Save = 0;
+fn fz_rand(): i64 {
+    var s = Fz_Seed;
+    s = s ^ (s << 13);
+    s = s ^ (s >> 7);
+    s = s ^ (s << 17);
+    s = s & 0x7FFFFFFFFFFFFFFF;
+    Fz_Seed = s;
+    return s;
+}
+fn fz_below(n): i64 {
+    if (n <= 0) { return 0; }
+    return fz_rand() % n;
+}
+
+# ---- the seeds: the committed reproducers, split into temporal units ----
+var Fz_NSeed = 0;
+var Fz_SeedTu = 0;    # [32 seeds] -> u64 pointer to [64] TU pointers
+var Fz_SeedLen = 0;   # [32 seeds] -> [64] TU lengths
+var Fz_SeedN = 0;     # [32] TU counts
+var Fz_SeedDig = 0;   # [32] the digest a FRESH decoder gives the clean seed
+var Fz_SeedAnch = 0;  # [32] large-scale tile files: how many leading units are anchor frames (0 = an ordinary stream)
+fn fz_load(path, nanch): i64 {
+    var buf = alloc(131072);   # bytes; the reproducers are under 128 KB
+    var n = file_read_all(path, buf, 131072);
+    if (n <= 32) { return 0; }
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, n, &e);
+    if (r == 0) { return 0; }
+    var tus = alloc(64 * 8);
+    var lens = alloc(64 * 8);
+    var k = 0;
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    while ((k < 64) && (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK)) {
+        store64(tus + (k * 8), pp);
+        store64(lens + (k * 8), ps);
+        k = k + 1;
+    }
+    var i = Fz_NSeed;
+    store64(Fz_SeedTu + (i * 8), tus);
+    store64(Fz_SeedLen + (i * 8), lens);
+    store64(Fz_SeedN + (i * 8), k);
+    store64(Fz_SeedAnch + (i * 8), nanch);
+    Fz_NSeed = Fz_NSeed + 1;
+    return k;
+}
+
+# ---- a mutant: up to 64 temporal units, each its own buffer (from the per-mutant scratch arena) ----
+var Fz_Arena = 0;      # the mutation scratch, reset per mutant (a DrArena used directly, not as a scope)
+var Fz_MTu = 0;        # [64] TU pointers
+var Fz_MLen = 0;       # [64] TU lengths
+var Fz_MN = 0;
+var Fz_MAnch = 0;      # the mutant's anchor count (its base seed's; 0 = ordinary)
+fn fz_copy_in(src, n): i64 {   # a fresh scratch copy of n bytes (+64 of slack for insertions)
+    var b = dr_arena_alloc(Fz_Arena, n + 64);
+    var i = 0;
+    while (i < n) { store8(b + i, load8(src + i)); i = i + 1; }
+    return b;
+}
+fn fz_mutant_from_seed(si): i64 {
+    Fz_MN = load64(Fz_SeedN + (si * 8));
+    Fz_MAnch = load64(Fz_SeedAnch + (si * 8));
+    var i = 0;
+    while (i < Fz_MN) {
+        var n = load64(load64(Fz_SeedLen + (si * 8)) + (i * 8));
+        store64(Fz_MTu + (i * 8), fz_copy_in(load64(load64(Fz_SeedTu + (si * 8)) + (i * 8)), n));
+        store64(Fz_MLen + (i * 8), n);
+        i = i + 1;
+    }
+    return 0;
+}
+# the guidance pool: mutants kept because their outcome was new (raw copies, at most 96)
+var Fz_PoolTu = 0;     # [96] -> [64] TU pointers
+var Fz_PoolLen = 0;    # [96] -> [64] lengths
+var Fz_PoolN = 0;      # [96] TU counts
+var Fz_PoolAnch = 0;   # [96] anchor counts
+var Fz_NPool = 0;
+fn fz_pool_add(): i64 {
+    var slot = Fz_NPool;
+    if (slot >= 96) { slot = fz_below(96); } else { Fz_NPool = Fz_NPool + 1; }
+    var tus = alloc(64 * 8);
+    var lens = alloc(64 * 8);
+    var i = 0;
+    while (i < Fz_MN) {
+        var n = load64(Fz_MLen + (i * 8));
+        var b = alloc(n + 1);
+        var j = 0;
+        while (j < n) { store8(b + j, load8(load64(Fz_MTu + (i * 8)) + j)); j = j + 1; }
+        store64(tus + (i * 8), b);
+        store64(lens + (i * 8), n);
+        i = i + 1;
+    }
+    store64(Fz_PoolTu + (slot * 8), tus);
+    store64(Fz_PoolLen + (slot * 8), lens);
+    store64(Fz_PoolN + (slot * 8), Fz_MN);
+    store64(Fz_PoolAnch + (slot * 8), Fz_MAnch);
+    return 0;
+}
+fn fz_mutant_from_pool(pi): i64 {
+    Fz_MN = load64(Fz_PoolN + (pi * 8));
+    Fz_MAnch = load64(Fz_PoolAnch + (pi * 8));
+    var i = 0;
+    while (i < Fz_MN) {
+        var n = load64(load64(Fz_PoolLen + (pi * 8)) + (i * 8));
+        store64(Fz_MTu + (i * 8), fz_copy_in(load64(load64(Fz_PoolTu + (pi * 8)) + (i * 8)), n));
+        store64(Fz_MLen + (i * 8), n);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---- structural positions inside a temporal unit: OBU header bytes, leb128 size bytes, first payload bytes ----
+var Fz_Pos = 0;        # [256] byte offsets
+fn fz_struct_positions(b, len): i64 {
+    var np = 0;
+    var pos = 0;
+    var guard = 0;
+    while ((pos < len) && (np < 240) && (guard < 64)) {
+        var hdr = load8(b + pos);
+        store64(Fz_Pos + (np * 8), pos);
+        np = np + 1;
+        var p = pos + 1 + ((hdr >> 2) & 1);
+        var size = len - p;
+        if (((hdr >> 1) & 1) != 0) {
+            size = 0;
+            var shift = 0;
+            var more = 1;
+            while ((more != 0) && (p < len) && (shift < 56)) {
+                var c = load8(b + p);
+                store64(Fz_Pos + (np * 8), p);
+                if (np < 240) { np = np + 1; }
+                size = size | ((c & 127) << shift);
+                shift = shift + 7;
+                more = c & 128;
+                p = p + 1;
+            }
+        }
+        if ((size < 0) || (size > (len - p))) { size = len - p; }
+        var k = 0;
+        while ((k < 8) && (k < size) && (np < 240)) {
+            store64(Fz_Pos + (np * 8), p + k);
+            np = np + 1;
+            k = k + 1;
+        }
+        pos = p + size;
+        guard = guard + 1;
+    }
+    return np;
+}
+fn fz_interesting(): i64 {
+    var r = fz_below(9);
+    if (r == 0) { return 0; }
+    if (r == 1) { return 1; }
+    if (r == 2) { return 0x7F; }
+    if (r == 3) { return 0x80; }
+    if (r == 4) { return 0xFF; }
+    if (r == 5) { return 0x10; }
+    if (r == 6) { return 0x40; }
+    return fz_below(256);
+}
+# one mutation of the current mutant; returns the operator applied (0..9)
+fn fz_mutate_once(): i64 {
+    if (Fz_MN == 0) { return 0 - 1; }
+    var t = fz_below(Fz_MN);
+    var b = load64(Fz_MTu + (t * 8));
+    var len = load64(Fz_MLen + (t * 8));
+    var op = fz_below(10);
+    if ((op == 0) && (len > 0)) {   # bit flip
+        var bp = fz_below(len * 8);
+        store8(b + (bp >> 3), load8(b + (bp >> 3)) ^ (1 << (bp & 7)));
+    }
+    if (((op == 1) || (op == 2)) && (len > 0)) {   # a structural byte (twice as likely), interesting value
+        var np = fz_struct_positions(b, len);
+        if (np > 0) { store8(b + load64(Fz_Pos + (fz_below(np) * 8)), fz_interesting()); }
+    }
+    if ((op == 3) && (len > 0)) {   # any byte, interesting value
+        store8(b + fz_below(len), fz_interesting());
+    }
+    if ((op == 4) && (len > 0)) {   # an OBU's type rewritten (forbidden bit and has_size kept)
+        var np2 = fz_struct_positions(b, len);
+        if (np2 > 0) {
+            var hp = load64(Fz_Pos + 0);
+            store8(b + hp, (load8(b + hp) & 0x87) | (fz_below(16) << 3));
+        }
+    }
+    if (op == 5) {   # truncation
+        store64(Fz_MLen + (t * 8), fz_below(len + 1));
+    }
+    if ((op == 6) && (Fz_MN > 1)) {   # drop a unit
+        var i = t;
+        while (i < (Fz_MN - 1)) {
+            store64(Fz_MTu + (i * 8), load64(Fz_MTu + ((i + 1) * 8)));
+            store64(Fz_MLen + (i * 8), load64(Fz_MLen + ((i + 1) * 8)));
+            i = i + 1;
+        }
+        Fz_MN = Fz_MN - 1;
+    }
+    if ((op == 7) && (Fz_MN < 64)) {   # duplicate a unit (in place: the copy follows it)
+        var j = Fz_MN;
+        while (j > t) {
+            store64(Fz_MTu + (j * 8), load64(Fz_MTu + ((j - 1) * 8)));
+            store64(Fz_MLen + (j * 8), load64(Fz_MLen + ((j - 1) * 8)));
+            j = j - 1;
+        }
+        store64(Fz_MTu + ((t + 1) * 8), fz_copy_in(b, len));
+        Fz_MN = Fz_MN + 1;
+    }
+    if (op == 8) {   # swap two units, or splice one in from another seed
+        if (fz_below(2) == 0) {
+            var u = fz_below(Fz_MN);
+            var tb = load64(Fz_MTu + (u * 8));
+            var tl = load64(Fz_MLen + (u * 8));
+            store64(Fz_MTu + (u * 8), b);
+            store64(Fz_MLen + (u * 8), len);
+            store64(Fz_MTu + (t * 8), tb);
+            store64(Fz_MLen + (t * 8), tl);
+        } else {
+            var si = fz_below(Fz_NSeed);
+            var sn = load64(Fz_SeedN + (si * 8));
+            if (sn > 0) {
+                var su = fz_below(sn);
+                var sl = load64(load64(Fz_SeedLen + (si * 8)) + (su * 8));
+                store64(Fz_MTu + (t * 8), fz_copy_in(load64(load64(Fz_SeedTu + (si * 8)) + (su * 8)), sl));
+                store64(Fz_MLen + (t * 8), sl);
+            }
+        }
+    }
+    if (op == 9) {   # insert 1..16 random bytes (the copy's slack holds them)
+        var nb = fz_below(16) + 1;
+        var nbuf = dr_arena_alloc(Fz_Arena, len + nb + 64);
+        var at = fz_below(len + 1);
+        var x = 0;
+        while (x < at) { store8(nbuf + x, load8(b + x)); x = x + 1; }
+        var y = 0;
+        while (y < nb) { store8(nbuf + at + y, fz_below(256)); y = y + 1; }
+        while (x < len) { store8(nbuf + x + nb, load8(b + x)); x = x + 1; }
+        store64(Fz_MTu + (t * 8), nbuf);
+        store64(Fz_MLen + (t * 8), len + nb);
+    }
+    return op;
+}
+
+# ---- FENCED input: each unit copied into its own mapping, against an unreadable guard page ----
+# Cyrius has no address sanitizer, and a read outside the input lands in mapped heap: no crash, and the same garbage
+# in both runs, so the other oracles cannot see it. With the unit against a PROT_NONE page, the first byte read past
+# it faults and the run dies with SIGSEGV (the electric-fence technique). side 0 puts the unit's LAST byte against a
+# trailing guard (an over-read faults), side 1 its FIRST byte after a leading guard (an under-read faults); the two
+# runs of a mutant use one side each. x86_64 Linux syscalls.
+var Fz_FTu = 0;      # [65] fenced copies
+var Fz_FMap = 0;     # [65] their mappings
+var Fz_FMapLen = 0;  # [65] mapping lengths
+fn fz_fence_all(tus, lens, n, side): i64 {
+    var i = 0;
+    while (i < n) {
+        var len = load64(lens + (i * 8));
+        var data_pages = (len + 4095) >> 12;
+        if ((side == 1) && (data_pages == 0)) { data_pages = 1; }   # the unit's (empty) data inside the mapping
+        var maplen = (data_pages + 1) << 12;
+        var m = syscall(9, 0, maplen, 3, 0x22, 0 - 1, 0);   # mmap(PROT_READ | PROT_WRITE, PRIVATE | ANONYMOUS)
+        var dst = m + 4096;                                  # side 1: after a leading guard page
+        if (side == 0) {
+            syscall(10, m + (data_pages << 12), 4096, 0);    # mprotect(the last page, PROT_NONE)
+            dst = m + (data_pages << 12) - len;
+        } else {
+            syscall(10, m, 4096, 0);                         # mprotect(the first page, PROT_NONE)
+        }
+        var src = load64(tus + (i * 8));
+        var j = 0;
+        while (j < len) { store8(dst + j, load8(src + j)); j = j + 1; }
+        store64(Fz_FTu + (i * 8), dst);
+        store64(Fz_FMap + (i * 8), m);
+        store64(Fz_FMapLen + (i * 8), maplen);
+        i = i + 1;
+    }
+    return 0;
+}
+fn fz_unfence_all(n): i64 {
+    var i = 0;
+    while (i < n) { syscall(11, load64(Fz_FMap + (i * 8)), load64(Fz_FMapLen + (i * 8))); i = i + 1; }
+    return 0;
+}
+
+# ---- running a mutant through the decoder ----
+var Fz_Dec = 0;
+var Fz_LIMIT = 524288;   # the frame size limit: 2^19 samples, above every seed's frame
+var Fz_Codes = 0;        # [64] per-unit error codes of the last run
+var Fz_Frames = 0;       # frames shown in the last run
+var Fz_Depth = 0;        # its allocation count
+var Fz_Bad = 0;          # oracle failures (kept going so a campaign reports them all)
+fn fz_known(e): i64 {
+    if (e == DR_ERR_OTHER) { return 1; }
+    if ((e >= DR_OK) && (e <= DR_ERR_OOM)) { return 1; }
+    if ((e >= 10) && (e <= 29)) { return 1; }   # the AV1 band
+    return 0;
+}
+fn fz_frame_ok(f): i64 {
+    var w = dr_frame_width(f);
+    var h = dr_frame_height(f);
+    if ((w <= 0) || (h <= 0) || ((w * h) > Fz_LIMIT)) { return 0; }
+    var np = dr_frame_num_planes(f);
+    if ((np != 1) && (np != 3)) { return 0; }
+    var bd = dr_frame_bit_depth(f);
+    if ((bd != 8) && (bd != 10) && (bd != 12)) { return 0; }
+    return 1;
+}
+fn fz_digest_frame(f, d): i64 {
+    var p = 0;
+    while (p < dr_frame_num_planes(f)) {
+        var y = 0;
+        while (y < dr_frame_plane_height(f, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(f, p)) {
+                d = ((d * 31) + dr_frame_get(f, p, x, y)) & 0xFFFFFFFFFFFF;
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return d;
+}
+# decode the current mutant (or, with tus != 0, a seed's units) once; returns the run's digest (codes folded in)
+fn fz_run(tus, lens, n, poison, nanch): i64 {
+    dr_alloc_set_poison(poison);
+    av1_decoder_reset(Fz_Dec);
+    dr_alloc_fail_at(0);   # zero the allocation count: the run's depth
+    var d = 7;
+    Fz_Frames = 0;
+    var i = 0;
+    while (i < n) {
+        var derr = 0;
+        var f = av1_decoder_decode(Fz_Dec, load64(tus + (i * 8)), load64(lens + (i * 8)), &derr);
+        if ((nanch > 0) && (i < nanch) && (derr == DR_OK)) {
+            # a large-scale tile file (the conformance harness's protocol): its first nanch units are the anchor
+            # frames, then the decoder switches modes and the tile lists decode against them
+            derr = av1_decoder_set_anchor(Fz_Dec, i, av1_decoder_last_decoded(Fz_Dec));
+            if (i == (nanch - 1)) { av1_decoder_set_large_scale_tile(Fz_Dec, 1); }
+        }
+        store64(Fz_Codes + (i * 8), derr);
+        d = ((d * 131) + derr + 1) & 0xFFFFFFFFFFFF;
+        if (derr != DR_OK) {
+            if (fz_known(derr) == 0) { Fz_Bad = Fz_Bad + 1; print("FZBAD unknown code\n", 19); }
+            var e2 = 0;
+            var g = av1_decoder_decode(Fz_Dec, load64(tus + (i * 8)), load64(lens + (i * 8)), &e2);
+            if ((e2 != derr) || (g != 0)) { Fz_Bad = Fz_Bad + 1; print("FZBAD not sticky\n", 17); }
+        } else {
+            if (f != 0) {
+                if (fz_frame_ok(f) == 0) { Fz_Bad = Fz_Bad + 1; print("FZBAD insane frame\n", 19); }
+                else { d = fz_digest_frame(f, d); Fz_Frames = Fz_Frames + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    Fz_Depth = dr_alloc_count();
+    dr_alloc_set_poison(0);
+    return d;
+}
+# the outcome signature guidance keys on: where it first failed and how, frames shown, allocation depth (log2)
+fn fz_signature(n): i64 {
+    var first = n;
+    var code = 0;
+    var i = 0;
+    while (i < n) {
+        if ((first == n) && (load64(Fz_Codes + (i * 8)) != DR_OK)) { first = i; code = load64(Fz_Codes + (i * 8)); }
+        i = i + 1;
+    }
+    var depth = 0;
+    var dd = Fz_Depth;
+    while (dd > 1) { dd = dd >> 1; depth = depth + 1; }
+    return (((((first * 64) + code) * 64) + Fz_Frames) * 64) + depth;
+}
+var Fz_Sigs = 0;    # an open-addressed set of seen signatures, 4096 slots
+var Fz_NSigs = 0;   # how many distinct signatures were seen
+fn fz_sig_new(sig): i64 {
+    var h = (sig * 2654435761) & 4095;
+    var k = 0;
+    while (k < 4096) {
+        var s = load64(Fz_Sigs + (((h + k) & 4095) * 8));
+        if (s == 0) { store64(Fz_Sigs + (((h + k) & 4095) * 8), sig + 1); Fz_NSigs = Fz_NSigs + 1; return 1; }
+        if (s == (sig + 1)) { return 0; }
+        k = k + 1;
+    }
+    return 0;
+}
+# the current mutant as an IVF file at fuzz-cur.ivf (campaign mode), so the input that kills a worker is on disk
+var Fz_Out = 0;
+fn fz_save(path): i64 {
+    var off = 32;
+    store8(Fz_Out + 0, 68); store8(Fz_Out + 1, 75); store8(Fz_Out + 2, 73); store8(Fz_Out + 3, 70);   # DKIF
+    var z = 4;
+    while (z < 32) { store8(Fz_Out + z, 0); z = z + 1; }
+    store8(Fz_Out + 6, 32);                                                                        # header size
+    store8(Fz_Out + 8, 65); store8(Fz_Out + 9, 86); store8(Fz_Out + 10, 48); store8(Fz_Out + 11, 49);   # AV01
+    store8(Fz_Out + 16, 30); store8(Fz_Out + 20, 1);                                               # 30 / 1
+    store8(Fz_Out + 24, Fz_MN);
+    var i = 0;
+    while (i < Fz_MN) {
+        var n = load64(Fz_MLen + (i * 8));
+        if ((off + 12 + n) > 4194304) { return 0; }
+        store8(Fz_Out + off, n & 255); store8(Fz_Out + off + 1, (n >> 8) & 255);
+        store8(Fz_Out + off + 2, (n >> 16) & 255); store8(Fz_Out + off + 3, 0);
+        var q = 4;
+        while (q < 12) { store8(Fz_Out + off + q, 0); q = q + 1; }
+        store8(Fz_Out + off + 4, i);
+        var j = 0;
+        var src = load64(Fz_MTu + (i * 8));
+        while (j < n) { store8(Fz_Out + off + 12 + j, load8(src + j)); j = j + 1; }
+        off = off + 12 + n;
+        i = i + 1;
+    }
+    file_write_all(path, Fz_Out, off);
+    return off;
+}
+
+fn fz_config(): i64 {
+    var b = alloc(256);   # bytes
+    var n = file_read_all("fuzz.cfg", b, 255);
+    if (n <= 0) { return 0; }
+    var vals = alloc(3 * 8);
+    var vi = 0;
+    var cur = 0;
+    var have = 0;
+    var i = 0;
+    while ((i <= n) && (vi < 3)) {
+        var c = 32;
+        if (i < n) { c = load8(b + i); }
+        if ((c >= 48) && (c <= 57)) { cur = (cur * 10) + (c - 48); have = 1; }
+        else { if (have != 0) { store64(vals + (vi * 8), cur); vi = vi + 1; cur = 0; have = 0; } }
+        i = i + 1;
+    }
+    if (vi >= 1) { Fz_Seed = load64(vals) + 1; }
+    if (vi >= 2) { Fz_Iters = load64(vals + 8); }
+    if (vi >= 3) { Fz_Save = load64(vals + 16); }
+    return vi;
+}
+
+fn test_corpus_fuzz() {
+    Fz_SeedTu = alloc(32 * 8);
+    Fz_SeedLen = alloc(32 * 8);
+    Fz_SeedN = alloc(32 * 8);
+    Fz_SeedDig = alloc(32 * 8);
+    Fz_SeedAnch = alloc(32 * 8);
+    Fz_MTu = alloc(65 * 8);
+    Fz_MLen = alloc(65 * 8);
+    Fz_PoolTu = alloc(96 * 8);
+    Fz_PoolLen = alloc(96 * 8);
+    Fz_PoolN = alloc(96 * 8);
+    Fz_PoolAnch = alloc(96 * 8);
+    Fz_Pos = alloc(256 * 8);
+    Fz_Codes = alloc(65 * 8);
+    Fz_FTu = alloc(65 * 8);
+    Fz_FMap = alloc(65 * 8);
+    Fz_FMapLen = alloc(65 * 8);
+    Fz_Sigs = alloc(4096 * 8);
+    memset(Fz_Sigs, 0, 4096 * 8);
+    Fz_Out = alloc(4194304);   # bytes: the saved mutant
+    Fz_Arena = dr_arena_new(1 << 20);
+    fz_config();
+    fz_load("tests/repro/e2d-160x160.ivf", 0);
+    fz_load("tests/repro/fg-b10-422-72x40.ivf", 0);
+    fz_load("tests/repro/fg-lag-96x64.ivf", 0);
+    fz_load("tests/repro/fg-reload-96x64.ivf", 0);
+    fz_load("tests/repro/fmt-422-72x56.ivf", 0);
+    fz_load("tests/repro/fmt-444-72x56.ivf", 0);
+    fz_load("tests/repro/fmt-b12-mono-72x56.ivf", 0);
+    fz_load("tests/repro/ibc-odd-349x197.ivf", 0);
+    fz_load("tests/repro/inter-6frame.ivf", 0);
+    fz_load("tests/repro/jnt-ctx-96x64.ivf", 0);
+    fz_load("tests/repro/lst-256x256.ivf", 4);
+    fz_load("tests/repro/obmc-edge-96x80.ivf", 0);
+    fz_load("tests/repro/oddmi-inter-136x96.ivf", 0);
+    fz_load("tests/repro/qm-ll-96x64.ivf", 0);
+    fz_load("tests/repro/roi-skip-96x64.ivf", 0);
+    fz_load("tests/repro/srmin-16x16.ivf", 0);
+    fz_load("tests/repro/srmin-24x24.ivf", 0);
+    fz_load("tests/repro/svc-l2t3-layers-96x64.ivf", 0);
+    assert_eq(Fz_NSeed, 18, "18 committed reproducers load as seeds");
+    Fz_Dec = av1_decoder_new(0);
+    av1_decoder_set_frame_size_limit(Fz_Dec, Fz_LIMIT);
+    # every clean seed decodes, every unit (the large-scale tile files' tile lists included); its digest from a
+    # FRESH decoder is what the reused one must reproduce later
+    var seed_fail = 0;
+    var s = 0;
+    while (s < Fz_NSeed) {
+        var fresh = av1_decoder_new(0);
+        var keep = Fz_Dec;
+        Fz_Dec = fresh;
+        fz_fence_all(load64(Fz_SeedTu + (s * 8)), load64(Fz_SeedLen + (s * 8)), load64(Fz_SeedN + (s * 8)), 1);
+        store64(Fz_SeedDig + (s * 8), fz_run(Fz_FTu, load64(Fz_SeedLen + (s * 8)), load64(Fz_SeedN + (s * 8)), 0,
+          load64(Fz_SeedAnch + (s * 8))));
+        fz_unfence_all(load64(Fz_SeedN + (s * 8)));
+        var cu = 0;
+        while (cu < load64(Fz_SeedN + (s * 8))) {
+            if (load64(Fz_Codes + (cu * 8)) != DR_OK) { seed_fail = seed_fail + 1; }
+            cu = cu + 1;
+        }
+        Fz_Dec = keep;
+        s = s + 1;
+    }
+    assert_eq(seed_fail, 0, "every unit of every clean seed decodes (tile lists against their anchors)");
+    var it = 0;
+    var differ = 0;
+    var reseed_bad = 0;
+    var ops = 0;
+    var bad0 = 0;
+    var all_ok = 0;      # mutants every unit of which decoded
+    var unit0 = 0;       # mutants refused at their first unit
+    var shown = 0;       # frames shown across all mutants (first runs)
+    while (it < Fz_Iters) {
+        syscall(37, 60);   # alarm(60): a hang kills the run
+        dr_arena_reset(Fz_Arena);
+        if ((Fz_NPool > 0) && (fz_below(3) == 0)) { fz_mutant_from_pool(fz_below(Fz_NPool)); }
+        else { fz_mutant_from_seed(fz_below(Fz_NSeed)); }
+        var k = fz_below(3) + 1;
+        while (k > 0) { fz_mutate_once(); ops = ops + 1; k = k - 1; }
+        if (Fz_Save != 0) { fz_save("fuzz-cur.ivf"); }
+        fz_fence_all(Fz_MTu, Fz_MLen, Fz_MN, 0);
+        var d1 = fz_run(Fz_FTu, Fz_MLen, Fz_MN, 1, Fz_MAnch);
+        var sig = fz_signature(Fz_MN);
+        shown = shown + Fz_Frames;
+        if ((Fz_MN > 0) && (load64(Fz_Codes) != DR_OK)) { unit0 = unit0 + 1; }
+        var fu = 0;
+        var okall = 1;
+        while (fu < Fz_MN) { if (load64(Fz_Codes + (fu * 8)) != DR_OK) { okall = 0; } fu = fu + 1; }
+        all_ok = all_ok + okall;
+        fz_unfence_all(Fz_MN);
+        fz_fence_all(Fz_MTu, Fz_MLen, Fz_MN, 1);
+        var d2 = fz_run(Fz_FTu, Fz_MLen, Fz_MN, 0, Fz_MAnch);
+        fz_unfence_all(Fz_MN);
+        if ((Fz_Save != 0) && ((Fz_Bad > bad0) || (d1 != d2))) { fz_save("fuzz-bad.ivf"); }
+        bad0 = Fz_Bad;
+        if (d1 != d2) {
+            differ = differ + 1;
+            print("FZBAD poisoned and plain runs differ at iteration ", 50);
+            print_num(it);
+            print("\n", 1);
+        }
+        if (fz_sig_new(sig) != 0) { fz_pool_add(); }
+        # every 32 mutants, a clean seed through the reused decoder must reproduce its fresh digest
+        if ((it % 32) == 31) {
+            var cs = fz_below(Fz_NSeed);
+            fz_fence_all(load64(Fz_SeedTu + (cs * 8)), load64(Fz_SeedLen + (cs * 8)), load64(Fz_SeedN + (cs * 8)), 0);
+            var cd = fz_run(Fz_FTu, load64(Fz_SeedLen + (cs * 8)), load64(Fz_SeedN + (cs * 8)), 1,
+              load64(Fz_SeedAnch + (cs * 8)));
+            fz_unfence_all(load64(Fz_SeedN + (cs * 8)));
+            if (cd != load64(Fz_SeedDig + (cs * 8))) {
+                reseed_bad = reseed_bad + 1;
+                print("FZBAD seed after reset\n", 23);
+            }
+        }
+        syscall(37, 0);
+        it = it + 1;
+    }
+    print("corpus fuzz: ", 13);
+    print_num(it);
+    print(" mutants, ", 10);
+    print_num(ops);
+    print(" mutations, ", 12);
+    print_num(Fz_NPool);
+    print(" kept for new outcomes; ", 24);
+    print_num(Fz_NSigs);
+    print(" distinct outcomes; ", 20);
+    print_num(all_ok);
+    print(" decoded every unit, ", 21);
+    print_num(unit0);
+    print(" refused at the first; ", 23);
+    print_num(shown);
+    print(" frames shown\n", 14);
+    assert_eq(Fz_Bad, 0, "every error a documented, sticky code; every shown frame sane");
+    assert_eq(differ, 0, "poisoned and plain runs agree on every mutant (no use of reclaimed memory)");
+    assert_eq(reseed_bad, 0, "a reset decoder reproduces every clean seed's fresh digest");
+    assert_gt(Fz_NPool, 4, "guidance: some mutants reached new outcomes");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("corpus-guided fuzzing of the streaming decoder");
+    test_corpus_fuzz();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
