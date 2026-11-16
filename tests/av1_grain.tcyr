@@ -1,0 +1,507 @@
+# tests/av1_grain.tcyr — AV1 film grain: the film_grain_params parse (5.9.30 / 6.8.20) and the synthesis process
+# (7.18.3, src/av1_grain.cyr).
+#
+# EVERY known answer comes from scripts/refs/grain_ref.py — a spec-literal port (the spec's full noiseStripe /
+# noiseImage arrays, where drishti works stripe by stripe) that was cross-checked against aomdec on every frame of
+# 22 libaom streams. Run it to regenerate. What each group pins:
+#   - Gaussian_Sequence: a digest of all 2048 entries (read from the spec markdown) and spot values;
+#   - get_random_number (7.18.3.2) from a known register;
+#   - five synthesis fixtures over 4:2:0 / 4:2:2 / 4:4:4 / monochrome, 8/10/12-bit, AR lags 0-3, overlap on/off,
+#     clip_to_restricted_range with and without MC_IDENTITY, chroma_scaling_from_luma, and no luma points: the
+#     three grain templates, the three scaling tables and the three output planes, each by digest;
+#   - that the source frame (the DPB's) is never modified, and that apply_grain 0 returns it untouched;
+#   - the parser: every syntax element stored, reset paths, the update_grain 0 load (seed kept), and every reject.
+include "src/main.cyr"
+
+# h = (h * 131 + (v & 0xFFFFFFFF)) mod (2^31 - 1) — the reference's digest.
+fn gt_mix(h, v): i64 { return ((h * 131) + (v & 4294967295)) % 2147483647; }
+
+# ---- Gaussian_Sequence ----
+fn test_grain_gauss() {
+    var gs = av1_grain_gauss();
+    assert(gs != 0, "Gaussian_Sequence builds");
+    var h = 0;
+    var k = 0;
+    while (k < 2048) { h = gt_mix(h, load64(gs + (k * 8)) + 2048); k = k + 1; }
+    assert_eq(h, 794501906, "digest of Gaussian_Sequence (v + 2048, 2048 entries)");
+    assert_eq(load64(gs + 0), 56, "GS[0]");
+    assert_eq(load64(gs + 8), 568, "GS[1]");
+    assert_eq(load64(gs + 16), 0 - 180, "GS[2] (negative)");
+    assert_eq(load64(gs + 24), 172, "GS[3]");
+    assert_eq(load64(gs + (2047 * 8)), 0 - 484, "GS[2047]");
+    return 0;
+}
+
+# ---- get_random_number (7.18.3.2) ----
+fn test_grain_rand() {
+    var gc = av1_grain_ctx_new();
+    store64(gc + AV1GC_RNG, 4660);   # 0x1234
+    assert_eq(av1_grain_rand(gc, 11), 1096, "rand(11) #1");
+    assert_eq(av1_grain_rand(gc, 11), 548, "rand(11) #2");
+    assert_eq(av1_grain_rand(gc, 11), 274, "rand(11) #3");
+    assert_eq(av1_grain_rand(gc, 11), 1161, "rand(11) #4");
+    assert_eq(av1_grain_rand(gc, 8), 200, "rand(8)");
+    assert_eq(load64(gc + AV1GC_RNG), 51345, "the register after five draws");
+    return 0;
+}
+
+# ---- the synthesis fixtures: the reference's LCG builds the parameters and the frame ----
+var Gt_Lcg = 0;
+fn gt_next(): i64 {
+    Gt_Lcg = ((Gt_Lcg * 1103515245) + 12345) % 2147483648;
+    return Gt_Lcg >> 16;
+}
+
+# fixture_params(seed, lag, num_y, num_cb, num_cr, csfl, scale_m8, ar_shift_m6, scale_shift, overlap, clip, extreme)
+fn gt_params(seed, lag, ny, ncb, ncr, csfl, sm8, as6, ss, ov, clip, extreme): i64 {
+    var g = alloc(AV1FG_SIZE);
+    memset(g, 0, AV1FG_SIZE);
+    Gt_Lcg = seed;
+    store64(g + AV1FG_APPLY, 1);
+    store64(g + AV1FG_SEED, gt_next() & 65535);
+    store64(g + AV1FG_AR_LAG, lag);
+    store64(g + AV1FG_CSFL, csfl);
+    var set = 0;
+    while (set < 3) {
+        var n = ny;
+        var vo = AV1FG_Y_VALUE;
+        var so = AV1FG_Y_SCALING;
+        var no = AV1FG_NUM_Y;
+        if (set == 1) { n = ncb; vo = AV1FG_CB_VALUE; so = AV1FG_CB_SCALING; no = AV1FG_NUM_CB; }
+        if (set == 2) { n = ncr; vo = AV1FG_CR_VALUE; so = AV1FG_CR_SCALING; no = AV1FG_NUM_CR; }
+        store64(g + no, n);
+        var step = 240;
+        if (n > 1) { step = 240 / n; }
+        var v = 0;
+        var i = 0;
+        while (i < n) {
+            v = v + 1 + (gt_next() % step);
+            store64(g + vo + (i * 8), av1_min(v, 255));
+            store64(g + so + (i * 8), gt_next() % 256);
+            i = i + 1;
+        }
+        set = set + 1;
+    }
+    var k = 0;
+    while (k < 24) { store64(g + AV1FG_AR_Y + (k * 8), 128 + (gt_next() % 61) - 30); k = k + 1; }
+    k = 0;
+    while (k < 25) {
+        store64(g + AV1FG_AR_CB + (k * 8), 128 + (gt_next() % 61) - 30);
+        store64(g + AV1FG_AR_CR + (k * 8), 128 + (gt_next() % 61) - 30);
+        k = k + 1;
+    }
+    store64(g + AV1FG_SCALING_M8, sm8);
+    store64(g + AV1FG_AR_SHIFT_M6, as6);
+    store64(g + AV1FG_SCALE_SHIFT, ss);
+    store64(g + AV1FG_CB_MULT, gt_next() % 256);
+    store64(g + AV1FG_CB_LUMA_MULT, gt_next() % 256);
+    store64(g + AV1FG_CB_OFFSET, gt_next() % 512);
+    store64(g + AV1FG_CR_MULT, gt_next() % 256);
+    store64(g + AV1FG_CR_LUMA_MULT, gt_next() % 256);
+    store64(g + AV1FG_CR_OFFSET, gt_next() % 512);
+    store64(g + AV1FG_OVERLAP, ov);
+    store64(g + AV1FG_CLIP_RR, clip);
+    if (extreme != 0) {   # the Cb merge above Clip1's top, the Cr merge below 0
+        store64(g + AV1FG_CB_MULT, 255);
+        store64(g + AV1FG_CB_LUMA_MULT, 255);
+        store64(g + AV1FG_CB_OFFSET, 511);
+        store64(g + AV1FG_CR_MULT, 0);
+        store64(g + AV1FG_CR_LUMA_MULT, 0);
+        store64(g + AV1FG_CR_OFFSET, 0);
+    }
+    return g;
+}
+
+# fixture_frame(seed, w, h, subx, suby, bd, mono, bright): bright mirrors every sample to hi - v
+fn gt_inv(v, hi, bright): i64 {
+    if (bright != 0) { return hi - v; }
+    return v;
+}
+fn gt_frame(seed, w, h, subx, suby, bd, mono, bright): i64 {
+    var np = 3;
+    if (mono != 0) { np = 1; }
+    var e = 0;
+    var f = dr_frame_new(w, h, np, subx, suby, bd, 0, &e);
+    Gt_Lcg = seed;
+    var hi = (1 << bd) - 1;
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            dr_frame_set(f, 0, x, y, gt_inv((((x * 7) + (y * 13) + (gt_next() % 40)) * (hi + 1) / 512) % (hi + 1),
+                hi, bright));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    if (mono != 0) { return f; }
+    var cw = (w + subx) >> subx;
+    var ch = (h + suby) >> suby;
+    y = 0;
+    while (y < ch) {
+        var x2 = 0;
+        while (x2 < cw) {
+            dr_frame_set(f, 1, x2, y, gt_inv((((x2 * 5) + (y * 3) + (gt_next() % 30)) * (hi + 1) / 400) % (hi + 1),
+                hi, bright));
+            x2 = x2 + 1;
+        }
+        y = y + 1;
+    }
+    y = 0;
+    while (y < ch) {
+        var x3 = 0;
+        while (x3 < cw) {
+            dr_frame_set(f, 2, x3, y, gt_inv((((x3 * 11) + (y * 2) + (gt_next() % 50)) * (hi + 1) / 700) % (hi + 1),
+                hi, bright));
+            x3 = x3 + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+
+fn gt_plane_digest(f, p, pw, ph): i64 {
+    var h = 0;
+    var y = 0;
+    while (y < ph) {
+        var x = 0;
+        while (x < pw) { h = gt_mix(h, dr_frame_get(f, p, x, y)); x = x + 1; }
+        y = y + 1;
+    }
+    return h;
+}
+fn gt_tmpl_digest(t, cw, ch): i64 {
+    var h = 0;
+    var y = 0;
+    while (y < ch) {
+        var x = 0;
+        while (x < cw) { h = gt_mix(h, load64(t + (((y * 82) + x) * 8))); x = x + 1; }
+        y = y + 1;
+    }
+    return h;
+}
+fn gt_lut_digest(gc, plane): i64 {
+    var h = 0;
+    var x = 0;
+    while (x < 256) { h = gt_mix(h, load64(load64(gc + AV1GC_LUT) + (((plane * 256) + x) * 8))); x = x + 1; }
+    return h;
+}
+
+# One fixture: geometry / format, the parameter recipe, then the reference's digests.
+fn gt_fixture(tag, w, h, subx, suby, bd, mono, mc, seed, lag, ny, ncb, ncr, csfl, sm8, as6, ss, ov, clip,
+  bright, extreme, d_luma, d_cb, d_cr, d_l0, d_l1, d_l2, d_y, d_u, d_v): i64 {
+    var g = gt_params(seed, lag, ny, ncb, ncr, csfl, sm8, as6, ss, ov, clip, extreme);
+    var src = gt_frame(seed + 1, w, h, subx, suby, bd, mono, bright);
+    var cw = (w + subx) >> subx;
+    var ch = (h + suby) >> suby;
+    var before = gt_plane_digest(src, 0, w, h);
+    var gc = av1_grain_ctx_new();
+    var err = 0;
+    var out = av1_grain_apply(gc, g, mc, src, &err);
+    assert_eq(err, DR_OK, tag);
+    assert(out != src, tag);   # the noise lands on a COPY
+    assert_eq(gt_plane_digest(src, 0, w, h), before, tag);   # ...and the source (the DPB frame) is untouched
+    assert_eq(gt_tmpl_digest(load64(gc + AV1GC_LUMA), 82, 73), d_luma, tag);
+    assert_eq(gt_lut_digest(gc, 0), d_l0, tag);
+    assert_eq(gt_lut_digest(gc, 1), d_l1, tag);
+    assert_eq(gt_lut_digest(gc, 2), d_l2, tag);
+    assert_eq(gt_plane_digest(out, 0, w, h), d_y, tag);
+    if (mono == 0) {
+        var tw = 82;
+        if (subx != 0) { tw = 44; }
+        var th = 73;
+        if (suby != 0) { th = 38; }
+        assert_eq(gt_tmpl_digest(load64(gc + AV1GC_CB), tw, th), d_cb, tag);
+        assert_eq(gt_tmpl_digest(load64(gc + AV1GC_CR), tw, th), d_cr, tag);
+        assert_eq(gt_plane_digest(out, 1, cw, ch), d_u, tag);
+        assert_eq(gt_plane_digest(out, 2, cw, ch), d_v, tag);
+    }
+    return 0;
+}
+
+fn test_grain_fixtures() {
+    gt_fixture("420 8-bit lag3 overlap", 67, 45, 1, 1, 8, 0, 2, 101, 3, 6, 4, 5, 0, 3, 1, 0, 1, 0, 0, 0,
+      386642522, 1213195295, 2005478503, 1680114755, 1853110225, 1195019762, 1464948999, 1141870129, 1398493420);
+    gt_fixture("420 10-bit csfl lag2 clip", 50, 70, 1, 1, 10, 0, 2, 202, 2, 8, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0,
+      755307356, 1012703420, 126818368, 1885503248, 1885503248, 1885503248, 841383380, 2137604216, 462674725);
+    gt_fixture("444 12-bit lag1 clip MC_IDENTITY", 41, 37, 0, 0, 12, 0, 0, 303, 1, 3, 2, 7, 0, 0, 3, 2, 0, 1, 0, 0,
+      1862050424, 2031624576, 1638466500, 1552069243, 1073808257, 303281710, 1779469885, 197839036, 1003677400);
+    gt_fixture("422 8-bit lag0 overlap, no luma points", 66, 34, 1, 0, 8, 0, 2, 404, 0, 0, 3, 2, 0, 2, 2, 3, 1, 0, 0, 0,
+      0, 506036994, 1214976017, 0, 482188156, 1824037006, 1608812760, 1542941706, 605624471);
+    gt_fixture("mono 10-bit lag3 overlap", 33, 66, 1, 1, 10, 1, 2, 505, 3, 14, 0, 0, 0, 2, 1, 0, 1, 0, 0, 0,
+      1090927078, 0, 0, 29182200, 0, 0, 261439662, 0, 0);
+    # bright frame + extreme chroma multipliers: MC_IDENTITY's luma-range chroma top and the merge Clip1 both bind
+    gt_fixture("444 12-bit bright, clip MC_IDENTITY, extreme mults", 37, 29, 0, 0, 12, 0, 0, 606, 2, 5, 3, 4, 0, 1,
+      2, 0, 0, 1, 1, 1,
+      1134815465, 1373582346, 973910949, 1502838375, 1158248411, 783887805, 1682042353, 2026538351, 1755825898);
+    return 0;
+}
+
+fn test_grain_noop() {
+    var g = alloc(AV1FG_SIZE);
+    memset(g, 0, AV1FG_SIZE);   # apply_grain 0
+    var src = gt_frame(9, 16, 16, 1, 1, 8, 0, 0);
+    var err = 0;
+    assert(av1_grain_apply(av1_grain_ctx_new(), g, 2, src, &err) == src, "apply_grain 0: the source itself");
+    assert_eq(err, DR_OK, "...without error");
+    return 0;
+}
+
+# ---- the parser (5.9.30 / 6.8.20) ----
+fn gt_seq(mono, subx, suby): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_FILM_GRAIN_PRESENT, 1);
+    store64(s + AV1_SEQ_MONO, mono);
+    store64(s + AV1_SEQ_SUBX, subx);
+    store64(s + AV1_SEQ_SUBY, suby);
+    return s;
+}
+fn gt_fh(frame_type, show): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_TYPE, frame_type);
+    store64(fh + AV1FH_SHOW_FRAME, show);
+    var j = 0;
+    while (j < 7) { store64(fh + AV1FH_REF_FRAME_IDX + (j * 8), j); j = j + 1; }   # ref_frame_idx = 0..6
+    return fh;
+}
+fn gt_parse(s, refs, fh, bw): i64 {
+    var n = dr_bw_flush(bw);
+    var br = dr_br_init(dr_bw_buf(bw), n);
+    return av1_film_grain_params(br, s, refs, fh);
+}
+fn gt_g(fh, off): i64 { return load64(av1_fh_grain(fh) + off); }
+# n strictly increasing scaling points (value 10 * i + 1, scaling 1)
+fn gt_points(bw, n): i64 {
+    var i = 0;
+    while (i < n) { dr_bw_put_bits(bw, (10 * i) + 1, 8); dr_bw_put_bits(bw, 1, 8); i = i + 1; }
+    return 0;
+}
+fn gt_pad(bw, nbits): i64 {
+    var i = 0;
+    while (i < nbits) { dr_bw_put_bit(bw, 0); i = i + 1; }
+    return 0;
+}
+
+fn test_grain_parse() {
+    var s = gt_seq(0, 1, 1);
+    var refs = av1_ref_state_new();
+    # a full parameter set on a KEY frame (update_grain implied 1): every element lands in the block
+    var fh = gt_fh(AV1_KEY_FRAME, 1);
+    var bw = dr_bw_init(64);
+    dr_bw_put_bit(bw, 1);              # apply_grain
+    dr_bw_put_bits(bw, 4242, 16);      # grain_seed
+    dr_bw_put_bits(bw, 2, 4);          # num_y_points = 2
+    dr_bw_put_bits(bw, 20, 8);  dr_bw_put_bits(bw, 30, 8);    # point_y[0] = (20, 30)
+    dr_bw_put_bits(bw, 200, 8); dr_bw_put_bits(bw, 90, 8);    # point_y[1] = (200, 90)
+    dr_bw_put_bit(bw, 0);              # chroma_scaling_from_luma
+    dr_bw_put_bits(bw, 1, 4);          # num_cb_points = 1
+    dr_bw_put_bits(bw, 64, 8);  dr_bw_put_bits(bw, 40, 8);    # point_cb[0]
+    dr_bw_put_bits(bw, 1, 4);          # num_cr_points = 1
+    dr_bw_put_bits(bw, 77, 8);  dr_bw_put_bits(bw, 50, 8);    # point_cr[0]
+    dr_bw_put_bits(bw, 2, 2);          # grain_scaling_minus_8
+    dr_bw_put_bits(bw, 1, 2);          # ar_coeff_lag = 1 -> 4 luma, 5 chroma coefficients
+    dr_bw_put_bits(bw, 101, 8); dr_bw_put_bits(bw, 102, 8); dr_bw_put_bits(bw, 103, 8); dr_bw_put_bits(bw, 104, 8);
+    var k = 0;
+    while (k < 5) { dr_bw_put_bits(bw, 110 + k, 8); k = k + 1; }   # ar_coeffs_cb_plus_128
+    k = 0;
+    while (k < 5) { dr_bw_put_bits(bw, 120 + k, 8); k = k + 1; }   # ar_coeffs_cr_plus_128
+    dr_bw_put_bits(bw, 3, 2);          # ar_coeff_shift_minus_6
+    dr_bw_put_bits(bw, 1, 2);          # grain_scale_shift
+    dr_bw_put_bits(bw, 140, 8); dr_bw_put_bits(bw, 150, 8); dr_bw_put_bits(bw, 300, 9);   # cb mult / luma / offset
+    dr_bw_put_bits(bw, 160, 8); dr_bw_put_bits(bw, 170, 8); dr_bw_put_bits(bw, 260, 9);   # cr mult / luma / offset
+    dr_bw_put_bit(bw, 1);              # overlap_flag
+    dr_bw_put_bit(bw, 1);              # clip_to_restricted_range
+    assert_eq(gt_parse(s, refs, fh, bw), DR_OK, "parse: full set");
+    assert_eq(gt_g(fh, AV1FG_APPLY), 1, "apply_grain");
+    assert_eq(gt_g(fh, AV1FG_SEED), 4242, "grain_seed");
+    assert_eq(gt_g(fh, AV1FG_UPDATE), 1, "update_grain implied on a KEY frame");
+    assert_eq(gt_g(fh, AV1FG_NUM_Y), 2, "num_y_points");
+    assert_eq(gt_g(fh, AV1FG_Y_VALUE + 8), 200, "point_y_value[1]");
+    assert_eq(gt_g(fh, AV1FG_Y_SCALING + 8), 90, "point_y_scaling[1]");
+    assert_eq(gt_g(fh, AV1FG_CB_VALUE), 64, "point_cb_value[0]");
+    assert_eq(gt_g(fh, AV1FG_CR_SCALING), 50, "point_cr_scaling[0]");
+    assert_eq(gt_g(fh, AV1FG_SCALING_M8), 2, "grain_scaling_minus_8");
+    assert_eq(gt_g(fh, AV1FG_AR_LAG), 1, "ar_coeff_lag");
+    assert_eq(gt_g(fh, AV1FG_AR_Y + 24), 104, "ar_coeffs_y_plus_128[3] (the last of 4)");
+    assert_eq(gt_g(fh, AV1FG_AR_CB + 32), 114, "ar_coeffs_cb_plus_128[4] (the luma-correlation one)");
+    assert_eq(gt_g(fh, AV1FG_AR_CR + 32), 124, "ar_coeffs_cr_plus_128[4]");
+    assert_eq(gt_g(fh, AV1FG_AR_SHIFT_M6), 3, "ar_coeff_shift_minus_6");
+    assert_eq(gt_g(fh, AV1FG_SCALE_SHIFT), 1, "grain_scale_shift");
+    assert_eq(gt_g(fh, AV1FG_CB_OFFSET), 300, "cb_offset (9 bits)");
+    assert_eq(gt_g(fh, AV1FG_CR_LUMA_MULT), 170, "cr_luma_mult");
+    assert_eq(gt_g(fh, AV1FG_OVERLAP), 1, "overlap_flag");
+    assert_eq(gt_g(fh, AV1FG_CLIP_RR), 1, "clip_to_restricted_range");
+    # update_grain 0 on an INTER frame: load the named reference's block, keep this frame's seed
+    store64(refs + AV1REF_SAVED_GRAIN + (5 * 8), av1_fh_grain(fh));   # slot 5 saved the block above
+    var fi = gt_fh(AV1_INTER_FRAME, 1);
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1);              # apply_grain
+    dr_bw_put_bits(bw, 777, 16);       # grain_seed
+    dr_bw_put_bit(bw, 0);              # update_grain = 0
+    dr_bw_put_bits(bw, 5, 3);          # film_grain_params_ref_idx = 5 (= ref_frame_idx[5])
+    assert_eq(gt_parse(s, refs, fi, bw), DR_OK, "parse: update_grain 0");
+    assert_eq(gt_g(fi, AV1FG_SEED), 777, "load_grain_params keeps THIS frame's grain_seed");
+    assert_eq(gt_g(fi, AV1FG_Y_VALUE + 8), 200, "...and loads everything else from the slot");
+    assert_eq(gt_g(fi, AV1FG_CR_OFFSET), 260, "...cr_offset too");
+    assert_eq(gt_g(fi, AV1FG_APPLY), 1, "...apply_grain (the slot's)");
+    assert_eq(gt_g(fi, AV1FG_UPDATE), 0, "...but update_grain stays this frame's coded 0 (observable reload)");
+    assert_eq(gt_g(fi, AV1FG_REF_IDX), 5, "...as does film_grain_params_ref_idx");
+    # a ref idx that is not one of ref_frame_idx[ 0..6 ]
+    var fb = gt_fh(AV1_INTER_FRAME, 1);
+    store64(fb + AV1FH_REF_FRAME_IDX + (5 * 8), 2);   # nobody names slot 5 any more
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 5, 3);
+    assert_eq(gt_parse(s, refs, fb, bw), DR_ERR_BAD_HEADER, "reject: film_grain_params_ref_idx not a reference");
+    # a named reference slot with nothing saved
+    var fz = gt_fh(AV1_INTER_FRAME, 1);
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 3, 3);
+    assert_eq(gt_parse(s, refs, fz, bw), DR_ERR_BAD_HEADER, "reject: the named slot has no saved parameters");
+    # reset paths: apply_grain 0, and a hidden non-showable frame (no bits read at all)
+    var fr = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 0);
+    assert_eq(gt_parse(s, refs, fr, bw), DR_OK, "apply_grain 0 parses");
+    assert_eq(gt_g(fr, AV1FG_APPLY), 0, "...and is reset");
+    var fhid = gt_fh(AV1_INTER_FRAME, 0);
+    store64(av1_fh_grain(fhid) + AV1FG_SEED, 99);   # stale bytes the reset must clear
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1);
+    assert_eq(gt_parse(s, refs, fhid, bw), DR_OK, "hidden + not showable: nothing read");
+    assert_eq(gt_g(fhid, AV1FG_SEED), 0, "...reset_grain_params zeroes the block");
+    # the conformance rejects
+    # each over-limit count is followed by VALID increasing points and zero padding, so that only the count limit
+    # can reject it (a parser without the limit would read on and succeed)
+    var f1 = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 15, 4);   # num_y_points = 15
+    gt_points(bw, 15);
+    gt_pad(bw, 64);
+    assert_eq(gt_parse(s, refs, f1, bw), DR_ERR_BAD_HEADER, "reject: num_y_points 15 > 14");
+    var f2 = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 2, 4);
+    dr_bw_put_bits(bw, 50, 8); dr_bw_put_bits(bw, 1, 8); dr_bw_put_bits(bw, 50, 8); dr_bw_put_bits(bw, 1, 8);
+    assert_eq(gt_parse(s, refs, f2, bw), DR_ERR_BAD_HEADER, "reject: point_y_value not increasing (50, 50)");
+    var s444 = gt_seq(0, 0, 0);   # 4:4:4, so the one-plane rule cannot be what rejects
+    var f3 = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 1, 4);
+    dr_bw_put_bits(bw, 10, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 11, 4);   # csfl 0, num_cb_points = 11
+    gt_points(bw, 11);
+    gt_pad(bw, 96);
+    assert_eq(gt_parse(s444, refs, f3, bw), DR_ERR_BAD_HEADER, "reject: num_cb_points 11 > 10");
+    var f3r = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 1, 4);
+    dr_bw_put_bits(bw, 10, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 0, 4);    # csfl 0, num_cb_points = 0
+    dr_bw_put_bits(bw, 11, 4);                         # num_cr_points = 11
+    gt_points(bw, 11);
+    gt_pad(bw, 96);
+    assert_eq(gt_parse(s444, refs, f3r, bw), DR_ERR_BAD_HEADER, "reject: num_cr_points 11 > 10");
+    var f3c = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 1, 4);
+    dr_bw_put_bits(bw, 10, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 2, 4);    # num_cb_points = 2: values 30, 30
+    dr_bw_put_bits(bw, 30, 8); dr_bw_put_bits(bw, 1, 8); dr_bw_put_bits(bw, 30, 8); dr_bw_put_bits(bw, 1, 8);
+    gt_pad(bw, 96);
+    assert_eq(gt_parse(s444, refs, f3c, bw), DR_ERR_BAD_HEADER, "reject: point_cb_value not increasing (30, 30)");
+    var f3d = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 1, 4);
+    dr_bw_put_bits(bw, 10, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 0, 4);    # num_cb_points = 0
+    dr_bw_put_bits(bw, 2, 4);                          # num_cr_points = 2: values 40, 39
+    dr_bw_put_bits(bw, 40, 8); dr_bw_put_bits(bw, 1, 8); dr_bw_put_bits(bw, 39, 8); dr_bw_put_bits(bw, 1, 8);
+    gt_pad(bw, 96);
+    assert_eq(gt_parse(s444, refs, f3d, bw), DR_ERR_BAD_HEADER, "reject: point_cr_value decreasing (40, 39)");
+    var f4 = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(8);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 1, 4);
+    dr_bw_put_bits(bw, 10, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 1, 4); dr_bw_put_bits(bw, 9, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bits(bw, 0, 4);          # num_cr_points = 0 with num_cb_points = 1, at 4:2:0
+    assert_eq(gt_parse(s, refs, f4, bw), DR_ERR_BAD_HEADER, "reject: 4:2:0 grain on one chroma plane only");
+    # ...which is allowed at 4:4:4 (then the stream continues: lag 0, shifts, cb mults, flags)
+    var f5 = gt_fh(AV1_KEY_FRAME, 1);
+    bw = dr_bw_init(16);
+    dr_bw_put_bit(bw, 1); dr_bw_put_bits(bw, 1, 16); dr_bw_put_bits(bw, 1, 4);
+    dr_bw_put_bits(bw, 10, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bit(bw, 0); dr_bw_put_bits(bw, 1, 4); dr_bw_put_bits(bw, 9, 8); dr_bw_put_bits(bw, 1, 8);
+    dr_bw_put_bits(bw, 0, 4);          # num_cr_points = 0
+    dr_bw_put_bits(bw, 0, 2); dr_bw_put_bits(bw, 0, 2);   # grain_scaling_minus_8, ar_coeff_lag 0
+    dr_bw_put_bits(bw, 128, 8);        # ar_coeffs_y: none at lag 0; ar_coeffs_cb_plus_128[0] (the luma term)
+    dr_bw_put_bits(bw, 0, 2); dr_bw_put_bits(bw, 0, 2);   # ar_coeff_shift_minus_6, grain_scale_shift
+    dr_bw_put_bits(bw, 1, 8); dr_bw_put_bits(bw, 2, 8); dr_bw_put_bits(bw, 3, 9);   # cb mults
+    dr_bw_put_bit(bw, 0); dr_bw_put_bit(bw, 0);
+    assert_eq(gt_parse(gt_seq(0, 0, 0), refs, f5, bw), DR_OK, "4:4:4: grain on one chroma plane is allowed");
+    assert_eq(gt_g(f5, AV1FG_CB_OFFSET), 3, "...and the cursor stays true to the end");
+    return 0;
+}
+
+# ---- matrix_coefficients is kept (clip_to_restricted_range's MC_IDENTITY test reads it) ----
+# A reduced still-picture sequence header, profile 0, 8-bit 4:2:0, with or without a colour description.
+fn gt_seq_mc(desc, mc): i64 {
+    var bw = dr_bw_init(16);
+    dr_bw_put_bits(bw, 0, 3);        # seq_profile = 0
+    dr_bw_put_bit(bw, 1);            # still_picture = 1
+    dr_bw_put_bit(bw, 1);            # reduced_still_picture_header = 1
+    dr_bw_put_bits(bw, 0, 5);        # seq_level_idx[0] = 0
+    dr_bw_put_bits(bw, 15, 4);       # frame_width_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 15, 4);       # frame_height_bits_minus_1 = 15
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_width_minus_1 = 63
+    dr_bw_put_bits(bw, 63, 16);      # max_frame_height_minus_1 = 63
+    dr_bw_put_bit(bw, 0);            # use_128x128_superblock
+    dr_bw_put_bit(bw, 0);            # enable_filter_intra
+    dr_bw_put_bit(bw, 0);            # enable_intra_edge_filter
+    dr_bw_put_bit(bw, 0);            # enable_superres
+    dr_bw_put_bit(bw, 0);            # enable_cdef
+    dr_bw_put_bit(bw, 0);            # enable_restoration
+    dr_bw_put_bit(bw, 0);            # high_bitdepth = 0 -> 8-bit
+    dr_bw_put_bit(bw, 0);            # mono_chrome = 0
+    dr_bw_put_bit(bw, desc);         # color_description_present_flag
+    if (desc != 0) {
+        dr_bw_put_bits(bw, 1, 8);    # color_primaries = CP_BT_709
+        dr_bw_put_bits(bw, 1, 8);    # transfer_characteristics = TC_BT_709 (not sRGB: no implied 4:4:4)
+        dr_bw_put_bits(bw, mc, 8);   # matrix_coefficients
+    }
+    dr_bw_put_bit(bw, 0);            # color_range = 0
+    dr_bw_put_bits(bw, 0, 2);        # chroma_sample_position
+    dr_bw_put_bit(bw, 0);            # separate_uv_delta_q = 0
+    dr_bw_put_bit(bw, 1);            # film_grain_params_present = 1
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    return av1_seq_parse(dr_bw_buf(bw), n, &e);
+}
+fn test_grain_seq_mc() {
+    var s0 = gt_seq_mc(0, 0);
+    assert(s0 != 0, "seq without a colour description parses");
+    assert_eq(av1_seq_matrix_coefficients(s0), 2, "no colour description: MC_UNSPECIFIED (2)");
+    var s6 = gt_seq_mc(1, 6);
+    assert(s6 != 0, "seq with a colour description parses");
+    assert_eq(av1_seq_matrix_coefficients(s6), 6, "matrix_coefficients 6 (BT.601) kept");
+    assert_eq(av1_seq_film_grain_present(s6), 1, "...and the cursor reaches film_grain_params_present");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("Gaussian_Sequence + get_random_number");
+    test_grain_gauss();
+    test_grain_rand();
+    test_group("synthesis fixtures (7.18.3)");
+    test_grain_fixtures();
+    test_grain_noop();
+    test_group("film_grain_params (5.9.30 / 6.8.20)");
+    test_grain_parse();
+    test_grain_seq_mc();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

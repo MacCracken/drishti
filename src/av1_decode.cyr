@@ -685,6 +685,9 @@ fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
 # tile_list. Returns when a frame completes (embedded FRAME OBU, or the last of its
 # standalone tile groups).
 #
+# It returns the RECONSTRUCTED frame, shown or not, and does not run the output process: no film grain (7.18.3)
+# is applied. av1_decoder_decode / av1_decode_stream are the output path, and they apply it.
+#
 # SCOPE: single-frame keyframe streams, both the separate-OBU form (SEQUENCE_HEADER
 # / FRAME_HEADER / one-or-more TILE_GROUP OBUs) and the combined FRAME OBU (the common
 # real-stream form, one embedded tile group); 8/10/12-bit, single- and multi-tile,

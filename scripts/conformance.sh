@@ -75,6 +75,19 @@ TSEG_CASES="tseg_352x288_b150_c8 tseg_160x136_b400_c8 tseg_200x104_b150_c9"
 # a matrix applied, plus the property the case exists for.
 QM_CASES="qm15_176x144 qmon_176x144 qm0_176x144 qmall_352x288 qmll_352x288 qmiq_176x144 qm444_176x144 \
 qmb10_176x144 qmb12_176x144 qmmono_176x144 qmscr_176x144 qmrt_176x144 qmai_176x144 svtqm_176x144"
+# FILM GRAIN (0.8.4; before it, grain streams decoded GRAIN-FREE without a word — 0/10 on both published grain
+# vectors), KIND_WxH, every frame hard against aomdec, whose default output applies the grain (dav1d's too). fgtN =
+# libaom's --film-grain-test=N parameter set N (1..16: AR lags 0-3, chroma from luma, overlap, restricted-range
+# clipping, scaling shifts), at the default lag so hidden frames come back through show_existing_frame with their
+# saved grain — except 5 / 9 / 11, which re-use a reference's parameters (update_grain 0) and run at lag 0. fgb10 /
+# fgb12 / fg444 / fg422 / fgmono the formats and depths; fgsr grain on superres output; fgrs on resized frames;
+# fgsvt SVT-AV1 --film-grain; fgrav rav1e --photon-noise; fgid / fgbt clip_to_restricted_range on saturated 4:4:4
+# testsrc2 chroma (up to 240) with matrix_coefficients MC_IDENTITY (chroma clips at luma's 235) and BT.709 (at 240).
+# Each case's grain_property guard proves grain applied, plus the property the case exists for.
+FG_CASES="fgt1_176x144 fgt2_176x144 fgt3_176x144 fgt4_176x144 fgt5_176x144 fgt6_176x144 fgt7_176x144 fgt8_176x144 \
+fgt9_176x144 fgt10_176x144 fgt11_176x144 fgt12_176x144 fgt13_176x144 fgt14_176x144 fgt15_176x144 fgt16_176x144 \
+fgb10_176x144 fgb12_176x144 fg444_176x144 fg422_176x144 fgmono_176x144 fgsr_352x288 fgrs_352x288 fgsvt_176x144 \
+fgrav_176x144 fgid_176x144 fgbt_176x144"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
 # context_update_tile_id != 0 (libaom names its LARGEST tile), and frame-parallel streams that adapt inside the
 # frame but save the INITIAL context (disable_frame_end_update_cdf 1). Every case also has a later frame
@@ -105,7 +118,8 @@ PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 
 av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-allintra \
 av1-1-b10-24-monochrome av1-1-b10-00-quantizer-00 av1-1-b10-00-quantizer-10 av1-1-b10-00-quantizer-20 \
-av1-1-b10-00-quantizer-32 av1-1-b10-00-quantizer-40 av1-1-b10-00-quantizer-50 av1-1-b10-00-quantizer-63"
+av1-1-b10-00-quantizer-32 av1-1-b10-00-quantizer-40 av1-1-b10-00-quantizer-50 av1-1-b10-00-quantizer-63 \
+av1-1-b8-23-film_grain-50 av1-1-b10-23-film_grain-50"
 # HIGH BIT DEPTH (0.8.3), kind_WxH, every frame hard. bNN = libaom at NN bits (4:2:0 / 4:4:4 / 4:2:2 / mono, superres +
 # LR, random resize at cpu-used 2, cpu-used 0, screen content, 128-SB, realtime, LOSSLESS, near-lossless quality);
 # r12* = rav1e, because libaom's aomenc cannot produce 12-bit 4:4:4 or 4:2:2. Each stream proves its bit depth and
@@ -152,6 +166,7 @@ skip_external() { # reason
     for c in $SEGI_CASES; do skip_case "$c" "$1"; done
     for c in $TSEG_CASES; do skip_case "$c" "$1"; done
     for c in $QM_CASES; do skip_case "$c" "$1"; done
+    for c in $FG_CASES; do skip_case "$c" "$1"; done
     for c in $CDF_CASES; do skip_case "$c" "$1"; done
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
@@ -313,6 +328,15 @@ repro_seq  fmt-b12-444-72x56 8 8
 # aomdec on every frame; both REJECTED on the 0.8.3 decoder.
 repro_seq  qm-iq-128x96 8 8
 repro_seq  qm-ll-96x64 3 3
+# FILM GRAIN (0.8.4), libaom 3.15.3, mandelbrot + noise=alls=6:allf=t, md5s over aomdec's DEFAULT (grained) output.
+# fg-reload-96x64: `--cpu-used=6 --film-grain-test=5 --lag-in-frames=0`, 4 frames, three of them update_grain 0 (a
+# reference's parameters, this frame's seed). fg-lag-96x64: `--cpu-used=6 --film-grain-test=10`, 10 frames, three
+# shown through show_existing_frame with their saved grain. fg-b10-422-72x40: profile 2, 10-bit 4:2:2,
+# `--film-grain-test=9 --lag-in-frames=0`, 3 frames. dav1d agrees with aomdec on every frame; the 0.8.4-bite-1 decoder
+# (no grain synthesis) matched none of the grained frames.
+repro_seq  fg-reload-96x64 4 4
+repro_seq  fg-lag-96x64 10 10
+repro_seq  fg-b10-422-72x40 3 3
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -1410,6 +1434,112 @@ qmcase() { # name = KIND_WxH (every frame hard)
 }
 echo "--- quantizer matrices (7.12.3 step 1b; every frame hard) ---"
 for c in $QM_CASES; do qmcase "$c"; done
+# Does the probe show what a FILM GRAIN case exists for? Per OUTPUT frame (show_frame or show_existing_frame) it reads
+# the grain the output process applies (after load_grain_params). want: applies (some output frame applies grain),
+# lagged (a show_existing_frame applies its saved grain), reload (a grain frame re-used a reference's parameters:
+# update_grain 0), superres (a grain frame is superres-upscaled), resize (>= 2 coded sizes), clipid / clipbt (a grain
+# frame clips to the restricted range, with matrix_coefficients MC_IDENTITY / not). bd / fmt as bd_property.
+grain_property() { # want bd fmt
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" -v bd="$2" -v fmt="$3" '
+        /^ *bit_depth=/ { split($0, a, "="); b = a[2] + 0 }
+        /^ *num_planes=/ { split($0, a, "="); np = a[2] + 0 }
+        /^ *subsampling_x=/ { split($0, a, "="); sx = a[2] + 0 }
+        /^ *subsampling_y=/ { split($0, a, "="); sy = a[2] + 0 }
+        /^ *frame_type=/ { f++ }
+        /^ *show_existing_frame=/ { split($0, a, "="); se[f] = a[2] + 0 }
+        /^ *show_frame=/ { split($0, a, "="); sh[f] = a[2] + 0 }
+        /^ *use_superres=/ { split($0, a, "="); sr[f] = a[2] + 0 }
+        /^ *frame_width=/ { split($0, a, "="); fw = a[2] + 0 }
+        /^ *frame_height=/ { split($0, a, "="); if (!se[f]) sz[fw "x" (a[2] + 0)] = 1 }
+        /^ *fg_apply_grain=/ { split($0, a, "="); ap[f] = a[2] + 0 }
+        /^ *fg_update_grain=/ { split($0, a, "="); up[f] = a[2] + 0 }
+        /^ *fg_clip_to_restricted_range=/ { split($0, a, "="); cl[f] = a[2] + 0 }
+        /^ *matrix_coefficients=/ { split($0, a, "="); mc = a[2] + 0 }
+        END {
+            nap = 0; nse = 0; nre = 0; nsr = 0; ns = 0; ncl = 0
+            for (s in sz) ns++
+            for (k = 1; k <= f; k++) {
+                if (!(sh[k] || se[k]) || !ap[k]) continue
+                nap++
+                if (se[k]) nse++
+                if (!se[k] && !up[k]) nre++
+                if (sr[k]) nsr++
+                if (cl[k]) ncl++
+            }
+            ok = (b == bd) && (nap >= 1)
+            if (fmt == "420") ok = ok && (np == 3 && sx == 1 && sy == 1)
+            if (fmt == "444") ok = ok && (np == 3 && sx == 0 && sy == 0)
+            if (fmt == "422") ok = ok && (np == 3 && sx == 1 && sy == 0)
+            if (fmt == "mono") ok = ok && (np == 1)
+            if (want == "lagged") ok = ok && (nse >= 1)
+            if (want == "reload") ok = ok && (nre >= 1)
+            if (want == "superres") ok = ok && (nsr >= 1)
+            if (want == "resize") ok = ok && (ns >= 2)
+            if (want == "clipid") ok = ok && (ncl >= 1) && (mc == 0)
+            if (want == "clipbt") ok = ok && (ncl >= 1) && (mc != 0)
+            printf "bit_depth=%d planes=%d grain_outputs=%d via_show_existing=%d reloads=%d superres=%d sizes=%d", \
+                b, np, nap, nse, nre, nsr, ns
+            printf " clipped=%d matrix_coefficients=%d", ncl, mc
+            exit !ok
+        }'
+}
+fgcase() { # name = KIND_WxH (every frame hard)
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=10 bd=8 fmt="420" enc="aomenc" want="lagged" args=""
+    local src="mandelbrot" sfilt=",noise=alls=6:allf=t"
+    local cicp="--color-primaries=bt709 --transfer-characteristics=bt709"
+    case "$kind" in
+        fgt5|fgt9|fgt11) fr=6; want="reload"; args="--cpu-used=6 --lag-in-frames=0 --film-grain-test=${kind#fgt}" ;;
+        fgt[0-9]*) args="--cpu-used=6 --film-grain-test=${kind#fgt}" ;;
+        fgb10)  bd=10; args="--cpu-used=6 --film-grain-test=3" ;;
+        fgb12)  bd=12; args="--profile=2 --cpu-used=6 --film-grain-test=7" ;;
+        fg444)  fmt="444"; args="--profile=1 --cpu-used=6 --film-grain-test=5" ;;
+        fg422)  fmt="422"; bd=10; args="--profile=2 --cpu-used=6 --film-grain-test=9" ;;
+        fgmono) fmt="mono"; args="--monochrome --cpu-used=6 --film-grain-test=2" ;;
+        fgsr)   fr=8; want="superres"
+                args="--cpu-used=6 --film-grain-test=4 --superres-mode=1 --superres-denominator=13 --superres-kf-denominator=11" ;;
+        fgrs)   fr=16; want="resize"; args="--cpu-used=6 --resize-mode=2 --film-grain-test=6" ;;   # 2 = random
+        fgsvt)  enc="svt"; args="--preset 8 --film-grain 10 --keyint 32" ;;
+        fgrav)  enc="rav1e"; args="--speed 6 --photon-noise 8" ;;
+        fgid)   fr=6; fmt="444"; src="testsrc2"; sfilt=""; want="clipid"
+                args="--profile=1 --cpu-used=6 --film-grain-test=1 $cicp --matrix-coefficients=identity" ;;
+        fgbt)   fr=6; fmt="444"; src="testsrc2"; sfilt=""; want="clipbt"
+                args="--profile=1 --cpu-used=6 --film-grain-test=1 $cicp --matrix-coefficients=bt709" ;;
+        *)      echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    local pf="yuv${fmt}p" iflag="--i${fmt}"
+    [ "$fmt" = "mono" ] && { pf="yuv420p"; iflag="--i420"; }
+    [ "$bd" != 8 ] && pf="${pf}${bd}le"
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv" "${WORK:?}/$n.y4m"
+    if [ "$enc" = "svt" ] || [ "$enc" = "rav1e" ]; then
+        local tool="SvtAv1EncApp"; [ "$enc" = "rav1e" ] && tool="rav1e"
+        if ! command -v "$tool" >/dev/null 2>&1; then skip_case "$n" "$tool not on PATH"; return; fi
+        ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30${sfilt}" -frames:v "$fr" \
+            -pix_fmt "$pf" "$WORK/$n.y4m" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+        # shellcheck disable=SC2086
+        if [ "$enc" = "svt" ]; then SvtAv1EncApp -i "$WORK/$n.y4m" -b "$WORK/$n.ivf" $args >/dev/null 2>&1
+        else rav1e "$WORK/$n.y4m" -o "$WORK/$n.ivf" -l "$fr" $args >/dev/null 2>&1; fi
+    else
+        ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30${sfilt}" -frames:v "$fr" \
+            -pix_fmt "$pf" -f rawvideo "$WORK/$n.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+        # shellcheck disable=SC2086
+        aomenc --codec=av1 -w "$w" -h "$h" $iflag --input-bit-depth="$bd" --bit-depth="$bd" --limit="$fr" $args \
+            --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" >/dev/null 2>&1
+    fi
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED ($enc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(grain_property "$want" "$bd" "$fmt"); then
+        echo "  $n: SETUP FAILED (not a $bd-bit $fmt '$want' film-grain stream: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($prop)"
+    vs_judge "$n" "$fr"
+}
+echo "--- film grain (7.18.3, the output process; every frame hard) ---"
+for c in $FG_CASES; do fgcase "$c"; done
 # does the probe show `want` — "ctxtile" (an adapting frame saving a tile other than 0) or "fp" (an adapting frame
 # with disable_frame_end_update_cdf 1) — AND a later frame inheriting CDFs (primary_ref_frame != 7)?
 cdf_property() { # want

@@ -1863,7 +1863,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >
 > **NEXT: 0.8.4, "every AV1 coding tool decodes"** (roadmap table): intra block copy (5.11.6), quantizer
 > matrices (7.12.3 with the per-segment `SegQMLevel`; the `qmon_*` case's 4 known gaps become matches),
-> film-grain synthesis (7.18.3; parsed and discarded today), scalability / operating-point select +
+> film-grain synthesis (7.18.3; DONE in bite 2 — it was silently skipped, not rejected), scalability / operating-point select +
 > `drop_obu`, and large-scale tile / `OBU_TILE_LIST`. Any reject left after it must be deliberate and
 > documented.
 >
@@ -1872,7 +1872,20 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > step 1b, and both lanes pick the matrix per transform block via `av1_qm_matrix`. `scripts/refs/qm_ref.py` proves
 > the table against the spec markdown and libaom. TRAP: libaom stores its table TRANSPOSED, so never copy it into
 > the spec's `i * tw + j`. The 4 `qmon` known gaps decode, and 13 more QM cases plus two reproducers are gated:
-> 2092 matched / 0 known-gap / 0 regressed / 0 skipped. Next in 0.8.4: intra block copy, film grain, scalability / `drop_obu`, large-scale tile.
+> 2092 matched / 0 known-gap / 0 regressed / 0 skipped.
+>
+> Bite 2 = **film grain DONE**. Before it, every grain stream decoded GRAIN-FREE with no error (0/10 on both
+> published grain vectors), and the docs had wrongly listed grain as a reject. Now:
+> - every `film_grain_params` element is kept in a block in the frame header (`AV1FH_GRAIN`, `Av1FgOff`);
+> - each slot saves a pointer to it (`AV1REF_SAVED_GRAIN`), loaded for `update_grain = 0` (seed kept) and for
+>   `show_existing_frame`;
+> - `src/av1_grain.cyr` (43 modules) synthesises 7.18.3 stripe by stripe onto the decoder's reused output frame;
+>   `av1_decoder_emit` is the hook, and the DPB stays clean.
+>
+> `scripts/refs/grain_ref.py --crosscheck` validated the port against `aomdec --skip-film-grain` before it was
+> trusted. 27 grain cases, three reproducers and both published grain vectors are gated: 2383 matched / 0 / 0 / 0.
+> Grain's `clip_to_restricted_range` reads the newly stored `matrix_coefficients`. Next in 0.8.4: intra block copy,
+> scalability / `drop_obu`, large-scale tile.
 >
 > **Known-and-tracked, not in 0.8.3:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

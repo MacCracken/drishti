@@ -180,7 +180,8 @@ enum Av1DecOff {
     AV1DEC_NSHOWN = 48;   # how many frames that call showed
     AV1DEC_COUNT  = 56;   # frames processed since av1_decoder_new (coded + show_existing)
     AV1DEC_ERR    = 64;   # sticky error (DR_OK while healthy)
-    AV1DEC_SIZE   = 72;
+    AV1DEC_GRAIN  = 72;   # Av1GrainCtx for the film grain output process (0 until a frame needs grain)
+    AV1DEC_SIZE   = 80;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
@@ -213,14 +214,30 @@ fn av1_decoder_fail(dec, err, out_err): i64 {
     return 0;
 }
 # a frame finished decoding (or was shown from the DPB): count it, and record it as
-# this call's output when it is shown.
-fn av1_decoder_emit(dec, frame, shown): i64 {
+# this call's output when it is shown. The OUTPUT is the output process's (7.18): with
+# film_grain_params_present and the header's (possibly loaded) apply_grain, the film
+# grain synthesis (7.18.3, src/av1_grain.cyr) runs on a COPY — the decoder's reused
+# grain frame, valid until the next grain output — and the DPB keeps the clean frame.
+# Returns DR_OK, or the synthesis's allocation error.
+fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
     store64(dec + AV1DEC_COUNT, load64(dec + AV1DEC_COUNT) + 1);
     if (shown == 1) {
-        store64(dec + AV1DEC_SHOWN, frame);
+        var outf = frame;
+        if ((av1_seq_film_grain_present(seq) != 0) && (av1_fh_apply_grain(fh) != 0)) {
+            var gc = load64(dec + AV1DEC_GRAIN);
+            if (gc == 0) {
+                gc = av1_grain_ctx_new();
+                if (gc == 0) { return DR_ERR_OOM; }
+                store64(dec + AV1DEC_GRAIN, gc);
+            }
+            var gerr = 0;
+            outf = av1_grain_apply(gc, av1_fh_grain(fh), av1_seq_matrix_coefficients(seq), frame, &gerr);
+            if (outf == 0) { return gerr; }
+        }
+        store64(dec + AV1DEC_SHOWN, outf);
         store64(dec + AV1DEC_NSHOWN, load64(dec + AV1DEC_NSHOWN) + 1);
     }
-    return 0;
+    return DR_OK;
 }
 
 # ================================================================
@@ -240,6 +257,11 @@ fn av1_decoder_emit(dec, frame, shown): i64 {
 #                      finish the frame, run the ref update, record output if shown.
 # temporal_delimiter / metadata / padding / redundant_frame_header / tile_list are
 # skipped.
+#
+# The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
+# the decoder's reused grain frame, overwritten by the next grain output — consume it
+# before the next call. Without grain it is the DPB's own frame. Either way, do not
+# modify it.
 #
 # On any parse/decode fault: returns 0 with *out_err set, and the error is latched
 # (see Av1Decoder). A null decoder or buffer, or a negative size, is DR_ERR_BOUNDS
@@ -288,7 +310,8 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
                 if (lerr != DR_OK) { return av1_decoder_fail(dec, lerr, out_err); }
                 var uerr = av1_dpb_update(dpb, refs, seq, nfh, shown);
                 if (uerr != DR_OK) { return av1_decoder_fail(dec, uerr, out_err); }
-                av1_decoder_emit(dec, shown, 1);
+                var eerr = av1_decoder_emit(dec, seq, nfh, shown, 1);
+                if (eerr != DR_OK) { return av1_decoder_fail(dec, eerr, out_err); }
                 store64(dec + AV1DEC_FH, 0);
             }
         }
@@ -311,7 +334,8 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             }
             var uerr2 = av1_dpb_update(dpb, refs, seq, ffh, frame);
             if (uerr2 != DR_OK) { return av1_decoder_fail(dec, uerr2, out_err); }
-            av1_decoder_emit(dec, frame, av1_fh_show_frame(ffh));
+            var eerr2 = av1_decoder_emit(dec, seq, ffh, frame, av1_fh_show_frame(ffh));
+            if (eerr2 != DR_OK) { return av1_decoder_fail(dec, eerr2, out_err); }
             store64(dec + AV1DEC_FH, 0);
             store64(dec + AV1DEC_FDC, 0);
         }
@@ -340,7 +364,8 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
                 if (gfin_err != DR_OK) { return av1_decoder_fail(dec, gfin_err, out_err); }
                 var uerr3 = av1_dpb_update(dpb, refs, seq, fh, gframe);
                 if (uerr3 != DR_OK) { return av1_decoder_fail(dec, uerr3, out_err); }
-                av1_decoder_emit(dec, gframe, av1_fh_show_frame(fh));
+                var eerr3 = av1_decoder_emit(dec, seq, fh, gframe, av1_fh_show_frame(fh));
+                if (eerr3 != DR_OK) { return av1_decoder_fail(dec, eerr3, out_err); }
                 store64(dec + AV1DEC_FDC, 0);
                 store64(dec + AV1DEC_FH, 0);
             }

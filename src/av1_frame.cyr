@@ -185,14 +185,7 @@ enum Av1FhOff {
     AV1FH_TILE_SIZE_BYTES        = 544;
     AV1FH_CONTEXT_UPDATE_TILE_ID = 552;
     AV1FH_UNIFORM_TILE           = 560;
-    AV1FH_APPLY_GRAIN            = 568;
-    AV1FH_GRAIN_SEED             = 576;
-    AV1FH_UPDATE_GRAIN           = 584;
-    AV1FH_GRAIN_REF_IDX          = 592;
-    AV1FH_NUM_Y_POINTS           = 600;
-    AV1FH_CHROMA_SCALE_FROM_LUMA = 608;
-    AV1FH_NUM_CB_POINTS          = 616;
-    AV1FH_NUM_CR_POINTS          = 624;
+    # 568..631 free: the film-grain scalars moved into the grain block (AV1FH_GRAIN, 0.8.4)
     AV1FH_SKIP_MODE_FRAME0       = 632;
     AV1FH_SKIP_MODE_FRAME1       = 640;
     AV1FH_BITS_CONSUMED          = 648;   # reader bit position at header end
@@ -214,7 +207,47 @@ enum Av1FhOff {
     AV1FH_FEATURE_DATA           = 2144;  # [8*8=64] sign -> 2656
     AV1FH_MI_COL_STARTS          = 2656;  # [65]          -> 3176
     AV1FH_MI_ROW_STARTS          = 3176;  # [65]          -> 3696
-    AV1FH_SIZE                   = 3712;
+    AV1FH_GRAIN                  = 3712;  # film_grain_params block (Av1FgOff, AV1FG_SIZE) -> 5232
+    AV1FH_SIZE                   = 5232;
+}
+
+# The film_grain_params() syntax elements (5.9.30), every one, as a block inside the frame header at
+# AV1FH_GRAIN (offsets relative to the block; i64 slots). reset_grain_params() zeroes it; load_grain_params( idx )
+# copies a reference slot's saved block over it (6.8.20); save_grain_params( i ) records a pointer to it per slot
+# (7.20, AV1REF_SAVED_GRAIN — a header is never modified after its parse, so the pointer is a stable copy). The
+# point arrays hold 16 entries though the conformance limits are 14 (luma) and 10 (chroma), so a 4-bit count can
+# never index past them; the parser rejects counts above the limits anyway.
+enum Av1FgOff {
+    AV1FG_APPLY         = 0;      # apply_grain
+    AV1FG_SEED          = 8;      # grain_seed
+    AV1FG_UPDATE        = 16;     # update_grain
+    AV1FG_REF_IDX       = 24;     # film_grain_params_ref_idx
+    AV1FG_NUM_Y         = 32;     # num_y_points
+    AV1FG_CSFL          = 40;     # chroma_scaling_from_luma
+    AV1FG_NUM_CB        = 48;     # num_cb_points
+    AV1FG_NUM_CR        = 56;     # num_cr_points
+    AV1FG_SCALING_M8    = 64;     # grain_scaling_minus_8
+    AV1FG_AR_LAG        = 72;     # ar_coeff_lag
+    AV1FG_AR_SHIFT_M6   = 80;     # ar_coeff_shift_minus_6
+    AV1FG_SCALE_SHIFT   = 88;     # grain_scale_shift
+    AV1FG_CB_MULT       = 96;
+    AV1FG_CB_LUMA_MULT  = 104;
+    AV1FG_CB_OFFSET     = 112;
+    AV1FG_CR_MULT       = 120;
+    AV1FG_CR_LUMA_MULT  = 128;
+    AV1FG_CR_OFFSET     = 136;
+    AV1FG_OVERLAP       = 144;    # overlap_flag
+    AV1FG_CLIP_RR       = 152;    # clip_to_restricted_range
+    AV1FG_Y_VALUE       = 160;    # point_y_value[16]      -> 288
+    AV1FG_Y_SCALING     = 288;    # point_y_scaling[16]    -> 416
+    AV1FG_CB_VALUE      = 416;    # point_cb_value[16]     -> 544
+    AV1FG_CB_SCALING    = 544;    # point_cb_scaling[16]   -> 672
+    AV1FG_CR_VALUE      = 672;    # point_cr_value[16]     -> 800
+    AV1FG_CR_SCALING    = 800;    # point_cr_scaling[16]   -> 928
+    AV1FG_AR_Y          = 928;    # ar_coeffs_y_plus_128[24]  -> 1120
+    AV1FG_AR_CB         = 1120;   # ar_coeffs_cb_plus_128[25] -> 1320
+    AV1FG_AR_CR         = 1320;   # ar_coeffs_cr_plus_128[25] -> 1520
+    AV1FG_SIZE          = 1520;
 }
 
 # ================================================================
@@ -248,7 +281,8 @@ enum Av1RefOff {
     AV1REF_SAVED_FEAT_DATA    = 8384;    # [8 slot][8 seg][8 lvl] FeatureData      -> 12480
     AV1REF_SAVED_LF_REF       = 12480;   # [8 slot][8] loop_filter_ref_deltas      -> 12992
     AV1REF_SAVED_LF_MODE      = 12992;   # [8 slot][2] loop_filter_mode_deltas     -> 13120
-    AV1REF_SIZE               = 13120;
+    AV1REF_SAVED_GRAIN        = 13120;   # [8] i64 pointers to each slot's saved film_grain_params block (7.20, 0.8.4)
+    AV1REF_SIZE               = 13184;
 }
 
 # ================================================================
@@ -414,6 +448,9 @@ fn av1_ref_set_saved_mf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_MF + (i * 8),
 # primary_ref_frame selects this slot. See av1_cdf_bundle_* in av1_intertile.cyr.
 fn av1_ref_saved_cdf(r, i): i64 { return load64(r + AV1REF_SAVED_CDF + (i * 8)); }
 fn av1_ref_set_saved_cdf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_CDF + (i * 8), ptr); return 0; }
+# saved film_grain_params block (7.20 save_grain_params / 6.8.20 load_grain_params, 0.8.4): slot i's pointer, 0 when
+# the slot was never refreshed.
+fn av1_ref_saved_grain(r, i): i64 { return load64(r + AV1REF_SAVED_GRAIN + (i * 8)); }
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }
@@ -573,12 +610,13 @@ fn av1_fh_ref_frame_idx(fh, i): i64 { return load64(fh + AV1FH_REF_FRAME_IDX + (
 fn av1_fh_order_hint_ref(fh, refFrame): i64 { return load64(fh + AV1FH_ORDER_HINTS + (refFrame * 8)); }
 fn av1_fh_gm_type(fh, ref): i64 { return load64(fh + AV1FH_GM_TYPE + ((ref - 1) * 8)); }
 fn av1_fh_gm_param(fh, ref, idx): i64 { return load64(fh + AV1FH_GM_PARAMS + (((ref - 1) * 6 + idx) * 8)); }
-fn av1_fh_apply_grain(fh): i64 { return load64(fh + AV1FH_APPLY_GRAIN); }
-fn av1_fh_grain_seed(fh): i64 { return load64(fh + AV1FH_GRAIN_SEED); }
-fn av1_fh_update_grain(fh): i64 { return load64(fh + AV1FH_UPDATE_GRAIN); }
-fn av1_fh_num_y_points(fh): i64 { return load64(fh + AV1FH_NUM_Y_POINTS); }
-fn av1_fh_num_cb_points(fh): i64 { return load64(fh + AV1FH_NUM_CB_POINTS); }
-fn av1_fh_num_cr_points(fh): i64 { return load64(fh + AV1FH_NUM_CR_POINTS); }
+fn av1_fh_grain(fh): i64 { return fh + AV1FH_GRAIN; }   # the film_grain_params block (Av1FgOff)
+fn av1_fh_apply_grain(fh): i64 { return load64(fh + AV1FH_GRAIN + AV1FG_APPLY); }
+fn av1_fh_grain_seed(fh): i64 { return load64(fh + AV1FH_GRAIN + AV1FG_SEED); }
+fn av1_fh_update_grain(fh): i64 { return load64(fh + AV1FH_GRAIN + AV1FG_UPDATE); }
+fn av1_fh_num_y_points(fh): i64 { return load64(fh + AV1FH_GRAIN + AV1FG_NUM_Y); }
+fn av1_fh_num_cb_points(fh): i64 { return load64(fh + AV1FH_GRAIN + AV1FG_NUM_CB); }
+fn av1_fh_num_cr_points(fh): i64 { return load64(fh + AV1FH_GRAIN + AV1FG_NUM_CR); }
 fn av1_fh_bits_consumed(fh): i64 { return load64(fh + AV1FH_BITS_CONSUMED); }
 
 # ================================================================
@@ -1550,36 +1588,60 @@ fn av1_global_motion_params(br, fh, refs): i64 {
     return dr_br_err(br);
 }
 
-# film_grain_params() — 5.9.30. Cursor-true: every field consumed; the
-# scalar summary is stored, the point/AR-coefficient arrays are read and
-# discarded (grain synthesis lands in the 0.7.x AV1 arc, see
-# docs/development/roadmap.md). mono_chrome / subsampling
-# come from the sequence header.
-fn av1_film_grain_params(br, s, fh): i64 {
+# film_grain_params() — 5.9.30, into the header's grain block (Av1FgOff). Every syntax element is stored: the
+# output process (7.18.3, src/av1_grain.cyr) synthesises the grain from them. reset_grain_params() is a zeroed
+# block; update_grain 0 is load_grain_params( film_grain_params_ref_idx ) with this frame's grain_seed kept.
+# REJECTS (DR_ERR_BAD_HEADER) every bitstream-conformance requirement of 6.8.20 whose violation could steer the
+# synthesis out of its arrays or tables — libaom refuses the same streams:
+#   num_y_points > 14, num_cb_points > 10, num_cr_points > 10, point values not strictly increasing (the scaling
+#   table's deltaX would be 0 or negative), 4:2:0 grain on exactly one chroma plane, and a film_grain_params_ref_idx
+#   that is not one of ref_frame_idx[ 0..6 ] (or names a slot with no saved parameters).
+fn av1_film_grain_params(br, s, refs, fh): i64 {
+    var g = fh + AV1FH_GRAIN;
+    memset(g, 0, AV1FG_SIZE);   # reset_grain_params()
     if ((av1_seq_film_grain_present(s) == 0)
       || ((av1_fh_show_frame(fh) == 0) && (av1_fh_showable_frame(fh) == 0))) {
-        store64(fh + AV1FH_APPLY_GRAIN, 0);
         return DR_OK;
     }
     var apply_grain = dr_br_read_bit(br);   # apply_grain f(1)
-    store64(fh + AV1FH_APPLY_GRAIN, apply_grain);
-    if (apply_grain == 0) { return DR_OK; }
-    store64(fh + AV1FH_GRAIN_SEED, dr_br_read_bits(br, 16));   # grain_seed f(16)
+    if (apply_grain == 0) { return dr_br_err(br); }
+    var seed = dr_br_read_bits(br, 16);   # grain_seed f(16)
     var update_grain = 1;
     if (av1_fh_frame_type(fh) == AV1_INTER_FRAME) {
         update_grain = dr_br_read_bit(br);   # update_grain f(1)
     }
-    store64(fh + AV1FH_UPDATE_GRAIN, update_grain);
     if (update_grain == 0) {
-        store64(fh + AV1FH_GRAIN_REF_IDX, dr_br_read_bits(br, 3));   # film_grain_params_ref_idx f(3)
-        return dr_br_err(br);
+        var ridx = dr_br_read_bits(br, 3);   # film_grain_params_ref_idx f(3)
+        if (dr_br_err(br) != DR_OK) { return dr_br_err(br); }
+        var found = 0;
+        var j = 0;
+        while (j < AV1_REFS_PER_FRAME) {
+            if (av1_fh_ref_frame_idx(fh, j) == ridx) { found = 1; }
+            j = j + 1;
+        }
+        var saved = av1_ref_saved_grain(refs, ridx);
+        if ((found == 0) || (saved == 0)) { return DR_ERR_BAD_HEADER; }
+        memcpy(g, saved, AV1FG_SIZE);   # load_grain_params( film_grain_params_ref_idx )
+        store64(g + AV1FG_SEED, seed);  # grain_seed = tempGrainSeed
+        # update_grain / film_grain_params_ref_idx steer only this parse, and the synthesis never reads them, so the
+        # block keeps THIS frame's coded values (the load would copy the slot's): the probe can then show a reload.
+        store64(g + AV1FG_UPDATE, 0);
+        store64(g + AV1FG_REF_IDX, ridx);
+        return DR_OK;
     }
+    store64(g + AV1FG_APPLY, 1);
+    store64(g + AV1FG_SEED, seed);
+    store64(g + AV1FG_UPDATE, 1);
     var num_y = dr_br_read_bits(br, 4);   # num_y_points f(4)
-    store64(fh + AV1FH_NUM_Y_POINTS, num_y);
+    if (num_y > 14) { return DR_ERR_BAD_HEADER; }
+    store64(g + AV1FG_NUM_Y, num_y);
     var i = 0;
     while (i < num_y) {
-        dr_br_read_bits(br, 8);   # point_y_value[i]   f(8)
-        dr_br_read_bits(br, 8);   # point_y_scaling[i] f(8)
+        store64(g + AV1FG_Y_VALUE + (i * 8), dr_br_read_bits(br, 8));     # point_y_value[ i ]   f(8)
+        store64(g + AV1FG_Y_SCALING + (i * 8), dr_br_read_bits(br, 8));   # point_y_scaling[ i ] f(8)
+        if ((i > 0) && (load64(g + AV1FG_Y_VALUE + (i * 8)) <= load64(g + AV1FG_Y_VALUE + ((i - 1) * 8)))) {
+            return DR_ERR_BAD_HEADER;
+        }
         i = i + 1;
     }
     var mono = av1_seq_mono(s);
@@ -1587,72 +1649,80 @@ fn av1_film_grain_params(br, s, fh): i64 {
     if (mono == 0) {
         csfl = dr_br_read_bit(br);   # chroma_scaling_from_luma f(1)
     }
-    store64(fh + AV1FH_CHROMA_SCALE_FROM_LUMA, csfl);
+    store64(g + AV1FG_CSFL, csfl);
     var num_cb = 0;
     var num_cr = 0;
     var ssx = av1_seq_subsampling_x(s);
     var ssy = av1_seq_subsampling_y(s);
-    if (mono || csfl || ((ssx == 1) && (ssy == 1) && (num_y == 0))) {
-        num_cb = 0;
-        num_cr = 0;
-    } else {
+    if ((mono == 0) && (csfl == 0) && (((ssx == 1) && (ssy == 1) && (num_y == 0)) == 0)) {
         num_cb = dr_br_read_bits(br, 4);   # num_cb_points f(4)
+        if (num_cb > 10) { return DR_ERR_BAD_HEADER; }
         var c = 0;
         while (c < num_cb) {
-            dr_br_read_bits(br, 8);   # point_cb_value[c]   f(8)
-            dr_br_read_bits(br, 8);   # point_cb_scaling[c] f(8)
+            store64(g + AV1FG_CB_VALUE + (c * 8), dr_br_read_bits(br, 8));     # point_cb_value[ i ]   f(8)
+            store64(g + AV1FG_CB_SCALING + (c * 8), dr_br_read_bits(br, 8));   # point_cb_scaling[ i ] f(8)
+            if ((c > 0) && (load64(g + AV1FG_CB_VALUE + (c * 8)) <= load64(g + AV1FG_CB_VALUE + ((c - 1) * 8)))) {
+                return DR_ERR_BAD_HEADER;
+            }
             c = c + 1;
         }
         num_cr = dr_br_read_bits(br, 4);   # num_cr_points f(4)
+        if (num_cr > 10) { return DR_ERR_BAD_HEADER; }
         var d = 0;
         while (d < num_cr) {
-            dr_br_read_bits(br, 8);   # point_cr_value[d]   f(8)
-            dr_br_read_bits(br, 8);   # point_cr_scaling[d] f(8)
+            store64(g + AV1FG_CR_VALUE + (d * 8), dr_br_read_bits(br, 8));     # point_cr_value[ i ]   f(8)
+            store64(g + AV1FG_CR_SCALING + (d * 8), dr_br_read_bits(br, 8));   # point_cr_scaling[ i ] f(8)
+            if ((d > 0) && (load64(g + AV1FG_CR_VALUE + (d * 8)) <= load64(g + AV1FG_CR_VALUE + ((d - 1) * 8)))) {
+                return DR_ERR_BAD_HEADER;
+            }
             d = d + 1;
         }
+        # 4:2:0: grain on both chroma planes or on neither (6.8.20)
+        if ((ssx == 1) && (ssy == 1) && ((num_cb == 0) != (num_cr == 0))) { return DR_ERR_BAD_HEADER; }
     }
-    store64(fh + AV1FH_NUM_CB_POINTS, num_cb);
-    store64(fh + AV1FH_NUM_CR_POINTS, num_cr);
-    dr_br_read_bits(br, 2);   # grain_scaling_minus_8 f(2)
+    store64(g + AV1FG_NUM_CB, num_cb);
+    store64(g + AV1FG_NUM_CR, num_cr);
+    store64(g + AV1FG_SCALING_M8, dr_br_read_bits(br, 2));   # grain_scaling_minus_8 f(2)
     var ar_lag = dr_br_read_bits(br, 2);   # ar_coeff_lag f(2)
-    var num_pos_luma = 2 * ar_lag * (ar_lag + 1);
+    store64(g + AV1FG_AR_LAG, ar_lag);
+    var num_pos_luma = 2 * ar_lag * (ar_lag + 1);   # <= 24
     var num_pos_chroma = num_pos_luma;
     if (num_y) {
-        num_pos_chroma = num_pos_luma + 1;
+        num_pos_chroma = num_pos_luma + 1;           # <= 25
         var p = 0;
         while (p < num_pos_luma) {
-            dr_br_read_bits(br, 8);   # ar_coeffs_y_plus_128[p] f(8)
+            store64(g + AV1FG_AR_Y + (p * 8), dr_br_read_bits(br, 8));   # ar_coeffs_y_plus_128[ i ] f(8)
             p = p + 1;
         }
     }
     if (csfl || num_cb) {
         var q = 0;
         while (q < num_pos_chroma) {
-            dr_br_read_bits(br, 8);   # ar_coeffs_cb_plus_128[q] f(8)
+            store64(g + AV1FG_AR_CB + (q * 8), dr_br_read_bits(br, 8));   # ar_coeffs_cb_plus_128[ i ] f(8)
             q = q + 1;
         }
     }
     if (csfl || num_cr) {
         var t = 0;
         while (t < num_pos_chroma) {
-            dr_br_read_bits(br, 8);   # ar_coeffs_cr_plus_128[t] f(8)
+            store64(g + AV1FG_AR_CR + (t * 8), dr_br_read_bits(br, 8));   # ar_coeffs_cr_plus_128[ i ] f(8)
             t = t + 1;
         }
     }
-    dr_br_read_bits(br, 2);   # ar_coeff_shift_minus_6 f(2)
-    dr_br_read_bits(br, 2);   # grain_scale_shift f(2)
+    store64(g + AV1FG_AR_SHIFT_M6, dr_br_read_bits(br, 2));   # ar_coeff_shift_minus_6 f(2)
+    store64(g + AV1FG_SCALE_SHIFT, dr_br_read_bits(br, 2));   # grain_scale_shift f(2)
     if (num_cb) {
-        dr_br_read_bits(br, 8);   # cb_mult      f(8)
-        dr_br_read_bits(br, 8);   # cb_luma_mult f(8)
-        dr_br_read_bits(br, 9);   # cb_offset    f(9)
+        store64(g + AV1FG_CB_MULT, dr_br_read_bits(br, 8));        # cb_mult      f(8)
+        store64(g + AV1FG_CB_LUMA_MULT, dr_br_read_bits(br, 8));   # cb_luma_mult f(8)
+        store64(g + AV1FG_CB_OFFSET, dr_br_read_bits(br, 9));      # cb_offset    f(9)
     }
     if (num_cr) {
-        dr_br_read_bits(br, 8);   # cr_mult      f(8)
-        dr_br_read_bits(br, 8);   # cr_luma_mult f(8)
-        dr_br_read_bits(br, 9);   # cr_offset    f(9)
+        store64(g + AV1FG_CR_MULT, dr_br_read_bits(br, 8));        # cr_mult      f(8)
+        store64(g + AV1FG_CR_LUMA_MULT, dr_br_read_bits(br, 8));   # cr_luma_mult f(8)
+        store64(g + AV1FG_CR_OFFSET, dr_br_read_bits(br, 9));      # cr_offset    f(9)
     }
-    dr_br_read_bit(br);   # overlap_flag f(1)
-    dr_br_read_bit(br);   # clip_to_restricted_range f(1)
+    store64(g + AV1FG_OVERLAP, dr_br_read_bit(br));   # overlap_flag f(1)
+    store64(g + AV1FG_CLIP_RR, dr_br_read_bit(br));   # clip_to_restricted_range f(1)
     return dr_br_err(br);
 }
 
@@ -1904,6 +1974,12 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
                 av1_ref_load_seg_lf(refs, idx, fh);
                 av1_ref_load_gm(refs, idx, fh);
             }
+            if (av1_seq_film_grain_present(s)) {
+                # load_grain_params( frame_to_show_map_idx ) (5.9.2): the output process applies the SHOWN
+                # frame's saved grain, seed included. A slot with nothing saved stays reset (no grain).
+                var sgrain = av1_ref_saved_grain(refs, idx);
+                if (sgrain != 0) { memcpy(fh + AV1FH_GRAIN, sgrain, AV1FG_SIZE); }
+            }
             store64(fh + AV1FH_FRAME_IS_INTRA, 1);
             if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
             store64(fh + AV1FH_BITS_CONSUMED, dr_br_bit_pos(br));
@@ -2134,7 +2210,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
     store64(fh + AV1FH_REDUCED_TX_SET, dr_br_read_bit(br));   # reduced_tx_set f(1)
     var rcg = av1_global_motion_params(br, fh, refs);
     if (rcg != DR_OK) { store64(out_err, rcg); return 0; }
-    var rcfg = av1_film_grain_params(br, s, fh);
+    var rcfg = av1_film_grain_params(br, s, refs, fh);
     if (rcfg != DR_OK) { store64(out_err, rcfg); return 0; }
 
     if (dr_br_err(br) != DR_OK) { store64(out_err, dr_br_err(br)); return 0; }
@@ -2215,6 +2291,9 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
                 store64(refs + AV1REF_SAVED_LF_REF + (((i * 8) + lk) * 8), av1_fh_loop_filter_ref_delta(fh, lk));
                 lk = lk + 1;
             }
+            # save_grain_params( i ) (7.20): a pointer to this header's grain block (reset when film grain is
+            # absent, so a later load reads "no grain"); a show_existing header holds the LOADED block.
+            store64(refs + AV1REF_SAVED_GRAIN + (i * 8), fh + AV1FH_GRAIN);
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
             if (from_shown != 0) {

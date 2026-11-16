@@ -87,6 +87,7 @@ enum Av1SeqOff {
     AV1_SEQ_ENABLE_MASKED        = 304;  # enable_masked_compound
     AV1_SEQ_ENABLE_DUAL_FILTER   = 312;
     AV1_SEQ_ENABLE_JNT_COMP      = 320;
+    AV1_SEQ_MATRIX_COEFF         = 328;  # matrix_coefficients (6.4.2; MC_UNSPECIFIED 2 when not described)
     AV1_SEQ_OP_IDC               = 384;  # operating_point_idc[32]     -> 640
     AV1_SEQ_OP_DM                = 640;  # dm_present_for_this_op[32]   -> 896
     AV1_SEQ_SIZE                 = 896;
@@ -171,6 +172,9 @@ fn av1_color_config_parse(br, profile, s): i64 {
         tc = dr_br_read_bits(br, 8);        # transfer_characteristics f(8)
         mc = dr_br_read_bits(br, 8);        # matrix_coefficients      f(8)
     }
+    # kept for the film grain output process: clip_to_restricted_range widens chroma to the luma range
+    # when matrix_coefficients is MC_IDENTITY (7.18.3.5).
+    store64(s + AV1_SEQ_MATRIX_COEFF, mc);
     if (mono) {
         # 5.5.2 monochrome path: color_range then RETURN — 4:2:0 implied,
         # no chroma position or separate_uv_delta_q coded.
@@ -431,6 +435,7 @@ fn av1_seq_width(s): i64 { return load64(s + AV1_SEQ_WIDTH); }
 fn av1_seq_height(s): i64 { return load64(s + AV1_SEQ_HEIGHT); }
 fn av1_seq_bitdepth(s): i64 { return load64(s + AV1_SEQ_BITDEPTH); }
 fn av1_seq_mono(s): i64 { return load64(s + AV1_SEQ_MONO); }
+fn av1_seq_matrix_coefficients(s): i64 { return load64(s + AV1_SEQ_MATRIX_COEFF); }
 fn av1_seq_still(s): i64 { return load64(s + AV1_SEQ_STILL); }
 fn av1_seq_reduced(s): i64 { return load64(s + AV1_SEQ_REDUCED); }
 

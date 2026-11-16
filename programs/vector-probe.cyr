@@ -45,6 +45,20 @@ fn probe_kv(k, v): i64 {
     probe_puts("\n");
     return 0;
 }
+# an i64 array as "k=v0,v1,...,v(n-1)" (the film grain point / AR-coefficient arrays, 0.8.4).
+fn probe_arr(k, ptr, n): i64 {
+    probe_puts("  ");
+    probe_puts(k);
+    probe_puts("=");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { probe_puts(","); }
+        probe_putn(load64(ptr + (i * 8)));
+        i = i + 1;
+    }
+    probe_puts("\n");
+    return 0;
+}
 # flag a field drishti REJECTS on when non-zero (or, for a few, when it differs from
 # the supported value) so the offending feature is obvious in the output.
 fn probe_gate(k, v, bad): i64 {
@@ -72,6 +86,8 @@ fn probe_seq(seq): i64 {
     probe_kv("enable_ref_frame_mvs", load64(seq + AV1_SEQ_ENABLE_REF_FRAME_MVS));
     probe_kv("enable_jnt_comp", load64(seq + AV1_SEQ_ENABLE_JNT_COMP));
     probe_kv("enable_superres", load64(seq + AV1_SEQ_ENABLE_SUPERRES));
+    probe_kv("matrix_coefficients", av1_seq_matrix_coefficients(seq));
+    probe_kv("film_grain_params_present", av1_seq_film_grain_present(seq));
     return 0;
 }
 
@@ -143,6 +159,37 @@ fn probe_fh(fh, seq): i64 {
     probe_kv("disable_cdf_update", load64(fh + AV1FH_DISABLE_CDF_UPDATE));   # drives symbol adaptation
     probe_kv("disable_frame_end_update_cdf", load64(fh + AV1FH_DISABLE_FE_UPDATE_CDF));
     probe_kv("context_update_tile_id", load64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID));
+    # film_grain_params (5.9.30) as the output process will apply them: after load_grain_params for
+    # update_grain 0 and for show_existing_frame (0.8.4). scripts/refs/grain_ref.py --crosscheck reads these.
+    var g = av1_fh_grain(fh);
+    probe_kv("fg_apply_grain", load64(g + AV1FG_APPLY));
+    probe_kv("fg_grain_seed", load64(g + AV1FG_SEED));
+    probe_kv("fg_update_grain", load64(g + AV1FG_UPDATE));
+    probe_kv("fg_num_y_points", load64(g + AV1FG_NUM_Y));
+    probe_arr("fg_point_y_value", g + AV1FG_Y_VALUE, 16);
+    probe_arr("fg_point_y_scaling", g + AV1FG_Y_SCALING, 16);
+    probe_kv("fg_chroma_scaling_from_luma", load64(g + AV1FG_CSFL));
+    probe_kv("fg_num_cb_points", load64(g + AV1FG_NUM_CB));
+    probe_arr("fg_point_cb_value", g + AV1FG_CB_VALUE, 16);
+    probe_arr("fg_point_cb_scaling", g + AV1FG_CB_SCALING, 16);
+    probe_kv("fg_num_cr_points", load64(g + AV1FG_NUM_CR));
+    probe_arr("fg_point_cr_value", g + AV1FG_CR_VALUE, 16);
+    probe_arr("fg_point_cr_scaling", g + AV1FG_CR_SCALING, 16);
+    probe_kv("fg_grain_scaling_minus_8", load64(g + AV1FG_SCALING_M8));
+    probe_kv("fg_ar_coeff_lag", load64(g + AV1FG_AR_LAG));
+    probe_arr("fg_ar_coeffs_y_plus_128", g + AV1FG_AR_Y, 24);
+    probe_arr("fg_ar_coeffs_cb_plus_128", g + AV1FG_AR_CB, 25);
+    probe_arr("fg_ar_coeffs_cr_plus_128", g + AV1FG_AR_CR, 25);
+    probe_kv("fg_ar_coeff_shift_minus_6", load64(g + AV1FG_AR_SHIFT_M6));
+    probe_kv("fg_grain_scale_shift", load64(g + AV1FG_SCALE_SHIFT));
+    probe_kv("fg_cb_mult", load64(g + AV1FG_CB_MULT));
+    probe_kv("fg_cb_luma_mult", load64(g + AV1FG_CB_LUMA_MULT));
+    probe_kv("fg_cb_offset", load64(g + AV1FG_CB_OFFSET));
+    probe_kv("fg_cr_mult", load64(g + AV1FG_CR_MULT));
+    probe_kv("fg_cr_luma_mult", load64(g + AV1FG_CR_LUMA_MULT));
+    probe_kv("fg_cr_offset", load64(g + AV1FG_CR_OFFSET));
+    probe_kv("fg_overlap_flag", load64(g + AV1FG_OVERLAP));
+    probe_kv("fg_clip_to_restricted_range", load64(g + AV1FG_CLIP_RR));
     return 0;
 }
 

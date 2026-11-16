@@ -4,6 +4,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.4 bite 2: film grain synthesis (7.18.3) on the output; grain streams no longer decode grain-free
+
+**Every film-grain stream used to decode WITHOUT its grain, and nothing said so.** `film_grain_params` was parsed
+and every point and coefficient array thrown away, and nothing applied the synthesis. Earlier docs listed film grain
+as a reject; it never was one. On libaom's published `av1-1-b8-23-film_grain-50` and `av1-1-b10-23-film_grain-50`,
+the 0.8.4-bite-1 decoder matched **0 of 10** frames each. Both now match **10 of 10** against libaom's published
+md5s.
+- **The parse** (`src/av1_frame.cyr`) keeps every `film_grain_params` element in a block inside the frame header:
+  - `reset_grain_params` is a zeroed block;
+  - each reference slot saves a pointer to its frame's block (`save_grain_params`, 7.20, `AV1REF_SAVED_GRAIN`);
+  - `update_grain = 0` loads the named slot's block and keeps the frame's own `grain_seed`;
+  - `show_existing_frame` loads the shown slot's block, seed included.
+
+  The coded `update_grain` and `film_grain_params_ref_idx` are kept after a load, so the probe can show a reload;
+  nothing in the synthesis reads them.
+- **Rejected with `DR_ERR_BAD_HEADER`** (6.8.20), each a violation that could steer the synthesis out of its tables,
+  and each refused by libaom too:
+  - more than 14 luma or 10 Cb/Cr points;
+  - point values that are not strictly increasing;
+  - 4:2:0 grain on one chroma plane only;
+  - a `film_grain_params_ref_idx` that is not one of `ref_frame_idx[]`, or names a slot with nothing saved.
+- **New module `src/av1_grain.cyr`**, all of 7.18.3: the LFSR, the generate-grain AR filter, the scaling lookup, and
+  the add-noise process.
+  - The add-noise process runs stripe by stripe, applying each 32-row stripe's chroma before its luma, as the spec's
+    order requires. The spec's full-frame arrays would cost about 100 MB per 4K frame in an arena that never frees.
+  - The grain goes onto a **copy**, the decoder's reused output frame. The DPB keeps the clean frame for prediction.
+  - `Gaussian_Sequence` is generated from the spec markdown.
+  - `matrix_coefficients` is now kept in the sequence header, because `clip_to_restricted_range` gives MC_IDENTITY
+    chroma the luma ceiling.
+- **The output hook:** `av1_decoder_emit` (`src/av1_dpb.cyr`) applies the grain to the shown frame.
+  - `av1_decoder_decode` documents that a grain output is valid until the next call.
+  - `av1_decode_obus` (first coded frame, shown or not) stays a reconstruction and runs no output process.
+
+**The reference, `scripts/refs/grain_ref.py`,** is spec-literal, with the full arrays. Before being trusted it was
+**cross-checked against libaom**: its `--crosscheck` applies the port's synthesis to `aomdec --skip-film-grain`
+output with the parameters the probe prints, and compares with `aomdec`'s grained output. It matched every frame of
+22 streams: all 16 `--film-grain-test` sets, 8/10/12-bit, 4:2:0 / 4:2:2 / 4:4:4 / monochrome, hidden frames shown
+through `show_existing_frame`, and superres. **`tests/av1_grain.tcyr`** (130 assertions) pins:
+- the table;
+- the LFSR;
+- six synthesis fixtures, each by template, scaling-table and output-plane digests, with the source frame proven
+  untouched;
+- the parser's storage, reset, reload and every reject;
+- `matrix_coefficients` storage.
+
+Four mutants first survived, each because a fixture never reached the case. A bright, extreme-multiplier fixture now
+makes the MC_IDENTITY ceiling and the merge `Clip1` bind. Over-limit point counts now come with valid points, so only
+the count limit can reject them. Cb/Cr ordering rejects were added. All 40 unit mutants and 6 production-wiring
+mutants go red.
+
+**`make conformance`** gains 27 grain cases, every frame hard; aomdec and dav1d both apply grain by default:
+- all 16 libaom `--film-grain-test` sets: 13 at the default lag, where 3 or more frames come back through
+  `show_existing_frame` with their saved grain, and sets 5 / 9 / 11, which reuse a reference's parameters
+  (`update_grain = 0`, 5 reloads each);
+- 10-bit, 12-bit, 4:4:4, 10-bit 4:2:2 and monochrome;
+- grain on superres output, and on randomly resized frames (8 sizes);
+- SVT-AV1 `--film-grain` and rav1e `--photon-noise`;
+- `clip_to_restricted_range` on saturated 4:4:4 chroma with MC_IDENTITY and with BT.709.
+
+Each case's `grain_property` guard proves grain applied, plus the property the case exists for. Also added: the two
+published grain vectors, and three committed reproducers that run without libaom. `fg-reload-96x64` has three
+`update_grain = 0` frames, `fg-lag-96x64` three `show_existing` frames, and `fg-b10-422-72x40` is 10-bit 4:2:2.
+
+`make conformance` is **2383 matched / 0 known-gap / 0 regressed / 0 skipped** (was 2092).
+
+**Gates:** 41 suites, **31,203** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green; 43 modules.
+
 ### Added — 0.8.4 bite 1: quantizer matrices (7.12.3 step 1b), both lanes; the 4 known gaps close
 
 **`using_qmatrix` no longer rejects.** From 0.8.2 to 0.8.3, a frame where a matrix could scale a coefficient was
