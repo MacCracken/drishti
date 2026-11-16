@@ -162,6 +162,21 @@ fn av1_obu_has_size(o): i64 { return load64(o + 32); }
 fn av1_obu_size(o): i64 { return load64(o + 40); }
 fn av1_obu_hdr_size(o): i64 { return load64(o + 48); }
 
+# The drop_obu( ) test of open_bitstream_unit (5.3.1): 1 when an OBU of type otype with obu_extension_flag ext and
+# temporal_id / spatial_id tid / sid is in the operating point whose operating_point_idc is op_idc, 0 when it must be
+# dropped (skipped whole, "the contents have no effect on the decoding process", 6.2.1). A sequence header or a
+# temporal delimiter is never dropped, nor is anything when op_idc is 0 (no scalability: every OBU is decoded) or an
+# OBU without the extension header. Otherwise bit tid (temporal layer) and bit sid + 8 (spatial layer) of op_idc
+# must BOTH be set (6.4.1: "Bit k ... temporal layer k ... Bit j+8 ... spatial layer j").
+fn av1_obu_in_operating_point(op_idc, otype, ext, tid, sid): i64 {
+    if ((otype == AV1_OBU_SEQUENCE_HEADER) || (otype == AV1_OBU_TEMPORAL_DELIMITER)) { return 1; }
+    if ((op_idc == 0) || (ext == 0)) { return 1; }
+    var in_temporal = (op_idc >> tid) & 1;
+    var in_spatial = (op_idc >> (sid + 8)) & 1;
+    if ((in_temporal == 0) || (in_spatial == 0)) { return 0; }
+    return 1;
+}
+
 # obu_type -> printable cstring (never null). Table from spec 6.2.2.
 fn av1_obu_type_name(type): i64 {
     if (type == AV1_OBU_SEQUENCE_HEADER)        { return "sequence_header"; }

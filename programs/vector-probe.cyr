@@ -88,6 +88,8 @@ fn probe_seq(seq): i64 {
     probe_kv("enable_superres", load64(seq + AV1_SEQ_ENABLE_SUPERRES));
     probe_kv("matrix_coefficients", av1_seq_matrix_coefficients(seq));
     probe_kv("film_grain_params_present", av1_seq_film_grain_present(seq));
+    probe_kv("operating_points_cnt_minus_1", av1_seq_op_cnt_minus_1(seq));   # operating points (0.8.4)
+    probe_arr("operating_point_idc", seq + AV1_SEQ_OP_IDC, av1_seq_op_cnt_minus_1(seq) + 1);
     return 0;
 }
 
@@ -225,10 +227,17 @@ fn main() {
             var osize = 0;
             var rc = av1_obu_next(it, &otype, &ooff, &osize);
             while (rc == DR_OK) {
+                var oo = av1_obu_iter_obu(it);
                 probe_puts(" OBU type=");
                 probe_putn(otype);
                 probe_puts(" size=");
                 probe_putn(osize);
+                probe_puts(" ext=");   # obu_extension_flag, temporal_id, spatial_id (drop_obu, 5.3.1; 0.8.4)
+                probe_putn(av1_obu_ext(oo));
+                probe_puts(" tid=");
+                probe_putn(av1_obu_tid(oo));
+                probe_puts(" sid=");
+                probe_putn(av1_obu_sid(oo));
                 probe_puts("\n");
                 if (otype == AV1_OBU_SEQUENCE_HEADER) {
                     var serr = 0;

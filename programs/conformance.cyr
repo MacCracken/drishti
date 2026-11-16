@@ -167,16 +167,22 @@ fn conf_write_tiles(f, path, count, tw, th, ow): i64 {
 # layout) whose first N temporal units are the anchor frames — decoded normally, each kept as AnchorFrames[ k - 1 ]
 # — after which the decoder switches to large-scale tile mode. Returns N, or 0 for an ordinary stream.
 fn conf_lst_anchors(): i64 {
-    var b = alloc(32);
-    var n = file_read_all("build/conformance-input.lst", b, 31);
-    if (n <= 0) { return 0; }
+    var v = conf_read_uint("build/conformance-input.lst");
+    if ((v < 1) || (v > 128)) { return 0; }
+    return v;
+}
+# the leading decimal digits of a small sidecar file, or -1 when it is absent or starts with no digit
+fn conf_read_uint(path): i64 {
+    var b = alloc(32);   # bytes
+    var n = file_read_all(path, b, 31);
+    if (n <= 0) { return 0 - 1; }
     var v = 0;
     var i = 0;
-    while ((i < n) && (load8(b + i) >= 48) && (load8(b + i) <= 57)) {
+    while ((i < n) && (i < 9) && (load8(b + i) >= 48) && (load8(b + i) <= 57)) {
         v = (v * 10) + (load8(b + i) - 48);
         i = i + 1;
     }
-    if ((v < 1) || (v > 128)) { return 0; }
+    if (i == 0) { return 0 - 1; }
     return v;
 }
 
@@ -212,6 +218,18 @@ fn main() {
 
     var dec = av1_decoder_new(0);
     if (dec == 0) { conf_puts("SUMMARY oom\n"); return 1; }
+    # build/conformance-input.op, when present, holds the operating point to decode (0.8.4 scalability): only its
+    # layers' OBUs are decoded, and a temporal unit with none of them shows no frame
+    var opreq = conf_read_uint("build/conformance-input.op");
+    if (opreq >= 0) {
+        if (av1_decoder_set_operating_point(dec, opreq) != DR_OK) {
+            conf_puts("SUMMARY bad-operating-point\n");
+            return 1;
+        }
+        conf_puts("operating point requested: ");
+        conf_putn(opreq);
+        conf_puts("\n");
+    }
     var nanch = conf_lst_anchors();
     if (nanch > 0) {
         conf_puts("large-scale tile: ");
@@ -275,6 +293,13 @@ fn main() {
                 }
             }
         }
+    }
+    if (opreq >= 0) {
+        conf_puts("operating point chosen: ");
+        conf_putn(av1_decoder_operating_point(dec));
+        conf_puts(" idc=");
+        conf_putn(av1_decoder_operating_point_idc(dec));
+        conf_puts("\n");
     }
     conf_puts("SUMMARY decoded=");
     conf_putn(ok);

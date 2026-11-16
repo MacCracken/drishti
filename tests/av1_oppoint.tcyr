@@ -1,0 +1,236 @@
+# tests/av1_oppoint.tcyr — AV1 operating point selection and drop_obu (spec 5.3.1, 5.5.1, 6.4.1; 0.8.4).
+#
+# The end-to-end decode is make conformance's scalability section and its two svc-l2t3 reproducers: every operating
+# point of libaom SVC streams (L1T2 .. L3T3, 8- and 10-bit, merged into temporal units and as written) and of the
+# published svc-L1T2 / L2T1 / L2T2 vectors, every frame against aomdec --oppoint with dav1d agreeing. This suite pins
+# what those cannot isolate: the drop rule itself (every boundary, and an exhaustive sweep whose count is derived by
+# hand and whose digest comes from scripts/refs/oppoint_ref.py), choose_operating_point's fall-back, the decoder API,
+# the operating point re-chosen at each sequence header, and the drop in BOTH OBU walks — witnessed with a junk OBU
+# that decodes as an error unless it is dropped, which no encoder emits.
+include "src/main.cyr"
+
+# ---- the drop rule (5.3.1): av1_obu_in_operating_point(op_idc, obu_type, ext, tid, sid) ----
+fn test_op_drop_cases() {
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_FRAME, 1, 1, 0), 0, "0x101: temporal layer 1 out");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_FRAME, 1, 0, 1), 0, "0x101: spatial layer 1 out");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_FRAME, 1, 0, 0), 1, "0x101: the base layer in");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_FRAME, 0, 1, 1), 1, "no extension header: never dropped");
+    assert_eq(av1_obu_in_operating_point(0, AV1_OBU_FRAME, 1, 7, 3), 1, "OperatingPointIdc 0: every OBU decodes");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_SEQUENCE_HEADER, 1, 7, 3), 1, "a sequence header: never");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_TEMPORAL_DELIMITER, 1, 7, 3), 1, "a temporal delimiter: never");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_FRAME_HEADER, 1, 5, 0), 0, "a frame header is dropped");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_TILE_GROUP, 1, 5, 0), 0, "a tile group is");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_METADATA, 1, 5, 0), 0, "metadata is");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_TILE_LIST, 1, 5, 0), 0, "a tile list is");
+    assert_eq(av1_obu_in_operating_point(257, AV1_OBU_PADDING, 1, 5, 0), 0, "padding is");
+    assert_eq(av1_obu_in_operating_point(257, 0, 1, 5, 0), 0, "a reserved type is");
+    assert_eq(av1_obu_in_operating_point(3968, AV1_OBU_FRAME, 1, 7, 3), 1, "0xF80: bit 7 (TL7) and bit 11 (SL3)");
+    assert_eq(av1_obu_in_operating_point(1920, AV1_OBU_FRAME, 1, 7, 3), 0, "0x780: bit 11 clear, SL3 out");
+    assert_eq(av1_obu_in_operating_point(3967, AV1_OBU_FRAME, 1, 7, 3), 0, "0xF7F: bit 7 clear, TL7 out");
+    assert_eq(av1_obu_in_operating_point(775, AV1_OBU_FRAME, 1, 2, 1), 1, "L2T3 point 0 (0x307): TL2 SL1 in");
+    assert_eq(av1_obu_in_operating_point(775, AV1_OBU_FRAME, 1, 3, 0), 0, "...TL3 out");
+    assert_eq(av1_obu_in_operating_point(775, AV1_OBU_FRAME, 1, 0, 2), 0, "...SL2 out");
+    assert_eq(av1_obu_in_operating_point(512, AV1_OBU_FRAME, 1, 0, 1), 0, "a spatial bit and no temporal bit");
+    assert_eq(av1_obu_in_operating_point(1, AV1_OBU_FRAME, 1, 0, 0), 0, "a temporal bit and no spatial bit");
+    return 0;
+}
+# every op_idc (12 bits) x obu_type 0..15 x ext x tid 0..7 x sid 0..3, in that nesting: the dropped count (derived by
+# hand in scripts/refs/oppoint_ref.py: 14 * (32 * 4095 - 32768)) and the FNV-1a digest of the keep / drop sequence
+fn test_op_drop_sweep() {
+    var h = 2166136261;
+    var drops = 0;
+    var idc = 0;
+    while (idc < 4096) {
+        var t = 0;
+        while (t < 16) {
+            var x = 0;
+            while (x < 2) {
+                var tid = 0;
+                while (tid < 8) {
+                    var sid = 0;
+                    while (sid < 4) {
+                        var r = av1_obu_in_operating_point(idc, t, x, tid, sid);
+                        drops = drops + (1 - r);
+                        h = ((h ^ r) * 16777619) & 4294967295;
+                        sid = sid + 1;
+                    }
+                    tid = tid + 1;
+                }
+                x = x + 1;
+            }
+            t = t + 1;
+        }
+        idc = idc + 1;
+    }
+    assert_eq(drops, 1375808, "sweep: 1375808 of 4194304 OBUs dropped");
+    assert_eq(h, 282766213, "sweep digest 0x10DAAB85 (oppoint_ref.py)");
+    return 0;
+}
+
+# ---- choose_operating_point (5.5.1 / 6.4.1): the request, or 0 when this sequence has no such point ----
+fn op_seq(cnt_m1): i64 {
+    var s = alloc(AV1_SEQ_SIZE);
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_OP_CNT_M1, cnt_m1);
+    return s;
+}
+fn test_op_choose() {
+    assert_eq(av1_seq_choose_operating_point(op_seq(0), 0), 0, "no scalability: point 0");
+    assert_eq(av1_seq_choose_operating_point(op_seq(3), 3), 3, "the last point");
+    assert_eq(av1_seq_choose_operating_point(op_seq(3), 4), 0, "one past it falls back to 0 (libaom, dav1d)");
+    assert_eq(av1_seq_choose_operating_point(op_seq(0), 31), 0, "31 of 1");
+    assert_eq(av1_seq_choose_operating_point(op_seq(8), 2), 2, "inside");
+    assert_eq(av1_seq_choose_operating_point(op_seq(8), 0 - 1), 0, "negative");
+    var dec = av1_decoder_new(0);
+    assert_eq(av1_decoder_set_operating_point(dec, 32), DR_ERR_BOUNDS, "set: 32 is out of range (f(5) points)");
+    assert_eq(av1_decoder_set_operating_point(dec, 0 - 1), DR_ERR_BOUNDS, "set: -1 too");
+    assert_eq(av1_decoder_set_operating_point(dec, 31), DR_OK, "set: 31 is the last");
+    assert_eq(av1_decoder_operating_point(dec), 0, "nothing is chosen before a sequence header");
+    assert_eq(av1_decoder_operating_point_idc(dec), 0, "...so OperatingPointIdc is 0: every OBU decodes");
+    return 0;
+}
+
+# ---- the reproducer: tests/repro/svc-l2t3-128x96.ivf (libaom svc_encoder_rtc layering mode 7, 2 spatial x 3
+# temporal layers, merged into 8 temporal units; operating points 0x307 0x303 0x301 0x107 0x103 0x101) ----
+var Op_Buf = 0;
+var Op_Len = 0;
+fn op_load(path): i64 {
+    Op_Buf = alloc(65536);   # bytes; the reproducers are 9-12 KB
+    Op_Len = file_read_all(path, Op_Buf, 65536);
+    return Op_Len;
+}
+# decode every unit of the loaded IVF at operating point op (set before the first sequence header); returns the
+# number of units that showed a frame, and checks every shown frame is w x h
+var Op_Dec = 0;
+fn op_decode_all(op, w, h): i64 {
+    var e = 0;
+    var r = dr_ivf_reader_init(Op_Buf, Op_Len, &e);
+    if (r == 0) { return 0 - 1; }
+    Op_Dec = av1_decoder_new(0);
+    av1_decoder_set_operating_point(Op_Dec, op);
+    var shown = 0;
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+        var derr = 0;
+        var f = av1_decoder_decode(Op_Dec, pp, ps, &derr);
+        if (derr != DR_OK) { return 0 - 2; }
+        if (f != 0) {
+            if ((dr_frame_width(f) != w) || (dr_frame_height(f) != h)) { return 0 - 3; }
+            shown = shown + 1;
+        }
+    }
+    return shown;
+}
+fn test_op_streaming() {
+    assert_gt(op_load("tests/repro/svc-l2t3-128x96.ivf"), 0, "the reproducer reads");
+    assert_eq(op_decode_all(0, 128, 96), 8, "point 0 (every layer): a 128x96 frame from all 8 units");
+    assert_eq(av1_decoder_operating_point_idc(Op_Dec), 775, "...OperatingPointIdc 0x307");
+    assert_eq(op_decode_all(1, 128, 96), 4, "point 1 (0x303, TL0-1): 4 units, the TL2 ones show nothing");
+    assert_eq(op_decode_all(2, 128, 96), 2, "point 2 (0x301, TL0): 2 units");
+    assert_eq(op_decode_all(3, 64, 48), 8, "point 3 (0x107, SL0): every unit shows its 64x48 base layer");
+    assert_eq(av1_decoder_operating_point(Op_Dec), 3, "...point 3 chosen");
+    assert_eq(av1_decoder_operating_point_idc(Op_Dec), 263, "...OperatingPointIdc 0x107");
+    assert_eq(op_decode_all(5, 64, 48), 2, "point 5 (0x101): the 2 base-layer TL0 units");
+    assert_eq(op_decode_all(6, 128, 96), 8, "point 6 does not exist: point 0 is decoded");
+    assert_eq(av1_decoder_operating_point(Op_Dec), 0, "...and reported as chosen");
+    assert_eq(av1_decoder_operating_point_idc(Op_Dec), 775, "...with point 0's idc");
+    # a new coded video sequence re-chooses: the same decoder, still asking for point 3, meets a non-scalable stream
+    op_decode_all(3, 64, 48);
+    var b2 = alloc(65536);   # bytes
+    var n2 = file_read_all("tests/repro/e2d-160x160.ivf", b2, 65536);
+    var e = 0;
+    var r2 = dr_ivf_reader_init(b2, n2, &e);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    dr_ivf_next_frame(r2, &pp, &ps, &pt);
+    var derr = 0;
+    var f = av1_decoder_decode(Op_Dec, pp, ps, &derr);
+    assert_eq(derr, DR_OK, "a non-scalable sequence after it decodes");
+    assert_neq(f, 0, "...and shows its keyframe");
+    assert_eq(av1_decoder_operating_point(Op_Dec), 0, "...its one operating point chosen");
+    assert_eq(av1_decoder_operating_point_idc(Op_Dec), 0, "...OperatingPointIdc 0");
+    return 0;
+}
+
+# ---- the drop in both walks, witnessed by a junk OBU ----
+# From the reproducer's first unit: its sequence header and its base-layer frame (spatial_id 0), with a junk FRAME
+# OBU between them carrying temporal_id tid (8 bytes of 0xFF: a frame header that cannot parse). Point 0 (0x307)
+# holds temporal layers 0-2, so tid 3 must be dropped — the walk then decodes the base frame — while tid 0 is not
+# dropped, and the junk must then fail. Returns the buffer length (in Op_Junk).
+var Op_Junk = 0;
+fn op_build_junk(tid): i64 {
+    var e = 0;
+    var r = dr_ivf_reader_init(Op_Buf, Op_Len, &e);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    dr_ivf_next_frame(r, &pp, &ps, &pt);
+    Op_Junk = alloc(ps + 16);   # bytes
+    var pos = 0;
+    var it = av1_obu_iter_init(pp, ps);
+    var otype = 0;
+    var ooff = 0;
+    var osize = 0;
+    var have_frame = 0;
+    while (av1_obu_next(it, &otype, &ooff, &osize) == DR_OK) {
+        var o = av1_obu_iter_obu(it);
+        var start = ooff - av1_obu_hdr_size(o);
+        var len = av1_obu_hdr_size(o) + osize;
+        if (otype == AV1_OBU_SEQUENCE_HEADER) {
+            memcpy(Op_Junk + pos, pp + start, len);
+            pos = pos + len;
+            # the junk: type 6 (FRAME) << 3 | extension (4) | has_size (2); temporal_id << 5 | spatial_id << 3; size 8
+            store8(Op_Junk + pos, 54);
+            store8(Op_Junk + pos + 1, tid << 5);
+            store8(Op_Junk + pos + 2, 8);
+            memset(Op_Junk + pos + 3, 255, 8);
+            pos = pos + 11;
+        }
+        if ((otype == AV1_OBU_FRAME) && (av1_obu_sid(o) == 0) && (have_frame == 0)) {
+            memcpy(Op_Junk + pos, pp + start, len);
+            pos = pos + len;
+            have_frame = 1;
+        }
+    }
+    return pos;
+}
+fn test_op_walks() {
+    op_load("tests/repro/svc-l2t3-128x96.ivf");
+    var e = 0;
+    var n = op_build_junk(3);
+    var f = av1_decode_obus(Op_Junk, n, &e);
+    assert_eq(e, DR_OK, "single-frame walk: a junk OBU of temporal layer 3 is outside point 0 and dropped");
+    assert_neq(f, 0, "...the base frame decodes");
+    if (f != 0) { assert_eq(dr_frame_width(f), 64, "...at 64x48"); }
+    var dec = av1_decoder_new(0);
+    var g = av1_decoder_decode(dec, Op_Junk, n, &e);
+    assert_eq(e, DR_OK, "streaming decoder: dropped too");
+    assert_neq(g, 0, "...the base frame shows");
+    n = op_build_junk(0);
+    assert_eq(av1_decode_obus(Op_Junk, n, &e), 0, "the same junk in temporal layer 0 is decoded");
+    assert_neq(e, DR_OK, "...and fails: the drop above was the drop rule, not luck");
+    var dec2 = av1_decoder_new(0);
+    assert_eq(av1_decoder_decode(dec2, Op_Junk, n, &e), 0, "streaming decoder: the same");
+    assert_neq(e, DR_OK, "...fails");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("the drop rule (5.3.1)");
+    test_op_drop_cases();
+    test_op_drop_sweep();
+    test_group("choose_operating_point (5.5.1) and the decoder API");
+    test_op_choose();
+    test_group("operating points of the svc-l2t3 reproducer");
+    test_op_streaming();
+    test_group("the drop in both OBU walks");
+    test_op_walks();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

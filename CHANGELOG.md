@@ -4,6 +4,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.4 bite 5: scalability — operating point selection and `drop_obu` (5.3.1), in both OBU walks
+
+**Scalability never rejected: the docs were wrong, as they were about film grain.** drishti decoded every OBU of every
+layer whatever the operating point, and returned each decode call's last shown frame. At operating point 0, the
+default, that equals libaom whenever point 0 holds every layer. Every libaom stream does: the three published
+`av1-1-b8-22-svc-*` vectors already matched libaom's md5s on all 8 frames each, with no code change. What was missing:
+- **Choosing an operating point.** There was no way to decode, say, the base layer of an L3T3 stream.
+- **Dropping.** An OBU outside the operating point was decoded anyway, which is wrong for any point that leaves a
+  present layer out.
+
+Now:
+- **The rule.** `av1_obu_in_operating_point` (`src/av1_obu.cyr`) is 5.3.1's `drop_obu( )` test, and both OBU walks
+  apply it before dispatch. Never dropped: sequence headers, temporal delimiters, anything when `OperatingPointIdc` is
+  0, and any OBU without an extension header (libaom's published vectors code their base layer that way). Everything
+  else needs both its `temporal_id` bit and its `spatial_id + 8` bit set.
+- **The choice.** `av1_seq_choose_operating_point` (`src/av1_seq.cyr`) is 5.5.1's `choose_operating_point( )`: the
+  requested point, or 0 when the sequence header has no such point. libaom falls back to 0, and so does dav1d
+  (observed: `--oppoint 9` on a 4-point stream decodes point 0 in both).
+- **The API.** `av1_decoder_set_operating_point(dec, op)` takes 0..31, else `DR_ERR_BOUNDS`. Like the spec's choice,
+  it takes effect at the next sequence header, and the point is re-chosen at every one, so a new coded video sequence
+  can change it. `av1_decoder_operating_point` / `_idc` report what was chosen. The single-frame `av1_decode_obus`
+  decodes point 0.
+- **Output.** Unchanged, and now documented: each `av1_decoder_decode` call returns its last shown frame.
+  - Given a whole temporal unit, that is the highest spatial layer in the operating point (7.18.1's note, and
+    libaom's default).
+  - Given one layer packet per call, it is that layer's frame, as aomdec does per IVF frame. That is how to get every
+    layer.
+  - A unit whose OBUs are all dropped shows nothing.
+- **Probe.** `vector-probe` prints `operating_points_cnt_minus_1`, the `operating_point_idc` list, and each OBU's
+  extension flag, `temporal_id` and `spatial_id`.
+
+**The reference, `scripts/refs/oppoint_ref.py`,** transcribes the rule and the choice, and ASSERTS 21 boundary cases
+and 6 choice cases; two canaries confirm a mislabelled case fails it. It also runs an exhaustive sweep over every
+12-bit `operating_point_idc` × obu_type × extension flag × `temporal_id` × `spatial_id` (4,194,304 OBUs). The sweep's
+dropped count, 1,375,808, is derived BY HAND in the port, not taken from its output: 14 droppable types × (32 × 4095 −
+Σ T·S). **`tests/av1_oppoint.tcyr`** (59 assertions) pins:
+- the cases and the sweep (count and digest);
+- the choice and the API bounds;
+- every operating point of the committed L2T3 reproducer, by count and size of what shows;
+- a new sequence re-choosing;
+- the drop in BOTH walks, witnessed by a junk FRAME OBU. In temporal layer 3 (outside point 0x307) it must be
+  dropped and the base frame decode; in layer 0 it must make the decode fail. No encoder emits that, so nothing else
+  could show the single-frame walk's drop.
+
+Mutation testing: **unit, 15 of 15** go red (each clause of the rule, the choice's bound and fall-back, the latch of
+`OperatingPointIdc` and of the chosen point, both walks' drop, the API bound). **Gate, production wiring: 3 of 4** go
+red: the streaming drop, the idc of the chosen point, and the output policy (a call returning its FIRST shown frame
+gives the base layer of every merged unit). The survivor makes OBUs without an extension header droppable. It is
+EQUIVALENT on every real stream: such an OBU reads as `temporal_id = spatial_id = 0`, and every operating point holds
+the base layer. The unit sweep kills it.
+
+**`make conformance`** gains a scalability section. Every frame is hard against `aomdec --oppoint`, paired by the
+unit it came from, with dav1d `--oppoint` agreeing:
+- **Generated:** eight libaom `examples/svc_encoder_rtc` configurations — L1T2, L1T3, L2T1, L3T1, L2T3, L3T3, an odd
+  350x198 L2T3, and a 10-bit L2T1. Each is decoded at EVERY operating point its sequence header lists (up to nine), in
+  two packings:
+  - merged into temporal units by ffmpeg's `av1_frame_merge`, with the payload bytes checked unchanged (dav1d
+    `--alllayers 0`);
+  - as written, one IVF frame per layer packet (dav1d `--alllayers 1`).
+- **Guard:** `svc_property` requires extension headers, the promised layer counts, and at every operating point past
+  the first a present layer that it leaves out.
+- **Published:** the three `av1-1-b8-22-svc-*` vectors join `PUBLISHED` (point 0 against libaom's md5s), and their
+  other operating points are judged too.
+- **Reproducers:** two run without libaom, at all six operating points each: `svc-l2t3-128x96` (merged, 11 KB) and
+  `svc-l2t3-layers-96x64` (as written, 9 KB).
+
+The harness reads an operating point from `build/conformance-input.op`.
+
+`make conformance` is **3314 matched / 0 known-gap / 0 regressed / 0 skipped** (was 2487).
+
+**Gates:** 44 suites, **31,447** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`,
+`version-check` and `distlib --check` all green.
+
 ### Added — 0.8.4 bite 4: large scale tile (7.3) — `OBU_TILE_LIST` decodes against application-supplied anchors
 
 **A tile list OBU is no longer skipped without a word.** Both OBU walks used to drop it. Large scale tile (light-field

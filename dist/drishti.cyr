@@ -1553,6 +1553,21 @@ fn av1_obu_has_size(o): i64 { return load64(o + 32); }
 fn av1_obu_size(o): i64 { return load64(o + 40); }
 fn av1_obu_hdr_size(o): i64 { return load64(o + 48); }
 
+# The drop_obu( ) test of open_bitstream_unit (5.3.1): 1 when an OBU of type otype with obu_extension_flag ext and
+# temporal_id / spatial_id tid / sid is in the operating point whose operating_point_idc is op_idc, 0 when it must be
+# dropped (skipped whole, "the contents have no effect on the decoding process", 6.2.1). A sequence header or a
+# temporal delimiter is never dropped, nor is anything when op_idc is 0 (no scalability: every OBU is decoded) or an
+# OBU without the extension header. Otherwise bit tid (temporal layer) and bit sid + 8 (spatial layer) of op_idc
+# must BOTH be set (6.4.1: "Bit k ... temporal layer k ... Bit j+8 ... spatial layer j").
+fn av1_obu_in_operating_point(op_idc, otype, ext, tid, sid): i64 {
+    if ((otype == AV1_OBU_SEQUENCE_HEADER) || (otype == AV1_OBU_TEMPORAL_DELIMITER)) { return 1; }
+    if ((op_idc == 0) || (ext == 0)) { return 1; }
+    var in_temporal = (op_idc >> tid) & 1;
+    var in_spatial = (op_idc >> (sid + 8)) & 1;
+    if ((in_temporal == 0) || (in_spatial == 0)) { return 0; }
+    return 1;
+}
+
 # obu_type -> printable cstring (never null). Table from spec 6.2.2.
 fn av1_obu_type_name(type): i64 {
     if (type == AV1_OBU_SEQUENCE_HEADER)        { return "sequence_header"; }
@@ -2169,6 +2184,16 @@ fn av1_seq_timing_present(s): i64 { return load64(s + AV1_SEQ_TIMING_PRESENT); }
 # range; the array holds 32 slots).
 fn av1_seq_op_idc(s, i): i64 { return load64(s + AV1_SEQ_OP_IDC + (i * 8)); }
 fn av1_seq_op_dm_present(s, i): i64 { return load64(s + AV1_SEQ_OP_DM + (i * 8)); }
+
+# choose_operating_point( ) (5.5.1 / 6.4.1): the operating point requested by external means (the spec's note allows
+# it) when this sequence header has one, else 0 — the first, the stream's preferred. drishti supports every level,
+# so no capability check narrows the choice; an out-of-range request falls back to 0 exactly as libaom
+# (av1/decoder/obu.c, read_sequence_header_obu) and dav1d (src/obu.c) do. OperatingPointIdc is then
+# av1_seq_op_idc(s, the result).
+fn av1_seq_choose_operating_point(s, requested): i64 {
+    if ((requested < 0) || (requested > av1_seq_op_cnt_minus_1(s))) { return 0; }
+    return requested;
+}
 
 # --- av1_frame.cyr ---
 
@@ -26330,7 +26355,9 @@ fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
 #   TILE_GROUP      -> feed a frame-decode context (av1_frame_dec_*); a frame may
 #                      span SEVERAL tile-group OBUs, so accumulate until complete,
 #                      then return the decoded + filtered frame,
-# and skips temporal_delimiter / metadata / padding / redundant_frame_header. A
+# and skips temporal_delimiter / metadata / padding / redundant_frame_header, and any
+# OBU outside operating point 0 (5.3.1 drop_obu; the streaming decoder can select
+# another, av1_decoder_set_operating_point). A
 # tile_list is DR_ERR_UNSUPPORTED: it only decodes in av1_decoder_decode's large-scale
 # tile mode, against anchors the application supplies (src/av1_lst.cyr). Returns when
 # a frame completes (embedded FRAME OBU, or the last of its standalone tile groups).
@@ -26356,14 +26383,20 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
     var otype = 0;
     var ooff = 0;
     var osize = 0;
+    var opidc = 0;   # OperatingPointIdc of operating point 0, the stream's preferred (choose_operating_point, 5.5.1)
     var rc = av1_obu_next(it, &otype, &ooff, &osize);
     while (rc == DR_OK) {
+        var xo = av1_obu_iter_obu(it);
+        if (av1_obu_in_operating_point(opidc, otype, av1_obu_ext(xo), av1_obu_tid(xo), av1_obu_sid(xo)) == 0) {
+            otype = 0 - 1;   # drop_obu( ) (5.3.1)
+        }
         if (otype == AV1_OBU_TILE_LIST) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
             var serr = 0;
             seq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { store64(out_err, serr); return 0; }
             if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            opidc = av1_seq_op_idc(seq, 0);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
             if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
@@ -26614,7 +26647,10 @@ enum Av1DecOff {
     AV1DEC_TL_TW  = 128;  # ...its TileWidth / TileHeight in samples
     AV1DEC_TL_TH  = 136;
     AV1DEC_TL_OW  = 144;  # ...output_frame_width_in_tiles_minus_1 + 1
-    AV1DEC_SIZE   = 152;
+    AV1DEC_OPREQ  = 152;  # the operating point requested by the application (0 = the stream's preferred)
+    AV1DEC_OPSEL  = 160;  # the operating point chosen at the last sequence header (5.5.1 choose_operating_point)
+    AV1DEC_OPIDC  = 168;  # OperatingPointIdc = operating_point_idc[ OPSEL ] (0 = every OBU decodes)
+    AV1DEC_SIZE   = 176;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
@@ -26638,6 +26674,20 @@ fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
 fn av1_decoder_count(dec): i64 { return load64(dec + AV1DEC_COUNT); }
 fn av1_decoder_shown_count(dec): i64 { return load64(dec + AV1DEC_NSHOWN); }
 fn av1_decoder_error(dec): i64 { return load64(dec + AV1DEC_ERR); }
+# Request operating point op (0..31) for scalable streams (6.4.1 note: "decoders may allow the operating point to be
+# explicitly signaled by external means"). Like choose_operating_point itself it takes effect at the next sequence
+# header, so set it before decoding; a stream without that many operating points gets operating point 0. Only the
+# OBUs of the chosen point's layers are decoded (5.3.1 drop_obu), and each av1_decoder_decode call returns the last
+# frame it showed: given a whole temporal unit, the highest spatial layer in the operating point (7.18.1's note).
+# DR_ERR_BOUNDS for an op outside 0..31 (operating_points_cnt_minus_1 is f(5)).
+fn av1_decoder_set_operating_point(dec, op): i64 {
+    if ((op < 0) || (op > 31)) { return DR_ERR_BOUNDS; }
+    store64(dec + AV1DEC_OPREQ, op);
+    return DR_OK;
+}
+# The operating point chosen at the last sequence header, and its operating_point_idc (OperatingPointIdc).
+fn av1_decoder_operating_point(dec): i64 { return load64(dec + AV1DEC_OPSEL); }
+fn av1_decoder_operating_point_idc(dec): i64 { return load64(dec + AV1DEC_OPIDC); }
 # the most recently decoded frame, shown or not (0 before the first) — what libaom's AV1_COPY_NEW_FRAME_IMAGE hands a
 # large-scale-tile application as an anchor.
 fn av1_decoder_last_decoded(dec): i64 { return load64(dec + AV1DEC_LAST); }
@@ -26698,7 +26748,8 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
 #                      they build. Outside that mode it is DR_ERR_UNSUPPORTED.
 # In large-scale tile mode a FRAME_HEADER / FRAME is the camera frame header: parsed and
 # kept, nothing decoded or output. temporal_delimiter / metadata / padding /
-# redundant_frame_header are skipped.
+# redundant_frame_header are skipped. Before any of that, an OBU outside the operating
+# point (av1_decoder_set_operating_point) is dropped whole (5.3.1 drop_obu).
 #
 # The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
 # the decoder's reused grain frame, overwritten by the next grain output — consume it
@@ -26728,12 +26779,21 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     while (rc == DR_OK) {
         var seq = load64(dec + AV1DEC_SEQ);
         var fh = load64(dec + AV1DEC_FH);
+        var xo = av1_obu_iter_obu(it);
+        if (av1_obu_in_operating_point(load64(dec + AV1DEC_OPIDC), otype, av1_obu_ext(xo), av1_obu_tid(xo),
+            av1_obu_sid(xo)) == 0) {
+            otype = 0 - 1;   # drop_obu( ) (5.3.1): not in the operating point, so none of the branches below sees it
+        }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
             var serr = 0;
             var nseq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             store64(dec + AV1DEC_SEQ, nseq);
+            # choose_operating_point( ) and OperatingPointIdc (5.5.1), for this coded video sequence
+            var op = av1_seq_choose_operating_point(nseq, load64(dec + AV1DEC_OPREQ));
+            store64(dec + AV1DEC_OPSEL, op);
+            store64(dec + AV1DEC_OPIDC, av1_seq_op_idc(nseq, op));
         }
         if ((load64(dec + AV1DEC_LST) != 0)
           && ((otype == AV1_OBU_FRAME_HEADER) || (otype == AV1_OBU_FRAME))) {

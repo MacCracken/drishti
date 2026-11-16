@@ -101,6 +101,23 @@ fgrav_176x144 fgid_176x144 fgbt_176x144"
 # seeded random tile lists of 1..64 entries — out of order, repeated tile windows, every anchor. Scored per anchor and
 # per tile list against lightfield_tile_list_decoder's YUV1D output. Skipped (counted) when the tools are not built.
 LST_CASES="lst_256x256_4x4_2 lst_384x256_3x3_2 lst_320x192_6x6_2 lst_512x320_4x4_2 lst_448x192_3x2_1"
+# SCALABILITY (0.8.4), svcLM[bD]_WxH: libaom's examples/svc_encoder_rtc in layering mode LM (1 = L1T2, 2 = L1T3,
+# 5 = L2T1, 6 = L3T1, 7 = L2T3, 8 = L3T3), 12 frames of mandelbrot at bit depth D (default 8), decoded at EVERY
+# operating point its sequence header lists (build/conformance-input.op) and judged in two packings:
+#  - merged into temporal units by ffmpeg's av1_frame_merge (the payload bytes are checked unchanged): one frame per
+#    unit, the highest spatial layer in the operating point — aomdec --oppoint, dav1d --oppoint --alllayers 0;
+#  - as written, one IVF frame per layer packet: one frame per packet — dav1d --alllayers 1.
+# Every output frame is hard against aomdec, paired by the unit it came from; a unit aomdec shows nothing for must
+# show nothing in drishti. svc_property requires extension headers on every frame OBU, the layer counts the mode
+# promises, and at every operating point but the first a present layer outside it (else nothing would drop).
+SVC_CASES="svc1_320x240 svc2_320x240 svc5_320x240 svc6_320x240 svc7_320x240 svc8_320x240 svc7_350x198 \
+svc5b10_320x240"
+# The published SVC vectors' operating points past the first (whose frames PUBLISHED scores against libaom's md5s),
+# name:last_operating_point, judged like a merged SVC_CASES stream. libaom codes their base layer with NO extension
+# header, which 5.3.1 never drops — but no stream can witness that clause: an OBU without the header reads as
+# temporal_id = spatial_id = 0, and every operating point holds the base layer, so the bit test keeps it too (a gate
+# mutant dropping extension-less OBUs survives here; tests/av1_oppoint.tcyr's sweep kills it).
+SVC_PUBLISHED_OPS="av1-1-b8-22-svc-L1T2:1 av1-1-b8-22-svc-L2T1-2:1 av1-1-b8-22-svc-L2T2-2:3"
 IBC_CASES="ibc_352x288 ibc0_352x288 ibcodd_349x197 ibcodd_173x101 ibc444_176x144 ibc422_352x288 ibcb10_352x288 \
 ibcb12_352x288 ibcmono_352x288 ibcll_352x288 ibc128_352x288 ibctile_640x360 ibcaq_352x288 ibcgop_352x288"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
@@ -134,7 +151,8 @@ av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
 av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-allintra \
 av1-1-b10-24-monochrome av1-1-b10-00-quantizer-00 av1-1-b10-00-quantizer-10 av1-1-b10-00-quantizer-20 \
 av1-1-b10-00-quantizer-32 av1-1-b10-00-quantizer-40 av1-1-b10-00-quantizer-50 av1-1-b10-00-quantizer-63 \
-av1-1-b8-23-film_grain-50 av1-1-b10-23-film_grain-50"
+av1-1-b8-23-film_grain-50 av1-1-b10-23-film_grain-50 \
+av1-1-b8-22-svc-L1T2 av1-1-b8-22-svc-L2T1-2 av1-1-b8-22-svc-L2T2-2"
 # HIGH BIT DEPTH (0.8.3), kind_WxH, every frame hard. bNN = libaom at NN bits (4:2:0 / 4:4:4 / 4:2:2 / mono, superres +
 # LR, random resize at cpu-used 2, cpu-used 0, screen content, 128-SB, realtime, LOSSLESS, near-lossless quality);
 # r12* = rav1e, because libaom's aomenc cannot produce 12-bit 4:4:4 or 4:2:2. Each stream proves its bit depth and
@@ -184,6 +202,8 @@ skip_external() { # reason
     for c in $FG_CASES; do skip_case "$c" "$1"; done
     for c in $IBC_CASES; do skip_case "$c" "$1"; done
     for c in $LST_CASES; do skip_case "$c" "$1"; done
+    for c in $SVC_CASES; do skip_case "$c" "$1"; done
+    for c in $SVC_PUBLISHED_OPS; do skip_case "${c%%:*}-ops" "$1"; done
     for c in $CDF_CASES; do skip_case "$c" "$1"; done
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
@@ -222,16 +242,25 @@ finish() {
 # failed copy can never leave the last case's stream (or its frames) in place to be scored
 # as this one. Returns 1 if the stream could not be put in place.
 run_drishti() { # ivf log
-    # the large-scale tile sidecar (build/conformance-input.lst) is removed for every ordinary run: a leftover one
-    # would switch the next stream into large-scale tile mode
-    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-out-*.yuv
+    # the large-scale tile and operating point sidecars (build/conformance-input.lst / .op) are removed for every
+    # ordinary run: a leftover one would switch the next stream into large-scale tile mode or another operating point
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     ./build/drishti-conformance >"$2" 2>&1
     return 0
 }
+# a scalable stream decoded at operating point op (0.8.4): only that point's layers' OBUs are decoded
+run_drishti_op() { # ivf op log
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
+    cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
+    printf '%d\n' "$2" > build/conformance-input.op || return 1
+    ./build/drishti-conformance >"$3" 2>&1
+    rm -f build/conformance-input.op
+    return 0
+}
 # a large-scale tile file (0.8.4): its first N temporal units are the anchor frames (N in the .lst sidecar)
 run_drishti_lst() { # ivf lst log
-    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-out-*.yuv
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     cp "$2" build/conformance-input.lst 2>/dev/null || return 1
     ./build/drishti-conformance >"$3" 2>&1
@@ -402,6 +431,44 @@ repro_lst() { # name
 }
 repro_lst lst-256x256
 repro_lst lst-384x256
+# SCALABILITY reproducers (0.8.4), libaom 3.15.3 examples/svc_encoder_rtc, layering mode 7 (2 spatial x 3 temporal
+# layers, six operating points: 0x307 0x303 0x301 0x107 0x103 0x101), 8 frames of mandelbrot, decoded at EVERY
+# operating point. The .md5 holds "op unit md5" for each frame aomdec --oppoint op outputs (dav1d --oppoint agreed on
+# all of them), unit being the IVF frame it came from; a unit with no line must show nothing (its OBUs all dropped).
+# svc-l2t3-128x96 is merged into temporal units (ffmpeg av1_frame_merge, byte for byte): one frame per unit, the
+# highest spatial layer in the operating point. svc-l2t3-layers-96x64 is as written, one IVF frame per layer packet:
+# one frame per packet. Before 0.8.4 bite 5 drishti had no operating point: it decoded every layer at every one.
+repro_svc() { # name
+    local n="$1" ivf="tests/repro/$1.ivf" md5f="tests/repro/$1.md5"
+    if [ ! -f "$ivf" ] || [ ! -f "$md5f" ]; then
+        echo "  repro $n: FIXTURE MISSING ($ivf / $md5f)"; fail=$((fail+1)); return
+    fi
+    local line="  repro $n:" op ops nu k want got
+    mkdir -p "$WORK"
+    ops=$(awk '{print $1}' "$md5f" | sort -nu)
+    for op in $ops; do
+        run_drishti_op "$ivf" "$op" "$WORK/repro-$n-op$op.log" || {
+            echo "  repro $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+        nu=$(grep -c '^frame [0-9]' "$WORK/repro-$n-op$op.log")
+        line="$line op$op:"
+        k=1
+        while [ "$k" -le "$nu" ]; do
+            want=$(awk -v op="$op" -v u="$k" '$1 == op && $2 == u { print $3 }' "$md5f")
+            got=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+            if [ -z "$want" ]; then
+                if [ -n "$got" ]; then line="$line u$k=REGRESSED(output)"; fail=$((fail+1)); fi
+            elif [ -n "$got" ] && [ "$got" = "$want" ]; then line="$line u$k=OK"; pass=$((pass+1))
+            else line="$line u$k=REGRESSED"; fail=$((fail+1)); fi
+            k=$((k+1))
+        done
+        if [ "$nu" -lt "$(awk -v op="$op" '$1 == op { if ($2 > m) m = $2 } END { print m + 0 }' "$md5f")" ]; then
+            line="$line REGRESSED(only $nu units)"; fail=$((fail+1))
+        fi
+    done
+    echo "$line"
+}
+repro_svc svc-l2t3-128x96
+repro_svc svc-l2t3-layers-96x64
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -1744,6 +1811,145 @@ lstcase() { # name = lst_WxH_LFWxLFH_bsB ; seed = position in LST_CASES
 echo "--- large scale tile (7.3: anchors, the camera header, tile list OBUs; every anchor and list hard) ---"
 lst_seed=1
 for c in $LST_CASES; do lstcase "$c" "$lst_seed"; lst_seed=$((lst_seed + 1)); done
+SVC_ENC="ref/aom-build/examples/svc_encoder_rtc"
+# drishti at operating point op vs aomdec --oppoint (one file per output frame, named by the unit it came from), dav1d
+# --oppoint --alllayers all agreeing with aomdec. Appends "opN:" and one oK=OK per frame to svc_line.
+svc_judge() { # ivf op all tag
+    local ivf="$1" op="$2" all="$3" tag="$4" r k u a b
+    if ! run_drishti_op "$ivf" "$op" "$WORK/$tag.log"; then
+        svc_line="$svc_line op$op=SETUP-FAILED(copy)"; fail=$((fail+1)); return
+    fi
+    rm -f "${WORK:?}/$tag.ref-"*.yuv "${WORK:?}/$tag.ref" "${WORK:?}/$tag.dav1d.yuv"
+    aomdec --rawvideo --oppoint="$op" -o "$WORK/$tag.ref-%6.yuv" "$ivf" 2>/dev/null
+    local refs=() ; mapfile -t refs < <(find "$WORK" -maxdepth 1 -name "$tag.ref-*.yuv" | sort)
+    if [ "${#refs[@]}" -lt 1 ]; then
+        svc_line="$svc_line op$op=SETUP-FAILED(no aomdec output)"; fail=$((fail+1)); return
+    fi
+    cat "${refs[@]}" > "$WORK/$tag.ref"
+    if command -v dav1d >/dev/null 2>&1; then
+        dav1d -q --oppoint "$op" --alllayers "$all" -i "$ivf" -o "$WORK/$tag.dav1d.yuv" >/dev/null 2>&1
+        if ! cmp -s "$WORK/$tag.ref" "$WORK/$tag.dav1d.yuv"; then
+            svc_line="$svc_line op$op=SETUP-FAILED(dav1d disagrees with aomdec)"; fail=$((fail+1)); return
+        fi
+    fi
+    svc_line="$svc_line op$op:"
+    local nu; nu=$(grep -c '^frame [0-9]' "$WORK/$tag.log")
+    declare -A want=()
+    for r in "${refs[@]}"; do u="${r##*.ref-}"; u=$((10#${u%.yuv})); want[$u]="$r"; done
+    k=1
+    while [ "$k" -le "$nu" ]; do
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+        if [ -z "${want[$k]:-}" ]; then
+            if [ -n "$a" ]; then svc_line="$svc_line u$k=REGRESSED(output)"; fail=$((fail+1)); fi
+        else
+            b=$(md5sum "${want[$k]}" | cut -d' ' -f1)
+            if [ -n "$a" ] && [ "$a" = "$b" ]; then svc_line="$svc_line u$k=OK"; pass=$((pass+1))
+            else svc_line="$svc_line u$k=REGRESSED"; fail=$((fail+1)); fi
+        fi
+        k=$((k+1))
+    done
+    for u in "${!want[@]}"; do
+        if [ "$u" -gt "$nu" ]; then svc_line="$svc_line u$u=REGRESSED(missing)"; fail=$((fail+1)); fi
+    done
+    rm -f "${WORK:?}/$tag.ref-"*.yuv
+}
+# the operating_point_idc list, and "ok" when every frame OBU of the stream carries an extension header (want_ext
+# 1), its layers are exactly sl spatial x tl temporal (0 = do not check), and every operating point but the first
+# leaves a present layer out; else the reason
+svc_property() { # want_ext sl tl
+    ./build/drishti-vector-probe 2>&1 | awk -v want_ext="$1" -v sl="$2" -v tl="$3" '
+        /operating_point_idc=/ { split($0, a, "="); n = split(a[2], idc, ","); list = a[2] }
+        / OBU type=(3|4|6) / {
+            split($0, f, " "); for (i in f) { split(f[i], kv, "="); v[kv[1]] = kv[2] + 0 }
+            if (v["ext"] == 1) {
+                L[v["tid"] "," v["sid"]] = 1
+                if (v["tid"] > mt) mt = v["tid"]
+                if (v["sid"] > ms) ms = v["sid"]
+            } else noext++
+        }
+        END {
+            why = ""
+            if (n < 2) why = why " operating_points_cnt_minus_1=" (n - 1)
+            if (want_ext && noext) why = why " " noext "-frame-OBUs-without-extension"
+            if (sl && (ms + 1 != sl || mt + 1 != tl)) why = why " layers=" (ms + 1) "x" (mt + 1)
+            for (i = 2; i <= n; i++) {
+                d = 0   # bit k of x is int(x / 2^k) % 2 (no gawk-only and() / rshift())
+                for (l in L) {
+                    split(l, ts, ",")
+                    if (int(idc[i] / 2 ^ ts[1]) % 2 == 0 || int(idc[i] / 2 ^ (ts[2] + 8)) % 2 == 0) d = 1
+                }
+                if (!d) why = why " op" (i - 1) "-drops-nothing"
+            }
+            print "operating_point_idc=" list " " (why == "" ? "ok" : "BAD" why)
+        }'
+}
+# the payload bytes of build/conformance-input.ivf, summed over its IVF frames (the probe's per-unit sizes)
+svc_payload_bytes() {
+    ./build/drishti-vector-probe 2>&1 | sed -n 's/^=== temporal unit [0-9]* (\([0-9]*\) bytes) ===$/\1/p' |
+        awk '{ s += $1 } END { print s + 0 }'
+}
+svccase() { # name = svcLM[bD]_WxH
+    local n="$1" lmx geo
+    IFS=_ read -r lmx geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" lm="${lmx#svc}" bd=8 sl tl pix=yuv420p
+    case "$lm" in *b*) bd="${lm#*b}"; lm="${lm%b*}" ;; esac
+    case "$lm" in 1) sl=1 tl=2 ;; 2) sl=1 tl=3 ;; 5) sl=2 tl=1 ;; 6) sl=3 tl=1 ;; 7) sl=2 tl=3 ;; 8) sl=3 tl=3 ;;
+        *) echo "  $n: SETUP FAILED (layering mode $lm unknown)"; fail=$((fail+1)); return ;; esac
+    [ "$bd" = "10" ] && pix=yuv420p10le
+    if [ ! -x "$SVC_ENC" ]; then skip_case "$n" "$SVC_ENC not built"; return; fi
+    # spatial layer s takes (s + 1) shares of 800 kbps (the last absorbs the rounding), its temporal layers cumulative
+    # fractions of that: svc_encoder_rtc requires the spatial layers' top temporal rates to sum to the target
+    local br; br=$(awk -v sl="$sl" -v tl="$tl" 'BEGIN { used = 0; out = ""
+        for (s = 0; s < sl; s++) {
+            top = (s == sl - 1) ? 800 - used : int(800 * (s + 1) / (sl * (sl + 1) / 2)); used += top
+            for (t = 0; t < tl; t++) out = out (out == "" ? "" : ",") ((t == tl - 1) ? top : int(top * (t + 1) / tl))
+        }
+        print out }')
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=30:start_scale=3:end_scale=0.3" \
+        -frames:v 12 -pix_fmt "$pix" -strict -1 "$WORK/$n.y4m" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    "$SVC_ENC" -k 10000 --width="$w" --height="$h" -lm "$lm" --speed=7 --target-bitrate=800 --bitrates="$br" \
+        --spatial-layers="$sl" --temporal-layers="$tl" --timebase=1/30 -d "$bd" "$WORK/$n.y4m" -o "$WORK/$n.ivf" \
+        >/dev/null 2>&1
+    if [ ! -s "$WORK/$n.ivf" ]; then echo "  $n: SETUP FAILED (svc_encoder_rtc)"; fail=$((fail+1)); return; fi
+    ffmpeg -loglevel error -y -i "$WORK/$n.ivf" -c copy -bsf:v av1_frame_merge -f ivf "$WORK/$n.tu.ivf" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (av1_frame_merge)"; fail=$((fail+1)); return; }
+    # the merge must only regroup: as many units as temporal delimiters, and the payload bytes unchanged
+    local pw pm um tdm
+    cp "$WORK/$n.ivf" build/conformance-input.ivf
+    pw=$(svc_payload_bytes)
+    cp "$WORK/$n.tu.ivf" build/conformance-input.ivf
+    local prop; prop=$(svc_property 1 "$sl" "$tl")
+    pm=$(svc_payload_bytes)
+    um=$(./build/drishti-vector-probe 2>&1 | grep -c '^=== temporal unit')
+    tdm=$(./build/drishti-vector-probe 2>&1 | grep -c ' OBU type=2 ')
+    if [ "$pw" != "$pm" ] || [ "$um" != "$tdm" ] || [ "$um" != "12" ]; then
+        echo "  $n: SETUP FAILED (the merge changed the stream: payload $pw -> $pm bytes, $um units, $tdm delimiters)"
+        fail=$((fail+1)); return
+    fi
+    case "$prop" in
+        *" ok") ;;
+        *) echo "  $n: SETUP FAILED (property: $prop — the case would prove nothing)"; fail=$((fail+1)); return ;;
+    esac
+    local nops op; nops=$(sed -n 's/^operating_point_idc=\([0-9,]*\) .*/\1/p' <<< "$prop" | tr ',' '\n' | grep -c .)
+    svc_line="  $n ($prop) merged:"
+    op=0; while [ "$op" -lt "$nops" ]; do svc_judge "$WORK/$n.tu.ivf" "$op" 0 "$n.tu"; op=$((op+1)); done
+    svc_line="$svc_line | as-written:"
+    op=0; while [ "$op" -lt "$nops" ]; do svc_judge "$WORK/$n.ivf" "$op" 1 "$n.lp"; op=$((op+1)); done
+    echo "$svc_line"
+}
+echo "--- scalability (5.3.1 drop_obu at every operating point; merged units and layer packets; every frame hard) ---"
+for c in $SVC_CASES; do svccase "$c"; done
+for c in $SVC_PUBLISHED_OPS; do
+    v="${c%%:*}" last="${c##*:}"
+    if ! fetch_vec "$v"; then skip_case "$v-ops" "vector fetch failed"; continue; fi
+    cp "$VDIR/$v.ivf" build/conformance-input.ivf
+    prop=$(svc_property 0 0 0)
+    case "$prop" in *" ok") ;; *) echo "  $v-ops: SETUP FAILED (property: $prop)"; fail=$((fail+1)); continue ;; esac
+    svc_line="  $v-ops ($prop):"
+    op=1; while [ "$op" -le "$last" ]; do svc_judge "$VDIR/$v.ivf" "$op" 0 "$v.ops"; op=$((op+1)); done
+    echo "$svc_line"
+done
 # does the probe show `want` — "ctxtile" (an adapting frame saving a tile other than 0) or "fp" (an adapting frame
 # with disable_frame_end_update_cdf 1) — AND a later frame inheriting CDFs (primary_ref_frame != 7)?
 cdf_property() { # want

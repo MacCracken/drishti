@@ -477,3 +477,13 @@ fn av1_seq_timing_present(s): i64 { return load64(s + AV1_SEQ_TIMING_PRESENT); }
 # range; the array holds 32 slots).
 fn av1_seq_op_idc(s, i): i64 { return load64(s + AV1_SEQ_OP_IDC + (i * 8)); }
 fn av1_seq_op_dm_present(s, i): i64 { return load64(s + AV1_SEQ_OP_DM + (i * 8)); }
+
+# choose_operating_point( ) (5.5.1 / 6.4.1): the operating point requested by external means (the spec's note allows
+# it) when this sequence header has one, else 0 — the first, the stream's preferred. drishti supports every level,
+# so no capability check narrows the choice; an out-of-range request falls back to 0 exactly as libaom
+# (av1/decoder/obu.c, read_sequence_header_obu) and dav1d (src/obu.c) do. OperatingPointIdc is then
+# av1_seq_op_idc(s, the result).
+fn av1_seq_choose_operating_point(s, requested): i64 {
+    if ((requested < 0) || (requested > av1_seq_op_cnt_minus_1(s))) { return 0; }
+    return requested;
+}

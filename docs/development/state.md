@@ -1867,8 +1867,8 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > **NEXT: 0.8.4, "every AV1 coding tool decodes"** (roadmap table): intra block copy (5.11.6), quantizer
 > matrices (7.12.3 with the per-segment `SegQMLevel`; the `qmon_*` case's 4 known gaps become matches),
 > film-grain synthesis (7.18.3; DONE in bite 2 — it was silently skipped, not rejected), scalability / operating-point select +
-> `drop_obu`, and large-scale tile / `OBU_TILE_LIST` (DONE in bite 4 — also silently skipped before). Any reject left
-> after it must be deliberate and documented.
+> `drop_obu` (DONE in bite 5 — it decoded every layer, never rejected), and large-scale tile / `OBU_TILE_LIST` (DONE in
+> bite 4 — also silently skipped before). Any reject left after it must be deliberate and documented.
 >
 > **0.8.4 progress (bites, uncut):** bite 1 = **quantizer matrices DONE**. `src/av1_qm.cyr` (42 modules) holds the
 > packed fundamentals, expanded once by the 9.5.2 subsampling. `av1_dequant_block` / `av1_reconstruct_qm` apply
@@ -1919,7 +1919,25 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > NOT EXTERNALLY WITNESSED: the scratch slot's re-description (the decoder's slot always holds a same-size anchor in
 > real streams); a unit test makes it stale and checks the output is unchanged. libaom's lightfield tools (built in
 > `ref/aom-build/examples`) need at least 4 anchors and output 64x64 8-bit 4:2:0 tiles only. Five configurations and
-> two reproducers are gated: 2487 matched / 0 / 0 / 0. Next in 0.8.4: scalability / `drop_obu`.
+> two reproducers are gated: 2487 matched / 0 / 0 / 0.
+>
+> Bite 5 = **scalability DONE**. It never REJECTED: drishti decoded every layer whatever the operating point, which
+> equals libaom at point 0 (it holds every layer in every libaom stream), so the published svc-L1T2 / L2T1 / L2T2
+> vectors already matched. Now:
+> - `av1_obu_in_operating_point` (5.3.1 `drop_obu`) runs in both OBU walks;
+> - `av1_seq_choose_operating_point` returns the request, or 0 when the sequence has no such point, as libaom and
+>   dav1d do;
+> - `av1_decoder_set_operating_point` (0..31) takes effect at the next sequence header and is re-chosen at each one;
+> - output is unchanged: a call's last shown frame, so a whole temporal unit gives its highest spatial layer in the
+>   point and one layer packet per call gives each layer.
+>
+> TRAPS: aomdec's `%6` output names a file by its INPUT frame, so a dropped unit leaves a gap — pair by name, never
+> by count. dav1d outputs EVERY layer by default (`--alllayers 1`): compare with `--alllayers 0` for whole temporal
+> units. svc_encoder_rtc writes one IVF frame per layer packet; ffmpeg's `av1_frame_merge` regroups them byte for
+> byte. libaom's published svc vectors code the base layer with NO extension header: never dropped, but no stream can
+> show that clause (it reads as layer 0,0, which every point holds), so only the unit sweep witnesses it.
+> Eight generated configurations at every operating point in two packings, the published vectors at every point, and
+> two reproducers are gated: 3314 matched / 0 / 0 / 0. That completes 0.8.4's bite list.
 >
 > **Known-and-tracked, not in 0.8.3:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

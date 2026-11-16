@@ -190,7 +190,10 @@ enum Av1DecOff {
     AV1DEC_TL_TW  = 128;  # ...its TileWidth / TileHeight in samples
     AV1DEC_TL_TH  = 136;
     AV1DEC_TL_OW  = 144;  # ...output_frame_width_in_tiles_minus_1 + 1
-    AV1DEC_SIZE   = 152;
+    AV1DEC_OPREQ  = 152;  # the operating point requested by the application (0 = the stream's preferred)
+    AV1DEC_OPSEL  = 160;  # the operating point chosen at the last sequence header (5.5.1 choose_operating_point)
+    AV1DEC_OPIDC  = 168;  # OperatingPointIdc = operating_point_idc[ OPSEL ] (0 = every OBU decodes)
+    AV1DEC_SIZE   = 176;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
@@ -214,6 +217,20 @@ fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
 fn av1_decoder_count(dec): i64 { return load64(dec + AV1DEC_COUNT); }
 fn av1_decoder_shown_count(dec): i64 { return load64(dec + AV1DEC_NSHOWN); }
 fn av1_decoder_error(dec): i64 { return load64(dec + AV1DEC_ERR); }
+# Request operating point op (0..31) for scalable streams (6.4.1 note: "decoders may allow the operating point to be
+# explicitly signaled by external means"). Like choose_operating_point itself it takes effect at the next sequence
+# header, so set it before decoding; a stream without that many operating points gets operating point 0. Only the
+# OBUs of the chosen point's layers are decoded (5.3.1 drop_obu), and each av1_decoder_decode call returns the last
+# frame it showed: given a whole temporal unit, the highest spatial layer in the operating point (7.18.1's note).
+# DR_ERR_BOUNDS for an op outside 0..31 (operating_points_cnt_minus_1 is f(5)).
+fn av1_decoder_set_operating_point(dec, op): i64 {
+    if ((op < 0) || (op > 31)) { return DR_ERR_BOUNDS; }
+    store64(dec + AV1DEC_OPREQ, op);
+    return DR_OK;
+}
+# The operating point chosen at the last sequence header, and its operating_point_idc (OperatingPointIdc).
+fn av1_decoder_operating_point(dec): i64 { return load64(dec + AV1DEC_OPSEL); }
+fn av1_decoder_operating_point_idc(dec): i64 { return load64(dec + AV1DEC_OPIDC); }
 # the most recently decoded frame, shown or not (0 before the first) — what libaom's AV1_COPY_NEW_FRAME_IMAGE hands a
 # large-scale-tile application as an anchor.
 fn av1_decoder_last_decoded(dec): i64 { return load64(dec + AV1DEC_LAST); }
@@ -274,7 +291,8 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
 #                      they build. Outside that mode it is DR_ERR_UNSUPPORTED.
 # In large-scale tile mode a FRAME_HEADER / FRAME is the camera frame header: parsed and
 # kept, nothing decoded or output. temporal_delimiter / metadata / padding /
-# redundant_frame_header are skipped.
+# redundant_frame_header are skipped. Before any of that, an OBU outside the operating
+# point (av1_decoder_set_operating_point) is dropped whole (5.3.1 drop_obu).
 #
 # The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
 # the decoder's reused grain frame, overwritten by the next grain output — consume it
@@ -304,12 +322,21 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     while (rc == DR_OK) {
         var seq = load64(dec + AV1DEC_SEQ);
         var fh = load64(dec + AV1DEC_FH);
+        var xo = av1_obu_iter_obu(it);
+        if (av1_obu_in_operating_point(load64(dec + AV1DEC_OPIDC), otype, av1_obu_ext(xo), av1_obu_tid(xo),
+            av1_obu_sid(xo)) == 0) {
+            otype = 0 - 1;   # drop_obu( ) (5.3.1): not in the operating point, so none of the branches below sees it
+        }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
             var serr = 0;
             var nseq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             store64(dec + AV1DEC_SEQ, nseq);
+            # choose_operating_point( ) and OperatingPointIdc (5.5.1), for this coded video sequence
+            var op = av1_seq_choose_operating_point(nseq, load64(dec + AV1DEC_OPREQ));
+            store64(dec + AV1DEC_OPSEL, op);
+            store64(dec + AV1DEC_OPIDC, av1_seq_op_idc(nseq, op));
         }
         if ((load64(dec + AV1DEC_LST) != 0)
           && ((otype == AV1_OBU_FRAME_HEADER) || (otype == AV1_OBU_FRAME))) {

@@ -703,7 +703,9 @@ fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
 #   TILE_GROUP      -> feed a frame-decode context (av1_frame_dec_*); a frame may
 #                      span SEVERAL tile-group OBUs, so accumulate until complete,
 #                      then return the decoded + filtered frame,
-# and skips temporal_delimiter / metadata / padding / redundant_frame_header. A
+# and skips temporal_delimiter / metadata / padding / redundant_frame_header, and any
+# OBU outside operating point 0 (5.3.1 drop_obu; the streaming decoder can select
+# another, av1_decoder_set_operating_point). A
 # tile_list is DR_ERR_UNSUPPORTED: it only decodes in av1_decoder_decode's large-scale
 # tile mode, against anchors the application supplies (src/av1_lst.cyr). Returns when
 # a frame completes (embedded FRAME OBU, or the last of its standalone tile groups).
@@ -729,14 +731,20 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
     var otype = 0;
     var ooff = 0;
     var osize = 0;
+    var opidc = 0;   # OperatingPointIdc of operating point 0, the stream's preferred (choose_operating_point, 5.5.1)
     var rc = av1_obu_next(it, &otype, &ooff, &osize);
     while (rc == DR_OK) {
+        var xo = av1_obu_iter_obu(it);
+        if (av1_obu_in_operating_point(opidc, otype, av1_obu_ext(xo), av1_obu_tid(xo), av1_obu_sid(xo)) == 0) {
+            otype = 0 - 1;   # drop_obu( ) (5.3.1)
+        }
         if (otype == AV1_OBU_TILE_LIST) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
             var serr = 0;
             seq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { store64(out_err, serr); return 0; }
             if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            opidc = av1_seq_op_idc(seq, 0);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
             if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
