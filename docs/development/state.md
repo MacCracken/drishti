@@ -6,6 +6,24 @@
 
 ## Version
 
+**0.8.3** — cut 2026-11-15, not yet tagged (user's git). **Real streams in every shape: long GOPs and the full
+geometry/format matrix decode bit-exact vs `aomdec`, as a standing matrix in `make conformance`.** Seven bites,
+listed newest first in the CHANGELOG:
+- 10/12-bit across every chroma format, gated (no decoder change), plus SVT-AV1 open-GOP intra-only frames;
+- the dimension sweep, and OBMC's overlap no longer trimmed to the visible plane;
+- the `compound_idx` context's order-hint term (the `av1-1-b8-05-mv` / `--cpu-used=0` desync);
+- monochrome / 4:4:4 / 4:2:2 at 8-bit, gated (no decoder change);
+- superres taps clamp at the MI-aligned width (they read the overhang columns);
+- the decode allocation covers the superblock grid (a 128-SB heap overflow; the odd-MI inter chroma divergence);
+- the streaming decoder `av1_decoder_*`, which lifts the harness's 9-frame cap and scores every published frame.
+
+`drishti_version()` = 8003.
+
+**ALL gates green:** 39 suites with **30,962** suite + **7,410** fuzz assertions, bench, vet, lint, fmt-check,
+version-check, `distlib --check`, all three programs build, and `make conformance` at **1950 matched / 4
+known-gap / 0 regressed / 0 skipped** (was 214). The 4 known gaps are still the `--enable-qm=1` frames, held as
+clean rejects until 0.8.4. No new module (41).
+
 **0.8.2** — cut 2026-11-13, not yet tagged (user's git). **The first AV1 batch release: no `DR_ERR_UNSUPPORTED`
 on a stock `aomenc` stream at any preset, on a gate that cannot score a non-run as a pass.** Ten bites, listed
 newest first in the CHANGELOG:
@@ -1731,18 +1749,21 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.8.2, the first AV1 batch, cut).** **`make conformance` is 214 matched / 4 KNOWN-GAP / 0
-> regressed / 0 skipped.** Every hard case is BIT-EXACT against `aomdec`, with dav1d as a tiebreak. That covers:
-> - the eight published libaom vectors;
-> - the generated corpus and the odd-MI geometries;
+> **Where we are (0.8.3, the second AV1 batch, cut).** **`make conformance` is 1950 matched / 4 KNOWN-GAP / 0
+> regressed / 0 skipped**, in about 4.5 minutes. Every hard case is BIT-EXACT against `aomdec` on EVERY frame,
+> with dav1d as a tiebreak. That covers:
+> - every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome);
+> - GOPs to 90 frames: hidden frames, `show_existing_frame`, every refresh slot, SWITCH frames, error resilience;
+> - frame sizes from 1x1 up at both superblock sizes, superres, and scaled references;
+> - 20 published libaom vectors, every frame (`sizeup` / `sizedown` remuxed from .mkv);
 > - libaom streams for delta-q / delta-lf, mixed lossless, every segmentation config, multi-tile,
->   frame-parallel, realtime ROI-skip and palette;
-> - rav1e and SVT-AV1 streams.
+>   frame-parallel, realtime ROI-skip and palette; rav1e and SVT-AV1 streams;
+> - committed reproducers under `tests/repro/`, which run without libaom installed.
 >
 > The 4 known gaps are `--enable-qm=1` frames that must REJECT (quantizer matrices are 0.8.4).
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
-> HONEST STATUS block and the batched release plan (0.8.3 → 0.8.11).
+> HONEST STATUS block and the batched release plan (0.8.4 → 0.8.11).
 >
 > **THE ONE HABIT THAT MATTERS, and 0.7.129 is the proof.** drishti's own round-trips and
 > hand-written oracles SHARE the implementation's reading of the spec, so they cannot catch a
@@ -1771,8 +1792,10 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >     with `AOM_SIMD_CAPS_MASK=0` or your probe silently never fires.
 >   * A decoder trace PAST a desync is fiction. Only the FIRST divergence is evidence; block sizes
 >     printed after it are garbage (this produced a whole dead-end sub-8x8-chroma theory).
->   * `programs/conformance.cyr` decodes each PREFIX separately, so drishti's symbol log contains
->     repeated passes. Compare only the final pass or the indices misalign.
+>   * Before 0.8.3, `programs/conformance.cyr` decoded each PREFIX separately, so a symbol log held
+>     repeated passes. Since 0.8.3 bite 1 it streams once per temporal unit, so the log is one pass;
+>     an instrumented libaom `inspect` run, though, may omit its `-1 -1 -1` init marker and the final
+>     frame's last symbols. Check that the two streams realign before calling a tail difference real.
 >   * An encoder flag that changes the BITSTREAM is not a controlled experiment. Check the stream
 >     md5 before concluding anything from `--enable-X=0`.
 >
@@ -1820,21 +1843,31 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > drishti rejects needs a non-default flag: `--enable-qm=1` (quantizer matrices) and `--tune-content=screen`
 > keyframes using intrabc, both 0.8.4.
 >
-> **NEXT: 0.8.3, "real streams in every shape"** (roadmap table). That means long GOPs, `show_existing_frame`,
-> switch frames, the full 7.21 reload and the DPB under real refresh patterns. It also includes the filed odd-MI
-> inter divergence: 160x136 at `--lag-in-frames=19`, frame 3, chroma, 1 LSB, bottom rows, MiRows % 4 == 2.
-> Its symbols match libaom exactly, so it is a RECONSTRUCTION bug.
+> **0.8.3 shipped: "real streams in every shape"** (the roadmap table has the batch). **What it contains:**
+> - **the streaming decoder** (`av1_decoder_*`, bite 1): `programs/conformance.cyr` decodes once per temporal
+>   unit with no frame cap (the old 9-unit `CONF_MAX_FRAMES` prefix re-decode is gone) and writes the
+>   `aomdec --rawvideo` layout as `build/conformance-out-<k>.yuv`; long GOPs and every published frame are scored;
+> - **the superblock-grid decode allocation** (bite 2): the MI-grid allocation let a 128x128 intra block write
+>   past the plane's border (a heap overflow), and trimmed an edge inter block's MC so 4 chroma rows picked the
+>   4-tap filter (the filed 160x136 odd-MI divergence);
+> - **the superres tap clamp** (bite 3): the 7.16 `maxX` is the MI-aligned width, so taps read the overhang;
+> - **monochrome / 4:4:4 / 4:2:2** (bite 4) and **10/12-bit** (bite 7), gated with no decoder change; libaom's
+>   monochrome `.md5`s checksum I420 with neutral chroma (`1 << (bd - 1)`);
+> - **the `compound_idx` context** (bite 5): `fwd == bck` over the block's two references was a constant 0 since
+>   0.7.77, which desynced `av1-1-b8-05-mv` and `--cpu-used=0` streams;
+> - **the dimension sweep** (bite 6), which found OBMC's overlap still trimmed to the visible plane.
 >
-> **Harness (0.8.3 bite 1):** `programs/conformance.cyr` STREAMS through `av1_decoder_*` — one decode per
-> temporal unit, no frame cap (the old 9-unit `CONF_MAX_FRAMES` prefix re-decode is gone), output in the
-> `aomdec --rawvideo` layout as `build/conformance-out-<k>.yuv`. Bite 1 filed three defects for the next bites:
-> the superres tap clamp (FIXED in bite 3: the clamp is the MI-aligned width), the MI-grid (not superblock-grid) decode allocation (a heap overflow on 128-SB streams,
-> and the odd-MI inter chroma divergence — FIXED in bite 2: the allocation is the superblock grid), and the
-> `av1-1-b8-05-mv` / `--cpu-used=0` entropy desync (FIXED in bite 5: the `compound_idx` context's order-hint
-> term was a constant 0). Bite 6 wired the dimension sweep in and fixed OBMC's visible-plane overlap trim.
-> Bite 7 gated 10/12-bit across every format (no decoder change), which completes the 0.8.3 batch.
+> CAVEAT: no encoder tried emits a `show_existing` KEY frame (libaom `--enable-fwd-kf` included; SVT-AV1's open
+> GOP, gated as `svtopen_176x144`, shows INTRA_ONLY frames instead), so the full 7.21 reload is unit-witnessed
+> only.
 >
-> **Known-and-tracked, not in 0.8.2:** the encode lane has NEVER run at 128 superblocks
+> **NEXT: 0.8.4, "every AV1 coding tool decodes"** (roadmap table): intra block copy (5.11.6), quantizer
+> matrices (7.12.3 with the per-segment `SegQMLevel`; the `qmon_*` case's 4 known gaps become matches),
+> film-grain synthesis (7.18.3; parsed and discarded today), scalability / operating-point select +
+> `drop_obu`, and large-scale tile / `OBU_TILE_LIST`. Any reject left after it must be deliberate and
+> documented.
+>
+> **Known-and-tracked, not in 0.8.3:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).
 > It is scheduled in 0.8.6, where the encoder first runs.
 

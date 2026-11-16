@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-15
+
+**Real streams in every shape: long GOPs and the full geometry/format matrix decode bit-exact vs `aomdec`, as a
+standing matrix in `make conformance`.** Seven bites, listed below newest first:
+- **10- and 12-bit**, every chroma format, gated (no decoder change); SVT-AV1 open-GOP intra-only frames.
+- **The dimension sweep** (1x1 to 257x31, scaled references, published `sizeup` / `sizedown`); it found OBMC's
+  overlap still trimmed to the visible plane, now fixed.
+- **The `compound_idx` context's order-hint term**, hard-coded to 0 since 0.7.77: the `av1-1-b8-05-mv` /
+  `--cpu-used=0` entropy desync.
+- **Monochrome, 4:4:4 and 4:2:2** at 8-bit, gated (no decoder change).
+- **Superres reads the overhang columns:** the 7.16 tap clamp is the MI-aligned width.
+- **The decode allocation covers the superblock grid:** a 128-SB heap overflow, and the odd-MI inter chroma
+  divergence (edge-block MC trimmed to the 4-tap filter).
+- **The streaming decoder** (`av1_decoder_*`): the harness's 9-frame cap is gone, long GOPs are gated, and every
+  published frame is scored.
+
+`drishti_version()` returns **8003**.
+
+`make conformance` is **1950 matched / 4 known-gap / 0 regressed / 0 skipped**, up from 214 at 0.8.2:
+- every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome);
+- GOPs to 90 frames with hidden frames, `show_existing_frame`, every refresh slot, SWITCH frames and
+  error-resilient streams;
+- frame sizes from 1x1 up, at both superblock sizes; superres; scaled references;
+- 20 published libaom vectors, every frame, and three encoders (libaom, rav1e, SVT-AV1);
+- committed reproducers under `tests/repro/`, so a machine without libaom still runs the format, bit-depth,
+  odd-MI and desync cases;
+- the 4 known gaps are still the `--enable-qm=1` frames, held as REJECTED until 0.8.4.
+
+**Gates:** 39 suites, **30,962** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green; all three programs build.
+
+Not externally witnessed: the full 7.21 reference reload on a `show_existing` KEY frame. No encoder tried emits one
+(libaom `--enable-fwd-kf` included; SVT-AV1's open GOP shows intra-only frames instead), so that path is covered by
+unit tests only. Still rejected: intra block copy, quantizer matrices, film grain, scalability and large-scale tile
+(0.8.4).
+
 ### Added — 0.8.3 bite 7: 10- and 12-bit gated end-to-end, every format; SVT-AV1 open-GOP intra-only frames
 
 **Every bit depth decodes bit-exact vs `aomdec` on every frame, as a standing section of `make conformance`.** No
