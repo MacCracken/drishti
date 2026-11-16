@@ -1859,8 +1859,16 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > the next frame start. API: the returned frame is valid until the next call. Every committed reproducer, four passes
 > through one decoder: bit-exact every pass, 0 bytes after pass 2 (a gate section). FOUND: arena zeroing is
 > load-bearing (code reads fresh memory before writing it); the stdlib memset / memcpy are byte loops (word-wise
-> `dr_fill` / `dr_copy` made the bound free). Gate: 3971 / 0 / 0 / 0. Next: corpus-guided fuzzing, the warp `LS_MAT`
-> clamp, the missing MC ref generators, the two streams others refuse.
+> `dr_fill` / `dr_copy` made the bound free). Gate: 3971 / 0 / 0 / 0.
+>
+> Bite 9 = **the warp `LS_MAT` clamp, settled: none exists, none is needed.** libaom's `LS_MAT_MIN` / `MAX` are
+> debug asserts (compiled out of release); the spec and dav1d bound nothing. `scripts/refs/warp_ls_bounds_ref.py`
+> proves from the 7.10.4 geometry (|sx|, |sy| <= 1024, multiples of 8; |sx - dx| < 256; <= 8 samples) that every
+> sum stays within [-2621400, 2637880], so 32-bit decoders never overflow and drishti's 64-bit sums equal theirs,
+> and that det is a multiple of 16 (the `divShift < 0` branch, where libaom's int16_t would wrap, never runs).
+> An assert-enabled, instrumented libaom (`ref/aom-build-ls`, `AOMLS` print) over the whole corpus: 44,206
+> estimations, 0 aborts, max sum 709,332. `av1_warp_ls_accumulate` factored out for the test. Gate: 3971 / 0 / 0 / 0.
+> Next: corpus-guided fuzzing, the missing MC ref generators, the two streams others refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

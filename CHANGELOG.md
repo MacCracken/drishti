@@ -4,6 +4,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — 0.8.5 bite 9: the warp LS_MAT accumulator clamp, settled — none exists, and none is needed
+
+**There is no accumulator clamp to model, and no stream can need one.** `src/av1_mv.cyr` carried "the
+libaom LS_MAT_MIN / MAX accumulator clamp (existence + bounds unverified)" as unmodelled. The three sources settle
+the first half:
+- **The spec** (7.11.3.8) bounds nothing.
+- **libaom** (`find_affine_int`) keeps the seven least-squares sums in `int32_t` and checks them against
+  `[LS_MAT_MIN, LS_MAT_MAX] = [-2^22, 2^22 - 1]` only in `assert`s marked "Just for debugging". A release build
+  compiles those out: the `ref/` Release `aomdec` holds none of their expressions, and an assert-enabled build holds
+  all seven.
+- **dav1d** (`dav1d_find_affine_int`) keeps them in `int` and checks nothing.
+
+drishti sums in 64 bits, so the real question was whether a stream could push a sum past int32, where 32-bit
+decoders hit undefined behaviour and could part from it. It cannot.
+
+**The proof, `scripts/refs/warp_ls_bounds_ref.py`:**
+- **Geometry.** A sample's source offset is the centre of a neighbour block the 7.10.4 scan visits, measured from
+  the block's centre in 1/8 sample. Enumerated over every warp-eligible block size, neighbour size and aligned,
+  non-overlapping position (above row, left column, top-left, and top-right for blocks up to 64), it is always a
+  multiple of 8 with `|sx|, |sy| <= 1024`: a 128x128 block's top-left neighbour.
+- **Terms.** The stream chooses only the motion vectors, and the estimation's own filter keeps `|sx - dx| < 256`.
+  With at most 8 samples (`LEAST_SQUARES_SAMPLES_MAX`), every sum lies in `[-2621400, 2637880]`, 63% of the asserted
+  range, so 32-bit libaom and dav1d never overflow and drishti's 64-bit sums equal theirs exactly. Each extreme is
+  derived by hand in the port and asserted, and two canaries show the asserts fire.
+- **Determinant.** Each sample adds `8 * odd` to `A[0][0]` and `A[1][1]` and `4 * odd` to `A[0][1]`, so det is 0 or
+  48 mod 64. A non-zero `|det|` is therefore at least 16, which gives `divShift = FloorLog2 + 14 - 16 >= 2`. The
+  spec's `divShift < 0` branch is unreachable in every decoder, which matters because libaom holds that factor in an
+  `int16_t` whose `<<=` would wrap there. The solve's products stay under 2^44, and times the divisor under 2^58.
+
+**Empirically:** the libaom in `ref/`, rebuilt without `NDEBUG` and instrumented to print the sums (`AOMLS` in
+`find_affine_int`), decoded every stream in the corpus: all 242 published vectors, the 218-stream generated corpus
+and the 31 committed reproducers. **365 streams, 44,206 estimations, 0 assert aborts.** The largest sum was
+709,332 (27% of the proven bound), the smallest non-zero determinant 1,968, and no determinant missed the
+multiple of 16. (The two large-scale tile files exit 1 in plain `aomdec`, which cannot supply their anchors, after
+88 estimations.)
+
+**Code:**
+- The accumulation loop is factored out of `av1_warp_estimation` into `av1_warp_ls_accumulate`, writing the seven sums
+  into the warp-divisor scratch (now 9 words), so a test can pin the sums themselves. The bounds argument sits there
+  in full.
+- The `divShift < 0` branch keeps its spec-literal form, with a comment proving it unreachable.
+- The stale "NOT modelled" header is gone. The other half of that line was stale too: shear realizability
+  (`setup_shear`, 7.11.3.6) already gates the local warp path (`av1_intertile.cyr`).
+- `docs/sources.md` gains a warp-estimation entry citing all three sources.
+
+**`tests/av1_mv.tcyr`** (+84, `test_warp_ls_bounds`; known answers from the port):
+- the sums at the positive extreme and at the most negative `Bx[1]` (eight samples each), each checked against
+  libaom's asserted range;
+- three mixed seeded sets, some of whose samples fail the filter;
+- the filter's edge on each axis (an offset of 255 kept, 256 dropped);
+- the smallest non-zero det (48, one centred sample);
+- a 2000-set sweep: every det is 0 or 48 mod 64, and every sum stays in bounds.
+
+Mutation testing: **7 of 7** go red: each filter edge as `<=` (one axis, then both), the filter dropped, `Bx[0]` /
+`Bx[1]` swapped, a sum read from the wrong slot, the last sample skipped, `A[0][1]` with the `+8` constant. The
+first `<=` mutant survived until the edge cases went in. Deleting the `divShift < 0` branch survives, as the proof
+says it must: an equivalent mutant, kept for the spec's sake.
+
+`make conformance` is **3971 matched / 0 known-gap / 0 regressed / 0 skipped** (unchanged: a refactor).
+
+**Gates:** 44 suites, **31,818** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Added — 0.8.5 bite 8: the memory bound — a streaming decoder settles at a fixed footprint
 
 **A long stream no longer ends in a real out-of-memory.** drishti's allocator (the stdlib bump allocator) never

@@ -1755,6 +1755,138 @@ fn test_temporal_scan_gate() {
     return 0;
 }
 
+# ---- the least-squares bounds (0.8.5) — known answers from scripts/refs/warp_ls_bounds_ref.py ----
+# libaom asserts each sum within [LS_MAT_MIN, LS_MAT_MAX] = [-2^22, 2^22 - 1] (a debug assert, not a clamp). The ref
+# proves no stream can leave it: |sx|, |sy| <= 1024, |sx - dx| < 256, at most 8 samples. These pin
+# av1_warp_ls_accumulate at the extremes and on mixed sets, and that det is always a multiple of 16.
+# one CandList entry given as offsets from a centre and destination at 0: {srcY, srcX, dstY, dstX}
+fn wl_set(ws, i, sx, sy, dx, dy): i64 {
+    var base = ws + AV1WS_CAND + ((i * 4) * 8);
+    store64(base + 0, sy);
+    store64(base + 8, sx);
+    store64(base + 16, dy);
+    store64(base + 24, dx);
+    return 0;
+}
+var Wl_Acc = 0;
+fn wl_check(ws, a00, a01, a11, bx0, bx1, by0, by1, det, tag): i64 {
+    av1_warp_ls_accumulate(ws, 0, 0, 0, 0, Wl_Acc);
+    assert_eq(load64(Wl_Acc + 0), a00, tag);
+    assert_eq(load64(Wl_Acc + 8), a01, tag);
+    assert_eq(load64(Wl_Acc + 16), a11, tag);
+    assert_eq(load64(Wl_Acc + 24), bx0, tag);
+    assert_eq(load64(Wl_Acc + 32), bx1, tag);
+    assert_eq(load64(Wl_Acc + 40), by0, tag);
+    assert_eq(load64(Wl_Acc + 48), by1, tag);
+    var d = (load64(Wl_Acc + 0) * load64(Wl_Acc + 16)) - (load64(Wl_Acc + 8) * load64(Wl_Acc + 8));
+    assert_eq(d, det, tag);
+    return 0;
+}
+fn test_warp_ls_bounds() {
+    Wl_Acc = alloc(7 * 8);   # 7 u64
+    # the extreme sample, sx = sy = 1024 and dx = dy = 1279, eight times: the largest sums any stream can make
+    var ws = av1_warp_new();
+    var i = 0;
+    while (i < 8) { wl_set(ws, i, 1024, 1024, 1279, 1279); i = i + 1; }
+    store64(ws + AV1WS_NUM, 8);
+    wl_check(ws, 2113600, 2113568, 2113600, 2637880, 2637848, 2637848, 2637880, 135269376,
+      "8 extreme samples: the largest sums any stream can make");
+    assert_lt(load64(Wl_Acc + 24), 4194304, "...inside libaom's asserted LS_MAT_MAX (2^22 - 1)");
+    # the most negative Bx[1]: sy = 1024 against dx = -1279, eight times
+    ws = av1_warp_new();
+    i = 0;
+    while (i < 8) { wl_set(ws, i, 0 - 1024, 1024, 0 - 1279, 1024); i = i + 1; }
+    store64(ws + AV1WS_NUM, 8);
+    wl_check(ws, 2080832, 0 - 2097120, 2113600, 2601032, 0 - 2621400, 0 - 2097120, 2113600, 134220800,
+      "8 samples at the most negative Bx[1]");
+    assert_gt(load64(Wl_Acc + 32), 0 - 4194305, "...inside libaom's asserted LS_MAT_MIN (-2^22)");
+    ws = av1_warp_new();
+    wl_set(ws, 0, (0 - 576), 200, (0 - 825), 381);
+    wl_set(ws, 1, (0 - 856), (0 - 504), (0 - 939), (0 - 353));
+    wl_set(ws, 2, 752, (0 - 24), 929, (0 - 249));
+    wl_set(ws, 3, 872, (0 - 544), 688, (0 - 565));
+    wl_set(ws, 4, (0 - 120), (0 - 784), 12, (0 - 673));
+    wl_set(ws, 5, 728, 664, 520, 931);
+    store64(ws + AV1WS_NUM, 6);
+    wl_check(ws, 601384, (0 - 22092), 298024, 643999, (0 - 26201), (0 - 130481), 270695, 178738808752,
+      "set 2 (mixed; some samples fail the LS_MV_MAX filter)");
+    ws = av1_warp_new();
+    wl_set(ws, 0, 704, (0 - 968), 585, (0 - 1199));
+    wl_set(ws, 1, 320, 488, 175, 528);
+    wl_set(ws, 2, 728, 1000, 965, 1114);
+    wl_set(ws, 3, 272, (0 - 992), 126, (0 - 1228));
+    wl_set(ws, 4, (0 - 104), 944, (0 - 25), 673);
+    wl_set(ws, 5, 656, (0 - 640), 861, (0 - 476));
+    wl_set(ws, 6, (0 - 312), 352, (0 - 29), 61);
+    store64(ws + AV1WS_NUM, 7);
+    wl_check(ws, 413480, (0 - 120156), 890024, 447794, (0 - 46358), (0 - 126165), 1011445, 353569659184,
+      "set 3 (mixed; some samples fail the LS_MV_MAX filter)");
+    ws = av1_warp_new();
+    wl_set(ws, 0, 832, 368, 728, 400);
+    wl_set(ws, 1, 688, (0 - 936), 424, (0 - 1114));
+    wl_set(ws, 2, 1000, 0, 1282, (0 - 46));
+    wl_set(ws, 3, 480, (0 - 560), 652, (0 - 489));
+    wl_set(ws, 4, 784, (0 - 744), 618, (0 - 909));
+    wl_set(ws, 5, 328, (0 - 304), 386, (0 - 535));
+    store64(ws + AV1WS_NUM, 6);
+    wl_check(ws, 416096, (0 - 160208), 271296, 387284, (0 - 167428), (0 - 196607), 312253, 87218577152,
+      "set 4 (mixed; some samples fail the LS_MV_MAX filter)");
+    # the LS_MV_MAX filter's edge, on each axis: |sx - dx| = 255 is kept, 256 is not (Abs(..) < LS_MV_MAX)
+    ws = av1_warp_new();
+    wl_set(ws, 0, 0, 0, 255, 0);
+    store64(ws + AV1WS_NUM, 1);
+    wl_check(ws, 8, 4, 8, 263, 259, 4, 8, 48, "|sx - dx| = 255: kept (Bx[0] = ls(0, 255) + 8 = 263)");
+    wl_set(ws, 0, 0, 0, 256, 0);
+    wl_check(ws, 0, 0, 0, 0, 0, 0, 0, 0, "|sx - dx| = 256: dropped");
+    wl_set(ws, 0, 0, 0, 0, 0 - 255);
+    wl_check(ws, 8, 4, 8, 8, 4, 0 - 251, 0 - 247, 48, "|sy - dy| = 255: kept (By[0] = ls(0, -255) + 4 = -251)");
+    wl_set(ws, 0, 0, 0, 0, 0 - 256);
+    wl_check(ws, 0, 0, 0, 0, 0, 0, 0, 0, "|sy - dy| = 256: dropped");
+    # the smallest non-zero det: one sample at the centre, A = [[8, 4], [4, 8]]
+    ws = av1_warp_new();
+    wl_set(ws, 0, 0, 0, 0, 0);
+    store64(ws + AV1WS_NUM, 1);
+    wl_check(ws, 8, 4, 8, 8, 4, 4, 8, 48, "one centred sample: det 48, the smallest non-zero");
+    # a sweep: random sets of 1..8 samples, offsets multiples of 8 within 1024, dx / dy within the filter: every det
+    # is a multiple of 16 (0 or 48 mod 64), every sum is inside the bounds the ref derives
+    var seed = 805;
+    var bad16 = 0;
+    var out_of_range = 0;
+    var t = 0;
+    while (t < 2000) {
+        ws = av1_warp_new();
+        seed = ((seed * 1103515245) + 12345) & 0x7FFFFFFF;
+        var k = 1 + (seed % 8);
+        var j = 0;
+        while (j < k) {
+            seed = ((seed * 1103515245) + 12345) & 0x7FFFFFFF;
+            var sx = ((seed % 257) - 128) * 8;
+            seed = ((seed * 1103515245) + 12345) & 0x7FFFFFFF;
+            var sy = ((seed % 257) - 128) * 8;
+            seed = ((seed * 1103515245) + 12345) & 0x7FFFFFFF;
+            var dx = sx + ((seed % 511) - 255);
+            seed = ((seed * 1103515245) + 12345) & 0x7FFFFFFF;
+            var dy = sy + ((seed % 511) - 255);
+            wl_set(ws, j, sx, sy, dx, dy);
+            j = j + 1;
+        }
+        store64(ws + AV1WS_NUM, k);
+        av1_warp_ls_accumulate(ws, 0, 0, 0, 0, Wl_Acc);
+        var d = (load64(Wl_Acc + 0) * load64(Wl_Acc + 16)) - (load64(Wl_Acc + 8) * load64(Wl_Acc + 8));
+        var m = d % 64;
+        if (m < 0) { m = m + 64; }
+        if ((m != 0) && (m != 48)) { bad16 = bad16 + 1; }
+        if ((load64(Wl_Acc + 0) > 2113600) || (load64(Wl_Acc + 24) > 2637880)
+          || (load64(Wl_Acc + 32) < (0 - 2621400))) {
+            out_of_range = out_of_range + 1;
+        }
+        t = t + 1;
+    }
+    assert_eq(bad16, 0, "2000 random sample sets: det is always 0 or 48 mod 64 (so divShift >= 2)");
+    assert_eq(out_of_range, 0, "...and every sum stays inside the derived bounds");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("Av1Mv representation");
@@ -1840,6 +1972,7 @@ fn main() {
     test_div_lut();
     test_resolve_divisor();
     test_warp_estimation();
+    test_warp_ls_bounds();
     test_warp_est_badargs();
     test_group("setup_shear (7.11.3.6) — shear params + warpValid");
     test_setup_shear();

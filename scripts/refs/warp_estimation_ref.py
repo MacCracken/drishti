@@ -22,10 +22,11 @@
 #     forced by the identity-warp landing (zero motion -> wm=(.,.,1,0,0,1)).
 #   * det==0 is the SOLE LocalValid=0 exit of 7.11.3.8.
 #
-# DEFERRED (NOT modelled here — un-witnessable without a conformance vector):
-#   * The libaom LS_MAT_MIN/MAX accumulator clamp (existence/bounds unverified).
-#   * The shear-realizability rejection (get_shear_params, ~7.11.3.6) — a
-#     SEPARATE process run AFTER warp_estimation, not a LocalValid exit here.
+# NOT HERE:
+#   * An LS_MAT_MIN/MAX accumulator clamp: there is none (settled 0.8.5). libaom's are debug asserts only, and the
+#     sums provably stay inside them for any stream: scripts/refs/warp_ls_bounds_ref.py.
+#   * The shear-realizability rejection (setup_shear, 7.11.3.6) — a SEPARATE process run AFTER warp_estimation,
+#     not a LocalValid exit here (src/av1_mv.cyr av1_setup_shear).
 
 DIV_LUT_BITS = 8
 DIV_LUT_PREC_BITS = 14

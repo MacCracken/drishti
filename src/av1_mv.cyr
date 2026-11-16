@@ -1858,10 +1858,10 @@ fn av1_find_warp_samples(ctx, ws, mv_row, mv_col): i64 {
 # oracle is scripts/refs/warp_estimation_ref.py. Reuses dr_floor_log2 (bits.cyr),
 # av1_round2 / av1_round2_signed / av1_iabs / av1_clip3 / AV1_WARPEDMODEL_PREC_BITS.
 #
-# NOT modelled here (roadmap.md 0.8.5 — deferred to a conformance-vector bite, being
-# un-witnessable by a self-consistent test): the libaom LS_MAT_MIN/MAX accumulator
-# clamp (existence + bounds unverified) and the shear-realizability rejection
-# (get_shear_params ~7.11.3.6 — a SEPARATE process run AFTER this one).
+# There is NO accumulator clamp to model (settled 0.8.5): libaom's LS_MAT_MIN / MAX are debug asserts only, and
+# the sums provably stay inside them for any stream — see LEAST-SQUARES BOUNDS at av1_warp_ls_accumulate. The
+# shear-realizability check (setup_shear, 7.11.3.6) is a separate process run after this one on the same model
+# (av1_setup_shear; the inter block's LOCALWARP path warps only when both LocalValid and its warpValid hold).
 # ================================================================
 enum Av1WarpEstConst {
     AV1_DIV_LUT_BITS      = 8;
@@ -1975,14 +1975,62 @@ fn av1_warp_mult_clip(v, factor, shift, is_diag, one): i64 {
     return av1_clip3((0 - AV1_WM_NONDIAG_CLAMP) + 1, AV1_WM_NONDIAG_CLAMP - 1, m);
 }
 
-# a persistent 2-slot scratch for resolve_divisor's output (never per-call alloc).
+# a persistent 9-slot scratch (never per-call alloc): [0] divShift and [1] divFactor (resolve_divisor's output), then
+# [2..8] the seven least-squares sums (av1_warp_ls_accumulate).
 var Av1_WarpDivScratch = 0;
 fn av1_warp_div_scratch(): i64 {
     if (Av1_WarpDivScratch != 0) { return Av1_WarpDivScratch; }
-    var s = dr_alloc_keep(16);
+    var s = dr_alloc_keep(9 * 8);   # 9 u64
     if (s == 0) { return 0; }
     Av1_WarpDivScratch = s;
     return s;
+}
+
+# The 7.11.3.8 accumulation, written to out[0..6] (u64): A[0][0], A[0][1], A[1][1], Bx[0], Bx[1], By[0], By[1],
+# over the CandList samples whose offsets pass the LS_MV_MAX filter. (suy, sux) is the block centre and (duy, dux) its
+# destination, in 1/8 sample. Factored out of av1_warp_estimation so a test can pin the sums themselves.
+#
+# LEAST-SQUARES BOUNDS (0.8.5; derived and asserted by scripts/refs/warp_ls_bounds_ref.py):
+#   * NO CLAMP EXISTS. The spec bounds nothing. libaom's LS_MAT_MIN / LS_MAT_MAX ([-2^22, 2^22 - 1]) appear only in
+#     debug asserts, compiled out of release builds, and dav1d checks nothing. All three keep the plain sums,
+#     libaom and dav1d in 32 bits.
+#   * The sums cannot leave that range, whatever the stream. A sample's source offset is the centre of a neighbour
+#     block the scan touched, a multiple of 8 with |sx|, |sy| <= 1024 (a 128x128 block's top-left neighbour). The
+#     motion vectors the stream chooses only move dx / dy, and the filter keeps |sx - dx| < 256, so |dx| <= 1279.
+#     There are at most 8 samples (LEAST_SQUARES_SAMPLES_MAX), so every sum lies within [-2621400, 2637880], 63% of
+#     the asserted range: 32-bit libaom and dav1d never overflow, and the 64-bit sums here equal theirs exactly.
+#     The instrumented, assert-enabled libaom in ref/ over the whole corpus agrees (0.8.5 CHANGELOG).
+#   * det is a multiple of 16: each sample adds 8 * odd to A[0][0] and A[1][1] and 4 * odd to A[0][1], so det is
+#     0 or 48 mod 64. That is why the divShift < 0 branch below never runs.
+fn av1_warp_ls_accumulate(ws, suy, sux, duy, dux, out): i64 {
+    var a00 = 0; var a01 = 0; var a11 = 0;
+    var bx0 = 0; var bx1 = 0; var by0 = 0; var by1 = 0;
+    var n = av1_warp_num(ws);
+    var i = 0;
+    while (i < n) {
+        var sy = av1_warp_cand(ws, i, 0) - suy;
+        var sx = av1_warp_cand(ws, i, 1) - sux;
+        var dy = av1_warp_cand(ws, i, 2) - duy;
+        var dx = av1_warp_cand(ws, i, 3) - dux;
+        if ((av1_iabs(sx - dx) < AV1_LS_MV_MAX) && (av1_iabs(sy - dy) < AV1_LS_MV_MAX)) {
+            a00 = a00 + av1_ls_square(sx);
+            a01 = a01 + av1_ls_product1(sx, sy);
+            a11 = a11 + av1_ls_square(sy);
+            bx0 = bx0 + av1_ls_product2(sx, dx);
+            bx1 = bx1 + av1_ls_product1(sy, dx);
+            by0 = by0 + av1_ls_product1(sx, dy);
+            by1 = by1 + av1_ls_product2(sy, dy);
+        }
+        i = i + 1;
+    }
+    store64(out + 0, a00);
+    store64(out + 8, a01);
+    store64(out + 16, a11);
+    store64(out + 24, bx0);
+    store64(out + 32, bx1);
+    store64(out + 40, by0);
+    store64(out + 48, by1);
+    return 0;
 }
 
 # av1_warp_estimation (spec 7.11.3.8). Inputs: the filled Av1WarpSamples `ws`, the
@@ -2009,35 +2057,26 @@ fn av1_warp_estimation(ws, mi_row, mi_col, mi_size, mv_row, mv_col, out): i64 {
     var sux = mid_x * 8;
     var duy = suy + mv_row;                               # dest center = source + Mv[0]
     var dux = sux + mv_col;
-    var a00 = 0; var a01 = 0; var a11 = 0;
-    var bx0 = 0; var bx1 = 0; var by0 = 0; var by1 = 0;
-    var n = av1_warp_num(ws);
-    var i = 0;
-    while (i < n) {
-        var sy = av1_warp_cand(ws, i, 0) - suy;
-        var sx = av1_warp_cand(ws, i, 1) - sux;
-        var dy = av1_warp_cand(ws, i, 2) - duy;
-        var dx = av1_warp_cand(ws, i, 3) - dux;
-        if ((av1_iabs(sx - dx) < AV1_LS_MV_MAX) && (av1_iabs(sy - dy) < AV1_LS_MV_MAX)) {
-            a00 = a00 + av1_ls_square(sx);
-            a01 = a01 + av1_ls_product1(sx, sy);
-            a11 = a11 + av1_ls_square(sy);
-            bx0 = bx0 + av1_ls_product2(sx, dx);
-            bx1 = bx1 + av1_ls_product1(sy, dx);
-            by0 = by0 + av1_ls_product1(sx, dy);
-            by1 = by1 + av1_ls_product2(sy, dy);
-        }
-        i = i + 1;
-    }
+    var scr = av1_warp_div_scratch();
+    if (scr == 0) { return DR_ERR_OOM; }
+    av1_warp_ls_accumulate(ws, suy, sux, duy, dux, scr + 16);
+    var a00 = load64(scr + 16);
+    var a01 = load64(scr + 24);
+    var a11 = load64(scr + 32);
+    var bx0 = load64(scr + 40);
+    var bx1 = load64(scr + 48);
+    var by0 = load64(scr + 56);
+    var by1 = load64(scr + 64);
     var det = (a00 * a11) - (a01 * a01);
     # det == 0 is the SOLE in-process invalidation (subsumes "no valid samples").
     if (det == 0) { return DR_OK; }
-    var scr = av1_warp_div_scratch();
-    if (scr == 0) { return DR_ERR_OOM; }
     var e = av1_resolve_divisor(det, scr);
     if (e != DR_OK) { return e; }
     var div_shift = load64(scr + 0) - AV1_WARPEDMODEL_PREC_BITS;
     var div_factor = load64(scr + 8);
+    # UNREACHABLE for any CandList the 7.10.4 scan can build (kept spec-literal): det is a multiple of 16 (see the
+    # LEAST-SQUARES BOUNDS above), so FloorLog2(|det|) >= 4 and divShift = FloorLog2 + 14 - 16 >= 2. It matters
+    # because libaom holds the factor in an int16_t, which this left shift would wrap; it never runs there either.
     if (div_shift < 0) {
         div_factor = div_factor << (0 - div_shift);      # det > 0 -> div_factor > 0
         div_shift = 0;
