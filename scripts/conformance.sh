@@ -146,13 +146,18 @@ gopsf_176x144 gopnoord_176x144 gopnomfmv_176x144 gopc0_176x144"
 # NOT a multiple of 8 — the frames with overhang columns, which 7.16's MI-grid tap clamp reads (see sr_property).
 SR_CASES="srfix_352x288 srrand_352x288 srsb128_352x288 srodd_175x99 srtiles_640x360 srrt_352x288 srlr_197x113 \
 srresize_352x288"
-PUBLISHED="av1-1-b8-01-size-16x16 av1-1-b8-01-size-32x32 av1-1-b8-01-size-64x64 \
-av1-1-b8-00-quantizer-32 av1-1-b8-04-cdfupdate av1-1-b8-05-mv \
-av1-1-b8-00-quantizer-00 av1-1-b8-06-mfmv av1-1-b8-24-monochrome av1-1-b8-02-allintra \
-av1-1-b10-24-monochrome av1-1-b10-00-quantizer-00 av1-1-b10-00-quantizer-10 av1-1-b10-00-quantizer-20 \
-av1-1-b10-00-quantizer-32 av1-1-b10-00-quantizer-40 av1-1-b10-00-quantizer-50 av1-1-b10-00-quantizer-63 \
-av1-1-b8-23-film_grain-50 av1-1-b10-23-film_grain-50 \
-av1-1-b8-22-svc-L1T2 av1-1-b8-22-svc-L2T1-2 av1-1-b8-22-svc-L2T2-2"
+# THE FULL PUBLISHED CORPUS (0.8.5): every AV1 vector libaom's test/test_vectors.cc lists (kAV1TestVectors,
+# libaom 3.15.3) — 240 .ivf here plus the 2 .mkv in PUBLISHED_MKV. The quantizer and size families are generated
+# from libaom's naming (quantizer 00..63 at 8 and 10 bits; sizes WxH over {16,18,32,34,64,66} and over
+# {196,198,200,202,208,210,224,226}), checked equal to that list when 0.8.5 gated them; PUBLISHED_COUNT guards it.
+PUBLISHED="$(for b in b8 b10; do for q in $(seq -w 0 63); do printf 'av1-1-%s-00-quantizer-%s ' "$b" "$q"; done; done
+    for s in "16 18 32 34 64 66" "196 198 200 202 208 210 224 226"; do
+        for w in $s; do for h in $s; do printf 'av1-1-b8-01-size-%sx%s ' "$w" "$h"; done; done
+    done) \
+av1-1-b8-02-allintra av1-1-b8-04-cdfupdate av1-1-b8-05-mv av1-1-b8-06-mfmv \
+av1-1-b8-16-intra_only-intrabc-extreme-dv av1-1-b8-22-svc-L1T2 av1-1-b8-22-svc-L2T1-2 av1-1-b8-22-svc-L2T2-2 \
+av1-1-b8-23-film_grain-50 av1-1-b10-23-film_grain-50 av1-1-b8-24-monochrome av1-1-b10-24-monochrome"
+PUBLISHED_COUNT=240
 # HIGH BIT DEPTH (0.8.3), kind_WxH, every frame hard. bNN = libaom at NN bits (4:2:0 / 4:4:4 / 4:2:2 / mono, superres +
 # LR, random resize at cpu-used 2, cpu-used 0, screen content, 128-SB, realtime, LOSSLESS, near-lossless quality);
 # r12* = rav1e, because libaom's aomenc cannot produce 12-bit 4:4:4 or 4:2:2. Each stream proves its bit depth and
@@ -613,7 +618,8 @@ check seq_nofilt  all $FRAME_LIMIT
 # the reference implementation. They ALL use 128x128 superblocks (libaom's default), so
 # every one of them rejected outright until the 128x128-superblock gate landed. Their .md5
 # companion holds ONE LINE PER FRAME, and since 0.8.3 (the streaming harness) EVERY frame is
-# scored, not just the keyframe; the full published corpus is roadmap.md 0.8.5.
+# scored, not just the keyframe. Since 0.8.5 the list is libaom's whole AV1 corpus, and drishti must output
+# exactly as many frames as the .md5 lists: an extra frame past the last md5 line is a regression too.
 VDIR="${CONFORMANCE_VECTORS:-build/vectors}"
 AOM_BASE="${CONFORMANCE_AOM_BASE:-https://storage.googleapis.com/aom-test-data}"
 # Frames that are KNOWN GAPS, as name:frame. A named cause on a gap is a HYPOTHESIS until it
@@ -696,6 +702,10 @@ check_published() { # name
         fi
         k=$((k+1))
     done
+    local ndec; ndec=$(grep -c '^frame [0-9]* decoded' "$WORK/$name.log")
+    if [ "$ndec" -ne "$nref" ]; then
+        line="$line REGRESSED(drishti output $ndec frames, the md5 file lists $nref)"; fail=$((fail+1))
+    fi
     echo "$line"
 }
 
@@ -2088,7 +2098,11 @@ for c in $BD_CASES; do bdcase "$c"; done
 echo "--- long GOPs: hidden frames, show_existing, every refresh slot, switch frames; every frame hard ---"
 for c in $GOP_CASES; do gopcase "$c"; done
 
-echo "--- published libaom vectors (128x128 superblocks; every frame) ---"
+echo "--- published libaom vectors: the full test_vectors.cc corpus (every frame, and no frame more) ---"
+npub=$(printf '%s\n' $PUBLISHED | grep -c .)
+if [ "$npub" -ne "$PUBLISHED_COUNT" ]; then
+    echo "  harness: PUBLISHED lists $npub vectors, not $PUBLISHED_COUNT"; fail=$((fail+1))
+fi
 for v in $PUBLISHED; do check_published "$v"; done
 for v in $PUBLISHED_MKV; do
     if fetch_mkv "$v"; then check_published "$v"; else skip_case "$v" "vector fetch/remux failed"; fi

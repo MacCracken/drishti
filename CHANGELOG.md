@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 1: the FULL published corpus gated, every frame, and no frame more
+
+**Every AV1 vector libaom publishes decodes bit-exact.** That is all 242 in libaom 3.15.3's
+`test/test_vectors.cc` (`kAV1TestVectors`), every frame against libaom's own md5s, with **no decoder change**. The
+gate used to score 25 of them. The 217 added are:
+- the 128 quantizer vectors, `00`..`63` at 8 and 10 bits (9 were gated before);
+- all 100 size vectors, every W x H over {16, 18, 32, 34, 64, 66} and over {196, 198, 200, 202, 208, 210, 224,
+  226} (3 were gated before);
+- `av1-1-b8-16-intra_only-intrabc-extreme-dv`, an intra-only frame with extreme intra block copy vectors.
+
+**The harness, hardened:**
+- `PUBLISHED` is generated from libaom's naming. When gated it was checked equal to the list in
+  `test_vectors.cc`, and a `PUBLISHED_COUNT` guard (240 `.ivf` + the 2 `.mkv` in `PUBLISHED_MKV`) makes a short
+  list a harness failure.
+- `check_published` used to score frames 1..N for an N-line `.md5`, so a frame drishti output past the last line
+  went unseen. drishti must now output exactly N frames. A canary (one md5 line removed) turns the vector red with
+  "drishti output 39 frames, the md5 file lists 38"; the full file stays green. All 240 vectors output exactly
+  their md5 count.
+
+The corpus is 7.5 MB, fetched once into `build/vectors` like before.
+
+`make conformance` is **3748 matched / 0 known-gap / 0 regressed / 0 skipped** (was 3314).
+
 ### Changed — source comments that still described long-closed limits (comment-only)
 
 Six module comments claimed scope limits the code no longer has. Checking 0.8.4's "any reject left is deliberate"

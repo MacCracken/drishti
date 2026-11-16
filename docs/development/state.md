@@ -1779,13 +1779,19 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > - every coding tool: quantizer matrices, film grain, intra block copy, palette, delta-q / delta-lf,
 >   segmentation, multi-tile, large-scale tile (vs libaom's lightfield tools), and scalable streams at every
 >   operating point;
-> - 25 published libaom vectors, every frame (`sizeup` / `sizedown` remuxed from .mkv; the svc vectors at every
->   operating point);
+> - ALL 242 published libaom vectors (0.8.5 bite 1), every frame and no frame more (`sizeup` / `sizedown`
+>   remuxed from .mkv; the svc vectors at every operating point);
 > - streams from libaom, rav1e and SVT-AV1, and committed reproducers under `tests/repro/` that run without libaom.
 >
 > **NEXT: 0.8.5, "decode is conformance-clean"** (roadmap table): the FULL published `aom-test-data` corpus, every
 > frame; the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection;
-> corpus-guided fuzzing. One unscored vector already matches: `av1-1-b8-16-intra_only-intrabc-extreme-dv` (2 of 2).
+> corpus-guided fuzzing.
+>
+> **0.8.5 progress (bites, uncut):** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
+> `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,
+> and `intra_only-intrabc-extreme-dv`). `check_published` now also fails a frame output past the last md5 line,
+> canary-tested. Gate: 3748 matched / 0 / 0 / 0. Next: the robustness half (libaom's `invalid-*.ivf` corpus, the
+> `av1_sym_decode` bound, the 7.12.3 reconstruct guard, OOM fault injection, corpus-guided fuzzing).
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).
