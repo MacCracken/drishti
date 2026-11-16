@@ -1822,9 +1822,15 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > refuse it, and the gate holds NO known gap. The check exposed an ENCODER-lane bug: a C1 test plan with a zero at
 > its EOB scan position made `coeff_base_eob` code -1 (reading `cdf[-1]`), and the round-trip compared two equally
 > desynced decodes. `av1_sym_encode` now refuses any symbol outside [0, n). `scripts/refs/symbol_exit_ref.py` gives
-> hand-derived known answers. Gate: 3930 / 0 / 0 / 0. Next: the `av1_sym_decode` bound, the 7.12.3 reconstruct
-> guard, OOM fault injection, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two
-> streams others refuse.
+> hand-derived known answers. Gate: 3930 / 0 / 0 / 0.
+>
+> Bite 5 = **the symbol-range bound**: 8.2.6's precondition (N > 1, `cdf[ N-1 ] == 1 << 15`, and every entry read in
+> `[0, 1 << 15]`) is checked on every symbol in both lanes (`av1_sym_cdf_ok` + the per-entry check in the search),
+> `DR_ERR_BOUNDS` on a violation. Only a wrong N or a CDF overwritten in memory can break it (cf. E2d). The
+> terminator alone was NOT enough (an entry above 1 << 15 mid-CDF leaves a meaningless range); an entry of -1 is
+> the witness only the per-entry check catches. Gate: 3930 / 0 / 0 / 0. Next: the 7.12.3 reconstruct guard, OOM
+> fault injection, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two streams
+> others refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

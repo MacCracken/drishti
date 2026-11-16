@@ -4664,12 +4664,30 @@ fn av1_sym_dec_range(sd): i64 { return load64(sd + AV1SD_RANGE); }
 fn av1_sym_dec_value(sd): i64 { return load64(sd + AV1SD_VALUE); }
 fn av1_sym_dec_max_bits(sd): i64 { return load64(sd + AV1SD_MAXBITS); }
 
+# The symbol-range bound: 8.2.6's own precondition ("N will be greater than 1 and cdf[ N-1 ] will be equal to
+# 1 << 15"), with every entry the search reads in [0, 1 << 15]. The terminator keeps the search inside [0, N-1] — at
+# N-1, f = 0 and cur = 0, so value >= cur ends it — and entries in range keep SymbolRange in (0, 1 << 16): the search
+# stops at the first cur <= value < prev, so prev - cur > 0, and prev <= SymbolRange. (An entry above 1 << 15 makes
+# f negative, f >> 6 a huge logical shift, and prev - cur meaningless.) No bitstream can break it: only a wrong N at a
+# call site, or a CDF overwritten in memory (0.7.128's E2d heap overflow overwrote the CDF blob and surfaced as a
+# silent desync). Both lanes check it on every symbol and refuse a violation with DR_ERR_BOUNDS, sticky.
+# av1_sym_cdf_ok is the entry check (N, the terminator); 1 when cdf/n satisfy it.
+fn av1_sym_cdf_ok(cdf, n): i64 {
+    if (n < 2) { return 0; }
+    if (load64(cdf + ((n - 1) * 8)) != AV1_CDF_PROB_TOP) { return 0; }
+    return 1;
+}
+
 # Core decode — spec 8.2.6. cdf has N symbols (N+1 slots). Returns the
 # decoded symbol in [0, N-1]; adapts the cdf in place when adapt != 0. On
-# a reader fault (only reachable if the partition buffer is short) latches
-# the sticky error and returns 0 — check av1_sym_dec_err.
+# a reader fault (only reachable if the partition buffer is short), or a cdf / N that breaks the symbol-range bound
+# (av1_sym_cdf_ok), latches the sticky error and returns 0 — check av1_sym_dec_err.
 fn av1_sym_decode(sd, cdf, n, adapt): i64 {
     if (load64(sd + AV1SD_ERR) != DR_OK) { return 0; }
+    if (av1_sym_cdf_ok(cdf, n) == 0) {
+        store64(sd + AV1SD_ERR, DR_ERR_BOUNDS);
+        return 0;
+    }
     var br = load64(sd + AV1SD_BR);
     var range = load64(sd + AV1SD_RANGE);
     var value = load64(sd + AV1SD_VALUE);
@@ -4680,7 +4698,12 @@ fn av1_sym_decode(sd, cdf, n, adapt): i64 {
     while (1) {
         symbol = symbol + 1;
         prev = cur;
-        var f = AV1_CDF_PROB_TOP - load64(cdf + (symbol * 8));
+        var cv = load64(cdf + (symbol * 8));
+        if ((cv < 0) || (cv > AV1_CDF_PROB_TOP)) {   # the symbol-range bound: every entry read in [0, 1 << 15]
+            store64(sd + AV1SD_ERR, DR_ERR_BOUNDS);
+            return 0;
+        }
+        var f = AV1_CDF_PROB_TOP - cv;
         cur = ((range >> 8) * (f >> AV1_EC_PROB_SHIFT)) >> (7 - AV1_EC_PROB_SHIFT);
         cur = cur + (AV1_EC_MIN_PROB * (n - symbol - 1));
         if (value >= cur) { break; }
@@ -4852,13 +4875,21 @@ fn av1_sym_encode(enc, cdf, n, sym, adapt): i64 {
     # A symbol outside [0, n) has no interval to code: refuse it, sticky. Before 0.8.5 a plan whose
     # coefficient at the EOB was zero coded coeff_base_eob as -1, reading cdf[-1] (one word before the CDF)
     # and writing a stream no decoder reads back the same way; 8.2.4's padding check is what exposed it.
-    if ((sym < 0) || (sym >= n)) {
+    if ((sym < 0) || (sym >= n) || (av1_sym_cdf_ok(cdf, n) == 0)) {   # and the symbol-range bound's cdf / N
         store64(enc + AV1SE_ERR, DR_ERR_BOUNDS);
         return DR_ERR_BOUNDS;
     }
     var r = load64(enc + AV1SE_RNG);
+    # the two entries this symbol reads must lie in [0, 1 << 15] (the symbol-range bound)
+    var cvs = load64(cdf + (sym * 8));
+    var cvp = 0;
+    if (sym > 0) { cvp = load64(cdf + ((sym - 1) * 8)); }
+    if ((cvs < 0) || (cvs > AV1_CDF_PROB_TOP) || (cvp < 0) || (cvp > AV1_CDF_PROB_TOP)) {
+        store64(enc + AV1SE_ERR, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
     # v = U(r, sym)
-    var fv = AV1_CDF_PROB_TOP - load64(cdf + (sym * 8));
+    var fv = AV1_CDF_PROB_TOP - cvs;
     var v = ((r >> 8) * (fv >> AV1_EC_PROB_SHIFT)) >> (7 - AV1_EC_PROB_SHIFT);
     v = v + (AV1_EC_MIN_PROB * (n - sym - 1));
     # u = U(r, sym-1) (= r for sym == 0)

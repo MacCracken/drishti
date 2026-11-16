@@ -406,8 +406,71 @@ fn test_sym_encode_symbol_bounds() {
     return 0;
 }
 
+# ---- the symbol-range bound (8.2.6's precondition: N > 1 and cdf[ N-1 ] == 1 << 15), both lanes ----
+fn sb_cdf(a, b, c, d): i64 {
+    var cdf = alloc(8 * 8);   # 8 i64 slots: the cdf, then guard words a corrupt search would read
+    store64(cdf, a); store64(cdf + 8, b); store64(cdf + 16, c); store64(cdf + 24, d);
+    store64(cdf + 32, 0); store64(cdf + 40, 0); store64(cdf + 48, 0); store64(cdf + 56, 0);
+    return cdf;
+}
+fn sb_dec(): i64 {
+    var b = alloc(8);   # bytes: a zero partition (SymbolValue 32767, the top of the range)
+    memset(b, 0, 8);
+    return av1_sym_dec_init(b, 4, 1);
+}
+fn test_sym_range_bound() {
+    # a terminator of 40000 instead of 1 << 15 at N = 2: the search would pass symbol 1 (f = 32768 - 40000 < 0,
+    # and >> is logical) into the counter word and beyond. Refused before any cdf entry is read.
+    var sd = sb_dec();
+    assert_eq(av1_sym_decode(sd, sb_cdf(16384, 40000, 0, 0), 2, 0), 0, "decode: terminator 40000 -> 0");
+    assert_eq(av1_sym_dec_err(sd), DR_ERR_BOUNDS, "...DR_ERR_BOUNDS");
+    assert_eq(av1_sym_decode(sd, sb_cdf(16384, 32768, 0, 0), 2, 0), 0, "...sticky: a good cdf after it, nothing");
+    assert_eq(av1_sym_dec_err(sd), DR_ERR_BOUNDS, "...still DR_ERR_BOUNDS");
+    var sd2 = sb_dec();
+    av1_sym_decode(sd2, sb_cdf(16384, 32767, 0, 0), 2, 0);
+    assert_eq(av1_sym_dec_err(sd2), DR_ERR_BOUNDS, "decode: terminator 32767 (one short)");
+    var sd3 = sb_dec();
+    av1_sym_decode(sd3, sb_cdf(32768, 0, 0, 0), 1, 0);
+    assert_eq(av1_sym_dec_err(sd3), DR_ERR_BOUNDS, "decode: N = 1 (the spec says N > 1)");
+    var sd4 = sb_dec();
+    av1_sym_decode(sd4, sb_cdf(32768, 0, 0, 0), 0, 0);
+    assert_eq(av1_sym_dec_err(sd4), DR_ERR_BOUNDS, "decode: N = 0");
+    # an entry above 1 << 15 in the middle, terminator intact: the search would end at N-1 but with a meaningless
+    # SymbolRange (prev - cur from a negative f, logically shifted) — refused as it is read
+    var sd5 = sb_dec();
+    av1_sym_decode(sd5, sb_cdf(40000, 50000, 32768, 0), 3, 0);
+    assert_eq(av1_sym_dec_err(sd5), DR_ERR_BOUNDS, "decode: an entry of 40000 mid-cdf");
+    # an entry of -1: f = 32769, cur = (128 * 512 >> 1) + 4 = 32772 > SymbolValue 32767, so the search moves on to the
+    # terminator and stops with a plausible SymbolRange 32772 — only the per-entry check sees this one
+    var sdn = sb_dec();
+    av1_sym_decode(sdn, sb_cdf(0 - 1, 32768, 0, 0), 2, 0);
+    assert_eq(av1_sym_dec_err(sdn), DR_ERR_BOUNDS, "decode: an entry of -1");
+    # sufficiency: NON-monotonic entries inside [0, 1 << 15] still decode, the range positive. An all-ones partition
+    # gives SymbolValue 0, so the search runs to N-1: cur = 2760 at symbol 0, 22724 at 1 (it RISES: 10000 < 30000),
+    # 0 at 2 -> symbol 2, SymbolRange 22724 - 0 = 22724, renormalised by 15 - FloorLog2(22724) = 1 bit to 45448.
+    var ones = alloc(8);   # bytes
+    memset(ones, 255, 8);
+    var sd6 = av1_sym_dec_init(ones, 4, 1);
+    var s6 = av1_sym_decode(sd6, sb_cdf(30000, 10000, 32768, 0), 3, 0);
+    assert_eq(av1_sym_dec_err(sd6), DR_OK, "non-monotonic entries in range: no error");
+    assert_eq(s6, 2, "...the search stops at N-1 = 2");
+    assert_eq(av1_sym_dec_range(sd6), 45448, "...SymbolRange 22724 << 1");
+    var e4 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(e4, sb_cdf(40000, 32768, 0, 0), 2, 0), DR_ERR_BOUNDS, "encode: an entry of 40000");
+    # the encoder refuses the same cdf / N
+    var e1 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(e1, sb_cdf(16384, 40000, 0, 0), 2, 0), DR_ERR_BOUNDS, "encode: terminator 40k");
+    var e2 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(e2, sb_cdf(32768, 0, 0, 0), 1, 0), DR_ERR_BOUNDS, "encode: N = 1");
+    var e3 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(e3, sb_cdf(16384, 32768, 0, 0), 2, 1), DR_OK, "encode: a good cdf codes");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("av1 symbol coder — the symbol-range bound (8.2.6 precondition)");
+    test_sym_range_bound();
     test_group("av1 symbol coder — exit_symbol (8.2.4) and the encoder's symbol bound");
     test_sym_exit_known();
     test_sym_exit_encoder_output();

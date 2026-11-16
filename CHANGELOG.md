@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 5: the symbol-range bound — 8.2.6's precondition enforced on every symbol, both lanes
+
+**The symbol coder now refuses a CDF it cannot safely search.** 8.2.6 states its precondition in a note: "N will be
+greater than 1 and cdf[ N-1 ] will be equal to 1 << 15". That terminator is what ends the symbol search at N-1 at
+the latest: there `f = 0` and `cur = 0`. With every entry in `[0, 1 << 15]`, it also keeps `SymbolRange` positive,
+because the search stops at the first `cur <= SymbolValue < prev`.
+
+Nothing in a bitstream can break it. A wrong `N` at a call site or a CDF overwritten in memory can: 0.7.128's E2d
+heap overflow overwrote the CDF blob and surfaced as a silent desync. With Cyrius's logical `>>`, an entry above
+`1 << 15` turns `f >> 6` into a huge value, so the search runs past the array or leaves a meaningless range.
+- **Decoder.** `av1_sym_cdf_ok` checks `N >= 2` and the terminator on entry to `av1_sym_decode`, and the search
+  checks each entry it reads (a value it has already loaded).
+- **Encoder.** `av1_sym_encode` checks the same `N` and terminator, plus the two entries it reads.
+- **Failure.** A violation is `DR_ERR_BOUNDS`, sticky. A full sweep of every suite, and every stream in
+  `make conformance`, satisfies it on every symbol.
+- **Cost.** Decode time is unchanged within noise on `sizeup` and `film_grain-50`, and 1–3% on `allintra`.
+
+**`tests/av1_symbol.tcyr`** (+16, now 413) pins each way to break it: a terminator of 40000 (and the error staying
+sticky), 32767 (one short), N = 1, N = 0, mid-CDF entries of 40000 and of -1, and the encoder's three refusals. It
+also pins the sufficiency case, hand-derived: NON-monotonic entries inside the range still decode. An all-ones
+partition with cdf {30000, 10000, 32768} gives cur 2760, then 22724 (a rise), then 0, so symbol 2, `SymbolRange`
+22724, renormalised to 45448.
+
+My first version checked only the terminator and claimed that was enough. This test disproved it: an entry of
+40000 mid-CDF still ended the search at N-1, but with a meaningless range, which the bit reader refused only by
+accident. The per-entry check came from that. The −1 entry is the witness only the per-entry check catches: `cur`
+32772 moves the search on to a plausible range of 32772. Mutation testing: **7 of 7** go red. There is no
+reference port; the precondition is the spec's own note, and the cases are derived in the test.
+
+`make conformance` is **3930 matched / 0 known-gap / 0 regressed / 0 skipped** (unchanged).
+
+**Gates:** 44 suites, **31,531** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Fixed — 0.8.5 bite 4: the symbol decoder's exit process in full (8.2.4); the encoder refuses impossible symbols
 
 **A tile whose data runs on past its last symbol is now refused, as the spec requires.** 8.2.4 makes three
