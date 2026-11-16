@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 2: libaom's invalid-stream corpus gated; two decoder defects found and held as known gaps
+
+**libaom's own fuzz and crash corpus runs in `make conformance`: the 23 streams of `test/invalid_file_test.cc`, with
+the `.res` file that test reads.** None crashes, hangs or runs away: each `drishti-conformance` run exits by itself
+within a 60 s budget. On 21 of the 23, drishti shows exactly what libaom shows on every input unit, the same frame
+or nothing.
+- **How they are fed.** libaom's test reads these through `IVFVideoSource`, which ignores every IVF header field.
+  The real `aomdec` and dav1d applications refuse most of them at the container (fuzzed fourcc, version or header
+  size), and so does drishti's IVF reader, which stays as it is. To fuzz the DECODER the way libaom's test does, the
+  gate runs each stream from a copy with version 0, header size 32 and fourcc `AV01`.
+- **What is compared.** Per unit, drishti must match `aomdec --keep-going` (libaom's test also decodes on past an
+  error). A refused unit and a unit that shows no frame count the same: drishti latches its first error where
+  libaom recovers, and no unit in the corpus has libaom SHOW a frame after its error. `aomdec` itself is checked
+  against libaom's published `.res`: a unit the `.res` says fails must show nothing.
+- **Canaries.** A near-zero timeout trips the crash / hang detector on 12 streams. Dropping the header
+  normalisation fails 15 on their unit count. Emptying the known-gap list turns both gaps red.
+
+**Found by it, held as KNOWN GAPS (`INVALID_XFAIL_UNITS`) with verified causes, both refused by libaom AND dav1d:**
+- **`invalid-oss-fuzz-10227` unit 1, the exit-process padding check (8.2.4).** The tile decodes with ~12.7 KB left
+  unread that is not zero padding. The exit process requires the trailing 1 bit and zero padding after it.
+  drishti's `av1_sym_dec_exit` enforces only `SymbolMaxBits >= -14` and skips the rest unchecked. libaom
+  (`check_trailing_bits_after_symbol_coder`) and dav1d refuse the frame.
+- **`invalid-oss-fuzz-10117-mc-buf-use-highbd` unit 1, the superres minimum width.** A 2-wide superres frame:
+  drishti takes the spec formula's `FrameWidth` = 1, while libaom and dav1d take `max(formula, Min(16,
+  UpscaledWidth))` = 2. Annex A requires `FrameWidth >= 16`, so the clamp changes nothing on a conforming stream.
+  **This is not only a fuzz problem.** libaom's own superres encodes below 32 samples wide hit it: at 24x24 and
+  30x40 only the keyframe matches, and at 16x16 the superres frames fail to decode. The gate never covered those
+  widths.
+
+**Deliberate, documented divergence (`INVALID_DAV1D_REF`):** `invalid-oss-fuzz-10779` ends in an OBU with
+`obu_has_size_field = 0`. libaom refuses it ("section 5 obu streams must have obu_size field set"). dav1d, like
+drishti, reads it as running to the end of the unit (5.3.1), and drishti's frame equals dav1d's bit for bit, so
+dav1d is the reference there. Spec 5.2 requires the size field in the low-overhead format, but "other methods of
+packing OBUs ... are also allowed", and drishti accepts a final size-less OBU on purpose.
+
+`make conformance` is **3832 matched / 2 known-gap / 0 regressed / 0 skipped** (was 3748 / 0).
+
 ### Added — 0.8.5 bite 1: the FULL published corpus gated, every frame, and no frame more
 
 **Every AV1 vector libaom publishes decodes bit-exact.** That is all 242 in libaom 3.15.3's

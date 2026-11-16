@@ -1790,8 +1790,22 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > **0.8.5 progress (bites, uncut):** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,
 > and `intra_only-intrabc-extreme-dv`). `check_published` now also fails a frame output past the last md5 line,
-> canary-tested. Gate: 3748 matched / 0 / 0 / 0. Next: the robustness half (libaom's `invalid-*.ivf` corpus, the
-> `av1_sym_decode` bound, the 7.12.3 reconstruct guard, OOM fault injection, corpus-guided fuzzing).
+> canary-tested. Gate: 3748 matched / 0 / 0 / 0.
+>
+> Bite 2 = **libaom's invalid-stream corpus gated**: the 23 streams of `test/invalid_file_test.cc` with their
+> `.res`. They are fed header-normalised (version 0, header size 32, fourcc AV01), because libaom's test ignores the
+> IVF header and the real aomdec / dav1d refuse these at the container. No crash, no hang; 21 match
+> `aomdec --keep-going` unit for unit. FOUND, held as KNOWN GAPS (`INVALID_XFAIL_UNITS`):
+> - the 8.2.4 exit-process trailing-bit / zero-padding check, which drishti's `av1_sym_dec_exit` never made
+>   (`invalid-oss-fuzz-10227`; libaom `check_trailing_bits_after_symbol_coder` and dav1d refuse);
+> - the superres minimum width: libaom and dav1d take `FrameWidth = max(formula, Min(16, UpscaledWidth))`
+>   (Annex A: FrameWidth >= 16), drishti the bare formula (`invalid-oss-fuzz-10117`). This also mis-decodes
+>   libaom's OWN superres encodes below 32 samples wide: 24x24 / 30x40 match only on the keyframe, 16x16 fails.
+>
+> Deliberate: `invalid-oss-fuzz-10779`'s final OBU without `obu_size` (libaom refuses, dav1d and drishti decode, the
+> same pixels), so dav1d is its reference (`INVALID_DAV1D_REF`). Gate: 3832 matched / 2 known-gap / 0 / 0.
+> Next: fix the two gaps (the padding check; the superres minimum, with small-width superres cases), then the
+> `av1_sym_decode` bound, the 7.12.3 reconstruct guard, OOM fault injection, corpus-guided fuzzing.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

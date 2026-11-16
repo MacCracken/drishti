@@ -118,6 +118,29 @@ svc5b10_320x240"
 # temporal_id = spatial_id = 0, and every operating point holds the base layer, so the bit test keeps it too (a gate
 # mutant dropping extension-less OBUs survives here; tests/av1_oppoint.tcyr's sweep kills it).
 SVC_PUBLISHED_OPS="av1-1-b8-22-svc-L1T2:1 av1-1-b8-22-svc-L2T1-2:1 av1-1-b8-22-svc-L2T2-2:3"
+# INVALID STREAMS (0.8.5): libaom's own fuzz / crash corpus, the 23 streams of test/invalid_file_test.cc
+# (kAV1InvalidFileTests, libaom 3.15.3), each with the .res file that test reads (libaom's expected result per input
+# unit; name:res-suffix where it is not ".res"). See invcase for what is checked.
+INVALID_CASES="invalid-bug-1814 invalid-chromium-906381 invalid-google-142530197 invalid-google-142530197-1 \
+invalid-oss-fuzz-9463:res.2 invalid-oss-fuzz-9720 invalid-oss-fuzz-10389:res.4 invalid-oss-fuzz-11523:res.2 \
+invalid-oss-fuzz-15363 invalid-oss-fuzz-16437:res.2 invalid-oss-fuzz-24706 invalid-oss-fuzz-9288 invalid-oss-fuzz-9482 \
+invalid-oss-fuzz-10061 invalid-oss-fuzz-10117-mc-buf-use-highbd invalid-oss-fuzz-10227 invalid-oss-fuzz-10555 \
+invalid-oss-fuzz-10705 invalid-oss-fuzz-10723:res.2 invalid-oss-fuzz-10779 invalid-oss-fuzz-11477 \
+invalid-oss-fuzz-11479:res.2 invalid-oss-fuzz-33030"
+# Where libaom and dav1d DISAGREE and drishti sides with dav1d, dav1d is the reference: invalid-oss-fuzz-10779 ends in
+# an OBU with obu_has_size_field = 0, which libaom refuses outright ("section 5 obu streams must have obu_size field
+# set", AOM_CODEC_UNSUP_BITSTREAM) and dav1d, like drishti, reads as running to the end of the unit (5.3.1); the
+# unit's frame is then decoded bit-exact by both.
+INVALID_DAV1D_REF="invalid-oss-fuzz-10779"
+# Units drishti shows differently from libaom AND dav1d, as name:unit, each with its verified cause. A listed unit
+# that now matches fails the gate, so this list cannot go stale.
+#  - invalid-oss-fuzz-10227:1 — the tile ends with ~12.7 KB unread, not padded with zeros. The 8.2.4 exit process
+#    requires the trailing bit and zero padding; drishti's exit enforces only SymbolMaxBits >= -14, while libaom
+#    (check_trailing_bits_after_symbol_coder) and dav1d refuse the frame.
+#  - invalid-oss-fuzz-10117-mc-buf-use-highbd:1 — a 2-wide superres frame. drishti takes the spec formula's
+#    FrameWidth 1; libaom and dav1d take max(formula, Min(16, UpscaledWidth)) = 2 (Annex A: FrameWidth >= 16).
+#    libaom's own small-width superres encodes hit the same split.
+INVALID_XFAIL_UNITS="invalid-oss-fuzz-10227:1 invalid-oss-fuzz-10117-mc-buf-use-highbd:1"
 IBC_CASES="ibc_352x288 ibc0_352x288 ibcodd_349x197 ibcodd_173x101 ibc444_176x144 ibc422_352x288 ibcb10_352x288 \
 ibcb12_352x288 ibcmono_352x288 ibcll_352x288 ibc128_352x288 ibctile_640x360 ibcaq_352x288 ibcgop_352x288"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
@@ -209,6 +232,7 @@ skip_external() { # reason
     for c in $LST_CASES; do skip_case "$c" "$1"; done
     for c in $SVC_CASES; do skip_case "$c" "$1"; done
     for c in $SVC_PUBLISHED_OPS; do skip_case "${c%%:*}-ops" "$1"; done
+    for c in $INVALID_CASES; do skip_case "${c%%:*}" "$1"; done
     for c in $CDF_CASES; do skip_case "$c" "$1"; done
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
@@ -2107,5 +2131,84 @@ for v in $PUBLISHED; do check_published "$v"; done
 for v in $PUBLISHED_MKV; do
     if fetch_mkv "$v"; then check_published "$v"; else skip_case "$v" "vector fetch/remux failed"; fi
 done
+
+# A libaom test-data file into $VDIR/invalid (via a .part name, as fetch_vec) -> 0 if available.
+fetch_invalid() { # file
+    local d="$VDIR/invalid"
+    mkdir -p "$d"
+    [ -s "$d/$1" ] && return 0
+    if curl -sf --max-time 60 -o "${d:?}/${1:?}.part" "$AOM_BASE/$1"; then mv -f "${d:?}/${1:?}.part" "${d:?}/${1:?}"
+    else rm -f "${d:?}/${1:?}.part"; return 1; fi
+}
+# One invalid stream. libaom's test reads it through IVFVideoSource, which ignores EVERY IVF header field; the real
+# aomdec and dav1d applications (and drishti's IVF reader) refuse most of these files at the container, on a fuzzed
+# fourcc, version or header size. To fuzz the DECODER the way libaom's test does, the stream runs from a copy with
+# version 0, header size 32 and fourcc AV01. Checked, per input unit:
+#  - drishti-conformance exits by itself within 60 s: no crash, no hang, no runaway allocation;
+#  - drishti shows exactly what aomdec --keep-going shows for that unit (libaom's test also decodes on past an
+#    error): the same frame, or nothing. A refused unit and a unit that shows no frame are the same here: drishti
+#    latches its first error, libaom recovers, and no unit in the corpus has libaom SHOW a frame after its error;
+#  - aomdec itself agrees with libaom's published .res: a unit .res says fails must show nothing (else the reference
+#    is not libaom's and the case is a setup failure).
+invcase() { # name[:res-suffix]
+    local n="${1%%:*}" rs="res" d="$VDIR/invalid"
+    case "$1" in *:*) rs="${1##*:}" ;; esac
+    if ! fetch_invalid "$n.ivf" || ! fetch_invalid "$n.ivf.$rs"; then skip_case "$n" "fetch failed"; return; fi
+    local w="$WORK/$n.d" rc nu k u r a b want
+    rm -rf "${w:?}"; mkdir -p "$w"
+    cp "$d/$n.ivf" "$w/in.ivf"
+    printf '\000\000\040\000AV01' | dd of="$w/in.ivf" bs=1 seek=4 conv=notrunc status=none
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
+    cp "$w/in.ivf" build/conformance-input.ivf
+    timeout 60 ./build/drishti-conformance > "$w/drishti.log" 2>&1
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "  $n: REGRESSED (drishti-conformance exit $rc: a crash, signal or timeout)"; fail=$((fail+1)); return
+    fi
+    timeout 60 aomdec --rawvideo --keep-going -o "$w/ref-%6.yuv" "$w/in.ivf" > /dev/null 2>&1
+    local res=(); mapfile -t res < <(tr -s ' \n' '\n' < "$d/$n.ivf.$rs" | grep .)
+    nu=$(grep -c '^frame [0-9]' "$w/drishti.log")
+    if [ "$nu" -ne "${#res[@]}" ]; then
+        echo "  $n: REGRESSED (drishti walked $nu units; libaom's .$rs lists ${#res[@]})"; fail=$((fail+1)); return
+    fi
+    local line="  $n:" ref_dav1d=0
+    case " $INVALID_DAV1D_REF " in *" $n "*) ref_dav1d=1 ;; esac
+    if [ "$ref_dav1d" = "1" ]; then
+        if ! command -v dav1d >/dev/null 2>&1; then
+            skip_case "$n" "dav1d is its reference and is not on PATH"; return
+        fi
+        dav1d -q -i "$w/in.ivf" -o "$w/dav1d.yuv" > /dev/null 2>&1
+        cat build/conformance-out-*.yuv > "$w/drishti.yuv" 2>/dev/null
+        if [ -s "$w/dav1d.yuv" ] && cmp -s "$w/drishti.yuv" "$w/dav1d.yuv"; then
+            echo "$line every unit = dav1d (libaom refuses this stream; see INVALID_DAV1D_REF)"; pass=$((pass+nu))
+        else
+            echo "$line REGRESSED (not dav1d's output)"; fail=$((fail+1))
+        fi
+        return
+    fi
+    k=1
+    while [ "$k" -le "$nu" ]; do
+        u=$(printf '%06d' "$k") r="${res[$((k-1))]}"
+        a=-; [ -f "$w/ref-$u.yuv" ] && a=$(md5sum < "$w/ref-$u.yuv" | cut -d' ' -f1)
+        b=-; [ -f "build/conformance-out-$k.yuv" ] && b=$(md5sum < "build/conformance-out-$k.yuv" | cut -d' ' -f1)
+        if [ "$r" != "0" ] && [ "$r" != "-1" ] && [ "$a" != "-" ]; then
+            echo "  $n: SETUP FAILED (aomdec shows a frame for unit $k, which libaom's .$rs says fails with $r)"
+            fail=$((fail+1)); return
+        fi
+        want=ok; [ "$a" != "$b" ] && want=diff
+        case " $INVALID_XFAIL_UNITS " in
+            *" $n:$k "*)
+                if [ "$want" = "ok" ]; then line="$line u$k=MATCHES(remove-from-INVALID_XFAIL_UNITS)"; fail=$((fail+1))
+                else line="$line u$k=known-gap"; xfail=$((xfail+1)); fi ;;
+            *)
+                if [ "$want" = "ok" ]; then line="$line u$k=OK"; pass=$((pass+1))
+                else line="$line u$k=REGRESSED"; fail=$((fail+1)); fi ;;
+        esac
+        k=$((k+1))
+    done
+    echo "$line"
+}
+echo "--- invalid streams: libaom's fuzz/crash corpus, decoded as its test does (no crash; per unit = libaom) ---"
+for c in $INVALID_CASES; do invcase "$c"; done
 
 finish
