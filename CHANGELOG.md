@@ -4,6 +4,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.5 bite 4: the symbol decoder's exit process in full (8.2.4); the encoder refuses impossible symbols
+
+**A tile whose data runs on past its last symbol is now refused, as the spec requires.** 8.2.4 makes three
+conformance requirements at the end of every tile:
+- `SymbolMaxBits >= -14`;
+- a 1 at `trailingBitPosition = get_position() - Min(15, SymbolMaxBits + 15)`;
+- zero padding from there to `paddingEndPosition`.
+
+`av1_sym_dec_exit` used to enforce only the first. The last two are new, and each failure is `AV1_ERR_BAD_FRAME`,
+sticky. The padding is checked bit by bit to a byte boundary, then in whole bytes, stopping at the first 1.
+`invalid-oss-fuzz-10227` unit 1, a tile ending in ~12.7 KB of non-zero bytes, was the corpus's last KNOWN GAP. drishti
+now refuses it, as libaom (`check_trailing_bits_after_symbol_coder`) and dav1d do, and `INVALID_XFAIL_UNITS` is empty.
+Every real stream in `make conformance` passes the stricter exit.
+
+**The check found an encoder-lane bug.** A `tests/av1_intertile.tcyr` fixture (the C1 CDF-inheritance witness) gave
+`eob` 3 with its coefficients at raster indices 0, 1, 2. But `eob` counts SCAN positions, and `scan[ 2 ]` of a
+32x32 DCT is raster 32, a zero.
+- The encode lane coded `coeff_base_eob` (level - 1) as **-1**, reading `cdf[-1]`, one word before the CDF.
+- It wrote a stream the decoder read differently from symbol 22 on: 63 symbols encoded, 26 decoded. The test
+  compared two equally desynced decodes and passed.
+- Now `av1_sym_encode` refuses any symbol outside `[0, n)` with `DR_ERR_BOUNDS` (sticky; `finish` yields nothing),
+  and the fixture puts its third coefficient at raster 32.
+
+**The reference, `scripts/refs/symbol_exit_ref.py`,** transcribes init_symbol (8.2.2), read_bool (8.2.3),
+read_symbol (8.2.6) and the exit (8.2.4). It gives each byte string read through k `read_bool` calls its verdict and
+trailing-bit position. Every case is derived BY HAND (families whose reads take exactly one bit each) and ASSERTED,
+and a flipped label fails it. My first, unasserted labels for the multi-read cases were all wrong. Also corrected:
+`src/av1_symbol.cyr` and `docs/sources.md` had 8.2.3 / 8.2.4 swapped (`exit_symbol` is 8.2.4, `read_bool` 8.2.3).
+**`tests/av1_symbol.tcyr`** (+35, now 397) pins:
+- the 13 exit cases, each with the reader left at `paddingEndPosition`;
+- 200 seeded encoder outputs that decode back and pass the exit, still pass with a zero byte appended, and fail with
+  0x01 appended;
+- the encoder's symbol bound at -1, n and n - 1.
+
+Mutation testing: **8 of 9** go red (the trailing-bit check, each padding loop, the `Min(15, ...)`, the trailing
+position, the padding end, and the encoder bound and its edge). The survivor loosens the `-14` bound to `-15` and
+is EQUIVALENT: at `SymbolMaxBits <= -15`, `trailingBitPosition` falls past the buffer and the trailing-bit check
+refuses anyway. The code says so.
+
+`make conformance` is **3930 matched / 0 known-gap / 0 regressed / 0 skipped** (was 3929 / 1).
+
+**Gates:** 44 suites, **31,515** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Fixed — 0.8.5 bite 3: superres at small widths (the Min(16, UpscaledWidth) floor; equal widths are not scaled)
 
 **libaom's own superres encodes below 32 samples wide now decode.** Before, at 24x24 and 30x40 only the keyframe

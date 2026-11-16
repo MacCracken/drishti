@@ -11,10 +11,10 @@
 # Decoder derived from the "AV1 Bitstream & Decoding Process
 # Specification" v1.0.0 w/ Errata 1, section 8.2 (cited inline):
 #   8.2.2 init_symbol()  — SymbolValue/SymbolRange/SymbolMaxBits setup
-#   8.2.4 read_bool()    — equiprobable bit via a fixed {1<<14,1<<15,0} cdf
+#   8.2.3 read_bool()    — equiprobable bit via a fixed {1<<14,1<<15,0} cdf
+#   8.2.4 exit_symbol()  — the trailing bit, the zero padding, SymbolMaxBits >= -14
 #   8.2.5 read_literal() — n flat bits, MSB first
 #   8.2.6 read_symbol()  — the multi-symbol decode + CDF adaptation
-#   8.2.3 exit_symbol()  — trailing-bit alignment / conformance
 # with EC_PROB_SHIFT = 6, EC_MIN_PROB = 4 (spec section 3).
 # The encoder is the exact inverse of this decoder (u = U(R,s-1),
 # v = U(R,s), low += R - u, rng = u - v) with the daala byte-carry
@@ -191,9 +191,21 @@ fn av1_sym_read_literal(sd, n): i64 {
     return x;
 }
 
-# exit_symbol() — 8.2.3 (memory-safe subset): advance the reader over the
-# unread trailing bits so the next OBU field is byte-aligned, and enforce
-# the SymbolMaxBits >= -14 conformance bound. Returns DR_OK / error.
+# The bit at bit position p of the reader's buffer (MSB first), or -1 outside it.
+fn av1_sym_buf_bit(br, p): i64 {
+    if ((p < 0) || ((p >> 3) >= load64(br + 8))) { return 0 - 1; }
+    return (load8(load64(br) + (p >> 3)) >> (7 - (p & 7))) & 1;
+}
+# exit_symbol() — 8.2.4, the whole process. The three conformance requirements, each AV1_ERR_BAD_FRAME:
+#   - SymbolMaxBits >= -14;
+#   - the bit at trailingBitPosition = get_position() - Min(15, SymbolMaxBits + 15) is 1;
+#   - every bit strictly between it and paddingEndPosition (after advancing Max(0, SymbolMaxBits)) is 0.
+# The reader is left at paddingEndPosition, byte-aligned. (The first requirement is also implied by the second: at
+# SymbolMaxBits <= -15 every bit has been read and Min(15, SymbolMaxBits + 15) <= 0, so trailingBitPosition falls at
+# or past the buffer's end, where av1_sym_buf_bit is -1. It stays as the spec writes it.) Before 0.8.5 only the
+# first was checked, so a tile whose data ran on into garbage decoded without complaint (libaom's
+# invalid-oss-fuzz-10227); libaom (check_trailing_bits_after_symbol_coder) and dav1d refuse such a tile. Returns
+# DR_OK / the error, sticky in sd.
 fn av1_sym_dec_exit(sd): i64 {
     if (load64(sd + AV1SD_ERR) != DR_OK) { return load64(sd + AV1SD_ERR); }
     var max_bits = load64(sd + AV1SD_MAXBITS);
@@ -202,12 +214,37 @@ fn av1_sym_dec_exit(sd): i64 {
         return AV1_ERR_BAD_FRAME;
     }
     var br = load64(sd + AV1SD_BR);
+    var lead = max_bits + 15;
+    if (lead > 15) { lead = 15; }                    # Min(15, SymbolMaxBits + 15), >= 1 here
+    var trailing = dr_br_bit_pos(br) - lead;         # trailingBitPosition
     if (max_bits > 0) {
-        dr_br_skip(br, max_bits);                 # skip Max(0, SymbolMaxBits)
+        dr_br_skip(br, max_bits);                    # advance Max(0, SymbolMaxBits)
         if (dr_br_err(br) != DR_OK) {
             store64(sd + AV1SD_ERR, dr_br_err(br));
             return dr_br_err(br);
         }
+    }
+    var end = dr_br_bit_pos(br);                     # paddingEndPosition
+    if (av1_sym_buf_bit(br, trailing) != 1) {
+        store64(sd + AV1SD_ERR, AV1_ERR_BAD_FRAME);
+        return AV1_ERR_BAD_FRAME;
+    }
+    # the padding: bit by bit to a byte boundary, then whole bytes
+    var p = trailing + 1;
+    while ((p < end) && ((p & 7) != 0)) {
+        if (av1_sym_buf_bit(br, p) != 0) {
+            store64(sd + AV1SD_ERR, AV1_ERR_BAD_FRAME);
+            return AV1_ERR_BAD_FRAME;
+        }
+        p = p + 1;
+    }
+    var buf = load64(br);
+    while ((p + 8) <= end) {
+        if (load8(buf + (p >> 3)) != 0) {
+            store64(sd + AV1SD_ERR, AV1_ERR_BAD_FRAME);
+            return AV1_ERR_BAD_FRAME;
+        }
+        p = p + 8;
     }
     return DR_OK;
 }
@@ -269,6 +306,13 @@ fn av1_sym_enc_push(enc, val): i64 {
 fn av1_sym_encode(enc, cdf, n, sym, adapt): i64 {
     var e = load64(enc + AV1SE_ERR);
     if (e != DR_OK) { return e; }
+    # A symbol outside [0, n) has no interval to code: refuse it, sticky. Before 0.8.5 a plan whose
+    # coefficient at the EOB was zero coded coeff_base_eob as -1, reading cdf[-1] (one word before the CDF)
+    # and writing a stream no decoder reads back the same way; 8.2.4's padding check is what exposed it.
+    if ((sym < 0) || (sym >= n)) {
+        store64(enc + AV1SE_ERR, DR_ERR_BOUNDS);
+        return DR_ERR_BOUNDS;
+    }
     var r = load64(enc + AV1SE_RNG);
     # v = U(r, sym)
     var fv = AV1_CDF_PROB_TOP - load64(cdf + (sym * 8));

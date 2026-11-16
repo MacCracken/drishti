@@ -133,13 +133,12 @@ invalid-oss-fuzz-11479:res.2 invalid-oss-fuzz-33030"
 # unit's frame is then decoded bit-exact by both.
 INVALID_DAV1D_REF="invalid-oss-fuzz-10779"
 # Units drishti shows differently from libaom AND dav1d, as name:unit, each with its verified cause. A listed unit
-# that now matches fails the gate, so this list cannot go stale.
-#  - invalid-oss-fuzz-10227:1 — the tile ends with ~12.7 KB unread, not padded with zeros. The 8.2.4 exit process
-#    requires the trailing bit and zero padding; drishti's exit enforces only SymbolMaxBits >= -14, while libaom
-#    (check_trailing_bits_after_symbol_coder) and dav1d refuse the frame.
-# (invalid-oss-fuzz-10117-mc-buf-use-highbd:1, a 2-wide superres frame, was listed here until 0.8.5 bite 3 gave the
-# superres width the Min(16, UpscaledWidth) floor libaom and dav1d use; it matches now.)
-INVALID_XFAIL_UNITS="invalid-oss-fuzz-10227:1"
+# that now matches fails the gate, so this list cannot go stale. Empty since 0.8.5 bite 4. Retired:
+#  - invalid-oss-fuzz-10117-mc-buf-use-highbd:1 (bite 3): a 2-wide superres frame, now given the Min(16,
+#    UpscaledWidth) floor libaom and dav1d use;
+#  - invalid-oss-fuzz-10227:1 (bite 4): a tile ending in ~12.7 KB of non-zero "padding", now refused by the full 8.2.4
+#    exit process (trailing bit + zero padding), as libaom (check_trailing_bits_after_symbol_coder) and dav1d refuse.
+INVALID_XFAIL_UNITS=""
 IBC_CASES="ibc_352x288 ibc0_352x288 ibcodd_349x197 ibcodd_173x101 ibc444_176x144 ibc422_352x288 ibcb10_352x288 \
 ibcb12_352x288 ibcmono_352x288 ibcll_352x288 ibc128_352x288 ibctile_640x360 ibcaq_352x288 ibcgop_352x288"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile

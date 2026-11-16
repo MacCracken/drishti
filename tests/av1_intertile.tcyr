@@ -4216,7 +4216,10 @@ fn test_cdf_inheritance() {
     memset(c2, 0, 1024 * 8);
     store64(c2 + 0, 176);
     store64(c2 + 8, 0 - 88);
-    store64(c2 + 16, 60);
+    # eob 3 counts SCAN positions: a 32x32 DCT scans 0, 1, then 32 (row 1, col 0), so the third coefficient sits at
+    # raster 32. (It sat at raster 2 until 0.8.5, a zero at scan[ 2 ]: the encoder coded coeff_base_eob as -1 and
+    # both decodes desynced alike, which the 8.2.4 padding check and the encoder's symbol bound now refuse.)
+    store64(c2 + (32 * 8), 60);
     var blk2 = ir_blk(0 - 8, 16, ir_resid1(AV1_DCT_DCT, 3, c2));
     # encode frame 2 against S: primary_ref_frame = 0 -> CDF source = ref_frame_idx[0] = slot 0 (bundle).
     var refsS = ir_refs(32, 32);

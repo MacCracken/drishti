@@ -300,8 +300,118 @@ fn test_subexp_encode_bounds() {
     return 0;
 }
 
+# ---- exit_symbol (8.2.4): the trailing bit, the zero padding, SymbolMaxBits >= -14 ----
+# Known answers from scripts/refs/symbol_exit_ref.py (a spec transcription of 8.2.2 / 8.2.3 / 8.2.4 / 8.2.6, every
+# case derived by hand there): bytes, then k read_bool calls, then the exit verdict.
+var Sx_Buf = 0;
+fn sx_case(b0, b1, b2, b3, sz, k, want_ok, what): i64 {
+    Sx_Buf = alloc(8);   # bytes
+    store8(Sx_Buf, b0); store8(Sx_Buf + 1, b1); store8(Sx_Buf + 2, b2); store8(Sx_Buf + 3, b3);
+    var sd = av1_sym_dec_init(Sx_Buf, sz, 1);
+    var i = 0;
+    while (i < k) { av1_sym_read_bool(sd); i = i + 1; }
+    var rc = av1_sym_dec_exit(sd);
+    if (want_ok == 1) {
+        assert_eq(rc, DR_OK, what);
+        assert_eq(dr_br_bit_pos(load64(sd + AV1SD_BR)), sz * 8, "...the reader ends at paddingEndPosition");
+    } else {
+        assert_eq(rc, AV1_ERR_BAD_FRAME, what);
+        assert_eq(av1_sym_dec_err(sd), AV1_ERR_BAD_FRAME, "...sticky");
+    }
+    return 0;
+}
+fn test_sym_exit_known() {
+    sx_case(128, 0, 0, 0, 1, 0, 1, "1 byte 1000 0000: the trailing bit then zero padding");
+    sx_case(129, 0, 0, 0, 1, 0, 0, "1 byte 1000 0001: a 1 in the padding");
+    sx_case(64, 0, 0, 0, 1, 0, 0, "1 byte 0100 0000: the trailing bit is 0");
+    sx_case(128, 0, 0, 0, 2, 0, 1, "2 bytes 0x80 0x00");
+    sx_case(128, 1, 0, 0, 2, 0, 0, "2 bytes 0x80 0x01: the last padding bit set");
+    sx_case(128, 0, 0, 0, 4, 0, 1, "whole zero bytes of padding");
+    sx_case(128, 0, 0, 16, 4, 0, 0, "a 1 three bytes into the padding");
+    sx_case(128, 0, 0, 0, 1, 7, 0, "one byte 0x80, 7 bools: the trailing bit lands on bit 7, a 0");
+    sx_case(129, 0, 0, 0, 1, 7, 1, "one byte 0x81, 7 bools: bit 7 is the trailing 1");
+    sx_case(128, 0, 0, 0, 1, 8, 0, "one byte, 8 bools: SymbolMaxBits -15");
+    sx_case(128, 0, 0, 0, 2, 1, 0, "two bytes, 1 bool: trailing bit 1 is a 0");
+    sx_case(128, 0, 0, 0, 2, 15, 0, "two bytes, 15 bools: trailing bit 15 is a 0");
+    sx_case(128, 0, 0, 0, 2, 16, 0, "two bytes, 16 bools: SymbolMaxBits -15");
+    return 0;
+}
+# The encoder's output meets 8.2.4 whatever was coded: 200 seeded symbol streams round-trip AND exit cleanly; one
+# extra zero byte is still valid padding, one extra 0x01 byte is not.
+fn test_sym_exit_encoder_output() {
+    var seed = 12345;
+    var good = 0;
+    var zero_ok = 0;
+    var junk_bad = 0;
+    var t = 0;
+    while (t < 200) {
+        var enc = av1_sym_enc_init(64, 1);
+        var cdf = alloc(5 * 8);   # 4 symbols + counter
+        store64(cdf, 8192); store64(cdf + 8, 16384); store64(cdf + 16, 24576); store64(cdf + 24, 32768);
+        store64(cdf + 32, 0);
+        var nsym = 1 + (t % 40);
+        var syms = alloc(nsym * 8);
+        var i = 0;
+        while (i < nsym) {
+            seed = ((seed * 1103515245) + 12345) & 2147483647;
+            store64(syms + (i * 8), (seed >> 16) & 3);
+            av1_sym_encode_symbol(enc, cdf, 4, load64(syms + (i * 8)));
+            i = i + 1;
+        }
+        var len = 0;
+        var out = av1_sym_enc_finish(enc, &len);
+        var b = alloc(len + 2);   # bytes
+        memcpy(b, out, len);
+        store8(b + len, 0);
+        store8(b + len + 1, 0);
+        var round = 1;
+        var sd = av1_sym_dec_init(b, len, 1);
+        store64(cdf, 8192); store64(cdf + 8, 16384); store64(cdf + 16, 24576); store64(cdf + 24, 32768);
+        i = 0;
+        while (i < nsym) {
+            if (av1_sym_read_symbol(sd, cdf, 4) != load64(syms + (i * 8))) { round = 0; }
+            i = i + 1;
+        }
+        if ((round == 1) && (av1_sym_dec_exit(sd) == DR_OK)) { good = good + 1; }
+        var sd2 = av1_sym_dec_init(b, len + 1, 1);   # + one zero byte
+        i = 0;
+        while (i < nsym) { av1_sym_read_symbol(sd2, cdf, 4); i = i + 1; }
+        if (av1_sym_dec_exit(sd2) == DR_OK) { zero_ok = zero_ok + 1; }
+        store8(b + len, 1);
+        var sd3 = av1_sym_dec_init(b, len + 1, 1);   # + 0x01
+        i = 0;
+        while (i < nsym) { av1_sym_read_symbol(sd3, cdf, 4); i = i + 1; }
+        if (av1_sym_dec_exit(sd3) == AV1_ERR_BAD_FRAME) { junk_bad = junk_bad + 1; }
+        t = t + 1;
+    }
+    assert_eq(good, 200, "200 encoder outputs decode back and pass the 8.2.4 exit");
+    assert_eq(zero_ok, 200, "...each still passes with one more zero byte of padding");
+    assert_eq(junk_bad, 200, "...and fails with a 0x01 byte after it");
+    return 0;
+}
+# The encoder refuses a symbol outside [0, n): no interval to code, and cdf[-1] is not the CDF's.
+fn test_sym_encode_symbol_bounds() {
+    var cdf = alloc(3 * 8);
+    store64(cdf, 16384); store64(cdf + 8, 32768); store64(cdf + 16, 0);
+    var enc = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(enc, cdf, 2, 0 - 1), DR_ERR_BOUNDS, "symbol -1 is refused");
+    assert_eq(av1_sym_enc_err(enc), DR_ERR_BOUNDS, "...sticky");
+    var len = 7;
+    assert_eq(av1_sym_enc_finish(enc, &len), 0, "...and finish yields nothing");
+    assert_eq(len, 0, "...of length 0");
+    var enc2 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(enc2, cdf, 2, 2), DR_ERR_BOUNDS, "symbol n (2 of 2) is refused");
+    var enc3 = av1_sym_enc_init(64, 1);
+    assert_eq(av1_sym_encode_symbol(enc3, cdf, 2, 1), DR_OK, "symbol n - 1 is coded");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("av1 symbol coder — exit_symbol (8.2.4) and the encoder's symbol bound");
+    test_sym_exit_known();
+    test_sym_exit_encoder_output();
+    test_sym_encode_symbol_bounds();
     test_group("av1 symbol coder — known answers");
     test_sym_init_known();
     test_sym_decode_known();

@@ -1815,8 +1815,16 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > Neither rule changes a frame that meets Annex A. libaom's superres encodes 8 to 30 wide now decode bit-exact: ten
 > cases and the reproducers `srmin-24x24` / `srmin-16x16`. TRAP: dav1d 1.5.4 decodes NOTHING of an equal-width
 > superres stream ("Cannot allocate memory"), so those are judged against aomdec alone. Gate: 3929 / 1 / 0 / 0
-> (10117 unit 1 left the known gaps). Next: the padding check (the last known gap), then the `av1_sym_decode` bound,
-> the 7.12.3 reconstruct guard, OOM fault injection, corpus-guided fuzzing.
+> (10117 unit 1 left the known gaps).
+>
+> Bite 4 = **the 8.2.4 exit process in full**: `av1_sym_dec_exit` now enforces the trailing 1 bit and the zero
+> padding too (it checked only SymbolMaxBits >= -14), so `invalid-oss-fuzz-10227` is refused as libaom and dav1d
+> refuse it, and the gate holds NO known gap. The check exposed an ENCODER-lane bug: a C1 test plan with a zero at
+> its EOB scan position made `coeff_base_eob` code -1 (reading `cdf[-1]`), and the round-trip compared two equally
+> desynced decodes. `av1_sym_encode` now refuses any symbol outside [0, n). `scripts/refs/symbol_exit_ref.py` gives
+> hand-derived known answers. Gate: 3930 / 0 / 0 / 0. Next: the `av1_sym_decode` bound, the 7.12.3 reconstruct
+> guard, OOM fault injection, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two
+> streams others refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).
