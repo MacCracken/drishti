@@ -6,4 +6,4 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [001](001-allocation-lifetimes.md) — Inside a decoder, `dr_alloc` memory dies at the next frame start (0.8.5)

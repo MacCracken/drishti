@@ -54,7 +54,7 @@ enum Av1PalScratch {
 var Av1_PalScratch = 0;
 fn av1_pal_scratch(): i64 {
     if (Av1_PalScratch != 0) { return Av1_PalScratch; }
-    Av1_PalScratch = dr_alloc(AV1PS_SIZE);   # AV1PS_SIZE bytes
+    Av1_PalScratch = dr_alloc_keep(AV1PS_SIZE);   # AV1PS_SIZE bytes
     return Av1_PalScratch;
 }
 

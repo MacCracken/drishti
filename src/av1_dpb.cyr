@@ -105,8 +105,7 @@ fn av1_dpb_store(dpb, fh, frame): i64 {
 fn av1_dpb_update(dpb, refs, s, fh, frame): i64 {
     var rc = av1_dpb_store(dpb, fh, frame);
     if (rc != DR_OK) { return rc; }
-    av1_frame_update_refs(refs, s, fh);
-    return DR_OK;
+    return av1_frame_update_refs(refs, s, fh);
 }
 
 # ================================================================
@@ -193,12 +192,72 @@ enum Av1DecOff {
     AV1DEC_OPREQ  = 152;  # the operating point requested by the application (0 = the stream's preferred)
     AV1DEC_OPSEL  = 160;  # the operating point chosen at the last sequence header (5.5.1 choose_operating_point)
     AV1DEC_OPIDC  = 168;  # OperatingPointIdc = operating_point_idc[ OPSEL ] (0 = every OBU decodes)
-    AV1DEC_SIZE   = 176;
+    # memory (0.8.5) — see "MEMORY" below
+    AV1DEC_ARENA  = 176;  # the DrArena every frame's working memory comes from, reset at each frame start
+    AV1DEC_POOL   = 184;  # the DrFramePool every frame the decoder makes comes from, swept at each frame start
+    AV1DEC_IT     = 192;  # the OBU iterator, reused by every call
+    AV1DEC_SEQBUF = 200;  # the decoder's own copy of the active sequence header (AV1DEC_SEQ points here)
+    AV1DEC_CAMBUF = 208;  # its own copy of the camera frame header (AV1DEC_CAMFH points here)
+    AV1DEC_SIZE   = 216;
+}
+# MEMORY (0.8.5). drishti's allocator never frees, and a decoder that took everything from it grew by ~35-60 bytes per
+# pixel per frame, for ever. Now a decoder owns its memory, and a long stream settles at a fixed footprint:
+#   - while av1_decoder_decode runs, every allocation is served from the decoder's ARENA (dr_alloc_scope), which
+#     is rewound at each FRAME START — a frame header (FRAME_HEADER / FRAME, outside large-scale tile mode) or a
+#     tile list — and at the start of a call that has no frame pending. A frame's tiles, grids, CDF contexts,
+#     headers and per-block records are dead by then;
+#   - every frame it makes (the reconstruction, the CDEF / loop-restoration / upscaled frames, a tile list's output,
+#     the film grain output) comes from its frame POOL. At each frame start the pool keeps only what is still held —
+#     the eight reference slots, the last decoded and last shown frames, the anchors, the grain output — and the rest
+#     is reused;
+#   - what outlives a frame is kept (dr_alloc_keep): the reference slots' saved blocks (their own copies), the sequence
+#     and camera headers (copied into AV1DEC_SEQBUF / CAMBUF), the lazily-built tables, the grain context.
+# The returned frame is therefore valid until the NEXT av1_decoder_decode call on the same decoder (a frame the
+# DPB still holds lives longer, but nothing promises that); consume it, or copy it, before then.
+# The frame start: everything the arena served is dead, and every pooled frame nothing holds is free again.
+fn av1_decoder_frame_start(dec): i64 {
+    var pool = load64(dec + AV1DEC_POOL);
+    if (pool == 0) { return 0; }   # a decoder without its memory (a test's unbounded reference): nothing to do
+    dr_frame_pool_sweep(pool);
+    var dpb = load64(dec + AV1DEC_DPB);
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) { dr_frame_pool_root(pool, av1_dpb_frame(dpb, i)); i = i + 1; }
+    dr_frame_pool_root(pool, load64(dec + AV1DEC_LAST));
+    dr_frame_pool_root(pool, load64(dec + AV1DEC_SHOWN));
+    var gc = load64(dec + AV1DEC_GRAIN);
+    if (gc != 0) { dr_frame_pool_root(pool, load64(gc + AV1GC_OUT)); }
+    var anch = load64(dec + AV1DEC_ANCH);
+    if (anch != 0) {
+        var j = 0;
+        while (j < load64(dec + AV1DEC_NANCH)) { dr_frame_pool_root(pool, load64(anch + (j * 8))); j = j + 1; }
+    }
+    dr_arena_reset(load64(dec + AV1DEC_ARENA));
+    store64(dec + AV1DEC_FH, 0);    # anything pending died with the arena
+    store64(dec + AV1DEC_FDC, 0);
+    return 0;
+}
+# copy the header record at src (n bytes) into the decoder's own buffer at field own_off (kept, made on first use);
+# returns the buffer, or 0 on OOM
+fn av1_decoder_own_copy(dec, own_off, src, n): i64 {
+    var own = load64(dec + own_off);
+    if (own == 0) {
+        own = dr_alloc_keep(n);
+        if (own == 0) { return 0; }
+        store64(dec + own_off, own);
+    }
+    if (own != src) { dr_copy(own, src, n); }
+    return own;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
 # one). Returns the handle, or 0 on OOM.
 fn av1_decoder_new(dpb): i64 {
+    dr_persist_begin();   # the decoder and everything it owns outlive every frame (and any enclosing scope)
+    var d = av1_decoder_new_in(dpb);
+    dr_persist_end();
+    return d;
+}
+fn av1_decoder_new_in(dpb): i64 {
     var d = dr_alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
     if (d == 0) { return 0; }
     memset(d, 0, AV1DEC_SIZE);
@@ -206,11 +265,21 @@ fn av1_decoder_new(dpb): i64 {
     if (ring == 0) { ring = av1_dpb_new(); }
     var refs = av1_ref_state_new();
     if ((ring == 0) || (refs == 0)) { return 0; }
+    var arena = dr_arena_new(1 << 20);   # 1 MiB chunks
+    var pool = dr_frame_pool_new();
+    var it = av1_obu_iter_init(d, 0);    # re-pointed at each call's buffer
+    if ((arena == 0) || (pool == 0) || (it == 0)) { return 0; }
     store64(d + AV1DEC_DPB, ring);
     store64(d + AV1DEC_REFS, refs);
     store64(d + AV1DEC_ERR, DR_OK);
+    store64(d + AV1DEC_ARENA, arena);
+    store64(d + AV1DEC_POOL, pool);
+    store64(d + AV1DEC_IT, it);
     return d;
 }
+# the decoder's memory, for a caller that bounds or reports it: the bytes its arena holds, and its pooled frames
+fn av1_decoder_arena_bytes(dec): i64 { return dr_arena_capacity(load64(dec + AV1DEC_ARENA)); }
+fn av1_decoder_pool_frames(dec): i64 { return dr_frame_pool_count(load64(dec + AV1DEC_POOL)); }
 fn av1_decoder_dpb(dec): i64 { return load64(dec + AV1DEC_DPB); }
 fn av1_decoder_refs(dec): i64 { return load64(dec + AV1DEC_REFS); }
 fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
@@ -256,7 +325,9 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
         if ((av1_seq_film_grain_present(seq) != 0) && (av1_fh_apply_grain(fh) != 0)) {
             var gc = load64(dec + AV1DEC_GRAIN);
             if (gc == 0) {
+                dr_persist_begin();   # the grain context is the decoder's for its whole life
                 gc = av1_grain_ctx_new();
+                dr_persist_end();
                 if (gc == 0) { return DR_ERR_OOM; }
                 store64(dec + AV1DEC_GRAIN, gc);
             }
@@ -295,9 +366,9 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
 # point (av1_decoder_set_operating_point) is dropped whole (5.3.1 drop_obu).
 #
 # The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
-# the decoder's reused grain frame, overwritten by the next grain output — consume it
-# before the next call. Without grain it is the DPB's own frame. Either way, do not
-# modify it.
+# the decoder's reused grain frame, else the decoded frame itself. Either way it is valid
+# until the NEXT call on this decoder (see MEMORY above) — consume it before then — and
+# must not be modified.
 #
 # On any parse/decode fault: returns 0 with *out_err set, and the error is latched
 # (see Av1Decoder). A null decoder or buffer, or a negative size, is DR_ERR_BOUNDS
@@ -309,12 +380,25 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     if (load64(dec + AV1DEC_ERR) != DR_OK) {
         store64(out_err, load64(dec + AV1DEC_ERR)); return 0;
     }
+    # the decoder's memory scope for the length of the call (MEMORY above), restored on every return
+    var prev_arena = dr_alloc_scope(load64(dec + AV1DEC_ARENA));
+    var prev_pool = dr_frame_pool_use(load64(dec + AV1DEC_POOL));
+    var f = av1_decoder_decode_in(dec, buf, sz, out_err);
+    dr_frame_pool_use(prev_pool);
+    dr_alloc_scope(prev_arena);
+    return f;
+}
+fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
     store64(dec + AV1DEC_SHOWN, 0);
     store64(dec + AV1DEC_NSHOWN, 0);
+    # nothing pending: whatever the last call left in the arena is dead
+    if ((load64(dec + AV1DEC_FH) == 0) && (load64(dec + AV1DEC_FDC) == 0)) {
+        dr_arena_reset(load64(dec + AV1DEC_ARENA));
+    }
     var dpb = load64(dec + AV1DEC_DPB);
     var refs = load64(dec + AV1DEC_REFS);
-    var it = av1_obu_iter_init(buf, sz);
-    if (it == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
+    var it = av1_obu_iter_reset(load64(dec + AV1DEC_IT), buf, sz);
+    if (it == 0) { return av1_decoder_fail(dec, DR_ERR_BOUNDS, out_err); }
     var otype = 0;
     var ooff = 0;
     var osize = 0;
@@ -322,9 +406,12 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     while (rc == DR_OK) {
         var seq = load64(dec + AV1DEC_SEQ);
         var fh = load64(dec + AV1DEC_FH);
+        # the OBU header's fields, read NOW: its record is arena memory, and a frame start below rewinds the arena
         var xo = av1_obu_iter_obu(it);
-        if (av1_obu_in_operating_point(load64(dec + AV1DEC_OPIDC), otype, av1_obu_ext(xo), av1_obu_tid(xo),
-            av1_obu_sid(xo)) == 0) {
+        var oext = av1_obu_ext(xo);
+        var otid = av1_obu_tid(xo);
+        var osid = av1_obu_sid(xo);
+        if (av1_obu_in_operating_point(load64(dec + AV1DEC_OPIDC), otype, oext, otid, osid) == 0) {
             otype = 0 - 1;   # drop_obu( ) (5.3.1): not in the operating point, so none of the branches below sees it
         }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
@@ -332,6 +419,9 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             var nseq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            # the decoder's own copy: the parse is arena memory, and the sequence outlives every frame
+            nseq = av1_decoder_own_copy(dec, AV1DEC_SEQBUF, nseq, AV1_SEQ_SIZE);
+            if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
             store64(dec + AV1DEC_SEQ, nseq);
             # choose_operating_point( ) and OperatingPointIdc (5.5.1), for this coded video sequence
             var op = av1_seq_choose_operating_point(nseq, load64(dec + AV1DEC_OPREQ));
@@ -344,12 +434,13 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             # against — no tile group of its own is decoded (an OBU_FRAME's tile data, if any, is skipped, as
             # libaom does: its lightfield files carry a header-only OBU_FRAME), no reference update, no output.
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
-            var co = av1_obu_iter_obu(it);
             var cerr = 0;
-            var cfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(co), av1_obu_sid(co),
-              buf + ooff, osize, &cerr);
+            var cfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &cerr);
             if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
             if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            # the decoder's own copy: every tile list after it is a frame start, which rewinds the arena
+            cfh = av1_decoder_own_copy(dec, AV1DEC_CAMBUF, cfh, AV1FH_SIZE);
+            if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
             store64(dec + AV1DEC_CAMFH, cfh);
             otype = 0 - 1;   # handled: none of the branches below may see it
         }
@@ -357,6 +448,7 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             # a tile list only means something to the large-scale tile process, which needs AnchorFrames supplied
             # by the application: outside that mode it is refused, never silently skipped.
             if (load64(dec + AV1DEC_LST) == 0) { return av1_decoder_fail(dec, DR_ERR_UNSUPPORTED, out_err); }
+            av1_decoder_frame_start(dec);
             var lerr2 = 0;
             var lout = av1_decode_tile_list(dec, buf + ooff, osize, &lerr2);
             if (lout == 0) {
@@ -369,10 +461,9 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
-            var o = av1_obu_iter_obu(it);
+            av1_decoder_frame_start(dec);
             var ferr = 0;
-            var nfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
-              av1_obu_sid(o), buf + ooff, osize, &ferr);
+            var nfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { return av1_decoder_fail(dec, ferr, out_err); }
             if (nfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             store64(dec + AV1DEC_FH, nfh);
@@ -391,10 +482,9 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
         }
         if (otype == AV1_OBU_FRAME) {
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
-            var of = av1_obu_iter_obu(it);
+            av1_decoder_frame_start(dec);
             var frr = 0;
-            var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
-              av1_obu_sid(of), buf + ooff, osize, &frr);
+            var ffh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &frr);
             if (frr != DR_OK) { return av1_decoder_fail(dec, frr, out_err); }
             if (ffh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;

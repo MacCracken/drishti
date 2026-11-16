@@ -57,7 +57,7 @@ fn av1_txt_fill16(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12,
 }
 fn av1_txtype_tables(): i64 {
     if (Av1_TxType != 0) { return Av1_TxType; }
-    var t = dr_alloc(173 * 8);         # 173 i64
+    var t = dr_alloc_keep(173 * 8);         # 173 i64
     if (t == 0) { return 0; }
     # Mode_To_Txfm[14]: DC,V,H,D45,D135,D113,D157,D203,D67,SMOOTH,SMOOTH_V,SMOOTH_H,PAETH,CFL
     store64(t + (0 * 8), AV1_DCT_DCT);    store64(t + (1 * 8), AV1_ADST_DCT);

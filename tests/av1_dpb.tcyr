@@ -494,6 +494,46 @@ fn test_decoder_sticky() {
     return 0;
 }
 
+# ---- the frame start (0.8.5): which pooled frames survive it ----
+# A white-box witness of av1_decoder_frame_start's roots. The committed streams cannot witness every root on its
+# own: a shown or last-decoded frame is almost always also a reference (rooted through the DPB), and the grain
+# output's border-0 layout fits no other frame request. So each root is set up here alone, beside a frame nothing
+# holds, and only the held ones may survive.
+fn test_decoder_frame_start_roots() {
+    var dec = av1_decoder_new(0);
+    var pool = load64(dec + AV1DEC_POOL);
+    var prev = dr_frame_pool_use(pool);
+    var e = 0;
+    var f_dpb = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    var f_last = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    var f_shown = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    var f_grain = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    var f_anchor = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    var f_free = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    assert_eq(dr_frame_pool_count(pool), 6, "six pooled frames");
+    store64(av1_decoder_dpb(dec) + AV1DPB_FRAMES + (3 * 8), f_dpb);   # a reference slot
+    store64(dec + AV1DEC_LAST, f_last);                               # the last decoded frame
+    store64(dec + AV1DEC_SHOWN, f_shown);                             # this call's output so far
+    var gc = av1_grain_ctx_new();
+    store64(gc + AV1GC_OUT, f_grain);                                  # the grain output
+    store64(dec + AV1DEC_GRAIN, gc);
+    assert_eq(av1_decoder_set_anchor(dec, 0, f_anchor), DR_OK, "an anchor");
+    av1_decoder_frame_start(dec);
+    assert_eq(dr_frame_pool_in_use(pool), 5, "the frame start keeps the five held frames, frees the sixth");
+    var t1 = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    assert_eq(t1, f_free, "the next frame is the one nothing held");
+    var t2 = dr_frame_new(32, 32, 1, 0, 0, 8, 0, &e);
+    assert_eq(dr_frame_pool_count(pool), 7, "...and the one after is new: no held frame was handed out");
+    assert_neq(t2, f_dpb, "not the reference slot's frame");
+    assert_neq(t2, f_last, "not the last decoded frame");
+    assert_neq(t2, f_shown, "not the shown frame");
+    assert_neq(t2, f_grain, "not the grain output");
+    assert_neq(t2, f_anchor, "not the anchor");
+    assert_eq(load64(dec + AV1DEC_FH), 0, "a frame start retires any pending frame header");
+    dr_frame_pool_use(prev);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("DPB reference frame update (7.20 pixel store)");
@@ -515,6 +555,8 @@ fn main() {
     test_decoder_streaming();
     test_decoder_two_in_one_call();
     test_decoder_sticky();
+    test_group("the frame start (0.8.5 memory bound)");
+    test_decoder_frame_start_roots();
     return assert_summary();
 }
 

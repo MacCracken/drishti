@@ -4,6 +4,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 8: the memory bound — a streaming decoder settles at a fixed footprint
+
+**A long stream no longer ends in a real out-of-memory.** drishti's allocator (the stdlib bump allocator) never
+frees. Bite 7 measured each decoded frame allocating ~35–60 bytes per pixel that nothing ever reclaimed: ~5.7 MB
+for a 352x288 frame, which extrapolates to ~100 MB for a 1080p one. Now `av1_decoder_*` owns its memory. Every
+committed reproducer fed four times through one decoder takes **no bytes at all** from the global allocator after
+its second pass, and decodes bit-exact on every pass. The decision and its alternatives are
+[ADR 0002](docs/adr/0002-decoder-memory-frame-arena-and-pool.md); the invariant contributors must keep is
+[architecture note 001](docs/architecture/001-allocation-lifetimes.md).
+- **The frame arena.** `dr_alloc` (bite 7's single funnel) is scoped to the decoder's `DrArena`
+  (`src/drishti.cyr`) while `av1_decoder_decode` runs. The arena is a chain of chunks. `dr_arena_reset` rewinds it
+  and keeps the chain, at every frame start (a frame header, a tile list) and at the start of a call with nothing
+  pending, so a stream settles at its high-water mark. Arena allocations are zeroed (see below).
+- **The frame pool.** While a pool is active, `dr_frame_new` takes from the decoder's `DrFramePool`
+  (`src/frame.cyr`). At each frame start `av1_decoder_frame_start` sweeps it and roots what the decoder still
+  holds: the eight reference slots, the last decoded and last shown frames, the anchors and the grain output. A
+  free frame whose plane buffers are large enough (best fit) is laid out again and zeroed. A stream typically
+  settles at 3–13 pooled frames.
+- **What outlives a frame is kept.** `dr_alloc_keep` covers the 64 lazily-built tables and persistent scratch, and
+  `dr_persist_begin` / `dr_persist_end` cover the grain context, the warp-model scratch and the decoder itself.
+  **Reference slots now own COPIES of what they save:** motion field, CDF bundle, segmentation map, film-grain
+  parameters. They used to hold pointers to the frame decoder's buffers, one aliased into every refreshed slot and
+  never freed. The setters (`av1_ref_set_saved_*`) copy into a per-slot buffer grown on demand and return
+  `DR_ERR_OOM` when it cannot be made; the reference update propagates it. The sequence header and the camera frame
+  header are copied into decoder-owned buffers. The OBU iterator is the decoder's own, reused by every call.
+- **API change: the returned frame is valid until the next `av1_decoder_decode` call** on the same decoder.
+  Consume it (or copy it) before then; `av1_decoder_decode`'s docstring says so. `av1_decoder_arena_bytes` and
+  `av1_decoder_pool_frames` report the footprint. The one-shot entry points (`av1_decode_frame`,
+  `av1_decode_obus`) and the encode lanes are unscoped, and unchanged.
+- **Cost: none measurable.** The stdlib `memset` / `memcpy` are byte loops, and zeroing a frame's megabytes with
+  them cost up to +65%. New word-wise `dr_fill` / `dr_copy` do the arena's zeroing, the pool's plane clearing and
+  the slots' copies. With them a decode times the same as before the bite, and the frame-plane clearing that
+  always existed got faster.
+
+**Found on the way:**
+- **Arena zeroing is LOAD-BEARING.** Without it the decode fails at once: some code reads freshly allocated memory
+  before writing it. `alloc` is documented not to zero, but every allocation was fresh mmap memory, so that reliance
+  never showed. The arena keeps that guarantee; finding the readers is not this bite's work.
+- **The decoder read each OBU's header record after the frame start could reclaim it.** The `tid` / `sid` passed to
+  the frame-header parse now come from locals read first. Only the decoder-model `buffer_removal_time` path consumes
+  them, which no committed stream exercises, so this one is by construction (an equivalent mutant in the corpus).
+
+**The gate.** `programs/conformance.cyr` now POISONS the arena at every reset (0xA5). A pointer into reclaimed
+memory reads garbage, and every md5 in `make conformance` checks for it. A new `.loops` sidecar feeds the stream K
+times through one decoder and prints each pass's global bytes, arena and pool size. The new **memory-bound
+section** runs every committed reproducer for four passes: every unit of every pass must match its reference md5
+(op 0 for the scalable ones; camera units empty), and passes 3–4 must take 0 bytes. 31 of 31 pass. The OOM
+section's site tagger now also tags `dr_alloc_keep`: 162 of 207 sites reached, every failure still `DR_ERR_OOM`.
+
+**Tests** (+129):
+- `tests/drishti.tcyr`: the arena (bump, 8-alignment, oversize chunks, zeroing, reset reuse, a settled capacity,
+  poison) and the scope (routing, `dr_alloc_keep`, persist brackets, injection on both).
+- `tests/frame.tcyr`: the pool (reuse after a sweep, zeroed reuse, held frames never handed out, smaller requests
+  in larger frames with their own strides, plane counts never shared, best fit over first fit, no pool = as before),
+  and a pooled take under OOM.
+- `tests/av1_frame.tcyr`: slot copies (a changed source changes nothing saved, self-save, shrink reuses, growth,
+  each kind, OOM). The aliasing tests became content tests.
+- `tests/av1_dpb.tcyr`: the frame-start roots, each set up alone beside a free frame.
+- `tests/av1_decode.tcyr`: `inter-6frame`, `srmin-16x16`, `fg-lag-96x64` and `svc-l2t3-128x96`, five passes through
+  one poisoned decoder. Each pass must show an UNBOUNDED decoder's pictures (no arena, no pool: the old model), and
+  passes 3–5 must take nothing.
+
+Mutation testing ran each mutation in an isolated copy, witnessed by a memory gate over seven streams or by a suite:
+- **24 go red.** The arena never rewinding; the sweep freeing nothing; no pool; each of the five roots; slots
+  aliasing instead of copying; a slot buffer in the arena; the sequence or camera header not copied; two lazy tables
+  in the arena; the grain context not kept; an iterator per call; poisoning off; keep served from the arena; pool
+  capacity ignored; best fit made first fit.
+- **The first round found two blind witnesses.** The unit test compared each pass only with pass 1, so dropping the
+  DPB roots, which corrupts pass 1 too, stayed green. It now compares with the unbounded decoder. The streams also
+  cannot witness the SHOWN, LAST and grain roots alone (each such frame is also a reference, or fits nothing else);
+  the white-box roots test does.
+- **Three are equivalent, and documented:** the two post-reset OBU-record reads, and the slot self-save fast path
+  (a self-copy reads the same).
+
+`make conformance` is **3971 matched / 0 known-gap / 0 regressed / 0 skipped** (was 3940: the 31 memory-bound
+cases), every case run against a poisoned arena.
+
+**Gates:** 44 suites, **31,734** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Added — 0.8.5 bite 7: OOM fault injection — every allocation can fail, and every failure stops the decode with DR_ERR_OOM
 
 **Any allocation in drishti can now be made to fail, and every failure the decode lane can reach is reported as

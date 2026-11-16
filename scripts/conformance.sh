@@ -280,14 +280,16 @@ finish() {
 run_drishti() { # ivf log
     # the large-scale tile and operating point sidecars (build/conformance-input.lst / .op) are removed for every
     # ordinary run: a leftover one would switch the next stream into large-scale tile mode or another operating point
-    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-input.loops \
+      build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     ./build/drishti-conformance >"$2" 2>&1
     return 0
 }
 # a scalable stream decoded at operating point op (0.8.4): only that point's layers' OBUs are decoded
 run_drishti_op() { # ivf op log
-    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-input.loops \
+      build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     printf '%d\n' "$2" > build/conformance-input.op || return 1
     ./build/drishti-conformance >"$3" 2>&1
@@ -296,7 +298,8 @@ run_drishti_op() { # ivf op log
 }
 # a large-scale tile file (0.8.4): its first N temporal units are the anchor frames (N in the .lst sidecar)
 run_drishti_lst() { # ivf lst log
-    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-input.loops \
+      build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     cp "$2" build/conformance-input.lst 2>/dev/null || return 1
     ./build/drishti-conformance >"$3" 2>&1
@@ -550,6 +553,60 @@ else
     for c in $OOM_CASES; do oomcase "$c"; done
     echo "  oom: $(sort -u "$WORK/oom-sites.acc" | wc -l) of $(wc -l < build/oom/sites.txt) allocation sites reached"
 fi
+
+# ---- THE MEMORY BOUND (0.8.5) — every committed reproducer, fed MEM_PASSES times through ONE decoder ----
+# drishti's allocator never frees; a streaming decoder now serves each frame from an arena it rewinds at the next
+# frame start, takes its frames from a pool it reuses, and keeps only what outlives a frame (src/av1_dpb.cyr, MEMORY).
+# Each stream opens with a sequence header and a keyframe, so re-feeding it restarts it cleanly. Every unit of every
+# pass must match the stream's committed reference md5 (the harness poisons the arena at every reset, so a pointer
+# into reclaimed memory reads 0xA5 garbage and shows here), and from the third pass on the decoder must take NO
+# bytes from the global allocator (the harness's "mem pass" lines). Before 0.8.5 every pass took ~35-60 bytes per
+# pixel per frame again. A scalable stream is decoded at operating point 0 (its .md5 lines for op 0).
+MEM_PASSES=4
+memcase() { # name
+    local n="$1" ivf="tests/repro/$1.ivf" md5f="tests/repro/$1.md5" lst="tests/repro/$1.lst" log nl nu u k want got
+    local bad=0 grew
+    if [ ! -f "$ivf" ] || [ ! -f "$md5f" ]; then echo "  mem $n: FIXTURE MISSING"; fail=$((fail+1)); return; fi
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op \
+      build/conformance-input.loops build/conformance-out-*.yuv
+    cp "$ivf" build/conformance-input.ivf || { echo "  mem $n: SETUP FAILED"; fail=$((fail+1)); return; }
+    [ -f "$lst" ] && cp "$lst" build/conformance-input.lst
+    echo "$MEM_PASSES" > build/conformance-input.loops
+    log="$WORK/mem-$n.log"
+    ./build/drishti-conformance > "$log" 2>&1
+    rm -f build/conformance-input.loops build/conformance-input.lst
+    nl=$(grep -c '^frame [0-9]' "$log" || true)
+    nu=$((nl / MEM_PASSES))
+    if [ "$nu" -lt 1 ] || [ $((nu * MEM_PASSES)) -ne "$nl" ]; then
+        echo "  mem $n: REGRESSED ($nl units over $MEM_PASSES passes)"; fail=$((fail+1)); return
+    fi
+    u=1
+    while [ "$u" -le "$nl" ]; do
+        k=$(( (u - 1) % nu + 1 ))
+        if [ "$(awk 'NR == 1 { print NF }' "$md5f")" = 3 ]; then
+            want=$(awk -v u="$k" '$1 == 0 && $2 == u { print $3 }' "$md5f"); [ -z "$want" ] && want="-"
+        else
+            want=$(sed -n "${k}p" "$md5f")
+        fi
+        got=""
+        [ -f "build/conformance-out-$u.yuv" ] && got=$(md5sum < "build/conformance-out-$u.yuv" | cut -c1-32)
+        if [ "$want" = "-" ]; then [ -z "$got" ] || bad=$((bad+1))
+        elif [ "$got" != "$want" ]; then bad=$((bad+1)); fi
+        u=$((u + 1))
+    done
+    grew=$(awk '$1 == "mem" && $3 >= 3 { s += $5 } END { print s + 0 }' "$log")
+    if [ "$bad" -eq 0 ] && [ "$grew" -eq 0 ] && [ "$(grep -c '^mem pass' "$log" || true)" -eq "$MEM_PASSES" ]; then
+        echo "  mem $n: $nu units x $MEM_PASSES passes OK, $(awk '$1 == "mem" && $3 == 1 { b = $5 }
+          $1 == "mem" { a = $7; f = $9 } END { printf "pass 1 took %d bytes; settled at a %d-byte arena + %d frames", b, a, f }' \
+          "$log")"
+        pass=$((pass+1))
+    else
+        echo "  mem $n: REGRESSED ($bad of $nl units differ; passes 3+ took $grew bytes)"; fail=$((fail+1))
+    fi
+}
+echo "--- the memory bound: each reproducer $MEM_PASSES times through one decoder, settling at a fixed footprint ---"
+mkdir -p "$WORK"
+for f in tests/repro/*.ivf; do memcase "$(basename "$f" .ivf)"; done
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -2262,7 +2319,8 @@ invcase() { # name[:res-suffix]
     rm -rf "${w:?}"; mkdir -p "$w"
     cp "$d/$n.ivf" "$w/in.ivf"
     printf '\000\000\040\000AV01' | dd of="$w/in.ivf" bs=1 seek=4 conv=notrunc status=none
-    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-out-*.yuv
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-input.op build/conformance-input.loops \
+      build/conformance-out-*.yuv
     cp "$w/in.ivf" build/conformance-input.ivf
     timeout 60 ./build/drishti-conformance > "$w/drishti.log" 2>&1
     rc=$?

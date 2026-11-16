@@ -1373,7 +1373,10 @@ fn tmvsest_setslot(refs, slot, mi_rows, mi_cols, ft, field): i64 {
     store64(refs + AV1REF_MI_ROWS + (slot * 8), mi_rows);
     store64(refs + AV1REF_MI_COLS + (slot * 8), mi_cols);
     store64(refs + AV1REF_FRAME_TYPE + (slot * 8), ft);
-    av1_ref_set_saved_mf(refs, slot, field);
+    # the slot saves a COPY (0.8.5), sized from the field's own header: fill a field before saving it (0: none)
+    var bytes = 0;
+    if (field != 0) { bytes = 16 + (load64(field + AV1SMF_H8) * load64(field + AV1SMF_W8) * 24); }
+    av1_ref_set_saved_mf(refs, slot, field, bytes);
     return 0;
 }
 fn tmvsest_setsoh(refs, slot, ref, hint): i64 {

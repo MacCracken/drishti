@@ -85,7 +85,7 @@ enum Av1LfScratch {
 var Av1_LfScratch = 0;
 fn av1_lf_scratch(): i64 {
     if (Av1_LfScratch != 0) { return Av1_LfScratch; }
-    Av1_LfScratch = dr_alloc(AV1LFS_SIZE);   # AV1LFS_SIZE bytes
+    Av1_LfScratch = dr_alloc_keep(AV1LFS_SIZE);   # AV1LFS_SIZE bytes
     return Av1_LfScratch;
 }
 

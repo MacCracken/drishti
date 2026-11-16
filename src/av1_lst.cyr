@@ -121,7 +121,7 @@ fn av1_decoder_set_anchor(dec, idx, frame): i64 {
     if ((idx < 0) || (idx > 127)) { return DR_ERR_BOUNDS; }
     var a = load64(dec + AV1DEC_ANCH);
     if (a == 0) {
-        a = dr_alloc(128 * 8);   # 128 DrFrame pointers
+        a = dr_alloc_keep(128 * 8);   # 128 DrFrame pointers; kept, as the decoder's own
         if (a == 0) { return DR_ERR_OOM; }
         memset(a, 0, 128 * 8);
         store64(dec + AV1DEC_ANCH, a);
@@ -202,6 +202,9 @@ fn av1_decode_tile_list(dec, buf, sz, out_err): i64 {
     var sdpb = av1_dpb_new();
     if ((srefs == 0) || (sdpb == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     memcpy(srefs, refs, AV1REF_SIZE);
+    # the copy must not share the slots' OWN buffers: a save through it would write into the real slots (none
+    # happens — the tile list never finishes a frame — but the copy is not the slots' owner)
+    memset(srefs + AV1REF_OWN, 0, AV1REF_SIZE - AV1REF_OWN);
     var last = av1_fh_ref_frame_idx(fh, 0);
     store64(srefs + AV1REF_VALID + (last * 8), 1);
     store64(srefs + AV1REF_UPSCALED_W + (last * 8), av1_fh_upscaled_width(fh));

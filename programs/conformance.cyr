@@ -193,6 +193,9 @@ fn main() {
     # them; the count is reported before the SUMMARY. The harness's own buffers use the raw allocator, never failed.
     var oomk = conf_read_uint("build/conformance-input.oom");
     if (oomk >= 0) { dr_alloc_fail_at(oomk); }
+    # the decoder's frame arena is POISONED at every reset (0.8.5): memory a frame used is filled with 0xA5 before the
+    # next frame reuses it, so anything still pointing into it reads garbage — and the md5s below catch it
+    dr_alloc_set_poison(1);
     var buf = alloc(CONF_MAX_INPUT);
     if (buf == 0) { conf_puts("SUMMARY oom\n"); return 1; }
     var n = file_read_all("build/conformance-input.ivf", buf, CONF_MAX_INPUT);
@@ -241,73 +244,106 @@ fn main() {
         conf_putn(nanch);
         conf_puts(" anchor temporal units\n");
     }
+    # build/conformance-input.loops, when present, holds K (1..16): the stream is fed K times through the SAME
+    # decoder (0.8.5 memory bound). Unit k of pass p is written as unit (p - 1) * units + k, and after each pass
+    # the harness reports the bytes drishti took from the global allocator during that pass's decode calls: once
+    # the decoder has settled, a pass takes none.
+    var loops = conf_read_uint("build/conformance-input.loops");
+    if ((loops < 1) || (loops > 16)) { loops = 1; }
     var ok = 0;
     var k = 0;
     var go = 1;
-    while (go == 1) {
-        var pp = 0;
-        var ps = 0;
-        var pt = 0;
-        if (dr_ivf_next_frame(r, &pp, &ps, &pt) != DR_OK) { go = 0; }
-        else {
-            k = k + 1;
-            var derr = 0;
-            var lst_out = 0;
-            if ((nanch > 0) && (k > nanch)) { lst_out = 1; }
-            var f = av1_decoder_decode(dec, pp, ps, &derr);
-            if ((nanch > 0) && (k <= nanch) && (derr == DR_OK)) {
-                # a failed anchor registration (DR_ERR_OOM) fails this unit and ends the stream: every tile list
-                # after it would decode against a missing anchor (0.8.5 — the harness dropped this result)
-                derr = av1_decoder_set_anchor(dec, k - 1, av1_decoder_last_decoded(dec));
-                if (derr != DR_OK) { f = 0; go = 0; }
-                if (k == nanch) { av1_decoder_set_large_scale_tile(dec, 1); }
-            }
-            if (oomk >= 0) {   # the allocation count at this unit's end, so a sweep can aim at each unit's own calls
-                conf_puts("oom-unit ");
-                conf_putn(k);
-                conf_puts(" end ");
-                conf_putn(dr_alloc_count());
-                conf_puts("\n");
-            }
-            conf_puts("frame ");
-            conf_putn(k);
-            if (derr != DR_OK) {
-                conf_puts(" DECODE-FAILED err=");
-                conf_putn(derr);
-                conf_puts(" (");
-                conf_puts(dr_err_name(derr));
-                conf_puts(")\n");
-            } else {
-                if (f == 0) {
-                    conf_puts(" NO-OUTPUT (the unit showed no frame)\n");
-                } else {
-                    var wrote = 0;
-                    if (lst_out != 0) {
-                        wrote = conf_write_tiles(f, conf_out_path(k), av1_decoder_tile_list_count(dec),
-                          av1_decoder_tile_list_tile_w(dec), av1_decoder_tile_list_tile_h(dec),
-                          av1_decoder_tile_list_out_w(dec));
-                        conf_puts(" tile-list tiles=");
-                        conf_putn(av1_decoder_tile_list_count(dec));
-                    } else {
-                        wrote = conf_write_frame(f, conf_out_path(k));
-                    }
-                    conf_puts(" decoded ");
-                    conf_putn(dr_frame_width(f));
-                    conf_puts("x");
-                    conf_putn(dr_frame_height(f));
-                    conf_puts(" planes=");
-                    conf_putn(dr_frame_num_planes(f));
-                    conf_puts(" bitdepth=");
-                    conf_putn(dr_frame_bit_depth(f));
-                    conf_puts(" shown=");
-                    conf_putn(av1_decoder_shown_count(dec));
-                    conf_puts(" wrote=");
-                    conf_putn(wrote);
+    var pass = 1;
+    var fatal = 0;
+    while ((pass <= loops) && (fatal == 0)) {
+        if (pass > 1) {
+            r = dr_ivf_reader_init(buf, n, &e);
+            if (r == 0) { go = 0; }
+            av1_decoder_set_large_scale_tile(dec, 0);   # a pass starts with the anchor frames again
+        }
+        var ku = 0;
+        var pass_bytes = 0;
+        while (go == 1) {
+            var pp = 0;
+            var ps = 0;
+            var pt = 0;
+            if (dr_ivf_next_frame(r, &pp, &ps, &pt) != DR_OK) { go = 0; }
+            else {
+                k = k + 1;
+                ku = ku + 1;
+                var derr = 0;
+                var lst_out = 0;
+                if ((nanch > 0) && (ku > nanch)) { lst_out = 1; }
+                var g0 = dr_alloc_global_bytes();
+                var f = av1_decoder_decode(dec, pp, ps, &derr);
+                if ((nanch > 0) && (ku <= nanch) && (derr == DR_OK)) {
+                    # a failed anchor registration (DR_ERR_OOM) fails this unit and ends the stream: every tile list
+                    # after it would decode against a missing anchor (0.8.5 — the harness dropped this result)
+                    derr = av1_decoder_set_anchor(dec, ku - 1, av1_decoder_last_decoded(dec));
+                    if (derr != DR_OK) { f = 0; go = 0; fatal = 1; }
+                    if (ku == nanch) { av1_decoder_set_large_scale_tile(dec, 1); }
+                }
+                pass_bytes = pass_bytes + (dr_alloc_global_bytes() - g0);
+                if (oomk >= 0) {   # the allocation count at this unit's end, so a sweep can aim at each unit
+                    conf_puts("oom-unit ");
+                    conf_putn(k);
+                    conf_puts(" end ");
+                    conf_putn(dr_alloc_count());
                     conf_puts("\n");
-                    if (wrote > 0) { ok = ok + 1; }
+                }
+                conf_puts("frame ");
+                conf_putn(k);
+                if (derr != DR_OK) {
+                    conf_puts(" DECODE-FAILED err=");
+                    conf_putn(derr);
+                    conf_puts(" (");
+                    conf_puts(dr_err_name(derr));
+                    conf_puts(")\n");
+                } else {
+                    if (f == 0) {
+                        conf_puts(" NO-OUTPUT (the unit showed no frame)\n");
+                    } else {
+                        var wrote = 0;
+                        if (lst_out != 0) {
+                            wrote = conf_write_tiles(f, conf_out_path(k), av1_decoder_tile_list_count(dec),
+                              av1_decoder_tile_list_tile_w(dec), av1_decoder_tile_list_tile_h(dec),
+                              av1_decoder_tile_list_out_w(dec));
+                            conf_puts(" tile-list tiles=");
+                            conf_putn(av1_decoder_tile_list_count(dec));
+                        } else {
+                            wrote = conf_write_frame(f, conf_out_path(k));
+                        }
+                        conf_puts(" decoded ");
+                        conf_putn(dr_frame_width(f));
+                        conf_puts("x");
+                        conf_putn(dr_frame_height(f));
+                        conf_puts(" planes=");
+                        conf_putn(dr_frame_num_planes(f));
+                        conf_puts(" bitdepth=");
+                        conf_putn(dr_frame_bit_depth(f));
+                        conf_puts(" shown=");
+                        conf_putn(av1_decoder_shown_count(dec));
+                        conf_puts(" wrote=");
+                        conf_putn(wrote);
+                        conf_puts("\n");
+                        if (wrote > 0) { ok = ok + 1; }
+                    }
                 }
             }
         }
+        if (loops > 1) {
+            conf_puts("mem pass ");
+            conf_putn(pass);
+            conf_puts(" bytes ");
+            conf_putn(pass_bytes);
+            conf_puts(" arena ");
+            conf_putn(av1_decoder_arena_bytes(dec));
+            conf_puts(" pool-frames ");
+            conf_putn(av1_decoder_pool_frames(dec));
+            conf_puts("\n");
+        }
+        if (go == 0) { go = 1; }
+        pass = pass + 1;
     }
     if (oomk >= 0) {
         conf_puts("oom: fail-at ");

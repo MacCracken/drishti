@@ -79,7 +79,7 @@ fn av1_txsz_fill19(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11,
 }
 fn av1_txsz_tables(): i64 {
     if (Av1_TxSzTab != 0) { return Av1_TxSzTab; }
-    var t = dr_alloc(63 * 8);          # 63 i64
+    var t = dr_alloc_keep(63 * 8);          # 63 i64
     if (t == 0) { return 0; }
     # Max_Tx_Size_Rect[22] (TxSize indices).
     av1_txsz_fill22(t, 0, 0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18);
@@ -101,7 +101,7 @@ fn av1_split_tx_size(txsize): i64 { return load64(av1_txsz_tables() + ((44 + txs
 var Av1_TxSqr = 0;
 fn av1_txsqr_tables(): i64 {
     if (Av1_TxSqr != 0) { return Av1_TxSqr; }
-    var t = dr_alloc(38 * 8);          # 2 * 19 i64
+    var t = dr_alloc_keep(38 * 8);          # 2 * 19 i64
     if (t == 0) { return 0; }
     # Tx_Size_Sqr[19] at slot 0.
     av1_itx_fill19(t + 0, 0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2);

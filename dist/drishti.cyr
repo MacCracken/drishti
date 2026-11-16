@@ -90,21 +90,171 @@ fn drishti_version(): i64 {
 
 # ================================================================
 # dr_alloc — every allocation in src/ goes through here (0.8.5), so an allocation FAILURE can be injected and every
-# DR_ERR_OOM branch exercised. With injection off it is the stdlib alloc. dr_alloc_fail_at(n), n >= 1, makes the
-# n-th dr_alloc from then on return 0 (one failure, as if memory ran out at that call and only that call), then
-# carries on normally; dr_alloc_fail_at(0) turns injection off. dr_alloc_count() is the number of dr_alloc calls
-# since the last dr_alloc_fail_at. Test-only machinery: no decode or encode path calls dr_alloc_fail_at or
-# dr_alloc_sweep.
+# DR_ERR_OOM branch exercised, and so a decoder can serve its per-frame work from an arena. dr_alloc_fail_at(n),
+# n >= 1, makes the n-th dr_alloc / dr_alloc_keep from then on return 0 (one failure, as if memory ran out at that
+# call and only that call), then carries on normally; dr_alloc_fail_at(0) turns injection off. dr_alloc_count() is
+# the number of calls since the last dr_alloc_fail_at. Test-only machinery: no decode or encode path calls
+# dr_alloc_fail_at or dr_alloc_sweep.
+#
+# WHERE THE MEMORY COMES FROM. The stdlib allocator is a bump allocator: it never frees. Outside an allocation
+# scope (the default) dr_alloc is that allocator. A streaming decoder opens a scope (dr_alloc_scope) over its own
+# DrArena, and dr_alloc then serves from the arena, which the decoder rewinds at every frame start: a frame's tiles,
+# grids, CDF contexts and per-block records are dead once it is decoded, and served from the bump they grew memory
+# ~35-60 bytes per pixel per frame without bound (measured 0.8.5). What must outlive the frame is taken with
+# dr_alloc_keep, or inside dr_persist_begin / dr_persist_end: the lazily-built tables and persistent scratch, the
+# reference slots' saved state, the decoder's own records and its pooled frames (src/frame.cyr).
 # ================================================================
 var Dr_Alloc_Fail_Left = 0;   # 0 = off; else the countdown to the failing call
-var Dr_Alloc_Calls = 0;       # dr_alloc calls since the last dr_alloc_fail_at
-fn dr_alloc(size): i64 {
+var Dr_Alloc_Calls = 0;       # dr_alloc / dr_alloc_keep calls since the last dr_alloc_fail_at
+var Dr_Alloc_Arena = 0;       # the scope's DrArena (0 = no scope: the global allocator)
+var Dr_Alloc_Persist = 0;     # > 0: inside dr_persist_begin / end, dr_alloc bypasses the arena
+var Dr_Alloc_Poison = 0;      # 1: dr_arena_reset fills its chunks with 0xA5 first (a stale pointer reads garbage)
+var Dr_Alloc_Global = 0;      # bytes drishti has taken from the global allocator (arena chunks included)
+# 1 when this call must fail (counts it)
+fn dr_alloc_inject(): i64 {
     Dr_Alloc_Calls = Dr_Alloc_Calls + 1;
     if (Dr_Alloc_Fail_Left > 0) {
         Dr_Alloc_Fail_Left = Dr_Alloc_Fail_Left - 1;
-        if (Dr_Alloc_Fail_Left == 0) { return 0; }
+        if (Dr_Alloc_Fail_Left == 0) { return 1; }
     }
-    return alloc(size);
+    return 0;
+}
+# Fill / copy n bytes a WORD at a time (with a byte tail). The stdlib memset / memcpy move one byte per iteration;
+# the arena zeroes every allocation and a reference slot copies every block it saves, megabytes a frame, so the
+# word loop is what keeps the memory bound cheap. dst / src should be 8-aligned (every allocation is).
+fn dr_fill(dst, byte, n): i64 {
+    var w = byte & 255;
+    w = w | (w << 8);
+    w = w | (w << 16);
+    w = w | (w << 32);
+    var i = 0;
+    var nw = n & (0 - 8);
+    while (i < nw) { store64(dst + i, w); i = i + 8; }
+    while (i < n) { store8(dst + i, byte); i = i + 1; }
+    return dst;
+}
+fn dr_copy(dst, src, n): i64 {
+    var i = 0;
+    var nw = n & (0 - 8);
+    while (i < nw) { store64(dst + i, load64(src + i)); i = i + 8; }
+    while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return dst;
+}
+# the global allocator, counted
+fn dr_alloc_global(size): i64 {
+    var p = alloc(size);
+    if (p != 0) { Dr_Alloc_Global = Dr_Alloc_Global + ((size + 7) & (0 - 8)); }
+    return p;
+}
+fn dr_alloc_serve(size, keep): i64 {
+    if ((keep == 0) && (Dr_Alloc_Arena != 0) && (Dr_Alloc_Persist == 0)) {
+        return dr_arena_alloc(Dr_Alloc_Arena, size);
+    }
+    return dr_alloc_global(size);
+}
+fn dr_alloc(size): i64 {
+    if (dr_alloc_inject() != 0) { return 0; }
+    return dr_alloc_serve(size, 0);
+}
+# an allocation that outlives the current frame: always the global allocator, scope or not
+fn dr_alloc_keep(size): i64 {
+    if (dr_alloc_inject() != 0) { return 0; }
+    return dr_alloc_serve(size, 1);
+}
+# everything allocated between these (a persistent object graph built by code that calls plain dr_alloc) is kept
+fn dr_persist_begin(): i64 { Dr_Alloc_Persist = Dr_Alloc_Persist + 1; return 0; }
+fn dr_persist_end(): i64 {
+    if (Dr_Alloc_Persist > 0) { Dr_Alloc_Persist = Dr_Alloc_Persist - 1; }
+    return 0;
+}
+# open (a != 0) or close (0) an allocation scope; returns the previous scope's arena, to restore it
+fn dr_alloc_scope(a): i64 {
+    var prev = Dr_Alloc_Arena;
+    Dr_Alloc_Arena = a;
+    return prev;
+}
+fn dr_alloc_set_poison(on): i64 { Dr_Alloc_Poison = on; return 0; }
+fn dr_alloc_global_bytes(): i64 { return Dr_Alloc_Global; }
+
+# ================================================================
+# DrArena — a chain of chunks taken from the global allocator, bump-allocated. dr_arena_reset rewinds to the first
+# chunk and KEEPS the chain, so a loop that resets once per frame settles at its high-water mark and then takes no
+# more memory. Allocations are ZEROED: fresh bump memory always was, and code written against it must see no
+# difference. Chunk: { next, cap, data[ cap ] }. A request larger than the chunk size gets a chunk of its own.
+# ================================================================
+enum DrArenaOff {
+    DR_ARENA_FIRST = 0;    # the first chunk (0 until the first allocation)
+    DR_ARENA_CUR   = 8;    # the chunk being bumped
+    DR_ARENA_PTR   = 16;   # the bump pointer in it
+    DR_ARENA_END   = 24;   # its end
+    DR_ARENA_CHUNK = 32;   # the chunk size
+    DR_ARENA_SIZE  = 40;   # bytes
+}
+fn dr_arena_new(chunk_size): i64 {
+    var a = dr_alloc_keep(DR_ARENA_SIZE);   # DR_ARENA_SIZE bytes
+    if (a == 0) { return 0; }
+    memset(a, 0, DR_ARENA_SIZE);
+    var cs = chunk_size;
+    if (cs < 4096) { cs = 4096; }
+    store64(a + DR_ARENA_CHUNK, cs);
+    return a;
+}
+# make the arena's current chunk one with room for need bytes: the next chunk of the chain if it fits, else a new
+# one linked in after the current. 1, or 0 when the global allocator fails.
+fn dr_arena_grow(a, need): i64 {
+    var cur = load64(a + DR_ARENA_CUR);
+    var nxt = load64(a + DR_ARENA_FIRST);
+    if (cur != 0) { nxt = load64(cur); }
+    if ((nxt != 0) && (load64(nxt + 8) >= need)) {
+        store64(a + DR_ARENA_CUR, nxt);
+        store64(a + DR_ARENA_PTR, nxt + 16);
+        store64(a + DR_ARENA_END, nxt + 16 + load64(nxt + 8));
+        return 1;
+    }
+    var cap = load64(a + DR_ARENA_CHUNK);
+    if (need > cap) { cap = need; }
+    var ch = dr_alloc_global(cap + 16);
+    if (ch == 0) { return 0; }
+    store64(ch, nxt);
+    store64(ch + 8, cap);
+    if (cur == 0) { store64(a + DR_ARENA_FIRST, ch); } else { store64(cur, ch); }
+    store64(a + DR_ARENA_CUR, ch);
+    store64(a + DR_ARENA_PTR, ch + 16);
+    store64(a + DR_ARENA_END, ch + 16 + cap);
+    return 1;
+}
+fn dr_arena_alloc(a, size): i64 {
+    if (size <= 0) { return 0; }
+    var sz = (size + 7) & (0 - 8);
+    var p = load64(a + DR_ARENA_PTR);
+    if ((p == 0) || (sz > (load64(a + DR_ARENA_END) - p))) {
+        if (dr_arena_grow(a, sz) == 0) { return 0; }
+        p = load64(a + DR_ARENA_PTR);
+    }
+    store64(a + DR_ARENA_PTR, p + sz);
+    dr_fill(p, 0, sz);
+    return p;
+}
+# everything allocated from the arena is dead from here (poisoned first when Dr_Alloc_Poison is on)
+fn dr_arena_reset(a): i64 {
+    if (a == 0) { return 0; }
+    var ch = load64(a + DR_ARENA_FIRST);
+    if (Dr_Alloc_Poison != 0) {
+        var c = ch;
+        while (c != 0) { dr_fill(c + 16, 0xA5, load64(c + 8)); c = load64(c); }
+    }
+    store64(a + DR_ARENA_CUR, 0);
+    store64(a + DR_ARENA_PTR, 0);
+    store64(a + DR_ARENA_END, 0);
+    return 0;
+}
+# the bytes the arena holds (every chunk's capacity) — its high-water mark once a loop has settled
+fn dr_arena_capacity(a): i64 {
+    if (a == 0) { return 0; }
+    var total = 0;
+    var c = load64(a + DR_ARENA_FIRST);
+    while (c != 0) { total = total + load64(c + 8); c = load64(c); }
+    return total;
 }
 fn dr_alloc_fail_at(n): i64 {
     Dr_Alloc_Fail_Left = n;
@@ -1347,8 +1497,33 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
         store64(out_err, DR_ERR_BOUNDS);
         return 0;
     }
+    if (Dr_Frame_Pool != 0) {
+        return dr_frame_pool_take(Dr_Frame_Pool, width, height, alloc_w, alloc_h, num_planes, subx, suby,
+          bit_depth, border, out_err);
+    }
     var f = dr_alloc(DR_FRAME_SIZE);
     if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var p = 0;
+    while (p < num_planes) {
+        var buf = dr_alloc(dr_frame_plane_bytes(p, alloc_w, alloc_h, subx, suby, border));   # u16 samples
+        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        dr_frame_lay_plane(f, p, buf, width, height, alloc_w, alloc_h, subx, suby, border);
+        p = p + 1;
+    }
+    dr_frame_lay_header(f, width, height, num_planes, subx, suby, bit_depth, border);
+    return f;
+}
+# the bytes plane p's buffer needs: (allocated width + 2 * border) x (allocated height + 2 * border) u16 samples
+fn dr_frame_plane_bytes(p, alloc_w, alloc_h, subx, suby, border): i64 {
+    var apw = alloc_w;
+    var aph = alloc_h;
+    if (p > 0) {
+        apw = (alloc_w + subx) >> subx;
+        aph = (alloc_h + suby) >> suby;
+    }
+    return (apw + (2 * border)) * (aph + (2 * border)) * 2;
+}
+fn dr_frame_lay_header(f, width, height, num_planes, subx, suby, bit_depth, border): i64 {
     store64(f + DR_FRAME_NUM_PLANES, num_planes);
     store64(f + DR_FRAME_BIT_DEPTH, bit_depth);
     store64(f + DR_FRAME_WIDTH, width);
@@ -1356,34 +1531,165 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
     store64(f + DR_FRAME_SUBX, subx);
     store64(f + DR_FRAME_SUBY, suby);
     store64(f + DR_FRAME_BORDER, border);
-    var p = 0;
-    while (p < num_planes) {
-        var pw = width;
-        var ph = height;
-        var apw = alloc_w;
-        var aph = alloc_h;
-        if (p > 0) {
-            pw = (width + subx) >> subx;    # ceil(width / 2^subx)
-            ph = (height + suby) >> suby;
-            apw = (alloc_w + subx) >> subx;
-            aph = (alloc_h + suby) >> suby;
-        }
-        # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
-        var stride = apw + (2 * border);
-        var rows = aph + (2 * border);
-        var buf = dr_alloc(stride * rows * 2);   # u16 samples
-        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-        memset(buf, 0, stride * rows * 2);
-        # origin = sample (0,0): skip `border` rows and `border` columns.
-        var origin = buf + (((border * stride) + border) * 2);
-        store64(f + DR_FRAME_PLANE_PTR + (p * 8), origin);
-        store64(f + DR_FRAME_PLANE_W + (p * 8), pw);
-        store64(f + DR_FRAME_PLANE_H + (p * 8), ph);
-        store64(f + DR_FRAME_PLANE_STRIDE + (p * 8), stride);
-        store64(f + DR_FRAME_PLANE_AW + (p * 8), apw);
-        store64(f + DR_FRAME_PLANE_AH + (p * 8), aph);
-        p = p + 1;
+    return 0;
+}
+# lay plane p out in buf (at least dr_frame_plane_bytes) and zero it
+fn dr_frame_lay_plane(f, p, buf, width, height, alloc_w, alloc_h, subx, suby, border): i64 {
+    var pw = width;
+    var ph = height;
+    var apw = alloc_w;
+    var aph = alloc_h;
+    if (p > 0) {
+        pw = (width + subx) >> subx;    # ceil(width / 2^subx)
+        ph = (height + suby) >> suby;
+        apw = (alloc_w + subx) >> subx;
+        aph = (alloc_h + suby) >> suby;
     }
+    # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
+    var stride = apw + (2 * border);
+    var rows = aph + (2 * border);
+    dr_fill(buf, 0, stride * rows * 2);
+    # origin = sample (0,0): skip `border` rows and `border` columns.
+    store64(f + DR_FRAME_PLANE_PTR + (p * 8), buf + (((border * stride) + border) * 2));
+    store64(f + DR_FRAME_PLANE_W + (p * 8), pw);
+    store64(f + DR_FRAME_PLANE_H + (p * 8), ph);
+    store64(f + DR_FRAME_PLANE_STRIDE + (p * 8), stride);
+    store64(f + DR_FRAME_PLANE_AW + (p * 8), apw);
+    store64(f + DR_FRAME_PLANE_AH + (p * 8), aph);
+    return 0;
+}
+
+# ================================================================
+# DrFramePool (0.8.5) — the frames a streaming decoder allocates, reused instead of re-allocated. The bump
+# allocator cannot free, so a decoder that took a fresh frame (and a CDEF, a loop-restoration and an upscaled one)
+# for every coded frame grew memory by the frame size each time. While a pool is ACTIVE (dr_frame_pool_use),
+# dr_frame_new / dr_frame_new_ext take from it: a frame no root holds whose plane buffers are large enough is laid
+# out again and zeroed (exactly what a fresh one would hold), else a new one is kept (dr_alloc_keep) and
+# registered. The owner decides what is live: dr_frame_pool_sweep frees every frame, then dr_frame_pool_root marks
+# each frame still held (a decoder: its reference slots, its output, its anchors) before the next one is taken.
+# Entry: { frame, in_use, buf[ 3 ], cap[ 3 ] } (8 u64): the plane buffers and their capacities in bytes.
+# ================================================================
+enum DrFramePoolOff {
+    DR_FPOOL_N     = 0;    # entries in use of the array
+    DR_FPOOL_CAP   = 8;    # the entry array's capacity
+    DR_FPOOL_ENT   = 16;   # the entry array (DR_FPOOL_CAP * 64 bytes)
+    DR_FPOOL_SIZE  = 24;   # bytes
+    DR_FPENT_FRAME = 0;
+    DR_FPENT_INUSE = 8;
+    DR_FPENT_BUF   = 16;   # [3]
+    DR_FPENT_BCAP  = 40;   # [3]
+    DR_FPENT_SIZE  = 64;
+}
+var Dr_Frame_Pool = 0;   # the active pool (0 = none: dr_frame_new allocates as it always did)
+fn dr_frame_pool_new(): i64 {
+    var pool = dr_alloc_keep(DR_FPOOL_SIZE);   # DR_FPOOL_SIZE bytes
+    var ent = dr_alloc_keep(16 * DR_FPENT_SIZE);   # 16 entries
+    if ((pool == 0) || (ent == 0)) { return 0; }
+    store64(pool + DR_FPOOL_N, 0);
+    store64(pool + DR_FPOOL_CAP, 16);
+    store64(pool + DR_FPOOL_ENT, ent);
+    return pool;
+}
+# make pool the active one (0: none); returns the previously active pool, to restore it
+fn dr_frame_pool_use(pool): i64 {
+    var prev = Dr_Frame_Pool;
+    Dr_Frame_Pool = pool;
+    return prev;
+}
+fn dr_frame_pool_count(pool): i64 { return load64(pool + DR_FPOOL_N); }
+fn dr_frame_pool_in_use(pool): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        n = n + load64(load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE) + DR_FPENT_INUSE);
+        i = i + 1;
+    }
+    return n;
+}
+# every frame free: the owner roots what it still holds before the next frame is taken
+fn dr_frame_pool_sweep(pool): i64 {
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        store64(load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE) + DR_FPENT_INUSE, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+# frame f is still held (a frame the pool does not own, or 0, is ignored)
+fn dr_frame_pool_root(pool, f): i64 {
+    if (f == 0) { return 0; }
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        var e = load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE);
+        if (load64(e + DR_FPENT_FRAME) == f) { store64(e + DR_FPENT_INUSE, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn dr_frame_pool_take(pool, width, height, alloc_w, alloc_h, num_planes, subx, suby, bit_depth, border,
+  out_err): i64 {
+    # the best fit: the free entry with the same plane count whose every plane buffer is large enough, and the
+    # smallest total capacity (a large frame stays free for a large request)
+    var best = 0;
+    var best_cap = 0;
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        var e = load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE);
+        var f0 = load64(e + DR_FPENT_FRAME);
+        if ((load64(e + DR_FPENT_INUSE) == 0) && (dr_frame_num_planes(f0) == num_planes)) {
+            var fits = 1;
+            var tot = 0;
+            var p = 0;
+            while (p < num_planes) {
+                var need = dr_frame_plane_bytes(p, alloc_w, alloc_h, subx, suby, border);
+                if (load64(e + DR_FPENT_BCAP + (p * 8)) < need) { fits = 0; }
+                tot = tot + load64(e + DR_FPENT_BCAP + (p * 8));
+                p = p + 1;
+            }
+            if ((fits == 1) && ((best == 0) || (tot < best_cap))) { best = e; best_cap = tot; }
+        }
+        i = i + 1;
+    }
+    if (best != 0) {
+        var bf = load64(best + DR_FPENT_FRAME);
+        var bp = 0;
+        while (bp < num_planes) {
+            dr_frame_lay_plane(bf, bp, load64(best + DR_FPENT_BUF + (bp * 8)), width, height, alloc_w, alloc_h, subx,
+              suby, border);
+            bp = bp + 1;
+        }
+        dr_frame_lay_header(bf, width, height, num_planes, subx, suby, bit_depth, border);
+        store64(best + DR_FPENT_INUSE, 1);
+        return bf;
+    }
+    # a new frame, kept: the pool reuses it for the decoder's life
+    if (load64(pool + DR_FPOOL_N) == load64(pool + DR_FPOOL_CAP)) {
+        var ncap = load64(pool + DR_FPOOL_CAP) * 2;
+        var nent = dr_alloc_keep(ncap * DR_FPENT_SIZE);
+        if (nent == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        memcpy(nent, load64(pool + DR_FPOOL_ENT), load64(pool + DR_FPOOL_N) * DR_FPENT_SIZE);
+        store64(pool + DR_FPOOL_ENT, nent);
+        store64(pool + DR_FPOOL_CAP, ncap);
+    }
+    var f = dr_alloc_keep(DR_FRAME_SIZE);
+    if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var ne = load64(pool + DR_FPOOL_ENT) + (load64(pool + DR_FPOOL_N) * DR_FPENT_SIZE);
+    memset(ne, 0, DR_FPENT_SIZE);
+    var q = 0;
+    while (q < num_planes) {
+        var nb = dr_frame_plane_bytes(q, alloc_w, alloc_h, subx, suby, border);
+        var buf = dr_alloc_keep(nb);   # u16 samples
+        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        dr_frame_lay_plane(f, q, buf, width, height, alloc_w, alloc_h, subx, suby, border);
+        store64(ne + DR_FPENT_BUF + (q * 8), buf);
+        store64(ne + DR_FPENT_BCAP + (q * 8), nb);
+        q = q + 1;
+    }
+    dr_frame_lay_header(f, width, height, num_planes, subx, suby, bit_depth, border);
+    # registered only once whole, so a failed take leaves no half-built entry behind
+    store64(ne + DR_FPENT_FRAME, f);
+    store64(ne + DR_FPENT_INUSE, 1);
+    store64(pool + DR_FPOOL_N, load64(pool + DR_FPOOL_N) + 1);
     return f;
 }
 
@@ -1663,6 +1969,18 @@ fn av1_obu_iter_init(buf, len): i64 {
     if (len < 0) { return 0; }
     var it = dr_alloc(40);
     if (it == 0) { return 0; }
+    store64(it, buf);
+    store64(it + 8, len);
+    store64(it + 16, 0);
+    store64(it + 24, DR_OK);
+    store64(it + 32, 0);
+    return it;
+}
+
+# Re-point an existing iterator at buf[0..len) (a streaming decoder keeps one for its whole life rather than
+# allocating one per call). Returns it, or 0 on a null iterator / negative len.
+fn av1_obu_iter_reset(it, buf, len): i64 {
+    if ((it == 0) || (len < 0)) { return 0; }
     store64(it, buf);
     store64(it + 8, len);
     store64(it + 16, 0);
@@ -2550,7 +2868,16 @@ enum Av1RefOff {
     AV1REF_SAVED_LF_REF       = 12480;   # [8 slot][8] loop_filter_ref_deltas      -> 12992
     AV1REF_SAVED_LF_MODE      = 12992;   # [8 slot][2] loop_filter_mode_deltas     -> 13120
     AV1REF_SAVED_GRAIN        = 13120;   # [8] i64 pointers to each slot's saved film_grain_params block (7.20, 0.8.4)
-    AV1REF_SIZE               = 13184;
+    # the slots' OWN buffers for the four saved blocks above (0.8.5), [kind][slot] — see av1_ref_own_copy
+    AV1REF_OWN                = 13184;   # [4 kinds][8] buffer pointers -> 13440
+    AV1REF_OCAP               = 13440;   # [4 kinds][8] their capacities in bytes -> 13696
+    AV1REF_SIZE               = 13696;
+}
+enum Av1RefOwnKind {
+    AV1REF_K_MF    = 0;   # the saved motion field
+    AV1REF_K_CDF   = 1;   # the saved CDF bundle
+    AV1REF_K_SEG   = 2;   # SavedSegmentIds
+    AV1REF_K_GRAIN = 3;   # the saved film_grain_params
 }
 
 # ================================================================
@@ -2710,23 +3037,64 @@ fn av1_ref_saved_order_hint(r, i, refFrame): i64 {
 # saved motion field (0.7.102): the per-slot pointer to slot i's compact per-8x8 field (av1_mv_save_field
 # output; 0 for an intra/never-refreshed slot), read by a FUTURE frame's motion_field_estimation.
 fn av1_ref_saved_mf(r, i): i64 { return load64(r + AV1REF_SAVED_MF + (i * 8)); }
-fn av1_ref_set_saved_mf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_MF + (i * 8), ptr); return 0; }
+# Save size bytes at src as slot i's motion field (src 0: none). DR_OK, or DR_ERR_OOM.
+fn av1_ref_set_saved_mf(r, i, src, size): i64 {
+    return av1_ref_save_block(r, AV1REF_SAVED_MF, AV1REF_K_MF, i, src, size);
+}
+
+# A slot's saved blocks are the slot's OWN copies (0.8.5). They used to be pointers to the frame decoder's buffers,
+# one aliased into every refreshed slot and never freed, which made every frame's buffers permanent; and when a
+# streaming decoder serves a frame from an arena (src/drishti.cyr) those buffers do not outlive the frame at all.
+# Each slot now owns one buffer per kind, kept (dr_alloc_keep) and grown only when a larger block arrives, and a
+# save COPIES into it. Saving is copying because nothing mutates a saved block after its save (every reader copies
+# out of it), so a copy reads exactly as the alias did. Returns the slot's buffer holding the copy, or 0 on OOM.
+fn av1_ref_own_copy(r, kind, i, src, size): i64 {
+    var slot = r + AV1REF_OWN + (((kind * 8) + i) * 8);
+    var capp = r + AV1REF_OCAP + (((kind * 8) + i) * 8);
+    var own = load64(slot);
+    if ((own != 0) && (src == own)) { return own; }   # the slot re-saving the block it holds
+    if (load64(capp) < size) {
+        var nb = dr_alloc_keep(size);
+        if (nb == 0) { return 0; }
+        own = nb;
+        store64(slot, nb);
+        store64(capp, size);
+    }
+    dr_copy(own, src, size);
+    return own;
+}
+# save size bytes at src as slot i's block of this kind (src 0 saves "none"); DR_OK or DR_ERR_OOM
+fn av1_ref_save_block(r, field, kind, i, src, size): i64 {
+    if (src == 0) { store64(r + field + (i * 8), 0); return DR_OK; }
+    var own = av1_ref_own_copy(r, kind, i, src, size);
+    if (own == 0) { return DR_ERR_OOM; }
+    store64(r + field + (i * 8), own);
+    return DR_OK;
+}
 # saved CDF bundle (C1, 7.20/7.21): the per-slot pointer to slot i's saved adaptive-CDF set
 # (av1_cdf_bundle_new output; 0 for a never-refreshed slot), loaded by a FUTURE non-key frame whose
 # primary_ref_frame selects this slot. See av1_cdf_bundle_* in av1_intertile.cyr.
 fn av1_ref_saved_cdf(r, i): i64 { return load64(r + AV1REF_SAVED_CDF + (i * 8)); }
-fn av1_ref_set_saved_cdf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_CDF + (i * 8), ptr); return 0; }
+fn av1_ref_set_saved_cdf(r, i, src): i64 {   # a whole bundle (AV1CB_N words); DR_OK or DR_ERR_OOM
+    return av1_ref_save_block(r, AV1REF_SAVED_CDF, AV1REF_K_CDF, i, src, AV1CB_N * 8);
+}
 # saved film_grain_params block (7.20 save_grain_params / 6.8.20 load_grain_params, 0.8.4): slot i's pointer, 0 when
 # the slot was never refreshed.
 fn av1_ref_saved_grain(r, i): i64 { return load64(r + AV1REF_SAVED_GRAIN + (i * 8)); }
+fn av1_ref_set_saved_grain(r, i, src): i64 {   # a film_grain_params block (AV1FG_SIZE bytes); DR_OK or DR_ERR_OOM
+    return av1_ref_save_block(r, AV1REF_SAVED_GRAIN, AV1REF_K_GRAIN, i, src, AV1FG_SIZE);
+}
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }
 # SavedSegmentIds[ i ] (7.20): the per-slot pointer to slot i's saved segmentation map — frame-addressed u64
 # per MI, stride RefMiCols[ i ]; 0 = all-zero (an unsegmented or never-refreshed slot). Never mutated after
-# it is saved (the decoder aliases it; a later frame copies out of it), so one buffer serves many slots.
+# it is saved: the slot holds its own copy (av1_ref_own_copy) and a later frame copies out of it.
 fn av1_ref_saved_segids(r, i): i64 { return load64(r + AV1REF_SAVED_SEGIDS + (i * 8)); }
-fn av1_ref_set_saved_segids(r, i, ptr): i64 { store64(r + AV1REF_SAVED_SEGIDS + (i * 8), ptr); return 0; }
+# save the size-byte map at src (0: all zero) as slot i's SavedSegmentIds; DR_OK or DR_ERR_OOM
+fn av1_ref_set_saved_segids(r, i, src, size): i64 {
+    return av1_ref_save_block(r, AV1REF_SAVED_SEGIDS, AV1REF_K_SEG, i, src, size);
+}
 fn av1_ref_saved_feature_enabled(r, i, seg, j): i64 {
     return load64(r + AV1REF_SAVED_FEAT_EN + ((((i * 8) + seg) * 8 + j) * 8));
 }
@@ -4517,7 +4885,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 # frame is (conceptually) decoded: saves the current frame's geometry /
 # order hints / global-motion into every slot flagged by
 # refresh_frame_flags. subsampling / bit depth come from the sequence
-# header. Returns DR_OK.
+# header. Returns DR_OK, or DR_ERR_OOM when a slot's own buffer for a saved block cannot be allocated.
 # ================================================================
 fn av1_frame_update_refs(refs, s, fh): i64 {
     var flags = av1_fh_refresh_frame_flags(fh);
@@ -4525,13 +4893,17 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
     # 7.20 saves them back into every refreshed slot). Read before the loop — the shown slot is refreshed
     # too. A decoded frame's map is saved by the frame decoder (av1_frame_dec_finish), not here.
     var shown_segids = 0;
+    var shown_seg_bytes = 0;
     var shown_cdf = 0;
     var from_shown = av1_fh_show_existing_frame(fh);
     if (from_shown != 0) {
-        shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh));
+        var ks = av1_fh_frame_to_show(fh);
+        shown_segids = av1_ref_saved_segids(refs, ks);
+        shown_seg_bytes = av1_ref_mi_rows(refs, ks) * av1_ref_mi_cols(refs, ks) * 8;   # its map, before any save
         # load_cdfs( frame_to_show_map_idx ) then save_cdfs( i ) (7.21 -> 7.20): every refreshed slot gets the
-        # shown slot's CDF bundle (aliased; bundles are never mutated after their save).
-        shown_cdf = av1_ref_saved_cdf(refs, av1_fh_frame_to_show(fh));
+        # shown slot's CDF bundle (a copy, from the shown slot's own buffer — which no save below changes: the
+        # shown slot re-saving its own block is a no-op).
+        shown_cdf = av1_ref_saved_cdf(refs, ks);
     }
     var i = 0;
     while (i < AV1_NUM_REF_FRAMES) {
@@ -4587,12 +4959,15 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
             }
             # save_grain_params( i ) (7.20): a pointer to this header's grain block (reset when film grain is
             # absent, so a later load reads "no grain"); a show_existing header holds the LOADED block.
-            store64(refs + AV1REF_SAVED_GRAIN + (i * 8), fh + AV1FH_GRAIN);
+            var ge = av1_ref_set_saved_grain(refs, i, fh + AV1FH_GRAIN);
+            if (ge != DR_OK) { return ge; }
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
             if (from_shown != 0) {
-                av1_ref_set_saved_segids(refs, i, shown_segids);
-                av1_ref_set_saved_cdf(refs, i, shown_cdf);
+                var se = av1_ref_set_saved_segids(refs, i, shown_segids, shown_seg_bytes);
+                if (se != DR_OK) { return se; }
+                var ce = av1_ref_set_saved_cdf(refs, i, shown_cdf);
+                if (ce != DR_OK) { return ce; }
             }
         }
         i = i + 1;
@@ -5256,7 +5631,7 @@ var Av1_ITx_Tables = 0;
 
 fn av1_itx_tables(): i64 {
     if (Av1_ITx_Tables != 0) { return Av1_ITx_Tables; }
-    var t = dr_alloc((65 + 19 + 19 + 19) * 8);
+    var t = dr_alloc_keep((65 + 19 + 19 + 19) * 8);
     if (t == 0) { return 0; }
     # Cos128_Lookup — 4096 * cos(a*pi/128) rounded (7.13.2.1).
     store64(t + 0, 4096);   store64(t + 8, 4095);   store64(t + 16, 4091);  store64(t + 24, 4085);
@@ -5922,7 +6297,7 @@ var Av1_SmW = 0;
 
 fn av1_sm_weights(): i64 {
     if (Av1_SmW != 0) { return Av1_SmW; }
-    var t = dr_alloc(124 * 8);
+    var t = dr_alloc_keep(124 * 8);
     if (t == 0) { return 0; }
     av1_smw_fill(t + 0, 255, 149, 85, 64, 0, 0, 0, 0);                 # 4x4 (first 4 used)
     av1_smw_fill(t + (4 * 8), 255, 197, 146, 105, 73, 50, 37, 32);     # 8x8
@@ -6097,7 +6472,7 @@ fn av1_intra_horizontal(left, w, h, pred): i64 {
 var Av1_DrDeriv = 0;
 fn av1_dr_intra_derivative(angle): i64 {
     if (Av1_DrDeriv == 0) {
-        var t = dr_alloc(90 * 8);
+        var t = dr_alloc_keep(90 * 8);
         if (t == 0) { return 0; }
         memset(t, 0, 90 * 8);
         store64(t + (3 * 8), 1023);  store64(t + (6 * 8), 547);   store64(t + (9 * 8), 372);
@@ -6400,7 +6775,7 @@ fn av1_ftaps_fill7(p, t0, t1, t2, t3, t4, t5, t6) {
 }
 fn av1_filter_taps(): i64 {
     if (Av1_FTaps != 0) { return Av1_FTaps; }
-    var t = dr_alloc((5 * 8 * 7) * 8);
+    var t = dr_alloc_keep((5 * 8 * 7) * 8);
     if (t == 0) { return 0; }
     var s = 7 * 8;   # bytes per position row
     # mode 0
@@ -6812,7 +7187,7 @@ fn av1_qfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_dc_qlookup(): i64 {
     if (Av1_DcQ != 0) { return Av1_DcQ; }
-    var t = dr_alloc(768 * 8);
+    var t = dr_alloc_keep(768 * 8);
     if (t == 0) { return 0; }
     av1_qfill8(t, 0, 4, 8, 8, 9, 10, 11, 12, 12);
     av1_qfill8(t, 8, 13, 14, 15, 16, 17, 18, 19, 19);
@@ -6916,7 +7291,7 @@ fn av1_dc_qlookup(): i64 {
 
 fn av1_ac_qlookup(): i64 {
     if (Av1_AcQ != 0) { return Av1_AcQ; }
-    var t = dr_alloc(768 * 8);
+    var t = dr_alloc_keep(768 * 8);
     if (t == 0) { return 0; }
     av1_qfill8(t, 0, 4, 8, 9, 10, 11, 12, 13, 14);
     av1_qfill8(t, 8, 15, 16, 17, 18, 19, 20, 21, 22);
@@ -7111,7 +7486,7 @@ var Av1_QmOff = 0;      # Qm_Offset[19] (9.5.3), i64 slots (19 * 8 bytes)
 fn av1_qm_offset(tx_size): i64 {
     if ((tx_size < 0) || (tx_size > 18)) { return 0 - 1; }
     if (Av1_QmOff == 0) {
-        var t = dr_alloc(19 * 8);   # 19 i64 slots
+        var t = dr_alloc_keep(19 * 8);   # 19 i64 slots
         if (t == 0) { return 0 - 1; }
         store64(t + (0 * 8), 0);       store64(t + (1 * 8), 16);      store64(t + (2 * 8), 80);
         store64(t + (3 * 8), 336);     store64(t + (4 * 8), 336);     store64(t + (5 * 8), 1360);
@@ -7172,7 +7547,7 @@ fn av1_qm_table(): i64 {
     # the loop sizes regions by av1_tx_width / height, which read the transform tables UNCHECKED: built here at
     # frame-header time (before av1_tables_init), a failed build of those was a null dereference (0.8.5).
     if (av1_itx_tables() == 0) { return 0; }
-    var t = dr_alloc(15 * 2 * 3344);   # 100,320 BYTES
+    var t = dr_alloc_keep(15 * 2 * 3344);   # 100,320 BYTES
     if (t == 0) { return 0; }
     var g = 0;
     while (g < 30) {   # g = level * 2 + ptype
@@ -7241,7 +7616,7 @@ fn av1_qm_matrix(fh, plane, tx_size, tx_type, lossless): i64 {
 # Quantizer_Matrix. Returns the blob, or 0 when the allocation fails.
 fn av1_qm_packed(): i64 {
     if (Av1_QmPacked != 0) { return Av1_QmPacked; }
-    var t = dr_alloc(31200);   # 31,200 BYTES
+    var t = dr_alloc_keep(31200);   # 31,200 BYTES
     if (t == 0) { return 0; }
     # level 0, luma: 32x32 lower triangle (528) then 32x16 (512)
     av1_qm_hex(t, 0, "201f201f20201f2020201f2020212120202021222322222122232527232222232425292b24232223");
@@ -8254,7 +8629,7 @@ fn av1_scanfill19(t, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13,
 
 fn av1_scan_blob(): i64 {
     if (Av1_ScanBlob != 0) { return Av1_ScanBlob; }
-    var t = dr_alloc(4912 * 8);
+    var t = dr_alloc_keep(4912 * 8);
     if (t == 0) { return 0; }
     av1_scanfill8(t, 0, 0, 1, 4, 8, 5, 2, 3, 6);
     av1_scanfill8(t, 8, 9, 12, 13, 10, 7, 11, 14, 15);
@@ -8877,7 +9252,7 @@ fn av1_scan_blob(): i64 {
 # Selector offset tables (entry offsets into the blob), indexed by TxSize.
 fn av1_scan_sel(): i64 {
     if (Av1_ScanSel != 0) { return Av1_ScanSel; }
-    var t = dr_alloc(3 * 19 * 8);
+    var t = dr_alloc_keep(3 * 19 * 8);
     if (t == 0) { return 0; }
     av1_scanfill19(t + (0 * 8),
       0, 80, 400, 1680, 1680, 16, 48, 144, 272, 656,
@@ -8982,7 +9357,7 @@ fn av1_cbfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_cbco(): i64 {
     if (Av1_CBCO != 0) { return Av1_CBCO; }
-    var t = dr_alloc(480 * 8);
+    var t = dr_alloc_keep(480 * 8);
     if (t == 0) { return 0; }
     av1_cbfill8(t, 0, 0, 1, 6, 6, 0, 1, 6, 6);
     av1_cbfill8(t, 8, 21, 0, 6, 6, 21, 21, 0, 6);
@@ -9053,7 +9428,7 @@ fn av1_coeff_base_ctx_offset(tx_size, r, c): i64 {
 
 fn av1_ctabs(): i64 {
     if (Av1_CTabs != 0) { return Av1_CTabs; }
-    var t = dr_alloc(70 * 8);
+    var t = dr_alloc_keep(70 * 8);
     if (t == 0) { return 0; }
     # Adjusted_Tx_Size[19]
     store64(t + ((0+0) * 8), 0);
@@ -9258,7 +9633,7 @@ fn av1_cdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_coeff_cdf_blob(): i64 {
     if (Av1_CoeffCdf != 0) { return Av1_CoeffCdf; }
-    var t = dr_alloc(3400 * 8);
+    var t = dr_alloc_keep(3400 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 31849, 32768, 0, 5892, 32768, 0, 12112, 32768);
     av1_cdffill8(t, 8, 0, 21935, 32768, 0, 20289, 32768, 0, 27473);
@@ -9738,7 +10113,7 @@ fn av1_coeff_base_eob_cdf(q, txsz_ctx, ptype, ctx): i64 {
 var Av1_CoeffBaseCdf = 0;
 fn av1_coeff_base_blob(): i64 {
     if (Av1_CoeffBaseCdf != 0) { return Av1_CoeffBaseCdf; }
-    var t = dr_alloc(8400 * 8);
+    var t = dr_alloc_keep(8400 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 4034, 8930, 12727, 32768, 0, 18082, 29741, 31877);
     av1_cdffill8(t, 8, 32768, 0, 12596, 26124, 30493, 32768, 0, 9446);
@@ -10807,7 +11182,7 @@ fn av1_coeff_base_cdf(q, txsz_ctx, ptype, ctx): i64 {
 var Av1_CoeffBrCdf = 0;
 fn av1_coeff_br_blob(): i64 {
     if (Av1_CoeffBrCdf != 0) { return Av1_CoeffBrCdf; }
-    var t = dr_alloc(4200 * 8);
+    var t = dr_alloc_keep(4200 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 14298, 20718, 24174, 32768, 0, 12536, 19601, 23789);
     av1_cdffill8(t, 8, 32768, 0, 8712, 15051, 19503, 32768, 0, 6170);
@@ -11392,7 +11767,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = dr_alloc((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
+    var t = dr_alloc_keep((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);
@@ -11996,7 +12371,7 @@ fn av1_mi_fill4(t, off, a, b, c, d) {
 }
 fn av1_blk_tables(): i64 {
     if (Av1_BlkTab != 0) { return Av1_BlkTab; }
-    var t = dr_alloc(211 * 8);           # 211 i64
+    var t = dr_alloc_keep(211 * 8);           # 211 i64
     if (t == 0) { return 0; }
     # Mi_Width_Log2[22]
     av1_mi_fill22(t, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4);
@@ -12187,7 +12562,7 @@ fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): 
 var Av1_SegIdPc = 0;
 fn av1_segid_scratch(): i64 {
     if (Av1_SegIdPc != 0) { return Av1_SegIdPc; }
-    Av1_SegIdPc = dr_alloc(2 * 8);   # 2 u64: pred, ctx
+    Av1_SegIdPc = dr_alloc_keep(2 * 8);   # 2 u64: pred, ctx
     return Av1_SegIdPc;
 }
 fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip): i64 {
@@ -13154,7 +13529,7 @@ enum Av1PalScratch {
 var Av1_PalScratch = 0;
 fn av1_pal_scratch(): i64 {
     if (Av1_PalScratch != 0) { return Av1_PalScratch; }
-    Av1_PalScratch = dr_alloc(AV1PS_SIZE);   # AV1PS_SIZE bytes
+    Av1_PalScratch = dr_alloc_keep(AV1PS_SIZE);   # AV1PS_SIZE bytes
     return Av1_PalScratch;
 }
 
@@ -13862,7 +14237,7 @@ fn av1_txsz_fill19(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11,
 }
 fn av1_txsz_tables(): i64 {
     if (Av1_TxSzTab != 0) { return Av1_TxSzTab; }
-    var t = dr_alloc(63 * 8);          # 63 i64
+    var t = dr_alloc_keep(63 * 8);          # 63 i64
     if (t == 0) { return 0; }
     # Max_Tx_Size_Rect[22] (TxSize indices).
     av1_txsz_fill22(t, 0, 0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18);
@@ -13884,7 +14259,7 @@ fn av1_split_tx_size(txsize): i64 { return load64(av1_txsz_tables() + ((44 + txs
 var Av1_TxSqr = 0;
 fn av1_txsqr_tables(): i64 {
     if (Av1_TxSqr != 0) { return Av1_TxSqr; }
-    var t = dr_alloc(38 * 8);          # 2 * 19 i64
+    var t = dr_alloc_keep(38 * 8);          # 2 * 19 i64
     if (t == 0) { return 0; }
     # Tx_Size_Sqr[19] at slot 0.
     av1_itx_fill19(t + 0, 0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2);
@@ -14038,7 +14413,7 @@ fn av1_txt_fill16(t, off, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12,
 }
 fn av1_txtype_tables(): i64 {
     if (Av1_TxType != 0) { return Av1_TxType; }
-    var t = dr_alloc(173 * 8);         # 173 i64
+    var t = dr_alloc_keep(173 * 8);         # 173 i64
     if (t == 0) { return 0; }
     # Mode_To_Txfm[14]: DC,V,H,D45,D135,D113,D157,D203,D67,SMOOTH,SMOOTH_V,SMOOTH_H,PAETH,CFL
     store64(t + (0 * 8), AV1_DCT_DCT);    store64(t + (1 * 8), AV1_ADST_DCT);
@@ -15779,7 +16154,7 @@ enum Av1PartitionConst {
 var Av1_PartSub = 0;
 fn av1_partsub_tables(): i64 {
     if (Av1_PartSub != 0) { return Av1_PartSub; }
-    var t = dr_alloc(220 * 8);          # 10 * 22 i64
+    var t = dr_alloc_keep(220 * 8);          # 10 * 22 i64
     if (t == 0) { return 0; }
     av1_mi_fill22(t, 0, 0, 0 - 1, 0 - 1, 3, 0 - 1, 0 - 1, 6, 0 - 1, 0 - 1, 9, 0 - 1,
       0 - 1, 12, 0 - 1, 0 - 1, 15, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
@@ -15891,7 +16266,7 @@ fn av1_synth_vert_cdf(pcdf, bsl, out): i64 {
 var Av1_PartSynthCdf = 0;
 fn av1_part_synth_scratch(): i64 {
     if (Av1_PartSynthCdf != 0) { return Av1_PartSynthCdf; }
-    Av1_PartSynthCdf = dr_alloc(3 * 8);   # 3 u64: cdf[0], 1 << 15, the (unused) count
+    Av1_PartSynthCdf = dr_alloc_keep(3 * 8);   # 3 u64: cdf[0], 1 << 15, the (unused) count
     return Av1_PartSynthCdf;
 }
 fn av1_read_split_or_horz(sd, ncc, ctx, bsl): i64 {
@@ -16541,7 +16916,7 @@ enum Av1LrScratch {
 var Av1_LrScratch = 0;
 fn av1_lr_scratch(): i64 {
     if (Av1_LrScratch != 0) { return Av1_LrScratch; }
-    Av1_LrScratch = dr_alloc(AV1LRS_SIZE);   # AV1LRS_SIZE bytes
+    Av1_LrScratch = dr_alloc_keep(AV1LRS_SIZE);   # AV1LRS_SIZE bytes
     return Av1_LrScratch;
 }
 fn av1_lr_wiener_filter(curr, cdef, lr, plane, x, y, w, h, hfilter, vfilter, pex, pey, ssy, sey): i64 {
@@ -16602,7 +16977,7 @@ var Av1_Sgr = 0;
 fn av1_lr_sgr_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_lr_sgr_tables(): i64 {
     if (Av1_Sgr != 0) { return Av1_Sgr; }
-    var t = dr_alloc(64 * 8);
+    var t = dr_alloc_keep(64 * 8);
     if (t == 0) { return 0; }
     av1_lr_sgr_store(t, 0, 2);  av1_lr_sgr_store(t, 1, 12);  av1_lr_sgr_store(t, 2, 1);  av1_lr_sgr_store(t, 3, 4);
     av1_lr_sgr_store(t, 4, 2);  av1_lr_sgr_store(t, 5, 15);  av1_lr_sgr_store(t, 6, 1);  av1_lr_sgr_store(t, 7, 6);
@@ -16997,7 +17372,7 @@ fn av1_lr_process(curr, cdef, lr, params): i64 {
 var Av1_LrTaps = 0;
 fn av1_lr_taps(): i64 {
     if (Av1_LrTaps != 0) { return Av1_LrTaps; }
-    var t = dr_alloc(18 * 8);
+    var t = dr_alloc_keep(18 * 8);
     if (t == 0) { return 0; }
     store64(t + 0, 0 - 5);  store64(t + 8, 0 - 23); store64(t + 16, 0 - 17);   # Wiener_Taps_Min
     store64(t + 24, 10);    store64(t + 32, 8);     store64(t + 40, 46);       # Wiener_Taps_Max
@@ -17571,7 +17946,7 @@ enum Av1LfScratch {
 var Av1_LfScratch = 0;
 fn av1_lf_scratch(): i64 {
     if (Av1_LfScratch != 0) { return Av1_LfScratch; }
-    Av1_LfScratch = dr_alloc(AV1LFS_SIZE);   # AV1LFS_SIZE bytes
+    Av1_LfScratch = dr_alloc_keep(AV1LFS_SIZE);   # AV1LFS_SIZE bytes
     return Av1_LfScratch;
 }
 
@@ -17947,7 +18322,7 @@ var Av1_Cdef = 0;
 fn av1_cdef_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_cdef_tables(): i64 {
     if (Av1_Cdef != 0) { return Av1_Cdef; }
-    var t = dr_alloc(81 * 8);
+    var t = dr_alloc_keep(81 * 8);
     if (t == 0) { return 0; }
     # Div_Table[9].
     av1_cdef_store(t, 0, 0);    av1_cdef_store(t, 1, 840);  av1_cdef_store(t, 2, 420);
@@ -18016,7 +18391,7 @@ enum Av1CdefScratch {
 var Av1_CdefScratch = 0;
 fn av1_cdef_scratch(): i64 {
     if (Av1_CdefScratch != 0) { return Av1_CdefScratch; }
-    Av1_CdefScratch = dr_alloc(AV1CDS_SIZE);   # AV1CDS_SIZE bytes
+    Av1_CdefScratch = dr_alloc_keep(AV1CDS_SIZE);   # AV1CDS_SIZE bytes
     return Av1_CdefScratch;
 }
 
@@ -18393,7 +18768,7 @@ fn av1_upfill8(t, row, v0, v1, v2, v3, v4, v5, v6, v7) {
 # dav1d_resize_filter negated -> the spec's positive-centre Upscale_Filter.
 fn av1_upscale_filter_blob(): i64 {
     if (Av1_UpscaleFilter != 0) { return Av1_UpscaleFilter; }
-    var t = dr_alloc(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
+    var t = dr_alloc_keep(AV1_SUPERRES_FILTER_SHIFTS * AV1_SUPERRES_FILTER_TAPS * 8);
     if (t == 0) { return 0; }
     av1_upfill8(t,  0,  0,  0,  0, 128,   0,   0,  0,  0);
     av1_upfill8(t,  1,  0,  0, 0 - 1, 128,   2, 0 - 1,  0,  0);
@@ -18996,7 +19371,7 @@ fn av1_grain_apply(gc, g, mc, src, out_err): i64 {
     if (load64(gc + AV1GC_SW) < sw) {
         var b = 0;
         while (b < 6) {
-            var sb = dr_alloc(34 * sw * 8);   # 34 rows * sw i64
+            var sb = dr_alloc_keep(34 * sw * 8);   # 34 rows * sw i64; kept: the context outlives every frame
             if (sb == 0) { store64(out_err, DR_ERR_OOM); return 0; }
             store64(gc + AV1GC_STRIPE + (b * 8), sb);
             b = b + 1;
@@ -19119,7 +19494,7 @@ fn av1_grain_apply(gc, g, mc, src, out_err): i64 {
 # table, or 0 when the allocation fails.
 fn av1_grain_gauss(): i64 {
     if (Av1_GrainGauss != 0) { return Av1_GrainGauss; }
-    var t = dr_alloc(2048 * 8);   # 2048 i64
+    var t = dr_alloc_keep(2048 * 8);   # 2048 i64
     if (t == 0) { return 0; }
     av1_grain_hex(t, 0, "838a3874c8ac87c7ac8ac7c047c818b348e0ce0be49107f846c67c524798744b208705746c068888c704");
     av1_grain_hex(t, 28, "9ec75882c4eca4c5b89f471c80caa8910624bcc79ca8c9709b073c530740be86b4a8c7785d85a47fc8c0");
@@ -19258,7 +19633,7 @@ fn av1_mcfill8(t, set, phase, v0, v1, v2, v3, v4, v5, v6, v7) {
 # Build (once) and return the Subpel_Filters[6][15][8] blob (dav1d order + convention).
 fn av1_subpel_filters_blob(): i64 {
     if (Av1_SubpelFilters != 0) { return Av1_SubpelFilters; }
-    var t = dr_alloc(AV1_SUBPEL_SETS * AV1_SUBPEL_PHASES * AV1_SUBPEL_TAPS * 8);
+    var t = dr_alloc_keep(AV1_SUBPEL_SETS * AV1_SUBPEL_PHASES * AV1_SUBPEL_TAPS * 8);
     if (t == 0) { return 0; }
     av1_mcfill8(t, 0,  0, 0, 1, 0 - 3, 63, 4, 0 - 1, 0, 0);
     av1_mcfill8(t, 0,  1, 0, 1, 0 - 5, 61, 9, 0 - 2, 0, 0);
@@ -19392,7 +19767,7 @@ fn av1_wfill8(t, row, v0, v1, v2, v3, v4, v5, v6, v7) {
 }
 fn av1_warp_filter_tbl(): i64 {
     if (Av1_WarpFilter != 0) { return Av1_WarpFilter; }
-    var t = dr_alloc(AV1_WARP_FILTER_ROWS * AV1_WARP_FILTER_TAPS * 8);
+    var t = dr_alloc_keep(AV1_WARP_FILTER_ROWS * AV1_WARP_FILTER_TAPS * 8);
     if (t == 0) { return 0; }
     av1_wfill8(t,   0, 0, 0, 127, 1, 0, 0, 0, 0);
     av1_wfill8(t,   1, 0, 0 - 1, 127, 2, 0, 0, 0, 0);
@@ -19781,7 +20156,7 @@ enum Av1McScaledBuf {
 var Av1_McScaledMid = 0;
 fn av1_mc_scaled_mid_scratch(): i64 {
     if (Av1_McScaledMid != 0) { return Av1_McScaledMid; }
-    Av1_McScaledMid = dr_alloc((AV1_MC_MAX_MID * AV1_MC_MAX_BLK) * 8);
+    Av1_McScaledMid = dr_alloc_keep((AV1_MC_MAX_MID * AV1_MC_MAX_BLK) * 8);
     return Av1_McScaledMid;
 }
 
@@ -20074,20 +20449,20 @@ var Av1_McWarp8 = 0;
 # reference) from put_8tap, which fully writes the (h+7)*w cells before reading them.
 fn av1_mc_mid_scratch(): i64 {
     if (Av1_McMid != 0) { return Av1_McMid; }
-    Av1_McMid = dr_alloc(((AV1_MC_MAX_BLK + 7) * AV1_MC_MAX_BLK) * 8);
+    Av1_McMid = dr_alloc_keep(((AV1_MC_MAX_BLK + 7) * AV1_MC_MAX_BLK) * 8);
     return Av1_McMid;
 }
 
 fn av1_mc_drv_scratch(): i64 {
     if (Av1_McOut != 0) { return DR_OK; }
     var g = AV1_MC_MAX_GATHER * AV1_MC_MAX_GATHER * 8;
-    Av1_McRect = dr_alloc(g);
-    Av1_McGather = dr_alloc(g);
-    Av1_McOut = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);
-    Av1_McTmp = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);   # 2nd compound intermediate
-    Av1_McMask = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # DIFFWTD luma mask
-    Av1_McIntra = dr_alloc(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # inter-intra intra half
-    Av1_McWarp8 = dr_alloc(8 * 8 * 8);                           # per-8x8 warp kernel output
+    Av1_McRect = dr_alloc_keep(g);
+    Av1_McGather = dr_alloc_keep(g);
+    Av1_McOut = dr_alloc_keep(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);
+    Av1_McTmp = dr_alloc_keep(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);   # 2nd compound intermediate
+    Av1_McMask = dr_alloc_keep(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # DIFFWTD luma mask
+    Av1_McIntra = dr_alloc_keep(AV1_MC_MAX_BLK * AV1_MC_MAX_BLK * 8);  # inter-intra intra half
+    Av1_McWarp8 = dr_alloc_keep(8 * 8 * 8);                           # per-8x8 warp kernel output
     if ((Av1_McRect == 0) || (Av1_McGather == 0) || (Av1_McOut == 0) || (Av1_McTmp == 0)
       || (Av1_McMask == 0) || (Av1_McWarp8 == 0) || (Av1_McIntra == 0)) {
         Av1_McOut = 0;
@@ -20656,7 +21031,7 @@ fn av1_wm_vert(i): i64 {
 var Av1_WedgeMaster = 0;
 fn av1_wedge_master_tbl(): i64 {
     if (Av1_WedgeMaster != 0) { return Av1_WedgeMaster; }
-    var m = dr_alloc(6 * 64 * 64 * 8);
+    var m = dr_alloc_keep(6 * 64 * 64 * 8);
     if (m == 0) { return 0; }
     # Stage 1 (spec 7.11.3.11): OBLIQUE63 (dir 3) + VERTICAL (dir 1). shift decrements ONCE
     # between the even row and the odd row, and PERSISTS across the outer iteration (the slope).
@@ -20705,7 +21080,7 @@ fn av1_wedge_master_tbl(): i64 {
 var Av1_WedgeCb = 0;
 fn av1_wedge_cb_tbl(): i64 {
     if (Av1_WedgeCb != 0) { return Av1_WedgeCb; }
-    var t = dr_alloc(48 * 8);
+    var t = dr_alloc_keep(48 * 8);
     if (t == 0) { return 0; }
     # shape 0 TALL
     store64(t + (0 * 8), 164);
@@ -20831,7 +21206,7 @@ fn av1_iifill8(t, o, v0, v1, v2, v3, v4, v5, v6, v7) {
 }
 fn av1_ii_weight_tbl(): i64 {
     if (Av1_IiWeights != 0) { return Av1_IiWeights; }
-    var t = dr_alloc(128 * 8);
+    var t = dr_alloc_keep(128 * 8);
     if (t == 0) { return 0; }
     av1_iifill8(t, 0, 60, 58, 56, 54, 52, 50, 48, 47);
     av1_iifill8(t, 8, 45, 44, 42, 41, 39, 38, 37, 35);
@@ -20871,7 +21246,7 @@ fn av1_ii_weight(idx): i64 {
 var Av1_ObmcMask = 0;
 fn av1_obmc_mask_tbl(): i64 {
     if (Av1_ObmcMask != 0) { return Av1_ObmcMask; }
-    var t = dr_alloc(64 * 8);
+    var t = dr_alloc_keep(64 * 8);
     if (t == 0) { return 0; }
     av1_iifill8(t, 0, 0, 0, 45, 64, 39, 50, 59, 64);       # pad[0,1] + len2{45,64} + len4{39,50,59,64}
     av1_iifill8(t, 8, 36, 42, 48, 53, 57, 61, 64, 64);      # len8
@@ -21720,7 +22095,7 @@ fn av1_mv_save_field(grid, fmi_cols, fmi_rows, s, fh, out): i64 {
 var Av1_DivMult = 0;
 fn av1_mv_div_mult_tbl(): i64 {
     if (Av1_DivMult != 0) { return Av1_DivMult; }
-    var t = dr_alloc(32 * 8);
+    var t = dr_alloc_keep(32 * 8);
     if (t == 0) { return 0; }
     store64(t, 0);                              # Div_Mult[0] = 0 (den is clamped to >=1 before indexing)
     var i = 1;
@@ -21791,7 +22166,7 @@ var Av1_MotionField    = 0;    # pointer to [h8, w8, then 8*h8*w8*2 i64], or 0
 var Av1_MotionFieldCap = 0;    # current cell capacity (h8*w8) — avoid re-alloc on same/smaller frames
 var Av1_MvProjScratch  = 0;    # reusable 48-byte projection scratch (pbuf|dbuf|qbuf), lazily allocated
 fn av1_mvproj_scratch(): i64 {   # the lazy 48-byte scratch (0 on OOM; av1_tables_init builds it up front)
-    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = dr_alloc(48); }
+    if (Av1_MvProjScratch == 0) { Av1_MvProjScratch = dr_alloc_keep(48); }
     return Av1_MvProjScratch;
 }
 enum Av1MotionFieldOff {
@@ -21807,7 +22182,7 @@ fn av1_motionfield_alloc(h8, w8): i64 {
     var need = h8 * w8;
     if (need <= 0) { return 0; }                        # trust-no-input backstop (0x0 frame)
     if ((Av1_MotionField == 0) || (need > Av1_MotionFieldCap)) {
-        var t = dr_alloc(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
+        var t = dr_alloc_keep(AV1MF_FIELD + (8 * need * 2 * 8));  # 8 planes * need cells * 2 comps * 8 bytes
         if (t == 0) { return 0; }
         Av1_MotionField    = t;
         Av1_MotionFieldCap = need;
@@ -22525,7 +22900,7 @@ fn av1_mv_context_and_clamping(ctx, is_compound, num_new): i64 {
 # so there is no lifetime overlap with Av1_MvProjScratch even if they aliased — this stays independent.
 var Av1_TplScratch = 0;
 fn av1_tpl_scratch(): i64 {   # the lazy 32-byte scratch (0 on OOM; av1_tables_init builds it up front)
-    if (Av1_TplScratch == 0) { Av1_TplScratch = dr_alloc(32); }
+    if (Av1_TplScratch == 0) { Av1_TplScratch = dr_alloc_keep(32); }
     return Av1_TplScratch;
 }
 # check_sb_border (7.10.2.5) — does an extension sample at (dR, dC) stay inside the current 64x64 superblock?
@@ -23000,7 +23375,7 @@ fn av1_warp_model_shear_valid(m): i64 { return load64(m + AV1WM_SHEARVALID); }
 var Av1_DivLut = 0;
 fn av1_div_lut_tbl(): i64 {
     if (Av1_DivLut != 0) { return Av1_DivLut; }
-    var t = dr_alloc((AV1_DIV_LUT_NUM + 1) * 8);
+    var t = dr_alloc_keep((AV1_DIV_LUT_NUM + 1) * 8);
     if (t == 0) { return 0; }
     var num = 1 << (AV1_DIV_LUT_PREC_BITS + AV1_DIV_LUT_BITS);   # 2^22
     var i = 0;
@@ -23064,7 +23439,7 @@ fn av1_warp_mult_clip(v, factor, shift, is_diag, one): i64 {
 var Av1_WarpDivScratch = 0;
 fn av1_warp_div_scratch(): i64 {
     if (Av1_WarpDivScratch != 0) { return Av1_WarpDivScratch; }
-    var s = dr_alloc(16);
+    var s = dr_alloc_keep(16);
     if (s == 0) { return 0; }
     Av1_WarpDivScratch = s;
     return s;
@@ -23230,7 +23605,9 @@ fn av1_warp_model_from_global(model, fh, ref): i64 {
 var Av1_WarpModelScratch = 0;
 fn av1_warp_model_scratch(): i64 {
     if (Av1_WarpModelScratch != 0) { return Av1_WarpModelScratch; }
+    dr_persist_begin();   # a persistent scratch: never from a decoder's frame arena
     Av1_WarpModelScratch = av1_warp_model_new();
+    dr_persist_end();
     return Av1_WarpModelScratch;
 }
 # A SECOND reusable warp-model scratch — a compound GLOBAL_GLOBALMV block needs BOTH refs' global models live
@@ -23238,7 +23615,9 @@ fn av1_warp_model_scratch(): i64 {
 var Av1_WarpModelScratch2 = 0;
 fn av1_warp_model_scratch2(): i64 {
     if (Av1_WarpModelScratch2 != 0) { return Av1_WarpModelScratch2; }
+    dr_persist_begin();   # a persistent scratch: never from a decoder's frame arena
     Av1_WarpModelScratch2 = av1_warp_model_new();
+    dr_persist_end();
     return Av1_WarpModelScratch2;
 }
 
@@ -23388,7 +23767,7 @@ fn av1_mvcdf_put_class(p): i64 {
 var AV1_MVBIT_VALS = 0;
 fn av1_mvbit_vals(): i64 {
     if (AV1_MVBIT_VALS != 0) { return AV1_MVBIT_VALS; }
-    var p = dr_alloc(10 * 8);
+    var p = dr_alloc_keep(10 * 8);
     if (p == 0) { return 0; }   # OOM: av1_tables_init reports it
     store64(p + 0, 17408);  store64(p + 8, 17920);  store64(p + 16, 18944);
     store64(p + 24, 20480); store64(p + 32, 22528); store64(p + 40, 24576);
@@ -23437,7 +23816,7 @@ fn av1_mvcdf_new(): i64 {
 var AV1_MVCDF_BLOB = 0;
 fn av1_mvcdf_blob(): i64 {
     if (AV1_MVCDF_BLOB != 0) { return AV1_MVCDF_BLOB; }
-    var cc = dr_alloc(AV1MVCDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1MVCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_mvcdf_fill(cc);
     AV1_MVCDF_BLOB = cc;
@@ -23800,7 +24179,7 @@ fn av1_imcdf_new(): i64 {
 var AV1_IMCDF_BLOB = 0;
 fn av1_imcdf_blob(): i64 {
     if (AV1_IMCDF_BLOB != 0) { return AV1_IMCDF_BLOB; }
-    var cc = dr_alloc(AV1IMCDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1IMCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_imcdf_fill(cc);
     AV1_IMCDF_BLOB = cc;
@@ -24537,7 +24916,7 @@ fn av1_refcdf_new(): i64 {
 var AV1_REFCDF_BLOB = 0;
 fn av1_refcdf_blob(): i64 {
     if (AV1_REFCDF_BLOB != 0) { return AV1_REFCDF_BLOB; }
-    var cc = dr_alloc(AV1REFCDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1REFCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_refcdf_fill(cc);
     AV1_REFCDF_BLOB = cc;
@@ -24746,7 +25125,7 @@ fn av1_write_compound_ref(enc, cc, cctx, r0, r1): i64 {
 var AV1_COMPMODE_CTXMAP = 0;
 fn av1_compmode_ctxmap(): i64 {
     if (AV1_COMPMODE_CTXMAP != 0) { return AV1_COMPMODE_CTXMAP; }
-    var p = dr_alloc(3 * AV1_COMP_NEWMV_CTXS * 8);
+    var p = dr_alloc_keep(3 * AV1_COMP_NEWMV_CTXS * 8);
     if (p == 0) { return 0; }   # OOM: av1_tables_init reports it
     store64(p + 0, 0);  store64(p + 8, 1);  store64(p + 16, 1); store64(p + 24, 1); store64(p + 32, 1);
     store64(p + 40, 1); store64(p + 48, 2); store64(p + 56, 3); store64(p + 64, 4); store64(p + 72, 4);
@@ -24983,7 +25362,7 @@ fn av1_iicdf_new(): i64 {
 var AV1_IICDF_BLOB = 0;
 fn av1_iicdf_blob(): i64 {
     if (AV1_IICDF_BLOB != 0) { return AV1_IICDF_BLOB; }
-    var cc = dr_alloc(AV1IICDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1IICDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_iicdf_fill(cc);
     AV1_IICDF_BLOB = cc;
@@ -25059,7 +25438,7 @@ fn av1_write_wedge_index(enc, cc, mi_size, wedge_idx): i64 {
 var AV1_WEDGE_BITS_TBL = 0;
 fn av1_wedge_bits_tbl(): i64 {
     if (AV1_WEDGE_BITS_TBL != 0) { return AV1_WEDGE_BITS_TBL; }
-    var t = dr_alloc(AV1_BLOCK_SIZES * 8);
+    var t = dr_alloc_keep(AV1_BLOCK_SIZES * 8);
     if (t == 0) { return 0; }
     # {0,0,0, 4,4,4,4,4,4,4, 0,0,0,0,0,0,0,0, 4,4, 0,0}
     store64(t + 0, 0);   store64(t + 8, 0);   store64(t + 16, 0);  store64(t + 24, 4);
@@ -25431,7 +25810,7 @@ fn av1_write_motion_mode(enc, cc, ctx, ws, fh, refs, skip_mode, y_mode, ref0, re
 var AV1RRF_SCRATCH = 0;
 fn av1_rrf_scratch(): i64 {
     if (AV1RRF_SCRATCH != 0) { return AV1RRF_SCRATCH; }
-    AV1RRF_SCRATCH = dr_alloc(AV1CCTX_SIZE);
+    AV1RRF_SCRATCH = dr_alloc_keep(AV1CCTX_SIZE);
     return AV1RRF_SCRATCH;
 }
 fn av1_read_ref_frames(sd, cc, out_ref, nb, fh, skip_mode, segment_id, mi_size): i64 {
@@ -25560,7 +25939,7 @@ fn av1_ib_ct(b): i64 { return b + AV1IB_CT; }
 var AV1IBMI_SCRATCH = 0;
 fn av1_ibmi_scratch(): i64 {
     if (AV1IBMI_SCRATCH != 0) { return AV1IBMI_SCRATCH; }
-    AV1IBMI_SCRATCH = dr_alloc(32);
+    AV1IBMI_SCRATCH = dr_alloc_keep(32);
     return AV1IBMI_SCRATCH;
 }
 fn av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out, ctx, nb, ws, fh, refs, s,
@@ -26621,18 +27000,18 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
     var result = av1_apply_loop_filters(tile0, fh, seq, load64(fdc + AV1FDEC_LR_PARAMS), &ferr);
     if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
     # TEMPORAL-MV PRODUCER (0.7.102, spec 7.19/7.20): save this inter frame's per-8x8 motion field into the
-    # DPB slots it refreshes, so a FUTURE frame's motion_field_estimation (7.9) can read it. Output-neutral
-    # — nothing reads AV1REF_SAVED_MF yet (the estimation + scan are 0.7.103/104). Intra/key frames leave
-    # the slots null (no MVs to save). One arena buffer is aliased into every refreshed slot (never freed;
-    # no later frame mutates it — the reducer allocs a fresh buffer per frame). The MI grid lives on tile0
-    # (the loop filters do not mutate it, so this after-filter placement is fine).
+    # DPB slots it refreshes, so a FUTURE frame's motion_field_estimation (7.9) can read it. Intra/key frames
+    # save none. The field is reduced into a frame buffer, then COPIED into each refreshed slot's own buffer
+    # (av1_ref_set_saved_mf, 0.8.5: it was one buffer aliased into every slot and never freed). The MI grid
+    # lives on tile0 (the loop filters do not mutate it, so this after-filter placement is fine).
     var refs = load64(fdc + AV1FDEC_REFS);
     if ((refs != 0) && (av1_fh_frame_is_intra(fh) == 0)) {
         var grid = load64(tile0 + AV1TILE_MVGRID);
         if (grid != 0) {
             var fmi_cols = av1_fh_mi_cols(fh);
             var fmi_rows = av1_fh_mi_rows(fh);
-            var buf = dr_alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
+            var mf_bytes = 16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24);
+            var buf = dr_alloc(mf_bytes);
             # an OOM here must fail the frame: skipping the save left the slots' previous fields in place, and
             # a later frame's motion-field estimation then projected a STALE field (silent mis-decode, 0.8.5).
             if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
@@ -26640,17 +27019,20 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
             var rff = av1_fh_refresh_frame_flags(fh);
             var i = 0;
             while (i < 8) {
-                if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
+                if (((rff >> i) & 1) != 0) {
+                    var me = av1_ref_set_saved_mf(refs, i, buf, mf_bytes);
+                    if (me != DR_OK) { store64(out_err, me); return 0; }
+                }
                 i = i + 1;
             }
         }
     }
     # SavedSegmentIds (7.20), with the 7.4 step-7 copy folded in. A frame that kept its map (segmentation_enabled
     # && !segmentation_update_map) ENDS with SegmentIds = PrevSegmentIds exactly, so its slots save
-    # PrevSegmentIds itself (aliased — never mutated) rather than the per-block minimums the decode stamped:
-    # those minimums are what THIS frame's deblocker reads, and step 7 runs after the loop filter. An
-    # unsegmented frame's map is all zero (every block's segment_id is 0), saved as 0. One map pointer is
-    # aliased into every refreshed slot; the decode grid is per frame and never written after this.
+    # PrevSegmentIds itself rather than the per-block minimums the decode stamped: those minimums are what
+    # THIS frame's deblocker reads, and step 7 runs after the loop filter. An unsegmented frame's map is all
+    # zero (every block's segment_id is 0), saved as 0. Each refreshed slot COPIES the map into its own buffer
+    # (0.8.5); PrevSegmentIds has the current frame's dimensions (av1_frame_prev_segids checks), so one size.
     if (refs != 0) {
         var save_ids = 0;
         if (av1_fh_segmentation_enabled(fh) != 0) {
@@ -26660,7 +27042,10 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
         var srff = av1_fh_refresh_frame_flags(fh);
         var si = 0;
         while (si < 8) {
-            if (((srff >> si) & 1) != 0) { av1_ref_set_saved_segids(refs, si, save_ids); }
+            if (((srff >> si) & 1) != 0) {
+                var sse = av1_ref_set_saved_segids(refs, si, save_ids, av1_fh_mi_rows(fh) * av1_fh_mi_cols(fh) * 8);
+                if (sse != DR_OK) { store64(out_err, sse); return 0; }
+            }
             si = si + 1;
         }
     }
@@ -26671,8 +27056,8 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
     #  - disable_frame_end_update_cdf == 1: save the frame's INITIAL CDFs, NOT the adapted ones — the
     #    q-bucketed defaults (primary_ref_frame == NONE) or the inherited source bundle (otherwise).
     #    Reconstructed here (tile-independent), so this needs no per-tile pre-decode snapshot.
-    # Runs for intra + inter (a keyframe's CDFs are inheritable). One bundle is aliased into every
-    # refreshed slot — never mutated after (the inherit COPIES out of it).
+    # Runs for intra + inter (a keyframe's CDFs are inheritable). Each refreshed slot COPIES the bundle into its
+    # own buffer (0.8.5; it was one bundle aliased into every slot, never freed).
     if (refs != 0) {
         var cdfb = load64(fdc + AV1FDEC_CTX_CDF);
         var serr = DR_OK;
@@ -26693,7 +27078,10 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
         var crff = av1_fh_refresh_frame_flags(fh);
         var ci = 0;
         while (ci < 8) {
-            if (((crff >> ci) & 1) != 0) { av1_ref_set_saved_cdf(refs, ci, cdfb); }
+            if (((crff >> ci) & 1) != 0) {
+                var cse = av1_ref_set_saved_cdf(refs, ci, cdfb);
+                if (cse != DR_OK) { store64(out_err, cse); return 0; }
+            }
             ci = ci + 1;
         }
     }
@@ -26949,8 +27337,7 @@ fn av1_dpb_store(dpb, fh, frame): i64 {
 fn av1_dpb_update(dpb, refs, s, fh, frame): i64 {
     var rc = av1_dpb_store(dpb, fh, frame);
     if (rc != DR_OK) { return rc; }
-    av1_frame_update_refs(refs, s, fh);
-    return DR_OK;
+    return av1_frame_update_refs(refs, s, fh);
 }
 
 # ================================================================
@@ -27037,12 +27424,72 @@ enum Av1DecOff {
     AV1DEC_OPREQ  = 152;  # the operating point requested by the application (0 = the stream's preferred)
     AV1DEC_OPSEL  = 160;  # the operating point chosen at the last sequence header (5.5.1 choose_operating_point)
     AV1DEC_OPIDC  = 168;  # OperatingPointIdc = operating_point_idc[ OPSEL ] (0 = every OBU decodes)
-    AV1DEC_SIZE   = 176;
+    # memory (0.8.5) — see "MEMORY" below
+    AV1DEC_ARENA  = 176;  # the DrArena every frame's working memory comes from, reset at each frame start
+    AV1DEC_POOL   = 184;  # the DrFramePool every frame the decoder makes comes from, swept at each frame start
+    AV1DEC_IT     = 192;  # the OBU iterator, reused by every call
+    AV1DEC_SEQBUF = 200;  # the decoder's own copy of the active sequence header (AV1DEC_SEQ points here)
+    AV1DEC_CAMBUF = 208;  # its own copy of the camera frame header (AV1DEC_CAMFH points here)
+    AV1DEC_SIZE   = 216;
+}
+# MEMORY (0.8.5). drishti's allocator never frees, and a decoder that took everything from it grew by ~35-60 bytes per
+# pixel per frame, for ever. Now a decoder owns its memory, and a long stream settles at a fixed footprint:
+#   - while av1_decoder_decode runs, every allocation is served from the decoder's ARENA (dr_alloc_scope), which
+#     is rewound at each FRAME START — a frame header (FRAME_HEADER / FRAME, outside large-scale tile mode) or a
+#     tile list — and at the start of a call that has no frame pending. A frame's tiles, grids, CDF contexts,
+#     headers and per-block records are dead by then;
+#   - every frame it makes (the reconstruction, the CDEF / loop-restoration / upscaled frames, a tile list's output,
+#     the film grain output) comes from its frame POOL. At each frame start the pool keeps only what is still held —
+#     the eight reference slots, the last decoded and last shown frames, the anchors, the grain output — and the rest
+#     is reused;
+#   - what outlives a frame is kept (dr_alloc_keep): the reference slots' saved blocks (their own copies), the sequence
+#     and camera headers (copied into AV1DEC_SEQBUF / CAMBUF), the lazily-built tables, the grain context.
+# The returned frame is therefore valid until the NEXT av1_decoder_decode call on the same decoder (a frame the
+# DPB still holds lives longer, but nothing promises that); consume it, or copy it, before then.
+# The frame start: everything the arena served is dead, and every pooled frame nothing holds is free again.
+fn av1_decoder_frame_start(dec): i64 {
+    var pool = load64(dec + AV1DEC_POOL);
+    if (pool == 0) { return 0; }   # a decoder without its memory (a test's unbounded reference): nothing to do
+    dr_frame_pool_sweep(pool);
+    var dpb = load64(dec + AV1DEC_DPB);
+    var i = 0;
+    while (i < AV1_NUM_REF_FRAMES) { dr_frame_pool_root(pool, av1_dpb_frame(dpb, i)); i = i + 1; }
+    dr_frame_pool_root(pool, load64(dec + AV1DEC_LAST));
+    dr_frame_pool_root(pool, load64(dec + AV1DEC_SHOWN));
+    var gc = load64(dec + AV1DEC_GRAIN);
+    if (gc != 0) { dr_frame_pool_root(pool, load64(gc + AV1GC_OUT)); }
+    var anch = load64(dec + AV1DEC_ANCH);
+    if (anch != 0) {
+        var j = 0;
+        while (j < load64(dec + AV1DEC_NANCH)) { dr_frame_pool_root(pool, load64(anch + (j * 8))); j = j + 1; }
+    }
+    dr_arena_reset(load64(dec + AV1DEC_ARENA));
+    store64(dec + AV1DEC_FH, 0);    # anything pending died with the arena
+    store64(dec + AV1DEC_FDC, 0);
+    return 0;
+}
+# copy the header record at src (n bytes) into the decoder's own buffer at field own_off (kept, made on first use);
+# returns the buffer, or 0 on OOM
+fn av1_decoder_own_copy(dec, own_off, src, n): i64 {
+    var own = load64(dec + own_off);
+    if (own == 0) {
+        own = dr_alloc_keep(n);
+        if (own == 0) { return 0; }
+        store64(dec + own_off, own);
+    }
+    if (own != src) { dr_copy(own, src, n); }
+    return own;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
 # one). Returns the handle, or 0 on OOM.
 fn av1_decoder_new(dpb): i64 {
+    dr_persist_begin();   # the decoder and everything it owns outlive every frame (and any enclosing scope)
+    var d = av1_decoder_new_in(dpb);
+    dr_persist_end();
+    return d;
+}
+fn av1_decoder_new_in(dpb): i64 {
     var d = dr_alloc(AV1DEC_SIZE);   # AV1DEC_SIZE bytes
     if (d == 0) { return 0; }
     memset(d, 0, AV1DEC_SIZE);
@@ -27050,11 +27497,21 @@ fn av1_decoder_new(dpb): i64 {
     if (ring == 0) { ring = av1_dpb_new(); }
     var refs = av1_ref_state_new();
     if ((ring == 0) || (refs == 0)) { return 0; }
+    var arena = dr_arena_new(1 << 20);   # 1 MiB chunks
+    var pool = dr_frame_pool_new();
+    var it = av1_obu_iter_init(d, 0);    # re-pointed at each call's buffer
+    if ((arena == 0) || (pool == 0) || (it == 0)) { return 0; }
     store64(d + AV1DEC_DPB, ring);
     store64(d + AV1DEC_REFS, refs);
     store64(d + AV1DEC_ERR, DR_OK);
+    store64(d + AV1DEC_ARENA, arena);
+    store64(d + AV1DEC_POOL, pool);
+    store64(d + AV1DEC_IT, it);
     return d;
 }
+# the decoder's memory, for a caller that bounds or reports it: the bytes its arena holds, and its pooled frames
+fn av1_decoder_arena_bytes(dec): i64 { return dr_arena_capacity(load64(dec + AV1DEC_ARENA)); }
+fn av1_decoder_pool_frames(dec): i64 { return dr_frame_pool_count(load64(dec + AV1DEC_POOL)); }
 fn av1_decoder_dpb(dec): i64 { return load64(dec + AV1DEC_DPB); }
 fn av1_decoder_refs(dec): i64 { return load64(dec + AV1DEC_REFS); }
 fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
@@ -27100,7 +27557,9 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
         if ((av1_seq_film_grain_present(seq) != 0) && (av1_fh_apply_grain(fh) != 0)) {
             var gc = load64(dec + AV1DEC_GRAIN);
             if (gc == 0) {
+                dr_persist_begin();   # the grain context is the decoder's for its whole life
                 gc = av1_grain_ctx_new();
+                dr_persist_end();
                 if (gc == 0) { return DR_ERR_OOM; }
                 store64(dec + AV1DEC_GRAIN, gc);
             }
@@ -27139,9 +27598,9 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
 # point (av1_decoder_set_operating_point) is dropped whole (5.3.1 drop_obu).
 #
 # The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
-# the decoder's reused grain frame, overwritten by the next grain output — consume it
-# before the next call. Without grain it is the DPB's own frame. Either way, do not
-# modify it.
+# the decoder's reused grain frame, else the decoded frame itself. Either way it is valid
+# until the NEXT call on this decoder (see MEMORY above) — consume it before then — and
+# must not be modified.
 #
 # On any parse/decode fault: returns 0 with *out_err set, and the error is latched
 # (see Av1Decoder). A null decoder or buffer, or a negative size, is DR_ERR_BOUNDS
@@ -27153,12 +27612,25 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     if (load64(dec + AV1DEC_ERR) != DR_OK) {
         store64(out_err, load64(dec + AV1DEC_ERR)); return 0;
     }
+    # the decoder's memory scope for the length of the call (MEMORY above), restored on every return
+    var prev_arena = dr_alloc_scope(load64(dec + AV1DEC_ARENA));
+    var prev_pool = dr_frame_pool_use(load64(dec + AV1DEC_POOL));
+    var f = av1_decoder_decode_in(dec, buf, sz, out_err);
+    dr_frame_pool_use(prev_pool);
+    dr_alloc_scope(prev_arena);
+    return f;
+}
+fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
     store64(dec + AV1DEC_SHOWN, 0);
     store64(dec + AV1DEC_NSHOWN, 0);
+    # nothing pending: whatever the last call left in the arena is dead
+    if ((load64(dec + AV1DEC_FH) == 0) && (load64(dec + AV1DEC_FDC) == 0)) {
+        dr_arena_reset(load64(dec + AV1DEC_ARENA));
+    }
     var dpb = load64(dec + AV1DEC_DPB);
     var refs = load64(dec + AV1DEC_REFS);
-    var it = av1_obu_iter_init(buf, sz);
-    if (it == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
+    var it = av1_obu_iter_reset(load64(dec + AV1DEC_IT), buf, sz);
+    if (it == 0) { return av1_decoder_fail(dec, DR_ERR_BOUNDS, out_err); }
     var otype = 0;
     var ooff = 0;
     var osize = 0;
@@ -27166,9 +27638,12 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
     while (rc == DR_OK) {
         var seq = load64(dec + AV1DEC_SEQ);
         var fh = load64(dec + AV1DEC_FH);
+        # the OBU header's fields, read NOW: its record is arena memory, and a frame start below rewinds the arena
         var xo = av1_obu_iter_obu(it);
-        if (av1_obu_in_operating_point(load64(dec + AV1DEC_OPIDC), otype, av1_obu_ext(xo), av1_obu_tid(xo),
-            av1_obu_sid(xo)) == 0) {
+        var oext = av1_obu_ext(xo);
+        var otid = av1_obu_tid(xo);
+        var osid = av1_obu_sid(xo);
+        if (av1_obu_in_operating_point(load64(dec + AV1DEC_OPIDC), otype, oext, otid, osid) == 0) {
             otype = 0 - 1;   # drop_obu( ) (5.3.1): not in the operating point, so none of the branches below sees it
         }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
@@ -27176,6 +27651,9 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             var nseq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            # the decoder's own copy: the parse is arena memory, and the sequence outlives every frame
+            nseq = av1_decoder_own_copy(dec, AV1DEC_SEQBUF, nseq, AV1_SEQ_SIZE);
+            if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
             store64(dec + AV1DEC_SEQ, nseq);
             # choose_operating_point( ) and OperatingPointIdc (5.5.1), for this coded video sequence
             var op = av1_seq_choose_operating_point(nseq, load64(dec + AV1DEC_OPREQ));
@@ -27188,12 +27666,13 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             # against — no tile group of its own is decoded (an OBU_FRAME's tile data, if any, is skipped, as
             # libaom does: its lightfield files carry a header-only OBU_FRAME), no reference update, no output.
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
-            var co = av1_obu_iter_obu(it);
             var cerr = 0;
-            var cfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(co), av1_obu_sid(co),
-              buf + ooff, osize, &cerr);
+            var cfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &cerr);
             if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
             if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            # the decoder's own copy: every tile list after it is a frame start, which rewinds the arena
+            cfh = av1_decoder_own_copy(dec, AV1DEC_CAMBUF, cfh, AV1FH_SIZE);
+            if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
             store64(dec + AV1DEC_CAMFH, cfh);
             otype = 0 - 1;   # handled: none of the branches below may see it
         }
@@ -27201,6 +27680,7 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             # a tile list only means something to the large-scale tile process, which needs AnchorFrames supplied
             # by the application: outside that mode it is refused, never silently skipped.
             if (load64(dec + AV1DEC_LST) == 0) { return av1_decoder_fail(dec, DR_ERR_UNSUPPORTED, out_err); }
+            av1_decoder_frame_start(dec);
             var lerr2 = 0;
             var lout = av1_decode_tile_list(dec, buf + ooff, osize, &lerr2);
             if (lout == 0) {
@@ -27213,10 +27693,9 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
-            var o = av1_obu_iter_obu(it);
+            av1_decoder_frame_start(dec);
             var ferr = 0;
-            var nfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o),
-              av1_obu_sid(o), buf + ooff, osize, &ferr);
+            var nfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { return av1_decoder_fail(dec, ferr, out_err); }
             if (nfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             store64(dec + AV1DEC_FH, nfh);
@@ -27235,10 +27714,9 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
         }
         if (otype == AV1_OBU_FRAME) {
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
-            var of = av1_obu_iter_obu(it);
+            av1_decoder_frame_start(dec);
             var frr = 0;
-            var ffh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(of),
-              av1_obu_sid(of), buf + ooff, osize, &frr);
+            var ffh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &frr);
             if (frr != DR_OK) { return av1_decoder_fail(dec, frr, out_err); }
             if (ffh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
@@ -27447,7 +27925,7 @@ fn av1_decoder_set_anchor(dec, idx, frame): i64 {
     if ((idx < 0) || (idx > 127)) { return DR_ERR_BOUNDS; }
     var a = load64(dec + AV1DEC_ANCH);
     if (a == 0) {
-        a = dr_alloc(128 * 8);   # 128 DrFrame pointers
+        a = dr_alloc_keep(128 * 8);   # 128 DrFrame pointers; kept, as the decoder's own
         if (a == 0) { return DR_ERR_OOM; }
         memset(a, 0, 128 * 8);
         store64(dec + AV1DEC_ANCH, a);
@@ -27528,6 +28006,9 @@ fn av1_decode_tile_list(dec, buf, sz, out_err): i64 {
     var sdpb = av1_dpb_new();
     if ((srefs == 0) || (sdpb == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     memcpy(srefs, refs, AV1REF_SIZE);
+    # the copy must not share the slots' OWN buffers: a save through it would write into the real slots (none
+    # happens — the tile list never finishes a frame — but the copy is not the slots' owner)
+    memset(srefs + AV1REF_OWN, 0, AV1REF_SIZE - AV1REF_OWN);
     var last = av1_fh_ref_frame_idx(fh, 0);
     store64(srefs + AV1REF_VALID + (last * 8), 1);
     store64(srefs + AV1REF_UPSCALED_W + (last * 8), av1_fh_upscaled_width(fh));
@@ -27957,7 +28438,7 @@ fn av1_intrabc_dv_valid(tile, r, c, sub_size, has_chroma, mv_row, mv_col): i64 {
 # to the left. Returns a scratch Av1Mv (1/8-sample units), overwritten by the next call.
 var Av1_IbcPred = 0;
 fn av1_ibc_pred_scratch(): i64 {   # one Av1Mv (0 on OOM; av1_tables_init builds it up front)
-    if (Av1_IbcPred == 0) { Av1_IbcPred = dr_alloc(16); }
+    if (Av1_IbcPred == 0) { Av1_IbcPred = dr_alloc_keep(16); }
     return Av1_IbcPred;
 }
 fn av1_intrabc_default_pred(mi_row, mi_row_start, sb128): i64 {

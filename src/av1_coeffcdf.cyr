@@ -25,7 +25,7 @@ fn av1_cdffill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_coeff_cdf_blob(): i64 {
     if (Av1_CoeffCdf != 0) { return Av1_CoeffCdf; }
-    var t = dr_alloc(3400 * 8);
+    var t = dr_alloc_keep(3400 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 31849, 32768, 0, 5892, 32768, 0, 12112, 32768);
     av1_cdffill8(t, 8, 0, 21935, 32768, 0, 20289, 32768, 0, 27473);
@@ -505,7 +505,7 @@ fn av1_coeff_base_eob_cdf(q, txsz_ctx, ptype, ctx): i64 {
 var Av1_CoeffBaseCdf = 0;
 fn av1_coeff_base_blob(): i64 {
     if (Av1_CoeffBaseCdf != 0) { return Av1_CoeffBaseCdf; }
-    var t = dr_alloc(8400 * 8);
+    var t = dr_alloc_keep(8400 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 4034, 8930, 12727, 32768, 0, 18082, 29741, 31877);
     av1_cdffill8(t, 8, 32768, 0, 12596, 26124, 30493, 32768, 0, 9446);
@@ -1574,7 +1574,7 @@ fn av1_coeff_base_cdf(q, txsz_ctx, ptype, ctx): i64 {
 var Av1_CoeffBrCdf = 0;
 fn av1_coeff_br_blob(): i64 {
     if (Av1_CoeffBrCdf != 0) { return Av1_CoeffBrCdf; }
-    var t = dr_alloc(4200 * 8);
+    var t = dr_alloc_keep(4200 * 8);
     if (t == 0) { return 0; }
     av1_cdffill8(t, 0, 14298, 20718, 24174, 32768, 0, 12536, 19601, 23789);
     av1_cdffill8(t, 8, 32768, 0, 8712, 15051, 19503, 32768, 0, 6170);

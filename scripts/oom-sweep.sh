@@ -9,7 +9,8 @@
 # without it).
 #
 #   scripts/oom-sweep.sh sites                     build the SITE-TAGGED harness: a copy of the tree in which every
-#                                                  dr_alloc call is dr_alloc_at(site, ...), so a trace run lists the
+#                                                  dr_alloc / dr_alloc_keep call is dr_alloc_at(site, keep, ...),
+#                                                  served exactly as before, so a trace run lists the
 #                                                  site of every allocation in order (build/oom/sites.txt maps them)
 #   scripts/oom-sweep.sh sweep NAME IVF MODE [LST] [MD5]
 #       MODE full   fail every k = 1..N
@@ -37,7 +38,7 @@ build_sites() {
     python3 -I - "$d" "$OUT/sites.txt" <<'PY' || return 1
 import re, glob, sys, os
 d, table = sys.argv[1], sys.argv[2]
-pat = re.compile(r'(?<![A-Za-z0-9_])dr_alloc\(')
+pat = re.compile(r'(?<![A-Za-z0-9_])dr_alloc(_keep)?\(')
 sites = []
 for f in sorted(glob.glob(d + '/src/*.cyr')):
     lines = open(f).read().split('\n')
@@ -48,7 +49,7 @@ for f in sorted(glob.glob(d + '/src/*.cyr')):
         code, com = (l, '') if h < 0 else (l[:h], l[h:])
         def tag(m):
             sites.append('%s:%d' % (os.path.basename(f), i + 1))
-            return 'dr_alloc_at(%d, ' % (len(sites) - 1)
+            return 'dr_alloc_at(%d, %d, ' % (len(sites) - 1, 1 if m.group(1) else 0)
         nc = pat.sub(tag, code)
         if nc != code:
             lines[i] = nc + com
@@ -59,14 +60,10 @@ anchor = 'fn dr_alloc_fail_at(n): i64 {'
 if s.count(anchor) != 1:
     sys.exit('oom-sweep: dr_alloc_fail_at not found once in src/drishti.cyr')
 s = s.replace(anchor, '''var Dr_Alloc_Trace = 0;
-fn dr_alloc_at(site, size): i64 {
-    Dr_Alloc_Calls = Dr_Alloc_Calls + 1;
+fn dr_alloc_at(site, keep, size): i64 {
     if (Dr_Alloc_Trace != 0) { print("T ", 2); print_num(site); print("\\n", 1); }
-    if (Dr_Alloc_Fail_Left > 0) {
-        Dr_Alloc_Fail_Left = Dr_Alloc_Fail_Left - 1;
-        if (Dr_Alloc_Fail_Left == 0) { print("OOMSITE ", 8); print_num(site); print("\\n", 1); return 0; }
-    }
-    return alloc(size);
+    if (dr_alloc_inject() != 0) { print("OOMSITE ", 8); print_num(site); print("\\n", 1); return 0; }
+    return dr_alloc_serve(size, keep);
 }
 fn dr_alloc_fail_at(n): i64 {
     if (n == 999999999) { Dr_Alloc_Trace = 1; n = 0; }''', 1)

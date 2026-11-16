@@ -79,21 +79,171 @@ fn drishti_version(): i64 {
 
 # ================================================================
 # dr_alloc — every allocation in src/ goes through here (0.8.5), so an allocation FAILURE can be injected and every
-# DR_ERR_OOM branch exercised. With injection off it is the stdlib alloc. dr_alloc_fail_at(n), n >= 1, makes the
-# n-th dr_alloc from then on return 0 (one failure, as if memory ran out at that call and only that call), then
-# carries on normally; dr_alloc_fail_at(0) turns injection off. dr_alloc_count() is the number of dr_alloc calls
-# since the last dr_alloc_fail_at. Test-only machinery: no decode or encode path calls dr_alloc_fail_at or
-# dr_alloc_sweep.
+# DR_ERR_OOM branch exercised, and so a decoder can serve its per-frame work from an arena. dr_alloc_fail_at(n),
+# n >= 1, makes the n-th dr_alloc / dr_alloc_keep from then on return 0 (one failure, as if memory ran out at that
+# call and only that call), then carries on normally; dr_alloc_fail_at(0) turns injection off. dr_alloc_count() is
+# the number of calls since the last dr_alloc_fail_at. Test-only machinery: no decode or encode path calls
+# dr_alloc_fail_at or dr_alloc_sweep.
+#
+# WHERE THE MEMORY COMES FROM. The stdlib allocator is a bump allocator: it never frees. Outside an allocation
+# scope (the default) dr_alloc is that allocator. A streaming decoder opens a scope (dr_alloc_scope) over its own
+# DrArena, and dr_alloc then serves from the arena, which the decoder rewinds at every frame start: a frame's tiles,
+# grids, CDF contexts and per-block records are dead once it is decoded, and served from the bump they grew memory
+# ~35-60 bytes per pixel per frame without bound (measured 0.8.5). What must outlive the frame is taken with
+# dr_alloc_keep, or inside dr_persist_begin / dr_persist_end: the lazily-built tables and persistent scratch, the
+# reference slots' saved state, the decoder's own records and its pooled frames (src/frame.cyr).
 # ================================================================
 var Dr_Alloc_Fail_Left = 0;   # 0 = off; else the countdown to the failing call
-var Dr_Alloc_Calls = 0;       # dr_alloc calls since the last dr_alloc_fail_at
-fn dr_alloc(size): i64 {
+var Dr_Alloc_Calls = 0;       # dr_alloc / dr_alloc_keep calls since the last dr_alloc_fail_at
+var Dr_Alloc_Arena = 0;       # the scope's DrArena (0 = no scope: the global allocator)
+var Dr_Alloc_Persist = 0;     # > 0: inside dr_persist_begin / end, dr_alloc bypasses the arena
+var Dr_Alloc_Poison = 0;      # 1: dr_arena_reset fills its chunks with 0xA5 first (a stale pointer reads garbage)
+var Dr_Alloc_Global = 0;      # bytes drishti has taken from the global allocator (arena chunks included)
+# 1 when this call must fail (counts it)
+fn dr_alloc_inject(): i64 {
     Dr_Alloc_Calls = Dr_Alloc_Calls + 1;
     if (Dr_Alloc_Fail_Left > 0) {
         Dr_Alloc_Fail_Left = Dr_Alloc_Fail_Left - 1;
-        if (Dr_Alloc_Fail_Left == 0) { return 0; }
+        if (Dr_Alloc_Fail_Left == 0) { return 1; }
     }
-    return alloc(size);
+    return 0;
+}
+# Fill / copy n bytes a WORD at a time (with a byte tail). The stdlib memset / memcpy move one byte per iteration;
+# the arena zeroes every allocation and a reference slot copies every block it saves, megabytes a frame, so the
+# word loop is what keeps the memory bound cheap. dst / src should be 8-aligned (every allocation is).
+fn dr_fill(dst, byte, n): i64 {
+    var w = byte & 255;
+    w = w | (w << 8);
+    w = w | (w << 16);
+    w = w | (w << 32);
+    var i = 0;
+    var nw = n & (0 - 8);
+    while (i < nw) { store64(dst + i, w); i = i + 8; }
+    while (i < n) { store8(dst + i, byte); i = i + 1; }
+    return dst;
+}
+fn dr_copy(dst, src, n): i64 {
+    var i = 0;
+    var nw = n & (0 - 8);
+    while (i < nw) { store64(dst + i, load64(src + i)); i = i + 8; }
+    while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return dst;
+}
+# the global allocator, counted
+fn dr_alloc_global(size): i64 {
+    var p = alloc(size);
+    if (p != 0) { Dr_Alloc_Global = Dr_Alloc_Global + ((size + 7) & (0 - 8)); }
+    return p;
+}
+fn dr_alloc_serve(size, keep): i64 {
+    if ((keep == 0) && (Dr_Alloc_Arena != 0) && (Dr_Alloc_Persist == 0)) {
+        return dr_arena_alloc(Dr_Alloc_Arena, size);
+    }
+    return dr_alloc_global(size);
+}
+fn dr_alloc(size): i64 {
+    if (dr_alloc_inject() != 0) { return 0; }
+    return dr_alloc_serve(size, 0);
+}
+# an allocation that outlives the current frame: always the global allocator, scope or not
+fn dr_alloc_keep(size): i64 {
+    if (dr_alloc_inject() != 0) { return 0; }
+    return dr_alloc_serve(size, 1);
+}
+# everything allocated between these (a persistent object graph built by code that calls plain dr_alloc) is kept
+fn dr_persist_begin(): i64 { Dr_Alloc_Persist = Dr_Alloc_Persist + 1; return 0; }
+fn dr_persist_end(): i64 {
+    if (Dr_Alloc_Persist > 0) { Dr_Alloc_Persist = Dr_Alloc_Persist - 1; }
+    return 0;
+}
+# open (a != 0) or close (0) an allocation scope; returns the previous scope's arena, to restore it
+fn dr_alloc_scope(a): i64 {
+    var prev = Dr_Alloc_Arena;
+    Dr_Alloc_Arena = a;
+    return prev;
+}
+fn dr_alloc_set_poison(on): i64 { Dr_Alloc_Poison = on; return 0; }
+fn dr_alloc_global_bytes(): i64 { return Dr_Alloc_Global; }
+
+# ================================================================
+# DrArena — a chain of chunks taken from the global allocator, bump-allocated. dr_arena_reset rewinds to the first
+# chunk and KEEPS the chain, so a loop that resets once per frame settles at its high-water mark and then takes no
+# more memory. Allocations are ZEROED: fresh bump memory always was, and code written against it must see no
+# difference. Chunk: { next, cap, data[ cap ] }. A request larger than the chunk size gets a chunk of its own.
+# ================================================================
+enum DrArenaOff {
+    DR_ARENA_FIRST = 0;    # the first chunk (0 until the first allocation)
+    DR_ARENA_CUR   = 8;    # the chunk being bumped
+    DR_ARENA_PTR   = 16;   # the bump pointer in it
+    DR_ARENA_END   = 24;   # its end
+    DR_ARENA_CHUNK = 32;   # the chunk size
+    DR_ARENA_SIZE  = 40;   # bytes
+}
+fn dr_arena_new(chunk_size): i64 {
+    var a = dr_alloc_keep(DR_ARENA_SIZE);   # DR_ARENA_SIZE bytes
+    if (a == 0) { return 0; }
+    memset(a, 0, DR_ARENA_SIZE);
+    var cs = chunk_size;
+    if (cs < 4096) { cs = 4096; }
+    store64(a + DR_ARENA_CHUNK, cs);
+    return a;
+}
+# make the arena's current chunk one with room for need bytes: the next chunk of the chain if it fits, else a new
+# one linked in after the current. 1, or 0 when the global allocator fails.
+fn dr_arena_grow(a, need): i64 {
+    var cur = load64(a + DR_ARENA_CUR);
+    var nxt = load64(a + DR_ARENA_FIRST);
+    if (cur != 0) { nxt = load64(cur); }
+    if ((nxt != 0) && (load64(nxt + 8) >= need)) {
+        store64(a + DR_ARENA_CUR, nxt);
+        store64(a + DR_ARENA_PTR, nxt + 16);
+        store64(a + DR_ARENA_END, nxt + 16 + load64(nxt + 8));
+        return 1;
+    }
+    var cap = load64(a + DR_ARENA_CHUNK);
+    if (need > cap) { cap = need; }
+    var ch = dr_alloc_global(cap + 16);
+    if (ch == 0) { return 0; }
+    store64(ch, nxt);
+    store64(ch + 8, cap);
+    if (cur == 0) { store64(a + DR_ARENA_FIRST, ch); } else { store64(cur, ch); }
+    store64(a + DR_ARENA_CUR, ch);
+    store64(a + DR_ARENA_PTR, ch + 16);
+    store64(a + DR_ARENA_END, ch + 16 + cap);
+    return 1;
+}
+fn dr_arena_alloc(a, size): i64 {
+    if (size <= 0) { return 0; }
+    var sz = (size + 7) & (0 - 8);
+    var p = load64(a + DR_ARENA_PTR);
+    if ((p == 0) || (sz > (load64(a + DR_ARENA_END) - p))) {
+        if (dr_arena_grow(a, sz) == 0) { return 0; }
+        p = load64(a + DR_ARENA_PTR);
+    }
+    store64(a + DR_ARENA_PTR, p + sz);
+    dr_fill(p, 0, sz);
+    return p;
+}
+# everything allocated from the arena is dead from here (poisoned first when Dr_Alloc_Poison is on)
+fn dr_arena_reset(a): i64 {
+    if (a == 0) { return 0; }
+    var ch = load64(a + DR_ARENA_FIRST);
+    if (Dr_Alloc_Poison != 0) {
+        var c = ch;
+        while (c != 0) { dr_fill(c + 16, 0xA5, load64(c + 8)); c = load64(c); }
+    }
+    store64(a + DR_ARENA_CUR, 0);
+    store64(a + DR_ARENA_PTR, 0);
+    store64(a + DR_ARENA_END, 0);
+    return 0;
+}
+# the bytes the arena holds (every chunk's capacity) — its high-water mark once a loop has settled
+fn dr_arena_capacity(a): i64 {
+    if (a == 0) { return 0; }
+    var total = 0;
+    var c = load64(a + DR_ARENA_FIRST);
+    while (c != 0) { total = total + load64(c + 8); c = load64(c); }
+    return total;
 }
 fn dr_alloc_fail_at(n): i64 {
     Dr_Alloc_Fail_Left = n;

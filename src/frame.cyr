@@ -118,8 +118,33 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
         store64(out_err, DR_ERR_BOUNDS);
         return 0;
     }
+    if (Dr_Frame_Pool != 0) {
+        return dr_frame_pool_take(Dr_Frame_Pool, width, height, alloc_w, alloc_h, num_planes, subx, suby,
+          bit_depth, border, out_err);
+    }
     var f = dr_alloc(DR_FRAME_SIZE);
     if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var p = 0;
+    while (p < num_planes) {
+        var buf = dr_alloc(dr_frame_plane_bytes(p, alloc_w, alloc_h, subx, suby, border));   # u16 samples
+        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        dr_frame_lay_plane(f, p, buf, width, height, alloc_w, alloc_h, subx, suby, border);
+        p = p + 1;
+    }
+    dr_frame_lay_header(f, width, height, num_planes, subx, suby, bit_depth, border);
+    return f;
+}
+# the bytes plane p's buffer needs: (allocated width + 2 * border) x (allocated height + 2 * border) u16 samples
+fn dr_frame_plane_bytes(p, alloc_w, alloc_h, subx, suby, border): i64 {
+    var apw = alloc_w;
+    var aph = alloc_h;
+    if (p > 0) {
+        apw = (alloc_w + subx) >> subx;
+        aph = (alloc_h + suby) >> suby;
+    }
+    return (apw + (2 * border)) * (aph + (2 * border)) * 2;
+}
+fn dr_frame_lay_header(f, width, height, num_planes, subx, suby, bit_depth, border): i64 {
     store64(f + DR_FRAME_NUM_PLANES, num_planes);
     store64(f + DR_FRAME_BIT_DEPTH, bit_depth);
     store64(f + DR_FRAME_WIDTH, width);
@@ -127,34 +152,165 @@ fn dr_frame_new_ext(width, height, alloc_w, alloc_h, num_planes, subx, suby, bit
     store64(f + DR_FRAME_SUBX, subx);
     store64(f + DR_FRAME_SUBY, suby);
     store64(f + DR_FRAME_BORDER, border);
-    var p = 0;
-    while (p < num_planes) {
-        var pw = width;
-        var ph = height;
-        var apw = alloc_w;
-        var aph = alloc_h;
-        if (p > 0) {
-            pw = (width + subx) >> subx;    # ceil(width / 2^subx)
-            ph = (height + suby) >> suby;
-            apw = (alloc_w + subx) >> subx;
-            aph = (alloc_h + suby) >> suby;
-        }
-        # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
-        var stride = apw + (2 * border);
-        var rows = aph + (2 * border);
-        var buf = dr_alloc(stride * rows * 2);   # u16 samples
-        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-        memset(buf, 0, stride * rows * 2);
-        # origin = sample (0,0): skip `border` rows and `border` columns.
-        var origin = buf + (((border * stride) + border) * 2);
-        store64(f + DR_FRAME_PLANE_PTR + (p * 8), origin);
-        store64(f + DR_FRAME_PLANE_W + (p * 8), pw);
-        store64(f + DR_FRAME_PLANE_H + (p * 8), ph);
-        store64(f + DR_FRAME_PLANE_STRIDE + (p * 8), stride);
-        store64(f + DR_FRAME_PLANE_AW + (p * 8), apw);
-        store64(f + DR_FRAME_PLANE_AH + (p * 8), aph);
-        p = p + 1;
+    return 0;
+}
+# lay plane p out in buf (at least dr_frame_plane_bytes) and zero it
+fn dr_frame_lay_plane(f, p, buf, width, height, alloc_w, alloc_h, subx, suby, border): i64 {
+    var pw = width;
+    var ph = height;
+    var apw = alloc_w;
+    var aph = alloc_h;
+    if (p > 0) {
+        pw = (width + subx) >> subx;    # ceil(width / 2^subx)
+        ph = (height + suby) >> suby;
+        apw = (alloc_w + subx) >> subx;
+        aph = (alloc_h + suby) >> suby;
     }
+    # the stride spans the ALLOCATED extent; the reported plane dims below stay visible.
+    var stride = apw + (2 * border);
+    var rows = aph + (2 * border);
+    dr_fill(buf, 0, stride * rows * 2);
+    # origin = sample (0,0): skip `border` rows and `border` columns.
+    store64(f + DR_FRAME_PLANE_PTR + (p * 8), buf + (((border * stride) + border) * 2));
+    store64(f + DR_FRAME_PLANE_W + (p * 8), pw);
+    store64(f + DR_FRAME_PLANE_H + (p * 8), ph);
+    store64(f + DR_FRAME_PLANE_STRIDE + (p * 8), stride);
+    store64(f + DR_FRAME_PLANE_AW + (p * 8), apw);
+    store64(f + DR_FRAME_PLANE_AH + (p * 8), aph);
+    return 0;
+}
+
+# ================================================================
+# DrFramePool (0.8.5) — the frames a streaming decoder allocates, reused instead of re-allocated. The bump
+# allocator cannot free, so a decoder that took a fresh frame (and a CDEF, a loop-restoration and an upscaled one)
+# for every coded frame grew memory by the frame size each time. While a pool is ACTIVE (dr_frame_pool_use),
+# dr_frame_new / dr_frame_new_ext take from it: a frame no root holds whose plane buffers are large enough is laid
+# out again and zeroed (exactly what a fresh one would hold), else a new one is kept (dr_alloc_keep) and
+# registered. The owner decides what is live: dr_frame_pool_sweep frees every frame, then dr_frame_pool_root marks
+# each frame still held (a decoder: its reference slots, its output, its anchors) before the next one is taken.
+# Entry: { frame, in_use, buf[ 3 ], cap[ 3 ] } (8 u64): the plane buffers and their capacities in bytes.
+# ================================================================
+enum DrFramePoolOff {
+    DR_FPOOL_N     = 0;    # entries in use of the array
+    DR_FPOOL_CAP   = 8;    # the entry array's capacity
+    DR_FPOOL_ENT   = 16;   # the entry array (DR_FPOOL_CAP * 64 bytes)
+    DR_FPOOL_SIZE  = 24;   # bytes
+    DR_FPENT_FRAME = 0;
+    DR_FPENT_INUSE = 8;
+    DR_FPENT_BUF   = 16;   # [3]
+    DR_FPENT_BCAP  = 40;   # [3]
+    DR_FPENT_SIZE  = 64;
+}
+var Dr_Frame_Pool = 0;   # the active pool (0 = none: dr_frame_new allocates as it always did)
+fn dr_frame_pool_new(): i64 {
+    var pool = dr_alloc_keep(DR_FPOOL_SIZE);   # DR_FPOOL_SIZE bytes
+    var ent = dr_alloc_keep(16 * DR_FPENT_SIZE);   # 16 entries
+    if ((pool == 0) || (ent == 0)) { return 0; }
+    store64(pool + DR_FPOOL_N, 0);
+    store64(pool + DR_FPOOL_CAP, 16);
+    store64(pool + DR_FPOOL_ENT, ent);
+    return pool;
+}
+# make pool the active one (0: none); returns the previously active pool, to restore it
+fn dr_frame_pool_use(pool): i64 {
+    var prev = Dr_Frame_Pool;
+    Dr_Frame_Pool = pool;
+    return prev;
+}
+fn dr_frame_pool_count(pool): i64 { return load64(pool + DR_FPOOL_N); }
+fn dr_frame_pool_in_use(pool): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        n = n + load64(load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE) + DR_FPENT_INUSE);
+        i = i + 1;
+    }
+    return n;
+}
+# every frame free: the owner roots what it still holds before the next frame is taken
+fn dr_frame_pool_sweep(pool): i64 {
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        store64(load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE) + DR_FPENT_INUSE, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+# frame f is still held (a frame the pool does not own, or 0, is ignored)
+fn dr_frame_pool_root(pool, f): i64 {
+    if (f == 0) { return 0; }
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        var e = load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE);
+        if (load64(e + DR_FPENT_FRAME) == f) { store64(e + DR_FPENT_INUSE, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn dr_frame_pool_take(pool, width, height, alloc_w, alloc_h, num_planes, subx, suby, bit_depth, border,
+  out_err): i64 {
+    # the best fit: the free entry with the same plane count whose every plane buffer is large enough, and the
+    # smallest total capacity (a large frame stays free for a large request)
+    var best = 0;
+    var best_cap = 0;
+    var i = 0;
+    while (i < load64(pool + DR_FPOOL_N)) {
+        var e = load64(pool + DR_FPOOL_ENT) + (i * DR_FPENT_SIZE);
+        var f0 = load64(e + DR_FPENT_FRAME);
+        if ((load64(e + DR_FPENT_INUSE) == 0) && (dr_frame_num_planes(f0) == num_planes)) {
+            var fits = 1;
+            var tot = 0;
+            var p = 0;
+            while (p < num_planes) {
+                var need = dr_frame_plane_bytes(p, alloc_w, alloc_h, subx, suby, border);
+                if (load64(e + DR_FPENT_BCAP + (p * 8)) < need) { fits = 0; }
+                tot = tot + load64(e + DR_FPENT_BCAP + (p * 8));
+                p = p + 1;
+            }
+            if ((fits == 1) && ((best == 0) || (tot < best_cap))) { best = e; best_cap = tot; }
+        }
+        i = i + 1;
+    }
+    if (best != 0) {
+        var bf = load64(best + DR_FPENT_FRAME);
+        var bp = 0;
+        while (bp < num_planes) {
+            dr_frame_lay_plane(bf, bp, load64(best + DR_FPENT_BUF + (bp * 8)), width, height, alloc_w, alloc_h, subx,
+              suby, border);
+            bp = bp + 1;
+        }
+        dr_frame_lay_header(bf, width, height, num_planes, subx, suby, bit_depth, border);
+        store64(best + DR_FPENT_INUSE, 1);
+        return bf;
+    }
+    # a new frame, kept: the pool reuses it for the decoder's life
+    if (load64(pool + DR_FPOOL_N) == load64(pool + DR_FPOOL_CAP)) {
+        var ncap = load64(pool + DR_FPOOL_CAP) * 2;
+        var nent = dr_alloc_keep(ncap * DR_FPENT_SIZE);
+        if (nent == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        memcpy(nent, load64(pool + DR_FPOOL_ENT), load64(pool + DR_FPOOL_N) * DR_FPENT_SIZE);
+        store64(pool + DR_FPOOL_ENT, nent);
+        store64(pool + DR_FPOOL_CAP, ncap);
+    }
+    var f = dr_alloc_keep(DR_FRAME_SIZE);
+    if (f == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    var ne = load64(pool + DR_FPOOL_ENT) + (load64(pool + DR_FPOOL_N) * DR_FPENT_SIZE);
+    memset(ne, 0, DR_FPENT_SIZE);
+    var q = 0;
+    while (q < num_planes) {
+        var nb = dr_frame_plane_bytes(q, alloc_w, alloc_h, subx, suby, border);
+        var buf = dr_alloc_keep(nb);   # u16 samples
+        if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        dr_frame_lay_plane(f, q, buf, width, height, alloc_w, alloc_h, subx, suby, border);
+        store64(ne + DR_FPENT_BUF + (q * 8), buf);
+        store64(ne + DR_FPENT_BCAP + (q * 8), nb);
+        q = q + 1;
+    }
+    dr_frame_lay_header(f, width, height, num_planes, subx, suby, bit_depth, border);
+    # registered only once whole, so a failed take leaves no half-built entry behind
+    store64(ne + DR_FPENT_FRAME, f);
+    store64(ne + DR_FPENT_INUSE, 1);
+    store64(pool + DR_FPOOL_N, load64(pool + DR_FPOOL_N) + 1);
     return f;
 }
 

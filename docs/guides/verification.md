@@ -83,6 +83,14 @@ A wrong default value is fully symmetric and invisible.
 > **Do:** diff every default table per-value against §10 (that is the ground truth), and
 > keep the round-trip for what it does prove: encoder/decoder inverse-ness.
 
+The same trap one level up: 0.8.5's memory-bound test fed a stream five times through one decoder
+and required every pass to equal pass 1. A mutant that dropped the reference slots from the frame
+pool's roots corrupted pass 1 as well, and every pass agreed with it. The test went red only once
+the oracle was an independent decoder, one with no arena and no pool (the old memory model).
+
+> **Do:** a "same as the first run" check needs a first run that was right. Compare with an
+> independent decoder, or with the reference md5s.
+
 ### Gated code — a closed gate must consume nothing
 
 If reader and writer disagree about how many symbols a *closed* gate consumes, the

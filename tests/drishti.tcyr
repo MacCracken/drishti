@@ -209,6 +209,68 @@ fn test_dr_alloc_sweep() {
     return 0;
 }
 
+# ---- the frame arena and the allocation scope (0.8.5) ----
+fn test_dr_arena() {
+    var a = dr_arena_new(4096);
+    assert_neq(a, 0, "an arena");
+    assert_eq(dr_arena_capacity(a), 0, "no chunk until the first allocation");
+    var p1 = dr_arena_alloc(a, 100);
+    var p2 = dr_arena_alloc(a, 8);
+    assert_eq(p2 - p1, 104, "bump: 100 rounds up to 104 (8-aligned)");
+    assert_eq(dr_arena_capacity(a), 4096, "one 4096-byte chunk");
+    store64(p1, 77);
+    var big = dr_arena_alloc(a, 10000);
+    assert_eq(dr_arena_capacity(a), 4096 + 10000, "a request past the chunk size gets a chunk of its own");
+    assert_eq(load64(big + 9992), 0, "allocations are zeroed (to the last word)");
+    assert_eq(dr_arena_alloc(a, 0), 0, "size 0 -> 0, as alloc");
+    dr_arena_reset(a);
+    var q1 = dr_arena_alloc(a, 100);
+    assert_eq(q1, p1, "reset rewinds: the first allocation after it reuses the first chunk");
+    assert_eq(load64(q1), 0, "...zeroed again (77 was written there)");
+    var qb = dr_arena_alloc(a, 10000);
+    assert_eq(qb, big, "...and the chain is kept: the big chunk is reused, not re-taken");
+    assert_eq(dr_arena_capacity(a), 4096 + 10000, "the capacity settles: a reset loop takes nothing new");
+    store64(q1 + 8, 5);
+    dr_alloc_set_poison(1);
+    dr_arena_reset(a);
+    dr_alloc_set_poison(0);
+    assert_eq(load64(q1 + 8), 0xA5A5A5A5A5A5A5A5, "poison: a reset fills the old memory with 0xA5");
+    return 0;
+}
+fn test_dr_alloc_scope() {
+    var a = dr_arena_new(65536);
+    var g0 = dr_alloc_global_bytes();
+    var prev = dr_alloc_scope(a);
+    assert_eq(prev, 0, "no scope was open");
+    var p = dr_alloc(64);
+    assert_eq(dr_arena_capacity(a), 65536, "in a scope, dr_alloc takes from the arena");
+    var g1 = dr_alloc_global_bytes();
+    var q = dr_alloc(64);
+    assert_eq(q - p, 64, "...bump-allocated");
+    assert_eq(dr_alloc_global_bytes(), g1, "...and takes nothing more from the global allocator");
+    var k = dr_alloc_keep(64);
+    assert_eq(dr_alloc_global_bytes(), g1 + 64, "dr_alloc_keep: the global allocator, scope or not");
+    dr_persist_begin();
+    var pk = dr_alloc(32);
+    dr_persist_end();
+    assert_eq(dr_alloc_global_bytes(), g1 + 96, "inside dr_persist_begin / end, dr_alloc is kept too");
+    assert_neq(pk, 0, "...and allocates");
+    dr_persist_end();   # unbalanced: harmless
+    var r = dr_alloc(32);
+    assert_eq(dr_alloc_global_bytes(), g1 + 96, "after dr_persist_end, back to the arena");
+    dr_alloc_fail_at(1);
+    assert_eq(dr_alloc(32), 0, "injection fails an arena allocation like any other");
+    dr_alloc_fail_at(1);
+    assert_eq(dr_alloc_keep(32), 0, "...and a kept one");
+    dr_alloc_fail_at(0);
+    assert_eq(dr_alloc_scope(prev), a, "closing returns the scope's arena");
+    var g2 = dr_alloc_global_bytes();
+    dr_alloc(16);
+    assert_eq(dr_alloc_global_bytes(), g2 + 16, "outside a scope, the global allocator");
+    assert_gt(g1, g0, "the arena's chunk was counted when it was taken");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("error codes");
@@ -228,6 +290,9 @@ fn main() {
     test_group("OOM fault injection");
     test_dr_alloc_inject();
     test_dr_alloc_sweep();
+    test_group("frame arena and allocation scope");
+    test_dr_arena();
+    test_dr_alloc_scope();
     return assert_summary();
 }
 

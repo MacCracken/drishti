@@ -231,9 +231,21 @@ fn test_tmvs_save_hook() {
     assert_eq(load64(oe), DR_OK, "tmvs hook: inter frame decodes");
     assert_eq(out != 0, 1, "tmvs hook: frame returned");
     assert_eq(av1_ref_saved_mf(refs, 0) != 0, 1, "tmvs hook: the save FIRED (slot 0 non-null)");
-    assert_eq(av1_ref_saved_mf(refs, 5), av1_ref_saved_mf(refs, 0),
-      "tmvs hook: all refreshed slots ALIAS one buffer");
+    # each refreshed slot holds its own COPY of the one saved field (0.8.5: it was one aliased buffer)
+    assert_neq(av1_ref_saved_mf(refs, 5), av1_ref_saved_mf(refs, 0), "tmvs hook: slot 5 holds its own copy");
+    assert_eq(it_words_eq(av1_ref_saved_mf(refs, 5), av1_ref_saved_mf(refs, 0), (16 + (8 * 8 * 24)) / 8), 1,
+      "tmvs hook: ...of the same field, word for word (header + 8x8 cells)");
     return 0;
+}
+
+fn it_words_eq(a, b, n): i64 {
+    if ((a == 0) || (b == 0)) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load64(a + (i * 8)) != load64(b + (i * 8))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # THE COPIED SEGMENT MAP through the FRAME driver (0.8.2): an inter frame with segmentation_update_map 0
@@ -258,7 +270,7 @@ fn test_frame_copied_segmap() {
     var i = 0;
     while (i < 256) { store64(prev + (i * 8), 2); i = i + 1; }
     store64(prev + (((5 * 16) + 5) * 8), 1);
-    av1_ref_set_saved_segids(refs, 0, prev);
+    av1_ref_set_saved_segids(refs, 0, prev, 256 * 8);
     store64(fh + AV1FH_PRIMARY_REF_FRAME, 0);  # -> slot ref_frame_idx[ 0 ] = 0
     store64(fh + AV1FH_SEG_ENABLED, 1);
     store64(fh + AV1FH_SEG_UPDATE_MAP, 0);     # the copied map: no segment symbol anywhere
@@ -291,8 +303,12 @@ fn test_frame_copied_segmap() {
     var out = av1_frame_dec_finish(fdc, oe);
     assert_eq(load64(oe), DR_OK, "copied-map frame finishes");
     assert_eq(out != 0, 1, "frame returned");
-    assert_eq(av1_ref_saved_segids(refs, 0), prev, "slot 0 saved PrevSegmentIds itself (7.4 step 7), not the stamp");
-    assert_eq(av1_ref_saved_segids(refs, 7), prev, "every refreshed slot aliases it");
+    # slots hold COPIES (0.8.5): the saved map's CONTENT is PrevSegmentIds (2 everywhere, 1 at (5,5)), not the stamp
+    # (1 over the whole footprint)
+    assert_eq(it_words_eq(av1_ref_saved_segids(refs, 0), prev, 256), 1,
+      "slot 0 saved PrevSegmentIds itself (7.4 step 7), not the stamp");
+    assert_eq(load64(av1_ref_saved_segids(refs, 0)), 2, "...so (0,0) holds 2, where the stamp wrote 1");
+    assert_eq(it_words_eq(av1_ref_saved_segids(refs, 7), prev, 256), 1, "every refreshed slot holds it");
     return 0;
 }
 

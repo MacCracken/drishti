@@ -1476,8 +1476,9 @@ fn test_frame_palette_decode() {
 
 # C1 (7.20): decoding a frame through the frame path SAVES its CDFs into every DPB slot its
 # refresh_frame_flags marks (and leaves the others null), so a future frame can inherit them.
-# Witnesses the av1_frame_dec_finish save loop + its refresh_frame_flags gating + the one-bundle
-# aliasing. (The save/load COPY correctness + load-bearingness are pinned by test_cdf_inheritance.)
+# Witnesses the av1_frame_dec_finish save loop + its refresh_frame_flags gating, and that each refreshed
+# slot holds its OWN copy of the one saved bundle (0.8.5: it was one bundle aliased into every slot). (The
+# save/load COPY correctness + load-bearingness are pinned by test_cdf_inheritance.)
 fn test_cdf_save_populates_slots() {
     var olen = 0;
     var out = frame_enc_keyframe(&olen);
@@ -1497,8 +1498,10 @@ fn test_cdf_save_populates_slots() {
         assert_eq(av1_ref_saved_cdf(refs, si), 0, "CDF save: every un-refreshed high slot stays null");
         si = si + 1;
     }
-    assert_eq(av1_ref_saved_cdf(refs, 0), av1_ref_saved_cdf(refs, 2),
-      "CDF save: ONE bundle is aliased into every refreshed slot");
+    assert_neq(av1_ref_saved_cdf(refs, 0), av1_ref_saved_cdf(refs, 2),
+      "CDF save: each refreshed slot holds its own copy (not one aliased bundle)");
+    assert_eq(ctx_bundles_equal(av1_ref_saved_cdf(refs, 0), av1_ref_saved_cdf(refs, 2)), 1,
+      "CDF save: ...of the same bundle, word for word");
     # this keyframe has disable_frame_end_update_cdf=1 (forced by disable_cdf_update=1), so 7.20 saves the
     # frame's INITIAL context — the bundle's coeff region equals a fresh q-bucket default, not adapted CDFs.
     var b = av1_ref_saved_cdf(refs, 0);
@@ -1567,8 +1570,8 @@ fn ctx_decode(t0, l0, t1, l1, ctx, dfeuc): i64 {
     assert_eq(load64(oe), DR_OK, "context tile: the adapting 2-tile keyframe decodes");
     assert_eq(frame != 0, 1, "context tile: frame returned");
     if (av1_ref_saved_cdf(refs, 0) == 0) { return av1_cdf_bundle_new(); }   # keep a failed decode from a null deref
-    assert_eq(av1_ref_saved_cdf(refs, 7), av1_ref_saved_cdf(refs, 0),
-      "context tile: one bundle aliased into all slots");
+    assert_eq(ctx_bundles_equal(av1_ref_saved_cdf(refs, 7), av1_ref_saved_cdf(refs, 0)), 1,
+      "context tile: every slot holds a copy of the one saved bundle");
     return av1_ref_saved_cdf(refs, 0);
 }
 fn ctx_bundles_equal(a, b): i64 {
@@ -1888,6 +1891,77 @@ fn test_decoder_oom() {
     return 0;
 }
 
+# ---- THE MEMORY BOUND (0.8.5): one decoder fed the same stream again and again settles at a fixed footprint ----
+# Each pass re-feeds every unit of a committed reproducer (it opens with a sequence header and a keyframe, so a
+# pass restarts the stream cleanly) through the SAME decoder, with the arena POISONED at every reset. Every pass
+# must show the pictures of an UNBOUNDED decoder (no arena, no pool: the pre-0.8.5 model) — a stale pointer into
+# reclaimed memory would read 0xA5 garbage — and from
+# the third pass on the decoder must take NOTHING from the global allocator (pass 2 may still grow: it starts with
+# pass 1's DPB held, which pass 1 never had). Before 0.8.5 every pass took the whole stream's memory again.
+fn dec_mem_pass(dec, buf, len, out_digest): i64 {
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, len, &e);
+    if (r == 0) { return 0 - 1; }
+    var d = 7;
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    var bytes = 0;
+    while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+        var derr = 0;
+        var g0 = dr_alloc_global_bytes();
+        var f = av1_decoder_decode(dec, pp, ps, &derr);
+        bytes = bytes + (dr_alloc_global_bytes() - g0);
+        if (derr != DR_OK) { return 0 - 2; }
+        if (f != 0) { d = dec_oom_digest(f, d); }
+    }
+    store64(out_digest, d);
+    return bytes;
+}
+fn dec_mem_case(path, what): i64 {
+    var buf = alloc(65536);   # bytes; the reproducers are under 64 KB
+    var len = file_read_all(path, buf, 65536);
+    assert_gt(len, 32, "the reproducer reads");
+    # the ORACLE: a decoder with neither arena nor pool — every allocation from the global allocator, nothing ever
+    # reused, i.e. the memory model before 0.8.5. Every bounded pass must show exactly its pictures.
+    var ref = av1_decoder_new(0);
+    store64(ref + AV1DEC_ARENA, 0);
+    store64(ref + AV1DEC_POOL, 0);
+    var dref = 0;
+    dec_mem_pass(ref, buf, len, &dref);
+    var dec = av1_decoder_new(0);
+    dr_alloc_set_poison(1);
+    var d1 = 0;
+    var b1 = dec_mem_pass(dec, buf, len, &d1);
+    assert_gt(b1, 0, "pass 1 builds the decoder's memory");
+    assert_eq(d1, dref, "pass 1 shows the unbounded decoder's pictures");
+    var d2 = 0;
+    dec_mem_pass(dec, buf, len, &d2);
+    var grew = 0;
+    var same = 1;
+    var arena = av1_decoder_arena_bytes(dec);
+    var p = 3;
+    while (p <= 5) {
+        var dp = 0;
+        grew = grew + dec_mem_pass(dec, buf, len, &dp);
+        if (dp != dref) { same = 0; }
+        p = p + 1;
+    }
+    dr_alloc_set_poison(0);
+    assert_eq(d2, dref, what);
+    assert_eq(same, 1, "...passes 3-5 show the same pictures too, with the arena poisoned at every reset");
+    assert_eq(grew, 0, "...and from pass 3 on take NOTHING from the global allocator");
+    assert_eq(av1_decoder_arena_bytes(dec), arena, "...the arena has settled");
+    return 0;
+}
+fn test_decoder_memory_bound() {
+    dec_mem_case("tests/repro/inter-6frame.ivf", "inter-6frame: pass 2 = the unbounded decoder");
+    dec_mem_case("tests/repro/srmin-16x16.ivf", "srmin-16x16 (superres upscale frames): = the unbounded decoder");
+    dec_mem_case("tests/repro/fg-lag-96x64.ivf", "fg-lag-96x64 (film grain output): = the unbounded decoder");
+    dec_mem_case("tests/repro/svc-l2t3-128x96.ivf", "svc-l2t3-128x96 (two frames a call): = the unbounded decoder");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("silent-mis-decode rejects (0.7.116)");
@@ -1948,6 +2022,8 @@ fn main() {
     test_obus_metadata_padding_skipped();
     test_group("OOM fault injection");
     test_decoder_oom();
+    test_group("the memory bound");
+    test_decoder_memory_bound();
     return assert_summary();
 }
 

@@ -587,18 +587,18 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
     var result = av1_apply_loop_filters(tile0, fh, seq, load64(fdc + AV1FDEC_LR_PARAMS), &ferr);
     if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
     # TEMPORAL-MV PRODUCER (0.7.102, spec 7.19/7.20): save this inter frame's per-8x8 motion field into the
-    # DPB slots it refreshes, so a FUTURE frame's motion_field_estimation (7.9) can read it. Output-neutral
-    # — nothing reads AV1REF_SAVED_MF yet (the estimation + scan are 0.7.103/104). Intra/key frames leave
-    # the slots null (no MVs to save). One arena buffer is aliased into every refreshed slot (never freed;
-    # no later frame mutates it — the reducer allocs a fresh buffer per frame). The MI grid lives on tile0
-    # (the loop filters do not mutate it, so this after-filter placement is fine).
+    # DPB slots it refreshes, so a FUTURE frame's motion_field_estimation (7.9) can read it. Intra/key frames
+    # save none. The field is reduced into a frame buffer, then COPIED into each refreshed slot's own buffer
+    # (av1_ref_set_saved_mf, 0.8.5: it was one buffer aliased into every slot and never freed). The MI grid
+    # lives on tile0 (the loop filters do not mutate it, so this after-filter placement is fine).
     var refs = load64(fdc + AV1FDEC_REFS);
     if ((refs != 0) && (av1_fh_frame_is_intra(fh) == 0)) {
         var grid = load64(tile0 + AV1TILE_MVGRID);
         if (grid != 0) {
             var fmi_cols = av1_fh_mi_cols(fh);
             var fmi_rows = av1_fh_mi_rows(fh);
-            var buf = dr_alloc(16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24));
+            var mf_bytes = 16 + ((fmi_rows >> 1) * (fmi_cols >> 1) * 24);
+            var buf = dr_alloc(mf_bytes);
             # an OOM here must fail the frame: skipping the save left the slots' previous fields in place, and
             # a later frame's motion-field estimation then projected a STALE field (silent mis-decode, 0.8.5).
             if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
@@ -606,17 +606,20 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
             var rff = av1_fh_refresh_frame_flags(fh);
             var i = 0;
             while (i < 8) {
-                if (((rff >> i) & 1) != 0) { av1_ref_set_saved_mf(refs, i, buf); }
+                if (((rff >> i) & 1) != 0) {
+                    var me = av1_ref_set_saved_mf(refs, i, buf, mf_bytes);
+                    if (me != DR_OK) { store64(out_err, me); return 0; }
+                }
                 i = i + 1;
             }
         }
     }
     # SavedSegmentIds (7.20), with the 7.4 step-7 copy folded in. A frame that kept its map (segmentation_enabled
     # && !segmentation_update_map) ENDS with SegmentIds = PrevSegmentIds exactly, so its slots save
-    # PrevSegmentIds itself (aliased — never mutated) rather than the per-block minimums the decode stamped:
-    # those minimums are what THIS frame's deblocker reads, and step 7 runs after the loop filter. An
-    # unsegmented frame's map is all zero (every block's segment_id is 0), saved as 0. One map pointer is
-    # aliased into every refreshed slot; the decode grid is per frame and never written after this.
+    # PrevSegmentIds itself rather than the per-block minimums the decode stamped: those minimums are what
+    # THIS frame's deblocker reads, and step 7 runs after the loop filter. An unsegmented frame's map is all
+    # zero (every block's segment_id is 0), saved as 0. Each refreshed slot COPIES the map into its own buffer
+    # (0.8.5); PrevSegmentIds has the current frame's dimensions (av1_frame_prev_segids checks), so one size.
     if (refs != 0) {
         var save_ids = 0;
         if (av1_fh_segmentation_enabled(fh) != 0) {
@@ -626,7 +629,10 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
         var srff = av1_fh_refresh_frame_flags(fh);
         var si = 0;
         while (si < 8) {
-            if (((srff >> si) & 1) != 0) { av1_ref_set_saved_segids(refs, si, save_ids); }
+            if (((srff >> si) & 1) != 0) {
+                var sse = av1_ref_set_saved_segids(refs, si, save_ids, av1_fh_mi_rows(fh) * av1_fh_mi_cols(fh) * 8);
+                if (sse != DR_OK) { store64(out_err, sse); return 0; }
+            }
             si = si + 1;
         }
     }
@@ -637,8 +643,8 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
     #  - disable_frame_end_update_cdf == 1: save the frame's INITIAL CDFs, NOT the adapted ones — the
     #    q-bucketed defaults (primary_ref_frame == NONE) or the inherited source bundle (otherwise).
     #    Reconstructed here (tile-independent), so this needs no per-tile pre-decode snapshot.
-    # Runs for intra + inter (a keyframe's CDFs are inheritable). One bundle is aliased into every
-    # refreshed slot — never mutated after (the inherit COPIES out of it).
+    # Runs for intra + inter (a keyframe's CDFs are inheritable). Each refreshed slot COPIES the bundle into its
+    # own buffer (0.8.5; it was one bundle aliased into every slot, never freed).
     if (refs != 0) {
         var cdfb = load64(fdc + AV1FDEC_CTX_CDF);
         var serr = DR_OK;
@@ -659,7 +665,10 @@ fn av1_frame_dec_finish(fdc, out_err): i64 {
         var crff = av1_fh_refresh_frame_flags(fh);
         var ci = 0;
         while (ci < 8) {
-            if (((crff >> ci) & 1) != 0) { av1_ref_set_saved_cdf(refs, ci, cdfb); }
+            if (((crff >> ci) & 1) != 0) {
+                var cse = av1_ref_set_saved_cdf(refs, ci, cdfb);
+                if (cse != DR_OK) { store64(out_err, cse); return 0; }
+            }
             ci = ci + 1;
         }
     }

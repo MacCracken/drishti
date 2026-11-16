@@ -211,6 +211,18 @@ fn av1_obu_iter_init(buf, len): i64 {
     return it;
 }
 
+# Re-point an existing iterator at buf[0..len) (a streaming decoder keeps one for its whole life rather than
+# allocating one per call). Returns it, or 0 on a null iterator / negative len.
+fn av1_obu_iter_reset(it, buf, len): i64 {
+    if ((it == 0) || (len < 0)) { return 0; }
+    store64(it, buf);
+    store64(it + 8, len);
+    store64(it + 16, 0);
+    store64(it + 24, DR_OK);
+    store64(it + 32, 0);
+    return it;
+}
+
 # Sticky error code (DR_OK until a fault).
 fn av1_obu_iter_err(it): i64 { return load64(it + 24); }
 

@@ -22,3 +22,4 @@ Decisions about drishti — what we chose, the context, and the consequences we 
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-one-repo-module-per-codec.md) | One repo, module-per-codec (the shravan model) | Accepted |
+| [0002](0002-decoder-memory-frame-arena-and-pool.md) | Decoder memory: a frame arena and a frame pool, not per-object freeing | Accepted |

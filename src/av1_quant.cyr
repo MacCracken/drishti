@@ -27,7 +27,7 @@ fn av1_qfill8(t, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 
 fn av1_dc_qlookup(): i64 {
     if (Av1_DcQ != 0) { return Av1_DcQ; }
-    var t = dr_alloc(768 * 8);
+    var t = dr_alloc_keep(768 * 8);
     if (t == 0) { return 0; }
     av1_qfill8(t, 0, 4, 8, 8, 9, 10, 11, 12, 12);
     av1_qfill8(t, 8, 13, 14, 15, 16, 17, 18, 19, 19);
@@ -131,7 +131,7 @@ fn av1_dc_qlookup(): i64 {
 
 fn av1_ac_qlookup(): i64 {
     if (Av1_AcQ != 0) { return Av1_AcQ; }
-    var t = dr_alloc(768 * 8);
+    var t = dr_alloc_keep(768 * 8);
     if (t == 0) { return 0; }
     av1_qfill8(t, 0, 4, 8, 9, 10, 11, 12, 13, 14);
     av1_qfill8(t, 8, 15, 16, 17, 18, 19, 20, 21, 22);

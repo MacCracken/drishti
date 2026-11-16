@@ -142,7 +142,7 @@ fn av1_mvcdf_put_class(p): i64 {
 var AV1_MVBIT_VALS = 0;
 fn av1_mvbit_vals(): i64 {
     if (AV1_MVBIT_VALS != 0) { return AV1_MVBIT_VALS; }
-    var p = dr_alloc(10 * 8);
+    var p = dr_alloc_keep(10 * 8);
     if (p == 0) { return 0; }   # OOM: av1_tables_init reports it
     store64(p + 0, 17408);  store64(p + 8, 17920);  store64(p + 16, 18944);
     store64(p + 24, 20480); store64(p + 32, 22528); store64(p + 40, 24576);
@@ -191,7 +191,7 @@ fn av1_mvcdf_new(): i64 {
 var AV1_MVCDF_BLOB = 0;
 fn av1_mvcdf_blob(): i64 {
     if (AV1_MVCDF_BLOB != 0) { return AV1_MVCDF_BLOB; }
-    var cc = dr_alloc(AV1MVCDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1MVCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_mvcdf_fill(cc);
     AV1_MVCDF_BLOB = cc;
@@ -554,7 +554,7 @@ fn av1_imcdf_new(): i64 {
 var AV1_IMCDF_BLOB = 0;
 fn av1_imcdf_blob(): i64 {
     if (AV1_IMCDF_BLOB != 0) { return AV1_IMCDF_BLOB; }
-    var cc = dr_alloc(AV1IMCDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1IMCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_imcdf_fill(cc);
     AV1_IMCDF_BLOB = cc;
@@ -1291,7 +1291,7 @@ fn av1_refcdf_new(): i64 {
 var AV1_REFCDF_BLOB = 0;
 fn av1_refcdf_blob(): i64 {
     if (AV1_REFCDF_BLOB != 0) { return AV1_REFCDF_BLOB; }
-    var cc = dr_alloc(AV1REFCDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1REFCDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_refcdf_fill(cc);
     AV1_REFCDF_BLOB = cc;
@@ -1500,7 +1500,7 @@ fn av1_write_compound_ref(enc, cc, cctx, r0, r1): i64 {
 var AV1_COMPMODE_CTXMAP = 0;
 fn av1_compmode_ctxmap(): i64 {
     if (AV1_COMPMODE_CTXMAP != 0) { return AV1_COMPMODE_CTXMAP; }
-    var p = dr_alloc(3 * AV1_COMP_NEWMV_CTXS * 8);
+    var p = dr_alloc_keep(3 * AV1_COMP_NEWMV_CTXS * 8);
     if (p == 0) { return 0; }   # OOM: av1_tables_init reports it
     store64(p + 0, 0);  store64(p + 8, 1);  store64(p + 16, 1); store64(p + 24, 1); store64(p + 32, 1);
     store64(p + 40, 1); store64(p + 48, 2); store64(p + 56, 3); store64(p + 64, 4); store64(p + 72, 4);
@@ -1737,7 +1737,7 @@ fn av1_iicdf_new(): i64 {
 var AV1_IICDF_BLOB = 0;
 fn av1_iicdf_blob(): i64 {
     if (AV1_IICDF_BLOB != 0) { return AV1_IICDF_BLOB; }
-    var cc = dr_alloc(AV1IICDF_SIZE * 8);
+    var cc = dr_alloc_keep(AV1IICDF_SIZE * 8);
     if (cc == 0) { return 0; }
     av1_iicdf_fill(cc);
     AV1_IICDF_BLOB = cc;
@@ -1813,7 +1813,7 @@ fn av1_write_wedge_index(enc, cc, mi_size, wedge_idx): i64 {
 var AV1_WEDGE_BITS_TBL = 0;
 fn av1_wedge_bits_tbl(): i64 {
     if (AV1_WEDGE_BITS_TBL != 0) { return AV1_WEDGE_BITS_TBL; }
-    var t = dr_alloc(AV1_BLOCK_SIZES * 8);
+    var t = dr_alloc_keep(AV1_BLOCK_SIZES * 8);
     if (t == 0) { return 0; }
     # {0,0,0, 4,4,4,4,4,4,4, 0,0,0,0,0,0,0,0, 4,4, 0,0}
     store64(t + 0, 0);   store64(t + 8, 0);   store64(t + 16, 0);  store64(t + 24, 4);
@@ -2185,7 +2185,7 @@ fn av1_write_motion_mode(enc, cc, ctx, ws, fh, refs, skip_mode, y_mode, ref0, re
 var AV1RRF_SCRATCH = 0;
 fn av1_rrf_scratch(): i64 {
     if (AV1RRF_SCRATCH != 0) { return AV1RRF_SCRATCH; }
-    AV1RRF_SCRATCH = dr_alloc(AV1CCTX_SIZE);
+    AV1RRF_SCRATCH = dr_alloc_keep(AV1CCTX_SIZE);
     return AV1RRF_SCRATCH;
 }
 fn av1_read_ref_frames(sd, cc, out_ref, nb, fh, skip_mode, segment_id, mi_size): i64 {
@@ -2314,7 +2314,7 @@ fn av1_ib_ct(b): i64 { return b + AV1IB_CT; }
 var AV1IBMI_SCRATCH = 0;
 fn av1_ibmi_scratch(): i64 {
     if (AV1IBMI_SCRATCH != 0) { return AV1IBMI_SCRATCH; }
-    AV1IBMI_SCRATCH = dr_alloc(32);
+    AV1IBMI_SCRATCH = dr_alloc_keep(32);
     return AV1IBMI_SCRATCH;
 }
 fn av1_inter_block_mode_info(sd, cc_ref, cc_im, cc_ii, cc_mv, out, ctx, nb, ws, fh, refs, s,

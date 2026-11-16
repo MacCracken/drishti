@@ -85,7 +85,7 @@ fn av1_mi_fill4(t, off, a, b, c, d) {
 }
 fn av1_blk_tables(): i64 {
     if (Av1_BlkTab != 0) { return Av1_BlkTab; }
-    var t = dr_alloc(211 * 8);           # 211 i64
+    var t = dr_alloc_keep(211 * 8);           # 211 i64
     if (t == 0) { return 0; }
     # Mi_Width_Log2[22]
     av1_mi_fill22(t, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4);
@@ -276,7 +276,7 @@ fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): 
 var Av1_SegIdPc = 0;
 fn av1_segid_scratch(): i64 {
     if (Av1_SegIdPc != 0) { return Av1_SegIdPc; }
-    Av1_SegIdPc = dr_alloc(2 * 8);   # 2 u64: pred, ctx
+    Av1_SegIdPc = dr_alloc_keep(2 * 8);   # 2 u64: pred, ctx
     return Av1_SegIdPc;
 }
 fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, skip): i64 {

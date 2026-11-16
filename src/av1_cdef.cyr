@@ -31,7 +31,7 @@ var Av1_Cdef = 0;
 fn av1_cdef_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_cdef_tables(): i64 {
     if (Av1_Cdef != 0) { return Av1_Cdef; }
-    var t = dr_alloc(81 * 8);
+    var t = dr_alloc_keep(81 * 8);
     if (t == 0) { return 0; }
     # Div_Table[9].
     av1_cdef_store(t, 0, 0);    av1_cdef_store(t, 1, 840);  av1_cdef_store(t, 2, 420);
@@ -100,7 +100,7 @@ enum Av1CdefScratch {
 var Av1_CdefScratch = 0;
 fn av1_cdef_scratch(): i64 {
     if (Av1_CdefScratch != 0) { return Av1_CdefScratch; }
-    Av1_CdefScratch = dr_alloc(AV1CDS_SIZE);   # AV1CDS_SIZE bytes
+    Av1_CdefScratch = dr_alloc_keep(AV1CDS_SIZE);   # AV1CDS_SIZE bytes
     return Av1_CdefScratch;
 }
 

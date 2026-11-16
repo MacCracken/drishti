@@ -171,7 +171,10 @@ via a `[deps.drishti]` entry pointing at a git tag.
   length checked, lying headers rejected, sticky error discipline
   throughout, fuzz-tested from day one at the container/VLC layer (tests/drishti.fcyr), and the AV1 decode path since 0.7.118 (tests/av1_decode.fcyr — mutated OBU streams into av1_decode_obus / av1_decode_stream).
   Fault-injected since 0.8.5: any allocation can be made to fail, and every failure must stop the
-  decode with `DR_ERR_OOM` (`scripts/oom-sweep.sh`, `dr_alloc_sweep`).
+  decode with `DR_ERR_OOM` (`scripts/oom-sweep.sh`, `dr_alloc_sweep`). And memory-bounded: a streaming
+  decoder serves each frame from an arena and a frame pool, so a long stream settles at a fixed footprint
+  ([ADR 0002](docs/adr/0002-decoder-memory-frame-arena-and-pool.md)); a frame `av1_decoder_decode` returns is
+  valid until the next call.
 
 ## License
 

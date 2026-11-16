@@ -46,7 +46,7 @@ fn av1_ncdffill_ym(t, off, a, b, c, d, e, f, g, h, i, j, k, l) {
 
 fn av1_noncoeff_cdf_blob(): i64 {
     if (Av1_NCdf != 0) { return Av1_NCdf; }
-    var t = dr_alloc((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
+    var t = dr_alloc_keep((AV1_NCDF_N + 2) * 8);   # AV1_NCDF_N entries + pad
     if (t == 0) { return 0; }
     av1_ncdffill8(t, 0, 19132, 25510, 30392, 32768, 0, 13928, 19855, 28540);
     av1_ncdffill8(t, 8, 32768, 0, 12522, 23679, 28629, 32768, 0, 9896);

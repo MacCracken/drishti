@@ -356,7 +356,7 @@ fn av1_intrabc_dv_valid(tile, r, c, sub_size, has_chroma, mv_row, mv_col): i64 {
 # to the left. Returns a scratch Av1Mv (1/8-sample units), overwritten by the next call.
 var Av1_IbcPred = 0;
 fn av1_ibc_pred_scratch(): i64 {   # one Av1Mv (0 on OOM; av1_tables_init builds it up front)
-    if (Av1_IbcPred == 0) { Av1_IbcPred = dr_alloc(16); }
+    if (Av1_IbcPred == 0) { Av1_IbcPred = dr_alloc_keep(16); }
     return Av1_IbcPred;
 }
 fn av1_intrabc_default_pred(mi_row, mi_row_start, sb128): i64 {

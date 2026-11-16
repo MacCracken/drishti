@@ -1785,7 +1785,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >
 > **NEXT: 0.8.5, "decode is conformance-clean"** (roadmap table): the FULL published `aom-test-data` corpus, every
 > frame; the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection;
-> corpus-guided fuzzing; bounding the decoder's memory (found in bite 7).
+> corpus-guided fuzzing; bounding the decoder's memory (found in bite 7, done in bite 8).
 >
 > **0.8.5 progress (bites, uncut):** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,
@@ -1848,9 +1848,19 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > lazy tables, SILENT mis-decodes (QM table cached one byte low; lazy palette / segmentation contexts read as absent;
 > motion-field save skipped and estimation dropped), and dropped / mislabelled errors on both lanes (encode-lane
 > refusals were dropped by the partition walk). ALSO FOUND, roadmapped not fixed: the arena grows ~35–60 bytes per
-> pixel per decoded frame and is never reclaimed (~100 MB per 1080p frame). Gate: 3940 / 0 / 0 / 0. Next: the memory
-> bound, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two streams others
-> refuse.
+> pixel per decoded frame and is never reclaimed (~100 MB per 1080p frame). Gate: 3940 / 0 / 0 / 0.
+>
+> Bite 8 = **the memory bound**: while `av1_decoder_decode` runs, `dr_alloc` serves from the decoder's `DrArena`,
+> rewound (and, in `make conformance`, POISONED with 0xA5) at every frame start; `dr_frame_new` takes from its
+> `DrFramePool`, swept at every frame start with the reference slots, last decoded / shown frames, anchors and grain
+> output as roots; what outlives a frame is `dr_alloc_keep` / `dr_persist_begin` (64 lazy tables, the grain context,
+> the decoder), and the reference slots now own COPIES of their saved blocks. RULE for new code
+> ([architecture note 001](../architecture/001-allocation-lifetimes.md)): inside a decoder, `dr_alloc` memory dies at
+> the next frame start. API: the returned frame is valid until the next call. Every committed reproducer, four passes
+> through one decoder: bit-exact every pass, 0 bytes after pass 2 (a gate section). FOUND: arena zeroing is
+> load-bearing (code reads fresh memory before writing it); the stdlib memset / memcpy are byte loops (word-wise
+> `dr_fill` / `dr_copy` made the bound free). Gate: 3971 / 0 / 0 / 0. Next: corpus-guided fuzzing, the warp `LS_MAT`
+> clamp, the missing MC ref generators, the two streams others refuse.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

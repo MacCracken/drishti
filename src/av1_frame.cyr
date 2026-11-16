@@ -282,7 +282,16 @@ enum Av1RefOff {
     AV1REF_SAVED_LF_REF       = 12480;   # [8 slot][8] loop_filter_ref_deltas      -> 12992
     AV1REF_SAVED_LF_MODE      = 12992;   # [8 slot][2] loop_filter_mode_deltas     -> 13120
     AV1REF_SAVED_GRAIN        = 13120;   # [8] i64 pointers to each slot's saved film_grain_params block (7.20, 0.8.4)
-    AV1REF_SIZE               = 13184;
+    # the slots' OWN buffers for the four saved blocks above (0.8.5), [kind][slot] — see av1_ref_own_copy
+    AV1REF_OWN                = 13184;   # [4 kinds][8] buffer pointers -> 13440
+    AV1REF_OCAP               = 13440;   # [4 kinds][8] their capacities in bytes -> 13696
+    AV1REF_SIZE               = 13696;
+}
+enum Av1RefOwnKind {
+    AV1REF_K_MF    = 0;   # the saved motion field
+    AV1REF_K_CDF   = 1;   # the saved CDF bundle
+    AV1REF_K_SEG   = 2;   # SavedSegmentIds
+    AV1REF_K_GRAIN = 3;   # the saved film_grain_params
 }
 
 # ================================================================
@@ -442,23 +451,64 @@ fn av1_ref_saved_order_hint(r, i, refFrame): i64 {
 # saved motion field (0.7.102): the per-slot pointer to slot i's compact per-8x8 field (av1_mv_save_field
 # output; 0 for an intra/never-refreshed slot), read by a FUTURE frame's motion_field_estimation.
 fn av1_ref_saved_mf(r, i): i64 { return load64(r + AV1REF_SAVED_MF + (i * 8)); }
-fn av1_ref_set_saved_mf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_MF + (i * 8), ptr); return 0; }
+# Save size bytes at src as slot i's motion field (src 0: none). DR_OK, or DR_ERR_OOM.
+fn av1_ref_set_saved_mf(r, i, src, size): i64 {
+    return av1_ref_save_block(r, AV1REF_SAVED_MF, AV1REF_K_MF, i, src, size);
+}
+
+# A slot's saved blocks are the slot's OWN copies (0.8.5). They used to be pointers to the frame decoder's buffers,
+# one aliased into every refreshed slot and never freed, which made every frame's buffers permanent; and when a
+# streaming decoder serves a frame from an arena (src/drishti.cyr) those buffers do not outlive the frame at all.
+# Each slot now owns one buffer per kind, kept (dr_alloc_keep) and grown only when a larger block arrives, and a
+# save COPIES into it. Saving is copying because nothing mutates a saved block after its save (every reader copies
+# out of it), so a copy reads exactly as the alias did. Returns the slot's buffer holding the copy, or 0 on OOM.
+fn av1_ref_own_copy(r, kind, i, src, size): i64 {
+    var slot = r + AV1REF_OWN + (((kind * 8) + i) * 8);
+    var capp = r + AV1REF_OCAP + (((kind * 8) + i) * 8);
+    var own = load64(slot);
+    if ((own != 0) && (src == own)) { return own; }   # the slot re-saving the block it holds
+    if (load64(capp) < size) {
+        var nb = dr_alloc_keep(size);
+        if (nb == 0) { return 0; }
+        own = nb;
+        store64(slot, nb);
+        store64(capp, size);
+    }
+    dr_copy(own, src, size);
+    return own;
+}
+# save size bytes at src as slot i's block of this kind (src 0 saves "none"); DR_OK or DR_ERR_OOM
+fn av1_ref_save_block(r, field, kind, i, src, size): i64 {
+    if (src == 0) { store64(r + field + (i * 8), 0); return DR_OK; }
+    var own = av1_ref_own_copy(r, kind, i, src, size);
+    if (own == 0) { return DR_ERR_OOM; }
+    store64(r + field + (i * 8), own);
+    return DR_OK;
+}
 # saved CDF bundle (C1, 7.20/7.21): the per-slot pointer to slot i's saved adaptive-CDF set
 # (av1_cdf_bundle_new output; 0 for a never-refreshed slot), loaded by a FUTURE non-key frame whose
 # primary_ref_frame selects this slot. See av1_cdf_bundle_* in av1_intertile.cyr.
 fn av1_ref_saved_cdf(r, i): i64 { return load64(r + AV1REF_SAVED_CDF + (i * 8)); }
-fn av1_ref_set_saved_cdf(r, i, ptr): i64 { store64(r + AV1REF_SAVED_CDF + (i * 8), ptr); return 0; }
+fn av1_ref_set_saved_cdf(r, i, src): i64 {   # a whole bundle (AV1CB_N words); DR_OK or DR_ERR_OOM
+    return av1_ref_save_block(r, AV1REF_SAVED_CDF, AV1REF_K_CDF, i, src, AV1CB_N * 8);
+}
 # saved film_grain_params block (7.20 save_grain_params / 6.8.20 load_grain_params, 0.8.4): slot i's pointer, 0 when
 # the slot was never refreshed.
 fn av1_ref_saved_grain(r, i): i64 { return load64(r + AV1REF_SAVED_GRAIN + (i * 8)); }
+fn av1_ref_set_saved_grain(r, i, src): i64 {   # a film_grain_params block (AV1FG_SIZE bytes); DR_OK or DR_ERR_OOM
+    return av1_ref_save_block(r, AV1REF_SAVED_GRAIN, AV1REF_K_GRAIN, i, src, AV1FG_SIZE);
+}
 fn av1_ref_saved_gm(r, i, ref, idx): i64 {
     return load64(r + AV1REF_SAVED_GM + (((i * 7 + (ref - 1)) * 6 + idx) * 8));
 }
 # SavedSegmentIds[ i ] (7.20): the per-slot pointer to slot i's saved segmentation map — frame-addressed u64
 # per MI, stride RefMiCols[ i ]; 0 = all-zero (an unsegmented or never-refreshed slot). Never mutated after
-# it is saved (the decoder aliases it; a later frame copies out of it), so one buffer serves many slots.
+# it is saved: the slot holds its own copy (av1_ref_own_copy) and a later frame copies out of it.
 fn av1_ref_saved_segids(r, i): i64 { return load64(r + AV1REF_SAVED_SEGIDS + (i * 8)); }
-fn av1_ref_set_saved_segids(r, i, ptr): i64 { store64(r + AV1REF_SAVED_SEGIDS + (i * 8), ptr); return 0; }
+# save the size-byte map at src (0: all zero) as slot i's SavedSegmentIds; DR_OK or DR_ERR_OOM
+fn av1_ref_set_saved_segids(r, i, src, size): i64 {
+    return av1_ref_save_block(r, AV1REF_SAVED_SEGIDS, AV1REF_K_SEG, i, src, size);
+}
 fn av1_ref_saved_feature_enabled(r, i, seg, j): i64 {
     return load64(r + AV1REF_SAVED_FEAT_EN + ((((i * 8) + seg) * 8 + j) * 8));
 }
@@ -2249,7 +2299,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 # frame is (conceptually) decoded: saves the current frame's geometry /
 # order hints / global-motion into every slot flagged by
 # refresh_frame_flags. subsampling / bit depth come from the sequence
-# header. Returns DR_OK.
+# header. Returns DR_OK, or DR_ERR_OOM when a slot's own buffer for a saved block cannot be allocated.
 # ================================================================
 fn av1_frame_update_refs(refs, s, fh): i64 {
     var flags = av1_fh_refresh_frame_flags(fh);
@@ -2257,13 +2307,17 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
     # 7.20 saves them back into every refreshed slot). Read before the loop — the shown slot is refreshed
     # too. A decoded frame's map is saved by the frame decoder (av1_frame_dec_finish), not here.
     var shown_segids = 0;
+    var shown_seg_bytes = 0;
     var shown_cdf = 0;
     var from_shown = av1_fh_show_existing_frame(fh);
     if (from_shown != 0) {
-        shown_segids = av1_ref_saved_segids(refs, av1_fh_frame_to_show(fh));
+        var ks = av1_fh_frame_to_show(fh);
+        shown_segids = av1_ref_saved_segids(refs, ks);
+        shown_seg_bytes = av1_ref_mi_rows(refs, ks) * av1_ref_mi_cols(refs, ks) * 8;   # its map, before any save
         # load_cdfs( frame_to_show_map_idx ) then save_cdfs( i ) (7.21 -> 7.20): every refreshed slot gets the
-        # shown slot's CDF bundle (aliased; bundles are never mutated after their save).
-        shown_cdf = av1_ref_saved_cdf(refs, av1_fh_frame_to_show(fh));
+        # shown slot's CDF bundle (a copy, from the shown slot's own buffer — which no save below changes: the
+        # shown slot re-saving its own block is a no-op).
+        shown_cdf = av1_ref_saved_cdf(refs, ks);
     }
     var i = 0;
     while (i < AV1_NUM_REF_FRAMES) {
@@ -2319,12 +2373,15 @@ fn av1_frame_update_refs(refs, s, fh): i64 {
             }
             # save_grain_params( i ) (7.20): a pointer to this header's grain block (reset when film grain is
             # absent, so a later load reads "no grain"); a show_existing header holds the LOADED block.
-            store64(refs + AV1REF_SAVED_GRAIN + (i * 8), fh + AV1FH_GRAIN);
+            var ge = av1_ref_set_saved_grain(refs, i, fh + AV1FH_GRAIN);
+            if (ge != DR_OK) { return ge; }
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 0) * 8), av1_fh_loop_filter_mode_delta(fh, 0));
             store64(refs + AV1REF_SAVED_LF_MODE + (((i * 2) + 1) * 8), av1_fh_loop_filter_mode_delta(fh, 1));
             if (from_shown != 0) {
-                av1_ref_set_saved_segids(refs, i, shown_segids);
-                av1_ref_set_saved_cdf(refs, i, shown_cdf);
+                var se = av1_ref_set_saved_segids(refs, i, shown_segids, shown_seg_bytes);
+                if (se != DR_OK) { return se; }
+                var ce = av1_ref_set_saved_cdf(refs, i, shown_cdf);
+                if (ce != DR_OK) { return ce; }
             }
         }
         i = i + 1;

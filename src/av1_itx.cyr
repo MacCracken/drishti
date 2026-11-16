@@ -80,7 +80,7 @@ var Av1_ITx_Tables = 0;
 
 fn av1_itx_tables(): i64 {
     if (Av1_ITx_Tables != 0) { return Av1_ITx_Tables; }
-    var t = dr_alloc((65 + 19 + 19 + 19) * 8);
+    var t = dr_alloc_keep((65 + 19 + 19 + 19) * 8);
     if (t == 0) { return 0; }
     # Cos128_Lookup — 4096 * cos(a*pi/128) rounded (7.13.2.1).
     store64(t + 0, 4096);   store64(t + 8, 4095);   store64(t + 16, 4091);  store64(t + 24, 4085);

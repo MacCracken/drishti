@@ -43,7 +43,7 @@ enum Av1PartitionConst {
 var Av1_PartSub = 0;
 fn av1_partsub_tables(): i64 {
     if (Av1_PartSub != 0) { return Av1_PartSub; }
-    var t = dr_alloc(220 * 8);          # 10 * 22 i64
+    var t = dr_alloc_keep(220 * 8);          # 10 * 22 i64
     if (t == 0) { return 0; }
     av1_mi_fill22(t, 0, 0, 0 - 1, 0 - 1, 3, 0 - 1, 0 - 1, 6, 0 - 1, 0 - 1, 9, 0 - 1,
       0 - 1, 12, 0 - 1, 0 - 1, 15, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1);
@@ -155,7 +155,7 @@ fn av1_synth_vert_cdf(pcdf, bsl, out): i64 {
 var Av1_PartSynthCdf = 0;
 fn av1_part_synth_scratch(): i64 {
     if (Av1_PartSynthCdf != 0) { return Av1_PartSynthCdf; }
-    Av1_PartSynthCdf = dr_alloc(3 * 8);   # 3 u64: cdf[0], 1 << 15, the (unused) count
+    Av1_PartSynthCdf = dr_alloc_keep(3 * 8);   # 3 u64: cdf[0], 1 << 15, the (unused) count
     return Av1_PartSynthCdf;
 }
 fn av1_read_split_or_horz(sd, ncc, ctx, bsl): i64 {

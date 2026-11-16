@@ -80,7 +80,7 @@ enum Av1LrScratch {
 var Av1_LrScratch = 0;
 fn av1_lr_scratch(): i64 {
     if (Av1_LrScratch != 0) { return Av1_LrScratch; }
-    Av1_LrScratch = dr_alloc(AV1LRS_SIZE);   # AV1LRS_SIZE bytes
+    Av1_LrScratch = dr_alloc_keep(AV1LRS_SIZE);   # AV1LRS_SIZE bytes
     return Av1_LrScratch;
 }
 fn av1_lr_wiener_filter(curr, cdef, lr, plane, x, y, w, h, hfilter, vfilter, pex, pey, ssy, sey): i64 {
@@ -141,7 +141,7 @@ var Av1_Sgr = 0;
 fn av1_lr_sgr_store(t, off, v): i64 { store64(t + (off * 8), v); return 0; }
 fn av1_lr_sgr_tables(): i64 {
     if (Av1_Sgr != 0) { return Av1_Sgr; }
-    var t = dr_alloc(64 * 8);
+    var t = dr_alloc_keep(64 * 8);
     if (t == 0) { return 0; }
     av1_lr_sgr_store(t, 0, 2);  av1_lr_sgr_store(t, 1, 12);  av1_lr_sgr_store(t, 2, 1);  av1_lr_sgr_store(t, 3, 4);
     av1_lr_sgr_store(t, 4, 2);  av1_lr_sgr_store(t, 5, 15);  av1_lr_sgr_store(t, 6, 1);  av1_lr_sgr_store(t, 7, 6);
@@ -536,7 +536,7 @@ fn av1_lr_process(curr, cdef, lr, params): i64 {
 var Av1_LrTaps = 0;
 fn av1_lr_taps(): i64 {
     if (Av1_LrTaps != 0) { return Av1_LrTaps; }
-    var t = dr_alloc(18 * 8);
+    var t = dr_alloc_keep(18 * 8);
     if (t == 0) { return 0; }
     store64(t + 0, 0 - 5);  store64(t + 8, 0 - 23); store64(t + 16, 0 - 17);   # Wiener_Taps_Min
     store64(t + 24, 10);    store64(t + 32, 8);     store64(t + 40, 46);       # Wiener_Taps_Max

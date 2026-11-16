@@ -76,7 +76,7 @@ var Av1_SmW = 0;
 
 fn av1_sm_weights(): i64 {
     if (Av1_SmW != 0) { return Av1_SmW; }
-    var t = dr_alloc(124 * 8);
+    var t = dr_alloc_keep(124 * 8);
     if (t == 0) { return 0; }
     av1_smw_fill(t + 0, 255, 149, 85, 64, 0, 0, 0, 0);                 # 4x4 (first 4 used)
     av1_smw_fill(t + (4 * 8), 255, 197, 146, 105, 73, 50, 37, 32);     # 8x8
@@ -251,7 +251,7 @@ fn av1_intra_horizontal(left, w, h, pred): i64 {
 var Av1_DrDeriv = 0;
 fn av1_dr_intra_derivative(angle): i64 {
     if (Av1_DrDeriv == 0) {
-        var t = dr_alloc(90 * 8);
+        var t = dr_alloc_keep(90 * 8);
         if (t == 0) { return 0; }
         memset(t, 0, 90 * 8);
         store64(t + (3 * 8), 1023);  store64(t + (6 * 8), 547);   store64(t + (9 * 8), 372);
@@ -554,7 +554,7 @@ fn av1_ftaps_fill7(p, t0, t1, t2, t3, t4, t5, t6) {
 }
 fn av1_filter_taps(): i64 {
     if (Av1_FTaps != 0) { return Av1_FTaps; }
-    var t = dr_alloc((5 * 8 * 7) * 8);
+    var t = dr_alloc_keep((5 * 8 * 7) * 8);
     if (t == 0) { return 0; }
     var s = 7 * 8;   # bytes per position row
     # mode 0

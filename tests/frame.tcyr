@@ -362,6 +362,88 @@ fn test_frame_oom() {
     return 0;
 }
 
+# ---- the frame pool (0.8.5): what a decoder's frames come from ----
+fn test_frame_pool() {
+    var pool = dr_frame_pool_new();
+    assert_neq(pool, 0, "a pool");
+    var prev = dr_frame_pool_use(pool);
+    assert_eq(prev, 0, "no pool was active");
+    var e = 0;
+    var a = dr_frame_new(64, 48, 3, 1, 1, 8, 8, &e);
+    var b = dr_frame_new(64, 48, 3, 1, 1, 8, 8, &e);
+    assert_eq(dr_frame_pool_count(pool), 2, "two frames taken, two registered");
+    assert_neq(a, b, "...distinct while both are held");
+    dr_frame_set(a, 0, 5, 5, 999);
+    dr_frame_set(a, 2, 31, 23, 7);
+    # a frame start: nothing is free until the owner says what it still holds
+    dr_frame_pool_sweep(pool);
+    dr_frame_pool_root(pool, b);
+    assert_eq(dr_frame_pool_in_use(pool), 1, "sweep + root: only b is held");
+    var c = dr_frame_new(64, 48, 3, 1, 1, 8, 8, &e);
+    assert_eq(c, a, "the freed frame is reused...");
+    assert_eq(dr_frame_get(c, 0, 5, 5), 0, "...zeroed, as a fresh frame is");
+    assert_eq(dr_frame_get(c, 2, 31, 23), 0, "...every plane");
+    assert_eq(dr_frame_pool_count(pool), 2, "...so the pool did not grow");
+    var d = dr_frame_new(64, 48, 3, 1, 1, 8, 8, &e);
+    assert_neq(d, b, "a held frame is never handed out");
+    assert_eq(dr_frame_pool_count(pool), 3, "...a new one is made instead");
+    # a SMALLER frame reuses a larger free one, laid out at its own size
+    dr_frame_pool_sweep(pool);
+    var sm = dr_frame_new(30, 20, 3, 1, 1, 10, 4, &e);
+    assert_eq(dr_frame_pool_count(pool), 3, "a smaller frame fits a free one");
+    assert_eq(dr_frame_width(sm), 30, "...reported at its own width");
+    assert_eq(dr_frame_bit_depth(sm), 10, "...and bit depth");
+    assert_eq(dr_frame_plane_stride(sm, 0), 30 + 8, "...with its own stride (width + 2 * border)");
+    assert_eq(dr_frame_plane_stride(sm, 1), 15 + 8, "...per plane");
+    assert_eq(dr_frame_border(sm), 4, "...and border");
+    # a different plane count never shares
+    var mono = dr_frame_new(30, 20, 1, 0, 0, 8, 4, &e);
+    assert_eq(dr_frame_num_planes(mono), 1, "a mono frame");
+    assert_eq(dr_frame_pool_count(pool), 4, "...is a new entry: no 3-plane frame is reused for it");
+    # a LARGER frame than any free one is made new
+    dr_frame_pool_sweep(pool);
+    var lg = dr_frame_new(200, 100, 3, 1, 1, 8, 8, &e);
+    assert_eq(dr_frame_width(lg), 200, "a larger frame");
+    assert_eq(dr_frame_pool_count(pool), 5, "...nothing free is big enough: a new entry");
+    # the best fit: a small request takes the smallest free frame that holds it, not the first that does — in a
+    # fresh pool whose FIRST entry is the large frame
+    var bp = dr_frame_pool_new();
+    dr_frame_pool_use(bp);
+    var big = dr_frame_new(200, 100, 3, 1, 1, 8, 8, &e);
+    var small = dr_frame_new(64, 48, 3, 1, 1, 8, 8, &e);
+    dr_frame_pool_sweep(bp);
+    var fit = dr_frame_new(60, 40, 3, 1, 1, 8, 8, &e);
+    assert_eq(fit, small, "best fit: the 64x48 frame, though the 200x100 one comes first");
+    assert_neq(big, small, "...two frames");
+    dr_frame_pool_use(pool);
+    assert_eq(dr_frame_pool_use(prev), pool, "closing returns the pool");
+    var g0 = dr_alloc_global_bytes();
+    var out = dr_frame_new(16, 16, 1, 0, 0, 8, 0, &e);
+    assert_eq(dr_frame_pool_count(pool), 5, "no pool active: dr_frame_new allocates as before");
+    assert_eq(dr_alloc_global_bytes(), g0 + 200 + 512, "...the record and its one plane, from the allocator");
+    assert_neq(out, 0, "...a frame");
+    assert_eq(dr_frame_pool_root(pool, 12345), 0, "rooting a frame the pool does not own is ignored");
+    return 0;
+}
+# every allocation of a pooled take failing -> 0 with DR_ERR_OOM, and no half-built entry is left behind
+var Fp_Oom_Pool = 0;
+fn frame_pool_oom_op(a): i64 {
+    var prev = dr_frame_pool_use(Fp_Oom_Pool);
+    dr_frame_pool_sweep(Fp_Oom_Pool);
+    var e = 0;
+    var f = dr_frame_new(48 + (dr_frame_pool_count(Fp_Oom_Pool) * 16), 32, 3, 1, 1, 8, 4, &e);
+    dr_frame_pool_use(prev);
+    if (f == 0) { return e; }
+    return DR_OK;
+}
+fn test_frame_pool_oom() {
+    Fp_Oom_Pool = dr_frame_pool_new();
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&frame_pool_oom_op, 0, &n), 0, "a pooled frame take: every failure -> OOM");
+    assert_eq(n, 4, "...the record and three planes (each take is larger than any free frame)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("the block-write guard (0.8.5)");
@@ -387,6 +469,9 @@ fn main() {
     test_frame_reject();
     test_group("OOM fault injection");
     test_frame_oom();
+    test_group("frame pool");
+    test_frame_pool();
+    test_frame_pool_oom();
     return assert_summary();
 }
 
