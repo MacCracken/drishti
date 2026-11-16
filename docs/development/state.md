@@ -6,6 +6,28 @@
 
 ## Version
 
+**0.8.5** — cut 2026-11-16, not yet tagged (user's git). **Decode is conformance-clean, and hardened: all 242
+published libaom vectors decode bit-exact on every frame, and the decode path is fuzzed and fault-injected.** The
+last decode batch. Twelve bites, listed newest first in the CHANGELOG:
+- the MV and superres reference ports restored (five unwitnessed MV-scan lines found and pinned);
+- the MC reference ports restored (dav1d's H-only rounding constant found untested, now pinned);
+- corpus-guided fuzzing of the streaming decoder, with `av1_decoder_set_frame_size_limit` and `av1_decoder_reset`
+  (found a large-scale tile output escaping the size limit);
+- the warp `LS_MAT` clamp settled: none exists, none is needed;
+- the memory bound: per-frame arena, frame pool, slot-owned saved data ([ADR 0002](../adr/0002-decoder-memory-frame-arena-and-pool.md));
+- OOM fault injection on every allocation (~45 unchecked allocations and silent OOM mis-decodes fixed);
+- the reconstruct guard; the 8.2.6 symbol-range bound; the 8.2.4 exit process in full;
+- superres at small widths (the `Min(16, UpscaledWidth)` floor);
+- libaom's invalid-stream corpus gated; the FULL published corpus gated, every frame.
+
+`drishti_version()` = 8005.
+
+**ALL gates green:** 44 suites with **31,882** suite + **7,416** fuzz assertions (3 fuzz harnesses), bench, vet,
+lint, fmt-check, version-check, `distlib --check`, all three programs build, and `make conformance` at **3971
+matched / 0 known-gap / 0 regressed / 0 skipped** (was 3314). No new module (44). CARRIED to 0.8.6: two kinds of
+stream libaom and dav1d refuse that drishti decodes (libaom `--aq-mode=2 --cq-level=0`; SVT-AV1 with chroma qindex
+offsets).
+
 **0.8.4** — cut 2026-11-15, not yet tagged (user's git). **Every AV1 coding tool decodes; the rejects left are
 deliberate.** Five bites, listed newest first in the CHANGELOG:
 - scalability: operating point selection and 5.3.1's `drop_obu` in both OBU walks (it never rejected: every layer
@@ -1770,8 +1792,9 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.8.4, the third AV1 batch, cut).** **`make conformance` is 3314 matched / 0 KNOWN-GAP / 0
-> regressed / 0 skipped.** Every hard case is BIT-EXACT against libaom on EVERY frame, with dav1d as a tiebreak.
+> **Where we are (0.8.5, the fourth AV1 batch and the last decode one, cut 2026-11-16).** **`make conformance` is
+> 3971 matched / 0 KNOWN-GAP / 0 regressed / 0 skipped.** Every hard case is BIT-EXACT against libaom on EVERY
+> frame, with dav1d as a tiebreak.
 > That covers:
 > - every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome);
 > - GOPs to 90 frames: hidden frames, `show_existing_frame`, every refresh slot, SWITCH frames, error resilience;
@@ -1783,11 +1806,12 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   remuxed from .mkv; the svc vectors at every operating point);
 > - streams from libaom, rav1e and SVT-AV1, and committed reproducers under `tests/repro/` that run without libaom.
 >
-> **NEXT: 0.8.5, "decode is conformance-clean"** (roadmap table): the FULL published `aom-test-data` corpus, every
-> frame; the `av1_sym_decode` symbol-range bound; the 7.12.3 reconstruct guard; OOM fault injection;
-> corpus-guided fuzzing; bounding the decoder's memory (found in bite 7, done in bite 8).
+> **NEXT: 0.8.6, "drishti emits a standalone `.ivf` that `aomdec` decodes"** (roadmap table): forward transform,
+> quantiser, sequence / frame header + OBU + IVF writers, a fixed-partition DC intra encoder, the encode lane at
+> 128x128 superblocks; plus, carried from 0.8.5, the two kinds of stream libaom and dav1d refuse that drishti
+> decodes (libaom `--aq-mode=2 --cq-level=0`; SVT-AV1 `--enable-qm 1` with chroma qindex offsets).
 >
-> **0.8.5 progress (bites, uncut):** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
+> **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,
 > and `intra_only-intrabc-extreme-dv`). `check_published` now also fails a frame output past the last md5 line,
 > canary-tested. Gate: 3748 matched / 0 / 0 / 0.
@@ -1902,7 +1926,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > take — killed by S14 / S15 decoys and new S17, D11, D12. Also: sort / extra search / add extra MV candidate were
 > cited 7.10.2.13 / .11 / .12 since 0.7.63; the spec numbers them .11 / .12 / .13 (comments + docs fixed).
 > No `src/` behaviour change (comments only). 44 suites, 31,882 suite + 7,416 fuzz assertions. Gate: 3971 / 0 /
-> 0 / 0. Next: the two streams others refuse.
+> 0 / 0. 0.8.5 was cut after this bite.
 >
 > **READ FIRST:** [`docs/guides/verification.md`](../guides/verification.md), then the roadmap's
 > HONEST STATUS block and the batched release plan (0.8.5 → 0.8.11).

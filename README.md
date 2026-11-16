@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.8.4 (AV1: **`make conformance` is 3930 matched / 0 KNOWN-GAP / 0 regressed / 0 skipped** — every hard case BIT-EXACT against libaom, with dav1d as a tiebreak. The gate is a standing matrix over every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome), GOPs to 90 frames with hidden frames and `show_existing_frame`, frame sizes from 1x1 up at both superblock sizes, superres and scaled references; it scores every frame of all 242 published libaom conformance vectors, and streams from three encoders (libaom, rav1e, SVT-AV1). Quantizer matrices decode (0.8.4: the 4 former known gaps, plus 13 libaom / SVT-AV1 QM cases), and film grain is synthesised on the output (0.8.4: before it, grain streams decoded grain-free without a word; both published grain vectors now match), intra block copy decodes (0.8.4: libaom screen-content keyframes, 14 cases), large-scale tile decodes (0.8.4: tile list OBUs against application-supplied anchors, every anchor and list of libaom's lightfield tools matched), and any operating point of a scalable stream decodes (0.8.4: 5.3.1's `drop_obu`; before it every layer was decoded whatever the point, which matched libaom only at point 0). Multi-tile, every segmentation feature, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
+## Status — 0.8.5 (AV1: **decode is conformance-clean. `make conformance` is 3971 matched / 0 KNOWN-GAP / 0 regressed / 0 skipped** — every hard case BIT-EXACT against libaom on every frame, with dav1d as a tiebreak. The gate is a standing matrix over every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome), GOPs to 90 frames with hidden frames and `show_existing_frame`, frame sizes from 1x1 up at both superblock sizes, superres and scaled references; it scores every frame of all 242 published libaom conformance vectors (0.8.5), libaom's invalid-stream corpus unit by unit, and streams from three encoders (libaom, rav1e, SVT-AV1). Every coding tool decodes: quantizer matrices, film grain, intra block copy, large-scale tile, every operating point of a scalable stream, multi-tile, every segmentation feature, delta-q/lf, palette, compound/warp/OBMC/inter-intra. The decode path is hardened (0.8.5): the 8.2.4 exit and 8.2.6 symbol-range checks and a reconstruct guard on every block write, every allocation fault-injected and failing cleanly, a streaming decoder that settles at a fixed memory footprint with a frame size limit and a reset, and corpus-guided fuzzing of real streams with fenced inputs and poisoned memory. The "encoder" remains a plan-driven bitstream writer, not an encoder; that is 0.8.6–0.8.11. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (31,447 suite assertions + 7,410 fuzz
+derived, and adversarially tested (31,882 suite assertions + 7,416 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -137,8 +137,8 @@ The honest, checkable breakdown, and why no "% done" is printed, is in
 **HONEST STATUS**.
 
 The road to 1.0 is **one minor arc per codec**, in batched releases. AV1
-ran **0.7.x** and closes in **0.8.x** (0.8.2, 0.8.3 and 0.8.4 are out; seven
-left, 0.8.5 → 0.8.11). Then **0.9.x** is H.264, **0.10.x** H.265 and
+ran **0.7.x** and closes in **0.8.x** (0.8.2 through 0.8.5 are out — the decode
+batches; six left, 0.8.6 → 0.8.11, the encode batches). Then **0.9.x** is H.264, **0.10.x** H.265 and
 **0.11.x** VP8/VP9, followed by a cross-family **audit** arc (0.12.x) and a
 **freeze/documentation** arc (0.13.x) before the 1.0.0 close-out. Encode
 lanes grow from the writer seeds already shipped. Full plan:

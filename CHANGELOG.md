@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-11-16
+
+**Decode is conformance-clean, and hardened.** All 242 published libaom conformance vectors decode bit-exact on every
+frame, and the decode path is fuzzed from real streams and fault-injected. That is the last decode batch; 0.8.6
+starts the encoder. Twelve bites, listed below newest first:
+- **Conformance (bites 1–4):**
+  - all 242 vectors of libaom's `test_vectors.cc` gated on every frame, with no decoder change;
+  - libaom's invalid-stream corpus gated unit by unit. It found two defects, both fixed: superres at small widths
+    (the `Min(16, UpscaledWidth)` floor; equal widths are not scaled) and the 8.2.4 exit process (trailing bit
+    and zero padding).
+- **Input bounds (bites 5–6):**
+  - 8.2.6's symbol-range precondition on every symbol, in both lanes;
+  - a reconstruct guard on every block-level frame write. Intra-lane transform errors now reach the tile instead
+    of being dropped.
+- **Faults and memory (bites 7–8):**
+  - every allocation can be made to fail, and every failure stops the decode with `DR_ERR_OOM`. Fault injection
+    found ~45 unchecked allocations and silent mis-decodes on OOM, all fixed.
+  - A streaming decoder now settles at a fixed footprint: a per-frame arena, a frame pool, and reference slots
+    that own their saved data ([ADR 0002](docs/adr/0002-decoder-memory-frame-arena-and-pool.md)). Before, it grew
+    by ~35–60 bytes per pixel per frame.
+- **Warp (bite 9):** libaom's `LS_MAT` clamp turned out to be debug asserts. None is needed: the accumulator's sums
+  are bounded by geometry, proved in a port.
+- **Fuzzing (bite 10):** corpus-guided fuzzing of the streaming decoder.
+  - It mutates 18 committed reproducers.
+  - Its oracles see what an output check cannot: fenced inputs, poisoned memory, sticky documented codes, a reset.
+  - Two new APIs: `av1_decoder_set_frame_size_limit` and `av1_decoder_reset`.
+  - It found a large-scale tile output frame escaping the size limit, now checked.
+- **Reference ports (bites 11–12):** every known answer comes from a committed port again: motion compensation,
+  motion-vector prediction and superres. They found three things no test witnessed:
+  - dav1d's H-only rounding constant;
+  - three parity terms of the far MV scans;
+  - both compound extra-search combine branches.
+
+  Each is now pinned.
+
+`drishti_version()` returns **8005**. No new module (44).
+
+`make conformance` is **3971 matched / 0 known-gap / 0 regressed / 0 skipped**, up from 3314 at 0.8.4. New in it:
+- the whole published corpus;
+- the invalid-stream corpus;
+- libaom superres encodes from 8 to 30 samples wide;
+- a per-site OOM sweep of the committed reproducers;
+- a memory-bound section: every reproducer fed four times through one decoder, bit-exact on every pass, with no
+  allocation after the second, under a poisoned arena.
+
+**Not done, carried to 0.8.6:** two kinds of stream that libaom and dav1d refuse but drishti decodes:
+- libaom `--aq-mode=2 --cq-level=0` encodes;
+- an SVT-AV1 stream with chroma qindex offsets.
+
+drishti may be missing a check there. The batch's acceptance outcome held without it.
+
+**Gates:** 44 suites, **31,882** assertions, **7,416** fuzz (3 harnesses); bench, `vet`, `lint`, `fmt-check`,
+`version-check` and `distlib --check` all green; all three programs build.
+
+Next is 0.8.6: drishti emits a standalone `.ivf` that `aomdec` decodes. That means a forward transform, a
+quantiser, header and OBU writers, a first intra encoder, and the encode lane at 128x128 superblocks.
+
 ### Added — 0.8.5 bite 12: the motion-vector and superres reference ports, restored; five unwitnessed MV lines found
 
 **Every known answer in `src/`, `tests/` and `docs/` now comes from a committed port.** The last lost generators
