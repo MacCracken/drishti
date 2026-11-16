@@ -7,13 +7,11 @@
 # feeds to the inverse transform). Consumes the 0.7.19 intra-tx CDFs
 # (av1_ncdf_intra_tx_set1/set2).
 #
-# SCOPE (this bite, intra keyframe baseline): the INTRA transform-type path.
-# get_tx_set is implemented for both is_inter branches (faithful), but the
-# in-set table + compute_tx_type chroma path here are intra-only
-# (Tx_Type_In_Set_Intra + Mode_To_Txfm[UVMode]); the inter co-located-luma
-# chroma derivation + Tx_Type_In_Set_Inter are deferred to the inter arc (roadmap.md).
-# Segmentation qindex is also deferred (roadmap.md) — for a keyframe the qindex
-# the transform_type gate reads is base_q_idx.
+# SCOPE: get_tx_set for both is_inter branches, Tx_Type_In_Set_Intra AND Tx_Type_In_Set_Inter
+# (av1_is_tx_type_in_set_inter), and the INTRA compute_tx_type chroma path (Mode_To_Txfm[UVMode]); an inter
+# block's chroma tx type, the co-located luma TxType, is derived in av1_intertile.cyr. The qindex the
+# transform_type gate reads is segmentation_enabled ? get_qindex( 1, segment_id ) : base_q_idx
+# (av1_tile_block_setup's CUR_TXQ).
 #
 # FLAT module — wiring in src/main.cyr after av1_txsize.cyr, BEFORE av1_coeffs
 # (which calls transform_type / compute_tx_type). Family av1_. Depends on:

@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — source comments that still described long-closed limits (comment-only)
+
+Six module comments claimed scope limits the code no longer has. Checking 0.8.4's "any reject left is deliberate"
+against the code turned them up. Each was checked against the code and rewritten:
+- `src/av1_partition.cyr` and `src/av1_residual.cyr` said the frame gate rejects 128x128 superblocks and the loop
+  drives 64x64 only. Both sizes have decoded since 0.7.126.
+- `src/av1_partition.cyr` also called itself intra-only, with palette and segmentation deferred and Lossless taken
+  from `base_q_idx`. In fact the walk serves both lanes, palette and segmentation run per block, and Lossless is
+  `LosslessArray[ segment_id ]`.
+- `src/av1_tile.cyr` said single-tile, with delta-q reads, multi-tile and the frame-end CDF save deferred. All three
+  work, and the comment now names where each lives.
+- `src/av1_txtype.cyr` said `Tx_Type_In_Set_Inter`, the inter chroma tx type and the segment qindex were deferred.
+- `src/av1_txsize.cyr` said `read_var_tx_size` was deferred; it is `av1_read_var_tx_size` in `src/av1_intertile.cyr`.
+- `src/av1_intertile.cyr` said OBMC "stays out" on the line that admits it.
+
+All three programs are byte-identical before and after. `dist/drishti.cyr` is regenerated (it carries the
+comments). Gates: 44 suites, 31,447 assertions, `lint`, `fmt-check`, `vet`, `version-check` and `distlib --check`
+green.
+
 ## [0.8.4] - 2026-11-15
 
 **Every AV1 coding tool decodes; the rejects left are deliberate.** Five bites, listed below newest first:

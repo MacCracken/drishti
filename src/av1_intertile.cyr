@@ -1368,7 +1368,7 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     # so an edge-cut inter-intra block touches exactly the same pixels a plain inter block does.
     var is_ii = 0;
     if (av1_ib_ref(ib, 1) == AV1_INTRA_FRAME) { is_ii = 1; }
-    # motion mode: SIMPLE + LOCALWARP (0.7.98) are in scope; OBMC stays out (roadmap.md).
+    # motion mode: SIMPLE, LOCALWARP (0.7.98) and OBMC are all in scope; the test is defensive (three values).
     var mm = av1_ib_motion_mode(ib);
     if ((mm != AV1_MM_SIMPLE) && (mm != AV1_MM_LOCALWARP) && (mm != AV1_MM_OBMC)) {
         return av1_ierr_latch(tile, DR_ERR_UNSUPPORTED);

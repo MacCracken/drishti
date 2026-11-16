@@ -6,20 +6,18 @@
 # mode-info, tx-size, the residual driver (predict/coeffs/reconstruct).
 #
 # decode_tile: clear_above_context, then per superblock row clear_left_context
-# and per superblock clear_block_decoded_flags + decode_partition(BLOCK_64X64).
+# and per superblock clear_block_decoded_flags + decode_partition(sbSize).
 # av1_decode_intra_tile is the entry point — it builds the per-tile adaptive CDF
 # contexts (init_non_coeff_cdfs / init_coeff_cdfs with the base_q_idx quantizer
 # bucket) and the symbol decoder (init_symbol), runs decode_tile, and exits.
 # The paired av1_encode_intra_tile drives the encode lane so a keyframe tile
 # round-trips.
 #
-# SCOPE (intra keyframe baseline): a SINGLE tile spanning the frame
-# (MiRowStart/ColStart = 0, MiRowEnd/ColEnd = MiRows/MiCols). The superblock size
-# is 64x64 OR 128x128, taken from AV1TILE_SB128 (0.7.126 E2a — sbSize/sbSize4 per
-# 5.11.2). The per-SB clear_cdef + read_lr are wired here (guarded by the
-# tile's CdefIdx / LrParams — inert until a frame-level driver attaches them);
-# delta-q per-SB reads, multi-tile, and the frame-end CDF save/average +
-# decode_frame_wrapup are deferred (roadmap.md).
+# SCOPE: one tile's superblocks, over its own MI window (AV1TILE_ROW_START..ROW_END x COL_START..COL_END, so a
+# multi-tile frame runs this once per tile). The superblock size is 64x64 OR 128x128, taken from AV1TILE_SB128
+# (0.7.126 E2a — sbSize/sbSize4 per 5.11.2). The per-SB clear_cdef, the ReadDeltas reset for delta-q / delta-lf,
+# and read_lr are here (cdef and lr guarded by the tile's CdefIdx / LrParams, which the frame driver attaches when
+# the frame enables them). The frame-end CDF save and decode_frame_wrapup live in av1_decode.cyr.
 # The encode-lane round-trip drives skip blocks (the non-skip coeffs-encode in
 # residual order — encode_residual — is the encoder arc, roadmap.md); the decode
 # path handles non-skip blocks (validated by av1_partition / av1_residual).

@@ -11,13 +11,12 @@
 # split_or_horz / split_or_vert use a binary CDF SYNTHESIZED from the partition
 # CDF (spec 9.3). MI grids live in the Av1Tile context (av1_residual).
 #
-# SCOPE (intra keyframe baseline): is_inter=0. The partition ENTROPY for a 128x128
-# superblock (W128 CDF + the 8-symbol bsl-5 alphabet) landed in 0.7.126; the SB loop
-# still drives 64x64 only and the frame gate still rejects sb128 (roadmap.md E2a).
-# Palette and segmentation are
-# deferred (roadmap.md). (The intra edge-filter type get_filter_type, 7.11.2.8,
-# is derived in transform_block as of 0.7.26.) Lossless is derived
-# as base_q_idx==0 (no per-plane delta-q in scope). The encode lane covers the
+# SCOPE: the partition walk serves BOTH lanes — av1_decode_block hands an inter-lane tile (AV1TILE_FH set) to
+# av1_decode_block_inter (av1_intertile.cyr) and decodes an intra frame's block itself. Both superblock sizes
+# decode: the 128x128 partition entropy (W128 CDF + the 8-symbol bsl-5 alphabet) landed in 0.7.126, when the
+# av1_tile loop began driving BLOCK_128X128. Palette (0.8.2, av1_palette) and segmentation run per block. (The
+# intra edge-filter type get_filter_type, 7.11.2.8, is derived in transform_block as of 0.7.26.) Lossless is
+# LosslessArray[ segment_id ] and the dequant qindex is per segment (av1_tile_block_setup). The encode lane covers the
 # block-orchestration entropy (mode_info + tx_size); the per-tx coeffs-encode in
 # residual order is grown with the tile-loop bite (roadmap.md) — the round-trip
 # test drives skip blocks (no coeffs) + hand-builds the single non-skip stream.

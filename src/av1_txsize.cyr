@@ -7,9 +7,8 @@
 # symbol coder). Consumes the 0.7.19 tx-size CDFs (av1_ncdf_tx8/16/32/64).
 #
 # SCOPE (this bite, intra keyframe baseline): read_tx_size for an intra block.
-# The inter read_var_tx_size tree (txfm_split) and the InterTxSizes grid write
-# are deferred to the residual-driver / tile-loop bites (roadmap.md 0.7.x) —
-# read_tx_size RETURNS the TxSize; the caller fills its InterTxSizes positions.
+# The inter read_var_tx_size tree (txfm_split) and its InterTxSizes grid write live in av1_intertile.cyr
+# (av1_read_var_tx_size); read_tx_size RETURNS the TxSize and the caller fills its InterTxSizes positions.
 # The tx_depth ctx takes the (already-decoded) above/left neighbour TxSizes as
 # inputs; for an intra keyframe IsInters is always 0 so get_above_tx_width /
 # get_left_tx_height reduce to Tx_Width/Height[ neighbour InterTxSize ].

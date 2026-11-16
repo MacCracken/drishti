@@ -135,8 +135,8 @@ enum Av1TileOff {
     AV1TILE_SEGIDS    = 560;  # SegmentIds grid (frame-addressed; shared)
     AV1TILE_SEG_FH    = 568;  # fh for segmentation lookups (both lanes; not the dispatch key)
     AV1TILE_CUR_QINDEX = 576; # per-block dequant qindex (set per block; defaults to base_q)
-    # --- 128x128 superblock (0.7.126 E2a). 0 = 64x64 (the only value the SB loop drives
-    #     today; the frame gate still rejects sb128). Selects the spec's
+    # --- 128x128 superblock (0.7.126 E2a). 0 = 64x64, 1 = 128x128 (use_128x128_superblock; the SB loop
+    #     drives both, both lanes). Selects the spec's
     #     sbMask = use_128x128_superblock ? 31 : 15 for every SB-RELATIVE coordinate. ---
     AV1TILE_SB128     = 584;
     # --- RefFrames[row][col][0] per MI (frame-addressed; shared). The DEBLOCKER needs it:
