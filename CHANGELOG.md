@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.4 bite 3: intra block copy (`allow_intrabc`), decoded on the inter lane
+
+**`allow_intrabc` no longer rejects.** Screen-content keyframes from libaom (`--tune-content=screen`, cpu-used 0..2)
+copy whole blocks from earlier in the same frame: up to 1,286 of a frame's 6,336 MI cells in the cases gated here.
+Every such frame used to be refused with `DR_ERR_UNSUPPORTED`; every one tried now decodes bit-exact.
+- **Routing.** An `allow_intrabc` intra frame decodes on the **inter lane** (`av1_frame_dec_group`). An intrabc block
+  is an inter block, with variable transform sizes, inter transform types and motion compensation, and its
+  neighbours' contexts must see it as one. A single-frame decode with no DPB gets an empty one, since no reference is
+  read.
+- **Mode info.** `av1_intra_frame_mode_info_ibc` reads the keyframe syntax plus `use_intrabc` (5.11.7), which is read
+  after the delta reads and before the Y mode. A `use_intrabc = 0` block takes the existing intra fork. A
+  `use_intrabc = 1` block becomes an inter block with `RefFrame { INTRA_FRAME, NONE }`, `DC_PRED`, SIMPLE motion and
+  BILINEAR filters.
+- **The vector.** `find_mv_stack( 0 )` against `INTRA_FRAME`, then `assign_mv`'s intrabc fallback
+  (`av1_intrabc_default_pred`: one superblock up, or in a tile's first superblock row one superblock plus 256 samples
+  left). It is read with `MV_INTRABC_CONTEXT` (`av1_intrabc_read_dv`) under the intra frame's `force_integer_mv`.
+- **Validity.** `is_mv_valid` (6.10.25) is ENFORCED (`av1_intrabc_dv_valid`): whole-sample, inside the tile, the
+  4-superblock delay and the wavefront. An invalid vector is `DR_ERR_BOUNDS`, never a read of undecoded samples.
+- **Prediction.** It reads from the frame being decoded (7.11.3.1 step 9). In-loop filters are off in
+  `allow_intrabc` frames, so that frame is unfiltered. Reads extend to the MI grid, not the visible frame (step 11),
+  through the new `av1_mc_pred_block_ext` / `av1_mc_pred_core_ext`; the old entry points are wrappers.
+- **CDF.** `Default_Intrabc_Cdf` is appended to the non-coefficient blob (2515 -> 2518 words). The saved-CDF bundle
+  offsets after it shift by 3, and every test that pinned them was updated.
+- **Plan writer.** It mirrors the `use_intrabc` symbol and refuses an intrabc block, since it cannot code a vector.
+- **Probe.** `vector-probe` no longer marks `allow_screen_content_tools` (decodes since 0.8.2) or `allow_intrabc` as
+  rejects.
+
+**The reference, `scripts/refs/intrabc_ref.py`,** transcribes `is_mv_valid` and the fallback from the spec. Every
+boundary case carries its expectation and the port ASSERTS it. My first, unasserted, hand-labelled set was wrong in
+several places, and once asserted the port caught one more (a 128-SB case whose source ran past the tile). A
+4000-case sweep gives a count (298 valid) and a digest. **`tests/av1_intrabc.tcyr`** (74 assertions) pins:
+- the fallback (nine cases);
+- 25 boundary cases and the sweep;
+- the `use_intrabc` read position (a marker symbol written after it must read back next);
+- the DV context, using deliberately diverged context-0 / context-1 CDFs;
+- the MI-grid read extent across the right and bottom edges, by luma copy and half-sample chroma bilinear.
+
+Mutation testing:
+- **Unit:** 21 of 22 mutants go red. The survivor drops `srcSbRow > activeSbRow`, and is EQUIVALENT for every legal
+  (superblock-aligned) tile, because a later-row source always fails the delay rule first. The port documents why,
+  and the sweep is unchanged under it.
+- **Gate, production wiring:** 6 of 9 go red. Three are not caught there:
+  - The `RefStackMv[ 1 ]` fallback is unreachable in valid streams: `[ 0 ]` is zero only when the stack is empty.
+  - `MV_INTRABC_CONTEXT` is caught by the unit test only. No libaom stream tried carries an intrabc keyframe's MV CDFs
+    into an inter frame, so context 0 vs 1 never shows (five GOP shapes tried).
+  - The MI-grid read extent is caught by the unit test only. libaom's encoder never aims a vector into the overhang
+    past the visible frame, even on periodic odd-size content built to invite it (three geometries).
+
+**`make conformance`** gains 14 intrabc cases, every frame hard against `aomdec` with dav1d agreeing:
+- the base at cpu-used 2 and 0 (the latter picks 128x128 superblocks itself);
+- two odd sizes;
+- 4:4:4, 10-bit 4:2:2, 10-bit, 12-bit and monochrome;
+- lossless;
+- 128x128 superblocks;
+- four tiles;
+- segmentation AQ;
+- a 10-frame GOP of intrabc keyframes between inter frames.
+
+Each case's `ibc_property` guard proves `allow_intrabc`, plus the property the case exists for. Four committed
+reproducers (`ibc-352x288`, `ibc-sb128-352x288`, `ibc-odd-349x197`, `ibc-b10-352x288`, 4–8 KB) run without libaom.
+All of them were REJECTED by the 0.8.4-bite-2 decoder.
+
+`make conformance` is **2425 matched / 0 known-gap / 0 regressed / 0 skipped** (was 2383).
+
+**Gates:** 42 suites, **31,282** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Fixed — 0.8.4 bite 2: film grain synthesis (7.18.3) on the output; grain streams no longer decode grain-free
 
 **Every film-grain stream used to decode WITHOUT its grain, and nothing said so.** `film_grain_params` was parsed

@@ -353,6 +353,12 @@ fn av1_tile_seg_fh(tile): i64 {
     if (tile == 0) { return 0; }
     return load64(tile + AV1TILE_SEG_FH);
 }
+# allow_intrabc of the frame this tile belongs to (0 for a bare test tile without a frame header).
+fn av1_tile_allow_intrabc(tile): i64 {
+    var fh = av1_tile_seg_fh(tile);   # 0 for a null tile too (the mode-info unit tests pass one)
+    if (fh == 0) { return 0; }
+    return av1_fh_allow_intrabc(fh);
+}
 fn av1_tile_seg_id_pre_skip(tile): i64 {
     if (tile == 0) { return 0; }
     var fh = load64(tile + AV1TILE_SEG_FH);

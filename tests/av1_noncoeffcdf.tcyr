@@ -149,7 +149,7 @@ fn ncdf_row_is_delta_default(b, off): i64 {
 }
 fn test_ncdf_delta_layout() {
     var b = av1_noncoeff_cdf_blob();
-    assert_eq(AV1_NCDF_N, 2515, "blob length 2515 i64 (... + three seg-pred rows of 3 + 601 palette words)");
+    assert_eq(AV1_NCDF_N, 2518, "blob length 2518 i64 (... + 601 palette words + the 3-word intrabc row)");
     assert_eq(av1_ncdf_delta_q(b) - b, 1875 * 8, "Default_Delta_Q_Cdf @ 1875");
     assert_eq(av1_ncdf_delta_lf(b) - b, 1880 * 8, "Default_Delta_Lf_Cdf @ 1880");
     var i = 0;
@@ -217,7 +217,13 @@ fn test_ncdf_palette_layout() {
     assert_eq(av1_ncdf_palette_uv_mode(b, 1) - b, 2512 * 8, "PaletteUVMode[1] @2512");
     assert_eq(load64(b + (2509 * 8)), 32461, "PaletteUVMode[0] = 32461");
     assert_eq(load64(b + (2512 * 8)), 21488, "PaletteUVMode[1] = 21488");
-    assert_eq(av1_ncdf_palette_uv_mode(b, 2) - b, AV1_NCDF_N * 8, "the palette rows end the blob");
+    assert_eq(av1_ncdf_palette_uv_mode(b, 2) - b, 2515 * 8, "the palette rows end @2515");
+    # Default_Intrabc_Cdf (0.8.4) is appended after them and ends the blob
+    assert_eq(av1_ncdf_intrabc(b) - b, 2515 * 8, "Default_Intrabc_Cdf @2515");
+    assert_eq(load64(b + (2515 * 8)), 30531, "Default_Intrabc_Cdf = 30531");
+    assert_eq(load64(b + (2516 * 8)), 32768, "...then 32768");
+    assert_eq(load64(b + (2517 * 8)), 0, "...then the 0 adaptation count");
+    assert_eq((av1_ncdf_intrabc(b) - b) + (3 * 8), AV1_NCDF_N * 8, "the intrabc row ends the blob");
     # every row is a valid CDF: monotone, ending 32768 then a 0 count (self-describing scan of the region).
     var bad = 0;
     var i = 1914;

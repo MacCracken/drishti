@@ -88,6 +88,15 @@ FG_CASES="fgt1_176x144 fgt2_176x144 fgt3_176x144 fgt4_176x144 fgt5_176x144 fgt6_
 fgt9_176x144 fgt10_176x144 fgt11_176x144 fgt12_176x144 fgt13_176x144 fgt14_176x144 fgt15_176x144 fgt16_176x144 \
 fgb10_176x144 fgb12_176x144 fg444_176x144 fg422_176x144 fgmono_176x144 fgsr_352x288 fgrs_352x288 fgsvt_176x144 \
 fgrav_176x144 fgid_176x144 fgbt_176x144"
+# INTRA BLOCK COPY (0.8.4; REJECTED before), KIND_WxH, every frame hard: libaom screen-content keyframes
+# (`--tune-content=screen --enable-intrabc=1`, testsrc2) at the presets that keep intrabc (cpu-used 0..2; it drops at
+# 3). Counted with libaom's inspect when the cases were written, the intrabc MI cells per frame run from 8 (4:4:4) to
+# over 1,200: ibc / ibc0 the base, ibcodd* odd sizes (the MI-grid read extent), ibc444 / ibc422 / ibcb10 / ibcb12 /
+# ibcmono every format and depth, ibcll lossless, ibc128 128x128 superblocks (gradient 6), ibctile four tiles (the
+# vector stays in its tile), ibcaq segmentation, ibcgop intrabc keyframes between inter frames. Each case's
+# ibc_property guard proves allow_intrabc, plus the property the case exists for.
+IBC_CASES="ibc_352x288 ibc0_352x288 ibcodd_349x197 ibcodd_173x101 ibc444_176x144 ibc422_352x288 ibcb10_352x288 \
+ibcb12_352x288 ibcmono_352x288 ibcll_352x288 ibc128_352x288 ibctile_640x360 ibcaq_352x288 ibcgop_352x288"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
 # context_update_tile_id != 0 (libaom names its LARGEST tile), and frame-parallel streams that adapt inside the
 # frame but save the INITIAL context (disable_frame_end_update_cdf 1). Every case also has a later frame
@@ -167,6 +176,7 @@ skip_external() { # reason
     for c in $TSEG_CASES; do skip_case "$c" "$1"; done
     for c in $QM_CASES; do skip_case "$c" "$1"; done
     for c in $FG_CASES; do skip_case "$c" "$1"; done
+    for c in $IBC_CASES; do skip_case "$c" "$1"; done
     for c in $CDF_CASES; do skip_case "$c" "$1"; done
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
@@ -337,6 +347,15 @@ repro_seq  qm-ll-96x64 3 3
 repro_seq  fg-reload-96x64 4 4
 repro_seq  fg-lag-96x64 10 10
 repro_seq  fg-b10-422-72x40 3 3
+# INTRA BLOCK COPY (0.8.4), libaom 3.15.3 `--tune-content=screen --enable-intrabc=1 --kf-max-dist=0` on testsrc2,
+# 2 keyframes each; intrabc MI cells per frame counted with libaom's inspect: ibc-352x288 (`--cpu-used=2`) 1,286 / 320;
+# ibc-sb128-352x288 (`--cpu-used=1 --sb-size=128`) 224 / 238; ibc-odd-349x197 (`--cpu-used=1`) 254 / 202;
+# ibc-b10-352x288 (10-bit, `--cpu-used=1`) 352 / 280. dav1d agrees with aomdec on every frame; all four were REJECTED
+# (allow_intrabc) by the 0.8.4-bite-2 decoder.
+repro_seq  ibc-352x288 2 2
+repro_seq  ibc-sb128-352x288 2 2
+repro_seq  ibc-odd-349x197 2 2
+repro_seq  ibc-b10-352x288 2 2
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -1540,6 +1559,92 @@ fgcase() { # name = KIND_WxH (every frame hard)
 }
 echo "--- film grain (7.18.3, the output process; every frame hard) ---"
 for c in $FG_CASES; do fgcase "$c"; done
+# Does the probe show what an INTRA BLOCK COPY case exists for? want: base (some frame allows intrabc), lossless (an
+# allow_intrabc frame is coded lossless), aq (... has segmentation on), tiles (... has >= 2 tiles), sb128 (128x128
+# superblocks), gop (>= 2 allow_intrabc frames AND >= 1 inter frame). bd / fmt as bd_property.
+ibc_property() { # want bd fmt
+    ./build/drishti-vector-probe 2>&1 | awk -v want="$1" -v bd="$2" -v fmt="$3" '
+        /^ *bit_depth=/ { split($0, a, "="); b = a[2] + 0 }
+        /^ *num_planes=/ { split($0, a, "="); np = a[2] + 0 }
+        /^ *subsampling_x=/ { split($0, a, "="); sx = a[2] + 0 }
+        /^ *subsampling_y=/ { split($0, a, "="); sy = a[2] + 0 }
+        /^ *use_128x128_superblock=/ { split($0, a, "="); s128 = a[2] + 0 }
+        /^ *frame_type=/ { f++; split($0, a, "="); ft[f] = a[2] + 0 }
+        /^ *coded_lossless=/ { split($0, a, "="); ll[f] = a[2] + 0 }
+        /^ *tile_cols=/ { split($0, a, "="); tc[f] = a[2] + 0 }
+        /^ *tile_rows=/ { split($0, a, "="); tr[f] = a[2] + 0 }
+        /^ *allow_intrabc=/ { split($0, a, "="); ib[f] = a[2] + 0 }
+        /^ *segmentation_enabled=/ { split($0, a, "="); sg[f] = a[2] + 0 }
+        END {
+            nib = 0; nll = 0; nsg = 0; nti = 0; ninter = 0
+            for (k = 1; k <= f; k++) {
+                if (ft[k] == 1) ninter++
+                if (!ib[k]) continue
+                nib++
+                if (ll[k]) nll++
+                if (sg[k]) nsg++
+                if (tc[k] * tr[k] >= 2) nti++
+            }
+            ok = (b == bd) && (nib >= 1)
+            if (fmt == "420") ok = ok && (np == 3 && sx == 1 && sy == 1)
+            if (fmt == "444") ok = ok && (np == 3 && sx == 0 && sy == 0)
+            if (fmt == "422") ok = ok && (np == 3 && sx == 1 && sy == 0)
+            if (fmt == "mono") ok = ok && (np == 1)
+            if (want == "lossless") ok = ok && (nll >= 1)
+            if (want == "aq") ok = ok && (nsg >= 1)
+            if (want == "tiles") ok = ok && (nti >= 1)
+            if (want == "sb128") ok = ok && (s128 == 1)
+            if (want == "gop") ok = ok && (nib >= 2) && (ninter >= 1)
+            printf "bit_depth=%d planes=%d intrabc_frames=%d lossless=%d segmented=%d tiled=%d sb128=%d inter_frames=%d", \
+                b, np, nib, nll, nsg, nti, s128, ninter
+            exit !ok
+        }'
+}
+ibccase() { # name = KIND_WxH (every frame hard)
+    local n="$1" kind geo
+    IFS=_ read -r kind geo <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" fr=2 bd=8 fmt="420" want="base" args="" kf="--kf-max-dist=0"
+    case "$kind" in
+        ibc)     args="--cpu-used=2" ;;
+        ibc0)    args="--cpu-used=0" ;;
+        ibcodd)  args="--cpu-used=1" ;;
+        ibc444)  fmt="444"; args="--profile=1 --cpu-used=1" ;;
+        ibc422)  fmt="422"; bd=10; args="--profile=2 --cpu-used=1" ;;
+        ibcb10)  bd=10; args="--cpu-used=1" ;;
+        ibcb12)  bd=12; args="--profile=2 --cpu-used=1" ;;
+        ibcmono) fmt="mono"; args="--monochrome --cpu-used=1" ;;
+        ibcll)   want="lossless"; args="--cpu-used=1 --lossless=1" ;;
+        ibc128)  want="sb128"; args="--cpu-used=1 --sb-size=128" ;;
+        ibctile) want="tiles"; args="--cpu-used=2 --tile-columns=1 --tile-rows=1" ;;
+        ibcaq)   want="aq"; args="--cpu-used=1 --aq-mode=1" ;;
+        ibcgop)  fr=10; want="gop"; kf="--kf-max-dist=4"; args="--cpu-used=2" ;;
+        *)       echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    local pf="yuv${fmt}p" iflag="--i${fmt}"
+    [ "$fmt" = "mono" ] && { pf="yuv420p"; iflag="--i420"; }
+    [ "$bd" != 8 ] && pf="${pf}${bd}le"
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "testsrc2=size=${w}x${h}:rate=30" -frames:v "$fr" -pix_fmt "$pf" \
+        -f rawvideo "$WORK/$n.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    # shellcheck disable=SC2086
+    aomenc --codec=av1 -w "$w" -h "$h" $iflag --input-bit-depth="$bd" --bit-depth="$bd" --limit="$fr" $args $kf \
+        --tune-content=screen --enable-intrabc=1 --ivf -o "$WORK/$n.ivf" "$WORK/$n.yuv" >/dev/null 2>&1
+    [ -s "$WORK/$n.ivf" ] || { echo "  $n: SETUP FAILED (aomenc produced no stream)"; fail=$((fail+1)); return; }
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf || { echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local prop
+    if ! prop=$(ibc_property "$want" "$bd" "$fmt"); then
+        echo "  $n: SETUP FAILED (not a $bd-bit $fmt '$want' intrabc stream: $prop — the case would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    # aomdec writes one frame per shown frame; an odd-size encode may code fewer frames than requested
+    local nref; nref=$(aomdec --rawvideo -o /dev/null --summary "$WORK/$n.ivf" 2>&1 | grep -oE '[0-9]+ showed' \
+        | grep -oE '[0-9]+' | head -1 || true)
+    echo "  $n ($prop)"
+    vs_judge "$n" "${nref:-$fr}"
+}
+echo "--- intra block copy (5.11.7 use_intrabc, 7.11.3 from the current frame; every frame hard) ---"
+for c in $IBC_CASES; do ibccase "$c"; done
 # does the probe show `want` — "ctxtile" (an adapting frame saving a tile other than 0) or "fp" (an adapting frame
 # with disable_frame_end_update_cdf 1) — AND a later frame inheriting CDFs (primary_ref_frame != 7)?
 cdf_property() { # want

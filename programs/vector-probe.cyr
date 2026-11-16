@@ -124,8 +124,8 @@ fn probe_fh(fh, seq): i64 {
     probe_kv("lr_type_u", av1_fh_frame_restoration_type(fh, 1));
     probe_kv("lr_type_v", av1_fh_frame_restoration_type(fh, 2));
     probe_puts(" --- drishti reject gates ---\n");
-    probe_gate("allow_screen_content_tools", load64(fh + AV1FH_ALLOW_SCT), 1);
-    probe_gate("allow_intrabc", load64(fh + AV1FH_ALLOW_INTRABC), 1);
+    probe_kv("allow_screen_content_tools", load64(fh + AV1FH_ALLOW_SCT));   # decodes as of 0.8.2 (palette)
+    probe_kv("allow_intrabc", load64(fh + AV1FH_ALLOW_INTRABC));            # decodes as of 0.8.4
     # quantizer matrices decode as of 0.8.4: reported, no longer gates (rejected 0.8.2 - 0.8.3).
     probe_kv("using_qmatrix", load64(fh + AV1FH_USING_QMATRIX));
     probe_kv("qm_y", load64(fh + AV1FH_QM_Y));

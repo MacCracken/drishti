@@ -12,15 +12,15 @@
 # 32768, count 0). The mode-info / tx-size / tx-type / partition reads that
 # consume these land in later 0.7.x bites (roadmap.md). FLAT module — wiring
 # in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a),
-# segment_id (0.7.125 D1) and delta_q / delta_lf (0.8.2) CDFs are now HERE. Still absent
-# (feature-gated, roadmap.md 0.8.4): intrabc and palette CDFs.
+# segment_id (0.7.125 D1) and delta_q / delta_lf (0.8.2) CDFs are now HERE, as are the palette CDFs (0.8.2)
+# and Default_Intrabc_Cdf (0.8.4, appended last).
 
 # The blob length in i64, named ONCE: av1_ncdf_new, the cross-frame CDF bundle (av1_intertile.cyr)
 # and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows,
-# 1905 -> 1914 for the three seg_id_predicted rows and 1914 -> 2515 for the palette CDFs; when it was a literal in
-# seven places, growing it meant finding all seven.
+# 1905 -> 1914 for the three seg_id_predicted rows, 1914 -> 2515 for the palette CDFs and 2515 -> 2518 for the
+# use_intrabc CDF (0.8.4); when it was a literal in seven places, growing it meant finding all seven.
 enum Av1NcdfSize {
-    AV1_NCDF_N = 2515;
+    AV1_NCDF_N = 2518;
 }
 
 var Av1_NCdf = 0;
@@ -479,6 +479,10 @@ fn av1_ncdf_fill_palette(t): i64 {
     store64(t + (2512 * 8), 21488);
     store64(t + (2513 * 8), 32768);
     store64(t + (2514 * 8), 0);
+    # Default_Intrabc_Cdf @2515 (one binary row): { 30531, 32768, 0 } (0.8.4)
+    store64(t + (2515 * 8), 30531);
+    store64(t + (2516 * 8), 32768);
+    store64(t + (2517 * 8), 0);
     return 0;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
@@ -536,6 +540,8 @@ fn av1_ncdf_palette_color(cc, uv, n, ctx): i64 {
 }
 fn av1_ncdf_palette_y_mode(cc, bctx, ctx): i64 { return cc + ((2446 + (((bctx * 3) + ctx) * 3)) * 8); }
 fn av1_ncdf_palette_uv_mode(cc, ctx): i64 { return cc + ((2509 + (ctx * 3)) * 8); }
+# use_intrabc (5.11.7): TileIntrabcCdf, one binary row @2515 (0.8.4).
+fn av1_ncdf_intrabc(cc): i64 { return cc + (2515 * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }
 fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }

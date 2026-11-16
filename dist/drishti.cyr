@@ -11135,15 +11135,15 @@ fn av1_coeff_br_cdf(q, txsz_ctx, ptype, ctx): i64 {
 # 32768, count 0). The mode-info / tx-size / tx-type / partition reads that
 # consume these land in later 0.7.x bites (roadmap.md). FLAT module — wiring
 # in src/main.cyr after av1_coeffs.cyr. Family av1_. The partition W128 (0.7.126 E2a),
-# segment_id (0.7.125 D1) and delta_q / delta_lf (0.8.2) CDFs are now HERE. Still absent
-# (feature-gated, roadmap.md 0.8.4): intrabc and palette CDFs.
+# segment_id (0.7.125 D1) and delta_q / delta_lf (0.8.2) CDFs are now HERE, as are the palette CDFs (0.8.2)
+# and Default_Intrabc_Cdf (0.8.4, appended last).
 
 # The blob length in i64, named ONCE: av1_ncdf_new, the cross-frame CDF bundle (av1_intertile.cyr)
 # and the frame-decode CDF copy all size off it. It grew 1875 -> 1905 for the six delta CDF rows,
-# 1905 -> 1914 for the three seg_id_predicted rows and 1914 -> 2515 for the palette CDFs; when it was a literal in
-# seven places, growing it meant finding all seven.
+# 1905 -> 1914 for the three seg_id_predicted rows, 1914 -> 2515 for the palette CDFs and 2515 -> 2518 for the
+# use_intrabc CDF (0.8.4); when it was a literal in seven places, growing it meant finding all seven.
 enum Av1NcdfSize {
-    AV1_NCDF_N = 2515;
+    AV1_NCDF_N = 2518;
 }
 
 var Av1_NCdf = 0;
@@ -11602,6 +11602,10 @@ fn av1_ncdf_fill_palette(t): i64 {
     store64(t + (2512 * 8), 21488);
     store64(t + (2513 * 8), 32768);
     store64(t + (2514 * 8), 0);
+    # Default_Intrabc_Cdf @2515 (one binary row): { 30531, 32768, 0 } (0.8.4)
+    store64(t + (2515 * 8), 30531);
+    store64(t + (2516 * 8), 32768);
+    store64(t + (2517 * 8), 0);
     return 0;
 }
 # init_non_coeff_cdfs: a mutable per-tile copy of the whole default blob (no
@@ -11659,6 +11663,8 @@ fn av1_ncdf_palette_color(cc, uv, n, ctx): i64 {
 }
 fn av1_ncdf_palette_y_mode(cc, bctx, ctx): i64 { return cc + ((2446 + (((bctx * 3) + ctx) * 3)) * 8); }
 fn av1_ncdf_palette_uv_mode(cc, ctx): i64 { return cc + ((2509 + (ctx * 3)) * 8); }
+# use_intrabc (5.11.7): TileIntrabcCdf, one binary row @2515 (0.8.4).
+fn av1_ncdf_intrabc(cc): i64 { return cc + (2515 * 8); }
 fn av1_ncdf_tx8(cc, ctx): i64 { return cc + ((1135 + ctx * 3) * 8); }
 fn av1_ncdf_tx16(cc, ctx): i64 { return cc + ((1144 + ctx * 4) * 8); }
 fn av1_ncdf_tx32(cc, ctx): i64 { return cc + ((1156 + ctx * 4) * 8); }
@@ -11852,7 +11858,8 @@ enum Av1ModeInfoOff {
     AV1MI_PAL_MAPY   = 288;   # encode plan: ColorMapY source (0 on decode)
     AV1MI_PAL_MAPUV  = 296;   # encode plan: ColorMapUV source
     AV1MI_PAL_VDELTA = 304;   # encode plan: delta-code the V colours when they fit
-    AV1MI_SIZE       = 312;
+    AV1MI_USE_IBC    = 312;   # use_intrabc (5.11.7, 0.8.4): the block copies from the current frame
+    AV1MI_SIZE       = 320;
 }
 fn av1_modeinfo_new(): i64 {
     var mi = alloc(AV1MI_SIZE);
@@ -12743,6 +12750,27 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
     # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.7), straight after read_cdef.
     av1_read_deltas(sd, ncc, av1_tile_dctx(tile), mi_size, skip);
 
+    # use_intrabc (5.11.7, 0.8.4), read only where allow_intrabc. An intra block copy is an INTER block whose
+    # reference is the frame being decoded: YMode / UVMode DC_PRED, no palette, no filter intra. The caller (the
+    # inter lane, av1_intra_frame_mode_info_ibc — allow_intrabc frames decode there) reads its displacement vector.
+    store64(mi + AV1MI_USE_IBC, 0);
+    if (av1_tile_allow_intrabc(tile) != 0) {
+        if (av1_sym_read_symbol(sd, av1_ncdf_intrabc(ncc), 2) != 0) {
+            store64(mi + AV1MI_USE_IBC, 1);
+            store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+            store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+            store64(mi + AV1MI_ANGLE_Y, 0);
+            store64(mi + AV1MI_ANGLE_UV, 0);
+            store64(mi + AV1MI_CFL_U, 0);
+            store64(mi + AV1MI_CFL_V, 0);
+            store64(mi + AV1MI_PAL_NY, 0);
+            store64(mi + AV1MI_PAL_NUV, 0);
+            store64(mi + AV1MI_USE_FI, 0);
+            store64(mi + AV1MI_FI_MODE, 0);
+            return av1_sym_dec_err(sd);
+        }
+    }
+
     var ymode = av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode);
     store64(mi + AV1MI_YMODE, ymode);
     store64(mi + AV1MI_ANGLE_Y, av1_read_angle_delta_y(sd, ncc, mi_size, ymode));
@@ -12805,6 +12833,12 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
     }
     var ewd = av1_write_deltas(enc, ncc, av1_tile_dctx(tile), mi_size, load64(mi + AV1MI_SKIP), mi_row, mi_col);
     if (ewd != DR_OK) { return ewd; }
+    # use_intrabc mirror (5.11.7): written wherever allow_intrabc, so the decoder's read stays in step. The plan
+    # writer cannot code a displacement vector, so an intrabc block in the plan is refused, never mis-written.
+    if (av1_tile_allow_intrabc(tile) != 0) {
+        av1_sym_encode_symbol(enc, av1_ncdf_intrabc(ncc), 2, load64(mi + AV1MI_USE_IBC));
+        if (load64(mi + AV1MI_USE_IBC) != 0) { return DR_ERR_UNSUPPORTED; }
+    }
 
     var ymode = load64(mi + AV1MI_YMODE);
     av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode);
@@ -15706,6 +15740,12 @@ fn av1_has_chroma(frame, r, c, bw4, bh4, subx, suby): i64 {
 fn av1_tile_seg_fh(tile): i64 {
     if (tile == 0) { return 0; }
     return load64(tile + AV1TILE_SEG_FH);
+}
+# allow_intrabc of the frame this tile belongs to (0 for a bare test tile without a frame header).
+fn av1_tile_allow_intrabc(tile): i64 {
+    var fh = av1_tile_seg_fh(tile);   # 0 for a null tile too (the mode-info unit tests pass one)
+    if (fh == 0) { return 0; }
+    return av1_fh_allow_intrabc(fh);
 }
 fn av1_tile_seg_id_pre_skip(tile): i64 {
     if (tile == 0) { return 0; }
@@ -19744,6 +19784,13 @@ fn av1_mc_scaled_mid_h(h, step_y): i64 {
 # av1_mc_pred_block and the two-ref av1_mc_pred_compound. `dst` supplies the geometry
 # (dims/bit-depth/subsampling); `ref` is the source reference frame.
 fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, compound): i64 {
+    return av1_mc_pred_core_ext(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, compound, 0, 0);
+}
+# av1_mc_pred_core with an explicit reference READ extent (clamp_w x clamp_h samples of this plane) in place of the
+# visible plane's — 7.11.3.4's lastX / lastY come from RefUpscaledWidth / RefFrameHeight, which intra block copy
+# sets to the MI grid (7.11.3.1 step 11). 0 keeps the visible extent; the extent never exceeds the allocation.
+fn av1_mc_pred_core_ext(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, compound,
+  clamp_w, clamp_h): i64 {
     if ((dst == 0) || (ref == 0)) { return DR_ERR_BOUNDS; }
     if ((plane < 0) || (plane >= dr_frame_num_planes(dst)) || (plane >= dr_frame_num_planes(ref))) {
         return DR_ERR_BOUNDS;
@@ -19753,6 +19800,8 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
     var bd = dr_frame_bit_depth(dst);
     var pw = dr_frame_plane_width(dst, plane);
     var ph = dr_frame_plane_height(dst, plane);
+    if (clamp_w > 0) { pw = av1_min(clamp_w, dr_frame_plane_alloc_w(ref, plane)); }
+    if (clamp_h > 0) { ph = av1_min(clamp_h, dr_frame_plane_alloc_h(ref, plane)); }
     # Format incompatibility is PERMANENT — differing bit depth or subsampling makes the two
     # sample grids incomparable and no amount of scaling reconciles them.
     if (av1_mc_ref_compat(ref, dst) == 0) { return DR_ERR_UNSUPPORTED; }
@@ -19837,9 +19886,13 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
 # single-ref MC (7.11.3.1 non-compound): produce the final prediction and write it
 # into the frame. Returns DR_OK / DR_ERR_* (see av1_mc_pred_core).
 fn av1_mc_pred_block(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y): i64 {
+    return av1_mc_pred_block_ext(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, 0, 0);
+}
+# av1_mc_pred_block with an explicit reference read extent (see av1_mc_pred_core_ext): intra block copy's MI grid.
+fn av1_mc_pred_block_ext(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, clamp_w, clamp_h): i64 {
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
-    var e = av1_mc_pred_core(Av1_McOut, dst, ref, plane, x, y, w, h, mv_row, mv_col,
-      filt_x, filt_y, 0);
+    var e = av1_mc_pred_core_ext(Av1_McOut, dst, ref, plane, x, y, w, h, mv_row, mv_col,
+      filt_x, filt_y, 0, clamp_w, clamp_h);
     if (e != DR_OK) { return e; }
     var r = 0;
     while (r < h) {
@@ -25345,8 +25398,8 @@ enum Av1BlockInfoOff {
     AV1FB_IB       = 32;    # embedded Av1InterBlock (AV1IB_SIZE = 192)
     AV1FB_RESID    = 224;   # encode-only: residual-coeff plan ptr (0 = zero residual)
     AV1FB_VARTX    = 232;   # encode-only: var-tx plan ptr (0 = uniform tx)
-    AV1FB_MI       = 240;   # embedded Av1ModeInfo (AV1MI_SIZE=312) — the intra-fork mode fields (5.11.24)
-    AV1FB_SIZE     = 552;
+    AV1FB_MI       = 240;   # embedded Av1ModeInfo (AV1MI_SIZE=320) — the intra-fork mode fields (5.11.24)
+    AV1FB_SIZE     = 560;
 }
 fn av1_blockinfo_new(): i64 {
     var b = alloc(AV1FB_SIZE);
@@ -25906,10 +25959,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     if (av1_fh_qm_applies(fh, av1_seq_num_planes(seq)) != 0) {
         if (av1_qm_table() == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     }
-    # allow_intrabc (5.11.6) is read by neither path; an intra-block-copy frame would desync (roadmap.md 0.8.4).
+    # allow_intrabc decodes as of 0.8.4: such an intra frame runs on the INTER lane (av1_frame_dec_group), which
+    # reads use_intrabc and predicts a block copy from the frame being decoded. It rejected here before.
     # allow_screen_content_tools itself no longer rejects (0.8.2): its palette tools decode on both lanes
     # (src/av1_palette.cyr), and force_integer_mv was already honoured by the MV reads.
-    if (av1_fh_allow_intrabc(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     var num_planes = av1_seq_num_planes(seq);
     # Allocate to the MI GRID, not the visible frame. Prediction writes a block's NOMINAL
     # extent, which runs past FrameWidth/FrameHeight in two independent ways: MiCols*MI_SIZE
@@ -26030,10 +26083,16 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
         var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
         if (ar != DR_OK) { store64(out_err, ar); return 0 - 1; }
-        if (av1_fh_frame_is_intra(fh) == 0) {
-            # an INTER frame (0.7.84): needs the DPB + ref state for MC.
+        if ((av1_fh_frame_is_intra(fh) == 0) || (av1_fh_allow_intrabc(fh) != 0)) {
+            # an INTER frame (0.7.84): needs the DPB + ref state for MC. An allow_intrabc INTRA frame (0.8.4)
+            # decodes on this lane too — an intra block copy is an inter block — but reads no reference, so a
+            # single-frame decode without a DPB gets an empty one.
             var idpb = load64(fdc + AV1FDEC_DPB);
             var irefs = load64(fdc + AV1FDEC_REFS);
+            if (av1_fh_frame_is_intra(fh) != 0) {
+                if (idpb == 0) { idpb = av1_dpb_new(); }
+                if (irefs == 0) { irefs = av1_ref_state_new(); }
+            }
             if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0 - 1; }
             var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
             if (ir != DR_OK) { store64(out_err, ir); return 0 - 1; }
@@ -27004,6 +27063,137 @@ fn av1_inter_store_block(tile, r, c, sub_size, fb, tx_size, has_chroma, is_vartx
     return DR_OK;
 }
 
+# is_mv_valid (6.10.25) for an intra block copy: the displacement vector must be whole-sample, stay inside the tile,
+# and fetch from superblocks already decoded at least INTRABC_DELAY_SB64 (4) 64-wide columns behind, along the
+# wavefront the gradient describes — so a pipelined decoder never reads a sample it has not written. A bitstream
+# conformance requirement; drishti refuses an invalid vector (libaom does too) rather than read the undecoded area.
+fn av1_intrabc_dv_valid(tile, r, c, sub_size, has_chroma, mv_row, mv_col): i64 {
+    if ((av1_itx_abs(mv_row) >= 16384) || (av1_itx_abs(mv_col) >= 16384)) { return 0; }
+    if (((mv_row & 7) != 0) || ((mv_col & 7) != 0)) { return 0; }
+    var bw = av1_block_width(sub_size);
+    var bh = av1_block_height(sub_size);
+    var top = (r * AV1_MI_SIZE) + (mv_row >>> 3);
+    var left = (c * AV1_MI_SIZE) + (mv_col >>> 3);
+    var bottom = top + bh;
+    var right = left + bw;
+    if (has_chroma != 0) {
+        if ((bw < 8) && (load64(tile + AV1TILE_SUBX) != 0)) { left = left - 4; }
+        if ((bh < 8) && (load64(tile + AV1TILE_SUBY) != 0)) { top = top - 4; }
+    }
+    var row_start = load64(tile + AV1TILE_ROW_START);
+    var col_start = load64(tile + AV1TILE_COL_START);
+    var row_end = load64(tile + AV1TILE_ROW_END);
+    var col_end = load64(tile + AV1TILE_COL_END);
+    if ((top < (row_start * AV1_MI_SIZE)) || (left < (col_start * AV1_MI_SIZE))
+      || (bottom > (row_end * AV1_MI_SIZE)) || (right > (col_end * AV1_MI_SIZE))) {
+        return 0;
+    }
+    var sb128 = load64(tile + AV1TILE_SB128);
+    var sbh = 64;
+    if (sb128 != 0) { sbh = 128; }
+    var active_sb_row = (r * AV1_MI_SIZE) / sbh;
+    var active_sb64_col = (c * AV1_MI_SIZE) >> 6;
+    var src_sb_row = (bottom - 1) / sbh;
+    var src_sb64_col = (right - 1) >> 6;
+    var total_sb64_per_row = ((col_end - col_start - 1) >> 4) + 1;
+    var active_sb64 = (active_sb_row * total_sb64_per_row) + active_sb64_col;
+    var src_sb64 = (src_sb_row * total_sb64_per_row) + src_sb64_col;
+    if (src_sb64 >= (active_sb64 - 4)) { return 0; }   # INTRABC_DELAY_SB64
+    var gradient = 1 + 4 + sb128;
+    var wf_offset = gradient * (active_sb_row - src_sb_row);
+    if ((src_sb_row > active_sb_row) || (src_sb64_col >= ((active_sb64_col - 4) + wf_offset))) { return 0; }
+    return 1;
+}
+
+# assign_mv( 0 )'s intrabc fallback (5.11.26) when RefStackMv[ 0 ] and [ 1 ] are both zero: one superblock up, or —
+# in the tile's first superblock row (MiRow - sbSize4 < MiRowStart) — one superblock plus INTRABC_DELAY_PIXELS (256)
+# to the left. Returns a scratch Av1Mv (1/8-sample units), overwritten by the next call.
+var Av1_IbcPred = 0;
+fn av1_intrabc_default_pred(mi_row, mi_row_start, sb128): i64 {
+    if (Av1_IbcPred == 0) {
+        Av1_IbcPred = alloc(16);   # one Av1Mv: row, col
+        if (Av1_IbcPred == 0) { return 0; }
+    }
+    var sb4 = 16;   # Num_4x4_Blocks_High[ BLOCK_64X64 ]
+    if (sb128 != 0) { sb4 = 32; }
+    store64(Av1_IbcPred + AV1MV_ROW, 0);
+    store64(Av1_IbcPred + AV1MV_COL, 0);
+    if ((mi_row - sb4) < mi_row_start) {
+        store64(Av1_IbcPred + AV1MV_COL, 0 - (((sb4 * AV1_MI_SIZE) + 256) * 8));
+    } else {
+        store64(Av1_IbcPred + AV1MV_ROW, 0 - ((sb4 * AV1_MI_SIZE) * 8));
+    }
+    return Av1_IbcPred;
+}
+
+# read_mv( 0 ) for an intra block copy (5.11.32): MvCtx = MV_INTRABC_CONTEXT, the second of the two MV CDF sets,
+# under the intra frame's force_integer_mv (and no high precision). The two sets start equal, so only the CDFs an
+# inter frame later inherits can tell them apart — tests/av1_intrabc.tcyr pins the context with deliberately
+# different sets.
+fn av1_intrabc_read_dv(sd, ccmv, fh, pred_row, pred_col, out_mv): i64 {
+    return av1_read_mv(sd, ccmv, AV1_MV_INTRABC_CTX, av1_fh_allow_high_precision_mv(fh), av1_fh_force_integer_mv(fh),
+      pred_row, pred_col, out_mv);
+}
+
+# intra_frame_mode_info (5.11.7) on the INTER lane. An allow_intrabc intra frame decodes here (0.8.4): an intra block
+# copy is an INTER block (var-tx, inter transform types, motion compensation) inside an intra frame, and the contexts
+# of its neighbours must see it as one. The keyframe mode info is read into fb's embedded Av1ModeInfo, so a
+# use_intrabc 0 block goes down the intra fork exactly like an intra block in an inter frame. A use_intrabc block
+# becomes an inter block: RefFrame { INTRA_FRAME, NONE }, YMode DC_PRED, SIMPLE motion, BILINEAR filters, and the
+# displacement vector of find_mv_stack( 0 ) + assign_mv( 0 )'s intrabc branch (5.11.26): RefStackMv[ 0 ], else [ 1 ],
+# else one superblock up (or, in the tile's first superblock row, one superblock + INTRABC_DELAY_PIXELS left), read
+# with MV_INTRABC_CONTEXT under the intra frame's force_integer_mv. An invalid vector is DR_ERR_BOUNDS.
+fn av1_intra_frame_mode_info_ibc(tile, sd, fb, r, c, sub_size, st, has_chroma): i64 {
+    memset(fb, 0, AV1FB_SIZE);   # the embedded Av1ModeInfo reads as av1_modeinfo_new's defaults (DC_PRED = 0)
+    var mi = fb + AV1FB_MI;
+    var avail_u = load64(st + 0);
+    var avail_l = load64(st + 8);
+    var nb = alloc(6 * 8);   # 6 i64: above / left Y mode, skip, tx size
+    if (nb == 0) { return DR_ERR_OOM; }
+    av1_block_neighbours(tile, r, c, avail_u, avail_l, nb);
+    var e = av1_intra_frame_mode_info_decode(sd, load64(tile + AV1TILE_NCC), mi, sub_size, has_chroma,
+      avail_u, load64(nb + 0), avail_l, load64(nb + 8), load64(nb + 16), load64(nb + 24),
+      load64(tile + AV1TILE_LOSSLESS_MASK), load64(tile + AV1TILE_SUBX), load64(tile + AV1TILE_SUBY),
+      load64(tile + AV1TILE_ENABLE_FI), load64(tile + AV1TILE_CDEF_CTX), r, c, tile);
+    if (e != DR_OK) { return e; }
+    store64(fb + AV1FB_SEGID, load64(mi + AV1MI_SEGID));
+    store64(fb + AV1FB_SKIP, load64(mi + AV1MI_SKIP));
+    var ib = fb + AV1FB_IB;
+    store64(ib + AV1IB_REF0, AV1_INTRA_FRAME);
+    store64(ib + AV1IB_REF1, AV1_REF_NONE);
+    if (load64(mi + AV1MI_USE_IBC) == 0) { return DR_OK; }   # is_inter 0: the intra fork
+    store64(fb + AV1FB_ISINTER, 1);
+    store64(ib + AV1IB_YMODE, AV1_DC_PRED);
+    store64(ib + AV1IB_MOTIONMODE, AV1_MM_SIMPLE);
+    store64(ib + AV1IB_INTERP + 0, AV1_BILINEAR);
+    store64(ib + AV1IB_INTERP + 8, AV1_BILINEAR);
+    # find_mv_stack( 0 ) for RefFrame[ 0 ] = INTRA_FRAME: only earlier intrabc blocks (inter, INTRA_FRAME) match;
+    # setup_global_mv gives INTRA_FRAME the zero vector, and no temporal scan runs in an intra frame.
+    var ctx = load64(tile + AV1TILE_MVCTX);
+    av1_mvctx_set_refs(ctx, AV1_INTRA_FRAME, AV1_REF_NONE);
+    av1_mvctx_set_global(ctx, 0, 0, 0, 0, AV1_GM_IDENTITY, AV1_GM_IDENTITY);
+    av1_find_mv_stack(ctx, 0);
+    var mvs = load64(ctx + AV1MVC_STACK);
+    var pr = av1_mv_stack_row(mvs, 0, 0);
+    var pc = av1_mv_stack_col(mvs, 0, 0);
+    if ((pr == 0) && (pc == 0)) {
+        pr = av1_mv_stack_row(mvs, 1, 0);
+        pc = av1_mv_stack_col(mvs, 1, 0);
+    }
+    if ((pr == 0) && (pc == 0)) {
+        var dp = av1_intrabc_default_pred(r, load64(tile + AV1TILE_ROW_START), load64(tile + AV1TILE_SB128));
+        if (dp == 0) { return DR_ERR_OOM; }
+        pr = av1_mv_row(dp);
+        pc = av1_mv_col(dp);
+    }
+    av1_intrabc_read_dv(sd, load64(tile + AV1TILE_CCMV), load64(tile + AV1TILE_FH), pr, pc, ib + AV1IB_MV0);
+    if (av1_intrabc_dv_valid(tile, r, c, sub_size, has_chroma, load64(ib + AV1IB_MV0 + AV1MV_ROW),
+        load64(ib + AV1IB_MV0 + AV1MV_COL)) == 0) {
+        return DR_ERR_BOUNDS;
+    }
+    return av1_sym_dec_err(sd);
+}
+
 # decode_block, the INTER path (5.11.4/5.11.15 + 7.11.3 compute_prediction, skip-path
 # scope). Dispatched from av1_decode_block when the tile carries an FH.
 fn av1_ierr_latch(tile, e): i64 {
@@ -27816,13 +28006,19 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
     av1_inter_block_setup(tile, r, c, sub_size, st);
     var fb = av1_blockinfo_new();
     if (fb == 0) { return av1_ierr_latch(tile, DR_ERR_OOM); }
-    var e = av1_inter_frame_mode_info(sd, load64(tile + AV1TILE_CCREF),
-      load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
-      load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
-      load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
-      load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
-      load64(tile + AV1TILE_ICDEF), has_chroma, load64(tile + AV1TILE_ENABLE_FI),
-      load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile), av1_tile_palctx(tile));
+    var e = DR_OK;
+    if (av1_fh_frame_is_intra(fh) != 0) {
+        # an allow_intrabc INTRA frame (0.8.4): intra_frame_mode_info (5.11.7) with use_intrabc
+        e = av1_intra_frame_mode_info_ibc(tile, sd, fb, r, c, sub_size, st, has_chroma);
+    } else {
+        e = av1_inter_frame_mode_info(sd, load64(tile + AV1TILE_CCREF),
+          load64(tile + AV1TILE_CCIM), load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV),
+          load64(tile + AV1TILE_NCC), fb, load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB),
+          load64(tile + AV1TILE_WS), fh, load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
+          load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32),
+          load64(tile + AV1TILE_ICDEF), has_chroma, load64(tile + AV1TILE_ENABLE_FI),
+          load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile), av1_tile_dctx(tile), av1_tile_palctx(tile));
+    }
     if (e != DR_OK) { return av1_ierr_latch(tile, e); }
     # per-segment dequant (0.7.125 D1): resolve this block's qindex from its segment_id so residual()
     # dequantizes at the right quantizer. == base_q when segmentation is disabled / segment inactive. Also
@@ -27950,7 +28146,11 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
             vr = vr + txh4;
         }
     }
-    var refframe = av1_dpb_ref_frame(load64(tile + AV1TILE_DPB), fh, av1_ib_ref(ib, 0));
+    # intra block copy (0.8.4): the reference is the frame being decoded (7.11.3.1, refIdx -1), read before any
+    # in-loop filter — allow_intrabc frames have deblocking, CDEF and loop restoration all off.
+    var use_ibc = load64(fb + AV1FB_MI + AV1MI_USE_IBC);
+    var refframe = frame;
+    if (use_ibc == 0) { refframe = av1_dpb_ref_frame(load64(tile + AV1TILE_DPB), fh, av1_ib_ref(ib, 0)); }
     if (refframe == 0) { return av1_ierr_latch(tile, DR_ERR_BOUNDS); }   # missing reference: hostile stream
     var ref1frame = 0;
     if (is_comp != 0) {
@@ -28228,8 +28428,18 @@ fn av1_decode_block_inter(tile, r, c, sub_size): i64 {
                                 if (use_warp != 0) {
                                     em = av1_warp_pred_block(frame, refframe, plane, x, y, w, h, wm);
                                 } else {
-                                    em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
-                                      mv_row, mv_col, filt_x, filt_y);
+                                    if (use_ibc != 0) {
+                                        # 7.11.3.1 step 11: RefUpscaledWidth / RefFrameHeight[ -1 ] are the MI
+                                        # grid's (MiCols / MiRows * MI_SIZE), so an intrabc block may read the
+                                        # decoded columns and rows past the visible frame.
+                                        em = av1_mc_pred_block_ext(frame, refframe, plane, x, y, w, h,
+                                          mv_row, mv_col, filt_x, filt_y,
+                                          ((load64(tile + AV1TILE_FMI_COLS) * AV1_MI_SIZE) + sx) >> sx,
+                                          ((load64(tile + AV1TILE_FMI_ROWS) * AV1_MI_SIZE) + sy) >> sy);
+                                    } else {
+                                        em = av1_mc_pred_block(frame, refframe, plane, x, y, w, h,
+                                          mv_row, mv_col, filt_x, filt_y);
+                                    }
                                 }
                             }
                         }
@@ -28406,23 +28616,23 @@ fn av1_encode_block_inter(tile, r, c, sub_size, fb): i64 {
 # ================================================================
 # C1: cross-frame CDF inheritance (spec 7.20 save / 7.21 load).
 # A saved-CDF bundle is ONE flat alloc holding COPIES of all six adaptive-CDF families back to back
-# (ncc AV1_NCDF_N = 2515, cc 3999, ref 177, im 341, ii 566, mv 286 = 7884 i64). The symbol coder adapts
+# (ncc AV1_NCDF_N = 2518, cc 3999, ref 177, im 341, ii 566, mv 286 = 7887 i64). The symbol coder adapts
 # the per-tile copies in place (av1_cdf_update); a bundle captures a decoded frame's CDF state so a future
 # frame whose primary_ref_frame selects this DPB slot starts from it instead of the defaults. The families
 # are flat and pointer-free, so a plain word copy is a full copy. ncc grew 1839 -> 1875 for
 # Default_Partition_W128_Cdf (0.7.126), 1875 -> 1905 for the delta_q / delta_lf CDFs, 1905 -> 1914 for
-# seg_id_predicted and 1914 -> 2515 for palette (all 0.8.2); the
+# seg_id_predicted and 1914 -> 2515 for palette (all 0.8.2), and 2515 -> 2518 for use_intrabc (0.8.4); the
 # offsets are NAMED here because each growth used to mean re-typing twenty literals across save,
 # defaults and load. tests/av1_intertile.tcyr pins every one of them as a literal.
 # ================================================================
 enum Av1CdfBundle {
-    AV1CB_NCC = 0;       # AV1_NCDF_N  (2515)
-    AV1CB_CC  = 2515;    # 3999
-    AV1CB_REF = 6514;    # 177
-    AV1CB_IM  = 6691;    # 341
-    AV1CB_II  = 7032;    # 566
-    AV1CB_MV  = 7598;    # 286
-    AV1CB_N   = 7884;
+    AV1CB_NCC = 0;       # AV1_NCDF_N  (2518)
+    AV1CB_CC  = 2518;    # 3999
+    AV1CB_REF = 6517;    # 177
+    AV1CB_IM  = 6694;    # 341
+    AV1CB_II  = 7035;    # 566
+    AV1CB_MV  = 7601;    # 286
+    AV1CB_N   = 7887;
 }
 fn av1_cdf_bundle_new(): i64 { return alloc(AV1CB_N * 8); }
 # Reset the per-row ADAPTATION COUNTERS in a saved bundle (libaom av1_reset_cdf_symbol_counters,

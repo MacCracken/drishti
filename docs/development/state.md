@@ -1884,8 +1884,19 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >
 > `scripts/refs/grain_ref.py --crosscheck` validated the port against `aomdec --skip-film-grain` before it was
 > trusted. 27 grain cases, three reproducers and both published grain vectors are gated: 2383 matched / 0 / 0 / 0.
-> Grain's `clip_to_restricted_range` reads the newly stored `matrix_coefficients`. Next in 0.8.4: intra block copy,
-> scalability / `drop_obu`, large-scale tile.
+> Grain's `clip_to_restricted_range` reads the newly stored `matrix_coefficients`.
+>
+> Bite 3 = **intra block copy DONE**. An `allow_intrabc` intra frame decodes on the INTER lane (an intrabc block is an
+> inter block; its neighbours' contexts must see one):
+> - `av1_intra_frame_mode_info_ibc` reads the keyframe syntax plus `use_intrabc`;
+> - the DV is found by `find_mv_stack( 0 )` against `INTRA_FRAME` plus `av1_intrabc_default_pred`, read by
+>   `av1_intrabc_read_dv` (`MV_INTRABC_CONTEXT`), and checked by `av1_intrabc_dv_valid` (`is_mv_valid` is enforced);
+> - it predicts from the current frame, reading to the MI grid (`av1_mc_pred_block_ext`);
+> - `Default_Intrabc_Cdf` grew the non-coefficient blob to 2518 words, and the bundle offsets shifted by 3.
+>
+> NOT EXTERNALLY WITNESSED: the MI-grid read extent and `MV_INTRABC_CONTEXT`. libaom never aims a DV into the
+> overhang and never lets an inter frame inherit an intrabc keyframe's CDFs; both are pinned by unit tests.
+> 14 intrabc cases and four reproducers are gated: 2425 matched / 0 / 0 / 0. Next in 0.8.4: scalability / `drop_obu`, large-scale tile.
 >
 > **Known-and-tracked, not in 0.8.3:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).

@@ -2616,8 +2616,8 @@ enum Av1BlockInfoOff {
     AV1FB_IB       = 32;    # embedded Av1InterBlock (AV1IB_SIZE = 192)
     AV1FB_RESID    = 224;   # encode-only: residual-coeff plan ptr (0 = zero residual)
     AV1FB_VARTX    = 232;   # encode-only: var-tx plan ptr (0 = uniform tx)
-    AV1FB_MI       = 240;   # embedded Av1ModeInfo (AV1MI_SIZE=312) — the intra-fork mode fields (5.11.24)
-    AV1FB_SIZE     = 552;
+    AV1FB_MI       = 240;   # embedded Av1ModeInfo (AV1MI_SIZE=320) — the intra-fork mode fields (5.11.24)
+    AV1FB_SIZE     = 560;
 }
 fn av1_blockinfo_new(): i64 {
     var b = alloc(AV1FB_SIZE);

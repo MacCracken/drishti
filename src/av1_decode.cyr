@@ -391,10 +391,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     if (av1_fh_qm_applies(fh, av1_seq_num_planes(seq)) != 0) {
         if (av1_qm_table() == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     }
-    # allow_intrabc (5.11.6) is read by neither path; an intra-block-copy frame would desync (roadmap.md 0.8.4).
+    # allow_intrabc decodes as of 0.8.4: such an intra frame runs on the INTER lane (av1_frame_dec_group), which
+    # reads use_intrabc and predicts a block copy from the frame being decoded. It rejected here before.
     # allow_screen_content_tools itself no longer rejects (0.8.2): its palette tools decode on both lanes
     # (src/av1_palette.cyr), and force_integer_mv was already honoured by the MV reads.
-    if (av1_fh_allow_intrabc(fh) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
     var num_planes = av1_seq_num_planes(seq);
     # Allocate to the MI GRID, not the visible frame. Prediction writes a block's NOMINAL
     # extent, which runs past FrameWidth/FrameHeight in two independent ways: MiCols*MI_SIZE
@@ -515,10 +515,16 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
         var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
         if (ar != DR_OK) { store64(out_err, ar); return 0 - 1; }
-        if (av1_fh_frame_is_intra(fh) == 0) {
-            # an INTER frame (0.7.84): needs the DPB + ref state for MC.
+        if ((av1_fh_frame_is_intra(fh) == 0) || (av1_fh_allow_intrabc(fh) != 0)) {
+            # an INTER frame (0.7.84): needs the DPB + ref state for MC. An allow_intrabc INTRA frame (0.8.4)
+            # decodes on this lane too — an intra block copy is an inter block — but reads no reference, so a
+            # single-frame decode without a DPB gets an empty one.
             var idpb = load64(fdc + AV1FDEC_DPB);
             var irefs = load64(fdc + AV1FDEC_REFS);
+            if (av1_fh_frame_is_intra(fh) != 0) {
+                if (idpb == 0) { idpb = av1_dpb_new(); }
+                if (irefs == 0) { irefs = av1_ref_state_new(); }
+            }
             if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0 - 1; }
             var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
             if (ir != DR_OK) { store64(out_err, ir); return 0 - 1; }

@@ -1,0 +1,321 @@
+# tests/av1_intrabc.tcyr — AV1 intra block copy (0.8.4): use_intrabc (5.11.7), the displacement-vector rules of
+# assign_mv( 0 ) (5.11.26) and is_mv_valid (6.10.25), and the MI-grid read extent of 7.11.3.1 step 11.
+#
+# The DV known answers come from scripts/refs/intrabc_ref.py — a spec-literal transcription that asserts each
+# boundary case's expectation, so a mislabelled case cannot stand — never from the Cyrius. The MC clamp answers are
+# derived from 7.11.3.4 by hand in the comments (a whole-sample BILINEAR tap is the identity; a half-sample one is
+# (a + b + 1) >> 1 after InterRound0 3 / InterRound1 11). The end-to-end path is make conformance's intrabc cases.
+include "src/main.cyr"
+
+# a bare tile record carrying only what av1_intrabc_dv_valid reads
+fn ibt_tile(row_start, row_end, col_start, col_end, sb128, subx, suby): i64 {
+    var t = alloc(AV1TILE_SIZE);
+    memset(t, 0, AV1TILE_SIZE);
+    store64(t + AV1TILE_ROW_START, row_start);
+    store64(t + AV1TILE_ROW_END, row_end);
+    store64(t + AV1TILE_COL_START, col_start);
+    store64(t + AV1TILE_COL_END, col_end);
+    store64(t + AV1TILE_SB128, sb128);
+    store64(t + AV1TILE_SUBX, subx);
+    store64(t + AV1TILE_SUBY, suby);
+    return t;
+}
+fn ibt_valid(mv_row, mv_col, mi_row, mi_col, mi_size, has_chroma, subx, suby, rs, re, cs, ce, sb128): i64 {
+    return av1_intrabc_dv_valid(ibt_tile(rs, re, cs, ce, sb128, subx, suby), mi_row, mi_col, mi_size, has_chroma,
+      mv_row, mv_col);
+}
+
+# ---- assign_mv( 0 )'s fallback (5.11.26) ----
+fn ibt_pred(mi_row, row_start, sb128, want_row, want_col, tag): i64 {
+    var p = av1_intrabc_default_pred(mi_row, row_start, sb128);
+    assert_eq(av1_mv_row(p), want_row, tag);
+    assert_eq(av1_mv_col(p), want_col, tag);
+    return 0;
+}
+fn test_ibc_default_pred() {
+    ibt_pred(0, 0, 0, 0, 0 - 2560, "64-SB first row: one SB + 256 left");
+    ibt_pred(15, 0, 0, 0, 0 - 2560, "64-SB MiRow 15: still the first SB row");
+    ibt_pred(16, 0, 0, 0 - 512, 0, "64-SB MiRow 16: one SB up");
+    ibt_pred(40, 32, 0, 0, 0 - 2560, "64-SB, tile starting at MiRow 32: its first SB row");
+    ibt_pred(48, 32, 0, 0 - 512, 0, "64-SB, tile starting at MiRow 32: second row");
+    ibt_pred(31, 0, 1, 0, 0 - 3072, "128-SB MiRow 31: first SB row, one SB + 256 left");
+    ibt_pred(32, 0, 1, 0 - 1024, 0, "128-SB MiRow 32: one SB up");
+    ibt_pred(63, 32, 1, 0, 0 - 3072, "128-SB tile at 32, MiRow 63");
+    ibt_pred(64, 32, 1, 0 - 1024, 0, "128-SB tile at 32, MiRow 64");
+    return 0;
+}
+
+# ---- is_mv_valid (6.10.25), boundary cases (the reference asserts each expectation) ----
+fn test_ibc_dv_boundary() {
+    # 0..80 x 0..120 MI tile, 64-SB, BLOCK_16X16 (6) at MiRow 32 / MiCol 96 unless noted
+    assert_eq(ibt_valid(0, 0 - 272 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 1, "same SB row, source Sb64Col 1");
+    assert_eq(ibt_valid(0, 0 - 264 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "same SB row, Sb64Col 2: delay");
+    assert_eq(ibt_valid((0 - 64 * 8) - 4, 0 - 272 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "fractional row");
+    assert_eq(ibt_valid(0, (0 - 272 * 8) + 3, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "fractional col");
+    assert_eq(ibt_valid(0 - 64 * 8, 48 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 1, "SB row up, Sb64Col 6: inside");
+    assert_eq(ibt_valid(0 - 64 * 8, 56 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "SB row up, Sb64Col 7: past");
+    assert_eq(ibt_valid(64 * 8, 0 - 272 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "a later SB row");
+    assert_eq(ibt_valid(0 - 128 * 8, 0 - 384 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 1,
+      "exactly the tile top-left");
+    assert_eq(ibt_valid(0 - 129 * 8, 0 - 384 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "a row above the tile");
+    assert_eq(ibt_valid(0 - 128 * 8, 0 - 385 * 8, 32, 96, 6, 1, 1, 1, 0, 80, 0, 120, 0), 0, "a column left of it");
+    assert_eq(ibt_valid(0 - 128 * 8, 0 - 320 * 8, 32, 96, 0, 0, 1, 1, 0, 80, 0, 120, 0), 1, "4x4 tile top, no chroma");
+    assert_eq(ibt_valid(0 - 128 * 8, 0 - 320 * 8, 32, 96, 0, 1, 1, 1, 0, 80, 0, 120, 0), 0,
+      "4x4 tile top, 4:2:0 chroma pulls the top 4 above the tile");
+    assert_eq(ibt_valid(0 - 128 * 8, 0 - 320 * 8, 32, 96, 0, 1, 0, 0, 0, 80, 0, 120, 0), 1, "4x4, 4:4:4: no pull");
+    assert_eq(ibt_valid(0, 0 - 384 * 8, 72, 96, 12, 1, 1, 1, 0, 80, 0, 120, 0), 0, "bottom edge past the tile end");
+    assert_eq(ibt_valid(0 - 16376, 0, 600, 96, 6, 1, 1, 1, 0, 700, 0, 120, 0), 1, "|mv_row| = (1 << 14) - 8");
+    assert_eq(ibt_valid(0 - 16384, 0, 600, 96, 6, 1, 1, 1, 0, 700, 0, 120, 0), 0, "|mv_row| = 1 << 14");
+    assert_eq(ibt_valid(0 - 128 * 8, 112 * 8, 64, 96, 6, 1, 1, 1, 0, 80, 0, 200, 1), 1, "128-SB row up, Sb64Col 7");
+    assert_eq(ibt_valid(0 - 128 * 8, 120 * 8, 64, 96, 6, 1, 1, 1, 0, 80, 0, 200, 1), 0, "128-SB row up, Sb64Col 8");
+    assert_eq(ibt_valid(0 - 64 * 8, 0 - 68 * 8, 32, 80, 6, 1, 1, 1, 0, 80, 64, 120, 0), 0, "second tile, left of it");
+    # a 300-row frame (MiRowEnd 75): BLOCK_64X64 at MiRow 64 in the last SB row — only the bottom rule decides
+    assert_eq(ibt_valid(0 - 16 * 8, 0 - 320 * 8, 64, 96, 12, 1, 1, 1, 0, 75, 0, 120, 0), 0,
+      "last SB row: the source's bottom past the frame end");
+    assert_eq(ibt_valid(0 - 48 * 8, 0 - 320 * 8, 64, 96, 12, 1, 1, 1, 0, 75, 0, 120, 0), 1,
+      "last SB row: the source inside the frame");
+    # the chroma pulls are per axis
+    assert_eq(ibt_valid(0, 0 - 384 * 8, 32, 96, 1, 1, 1, 1, 0, 80, 0, 120, 0), 0, "4x8 at the tile left: pulled out");
+    assert_eq(ibt_valid(0, 0 - 380 * 8, 32, 96, 1, 1, 1, 1, 0, 80, 0, 120, 0), 1, "4x8 one sample in: pulled to 0");
+    assert_eq(ibt_valid(0 - 128 * 8, 0 - 320 * 8, 32, 96, 2, 1, 1, 1, 0, 80, 0, 120, 0), 0, "8x4 at the tile top");
+    assert_eq(ibt_valid(0, 0 - 384 * 8, 32, 96, 2, 1, 1, 1, 0, 80, 0, 120, 0), 1, "8x4 at the tile left: no left pull");
+    return 0;
+}
+
+# ---- is_mv_valid, the reference's 4000-case sweep (its LCG replayed) ----
+var Ibt_Lcg = 0;
+fn ibt_next(): i64 {
+    Ibt_Lcg = ((Ibt_Lcg * 1103515245) + 12345) % 2147483648;
+    return Ibt_Lcg >> 16;
+}
+fn test_ibc_dv_sweep() {
+    Ibt_Lcg = 2024;
+    var h = 0;
+    var nvalid = 0;
+    var n = 0;
+    while (n < 4000) {
+        var sb128 = ibt_next() % 2;
+        var col_start = (ibt_next() % 4) * 16;
+        var row_start = (ibt_next() % 4) * 16;
+        var col_end = col_start + 16 + (ibt_next() % 160);
+        var row_end = row_start + 16 + (ibt_next() % 120);
+        var mi_size = ibt_next() % 22;
+        var mi_row = row_start + (ibt_next() % (row_end - row_start));
+        var mi_col = col_start + (ibt_next() % (col_end - col_start));
+        var has_chroma = ibt_next() % 2;
+        var subx = ibt_next() % 2;
+        var suby = subx & (ibt_next() % 2);
+        var mv_row = 0 - ((ibt_next() % 400) * 8);
+        var mv_col = ((ibt_next() % 700) - 500) * 8;
+        if ((ibt_next() % 16) == 0) { mv_col = mv_col + 1 + (ibt_next() % 7); }
+        if ((ibt_next() % 32) == 0) { mv_row = 0 - (16384 + (ibt_next() % 64)); }
+        var v = ibt_valid(mv_row, mv_col, mi_row, mi_col, mi_size, has_chroma, subx, suby, row_start, row_end,
+          col_start, col_end, sb128);
+        nvalid = nvalid + v;
+        h = ((h * 131) + v) % 2147483647;
+        n = n + 1;
+    }
+    assert_eq(nvalid, 298, "sweep: 298 of 4000 vectors valid");
+    assert_eq(h, 357451266, "sweep: position-weighted digest of the 4000 verdicts");
+    return 0;
+}
+
+# ---- use_intrabc (5.11.7): the read sits after the delta reads, and a use_intrabc block reads no more ----
+fn ibt_fh(allow_intrabc): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_ALLOW_INTRABC, allow_intrabc);
+    return fh;
+}
+fn test_ibc_mode_info() {
+    var tile = alloc(AV1TILE_SIZE);
+    memset(tile, 0, AV1TILE_SIZE);
+    store64(tile + AV1TILE_SEG_FH, ibt_fh(1));
+    # (a) use_intrabc 1 after skip 0: the writer emits skip and use_intrabc, then refuses (no DV in the plan writer)
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_USE_IBC, 1);
+    var enc = av1_sym_enc_init(64, 0);
+    var ncce = av1_ncdf_new();
+    assert_eq(av1_intra_frame_mode_info_encode(enc, ncce, mi, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, tile),
+      DR_ERR_UNSUPPORTED, "plan writer: an intrabc block is refused after its use_intrabc symbol");
+    av1_sym_encode_literal(enc, 165, 8);   # a marker straight after use_intrabc: the read must stop there
+    var olen = 0;
+    var buf = av1_sym_enc_finish(enc, &olen);
+    var mo = av1_modeinfo_new();
+    store64(mo + AV1MI_YMODE, 5);   # stale values the read must overwrite
+    store64(mo + AV1MI_UVMODE, 5);
+    var sd = av1_sym_dec_init(buf, olen, 0);
+    assert_eq(av1_intra_frame_mode_info_decode(sd, av1_ncdf_new(), mo, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0,
+        tile), DR_OK, "decode: use_intrabc 1");
+    assert_eq(load64(mo + AV1MI_USE_IBC), 1, "use_intrabc = 1");
+    assert_eq(load64(mo + AV1MI_YMODE), AV1_DC_PRED, "YMode = DC_PRED");
+    assert_eq(load64(mo + AV1MI_UVMODE), AV1_DC_PRED, "UVMode = DC_PRED");
+    assert_eq(av1_sym_read_literal(sd, 8), 165, "the next symbol is the marker: nothing read past use_intrabc");
+    # (b) use_intrabc 0: the regular keyframe syntax follows (V_PRED on a 4x4, no chroma)
+    var m2 = av1_modeinfo_new();
+    store64(m2 + AV1MI_YMODE, AV1_V_PRED);
+    var enc2 = av1_sym_enc_init(64, 0);
+    assert_eq(av1_intra_frame_mode_info_encode(enc2, av1_ncdf_new(), m2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0,
+        tile), DR_OK, "encode: use_intrabc 0, V_PRED");
+    var olen2 = 0;
+    var buf2 = av1_sym_enc_finish(enc2, &olen2);
+    var m3 = av1_modeinfo_new();
+    var sd2 = av1_sym_dec_init(buf2, olen2, 0);
+    assert_eq(av1_intra_frame_mode_info_decode(sd2, av1_ncdf_new(), m3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0,
+        tile), DR_OK, "decode: use_intrabc 0");
+    assert_eq(load64(m3 + AV1MI_USE_IBC), 0, "use_intrabc = 0");
+    assert_eq(load64(m3 + AV1MI_YMODE), AV1_V_PRED, "...and the y mode after it is V_PRED");
+    # (c) without allow_intrabc nothing is read: the same V_PRED stream decodes on a frame that forbids it only if
+    # the writer also skipped the symbol — so the two streams must differ
+    var t0 = alloc(AV1TILE_SIZE);
+    memset(t0, 0, AV1TILE_SIZE);
+    store64(t0 + AV1TILE_SEG_FH, ibt_fh(0));
+    var enc3 = av1_sym_enc_init(64, 0);
+    av1_intra_frame_mode_info_encode(enc3, av1_ncdf_new(), m2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, t0);
+    var olen3 = 0;
+    var buf3 = av1_sym_enc_finish(enc3, &olen3);
+    var same = 0;
+    if (olen3 == olen2) {
+        same = 1;
+        var k = 0;
+        while (k < olen2) { if (load8(buf3 + k) != load8(buf2 + k)) { same = 0; } k = k + 1; }
+    }
+    assert_eq(same, 0, "allow_intrabc 1 codes one more symbol than allow_intrabc 0");
+    var m4 = av1_modeinfo_new();
+    var sd3 = av1_sym_dec_init(buf3, olen3, 0);
+    av1_intra_frame_mode_info_decode(sd3, av1_ncdf_new(), m4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, t0);
+    assert_eq(load64(m4 + AV1MI_YMODE), AV1_V_PRED, "allow_intrabc 0: V_PRED read with no use_intrabc symbol");
+    return 0;
+}
+
+# ---- the DV read uses MV_INTRABC_CONTEXT (5.11.32) ----
+# The two MV CDF sets start equal, so a read with the wrong context is invisible until they diverge. Skew context 0's
+# mv_joint CDF (in both the writer's and the reader's copy) towards MV_JOINT_ZERO; a vector written with context 1 then
+# only reads back right through context 1.
+fn ibt_skew_ctx0(cc): i64 {
+    var j = av1_mvcdf_joint(cc, 0);
+    store64(j + 0, 32000);   # P(MV_JOINT_ZERO) ~ 0.98 under context 0
+    store64(j + 8, 32300);
+    store64(j + 16, 32600);
+    return 0;
+}
+fn test_ibc_dv_context() {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FORCE_INT_MV, 1);   # an intra frame: whole-sample vectors, no high precision
+    var ce = av1_mvcdf_new();
+    var cd = av1_mvcdf_new();
+    ibt_skew_ctx0(ce);
+    ibt_skew_ctx0(cd);
+    var enc = av1_sym_enc_init(64, 0);
+    # diff (-24, -40) whole-sample (fr 3, hp 1 implied), coded under context 1
+    av1_write_mv(enc, ce, AV1_MV_INTRABC_CTX, 0, 1, 0 - 24, 0 - 40);
+    av1_write_mv(enc, ce, AV1_MV_INTRABC_CTX, 0, 1, 0 - 512, 8);
+    var olen = 0;
+    var buf = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(buf, olen, 0);
+    var mv = alloc(16);   # one Av1Mv
+    av1_intrabc_read_dv(sd, cd, fh, 0 - 2048, 0, mv);
+    assert_eq(av1_mv_row(mv), 0 - 2072, "DV 1: pred row -2048 + diff -24");
+    assert_eq(av1_mv_col(mv), 0 - 40, "DV 1: pred col 0 + diff -40");
+    av1_intrabc_read_dv(sd, cd, fh, 0, 0 - 2560, mv);
+    assert_eq(av1_mv_row(mv), 0 - 512, "DV 2 (after context 1 adapted): row -512");
+    assert_eq(av1_mv_col(mv), 0 - 2552, "DV 2: col -2560 + 8");
+    return 0;
+}
+
+# ---- 7.11.3.1 step 11: an intrabc read extent is the MI grid, not the visible frame ----
+# A 21x9 frame (MiCols 6, MiRows 4: a 24x16 MI grid) allocated 32x16, 4:2:0. Luma v(x, y) = 10 + x + 20y and chroma
+# U(x, y) = 50 + 7x + 3y everywhere in the allocation, so the overhang columns (luma x >= 21, chroma x >= 11) hold
+# values unlike the last visible column.
+fn ibt_frame(): i64 {
+    var e = 0;
+    var f = dr_frame_new_ext(21, 9, 32, 16, 3, 1, 1, 8, 0, &e);
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 32) { dr_frame_set(f, 0, x, y, 10 + x + (20 * y)); x = x + 1; }
+        y = y + 1;
+    }
+    y = 0;
+    while (y < 8) {
+        var x2 = 0;
+        while (x2 < 16) {
+            dr_frame_set(f, 1, x2, y, 50 + (7 * x2) + (3 * y));
+            dr_frame_set(f, 2, x2, y, 0);
+            x2 = x2 + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+fn test_ibc_mc_extent() {
+    # luma: a 4x4 block at (16, 4) copying from (19, 0) — mv (row -32, col 24) in 1/8 units, whole-sample, so the
+    # BILINEAR tap is the identity and the prediction IS the source: columns 19..22, two of them past the visible 21
+    var f = ibt_frame();
+    assert_eq(av1_mc_pred_block_ext(f, f, 0, 16, 4, 4, 4, 0 - 32, 24, AV1_BILINEAR, AV1_BILINEAR, 24, 16), DR_OK,
+      "luma intrabc copy, MI-grid extent");
+    var bad = 0;
+    var r = 0;
+    while (r < 4) {
+        var c = 0;
+        while (c < 4) {
+            if (dr_frame_get(f, 0, 16 + c, 4 + r) != (10 + (19 + c) + (20 * r))) { bad = bad + 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(bad, 0, "luma: every sample is the source's, the overhang columns 21 and 22 included");
+    # the same copy clamped at the VISIBLE frame repeats column 20 — the pre-0.8.4 behaviour this extent replaces
+    var g = ibt_frame();
+    av1_mc_pred_block(g, g, 0, 16, 4, 4, 4, 0 - 32, 24, AV1_BILINEAR, AV1_BILINEAR);
+    assert_eq(dr_frame_get(g, 0, 18, 4), 10 + 20, "visible clamp: column 21 reads column 20");
+    assert_eq(dr_frame_get(f, 0, 18, 4), 10 + 21, "MI extent: column 21 is its own");
+    # chroma, 4:2:0: a 2x2 block at (8, 2); the luma mv (row -16, col 24) is (row -1, col 1.5) chroma samples, a
+    # half-sample BILINEAR tap: pred = (U(x) + U(x + 1) + 1) >> 1 at x = 9 + c — c = 1 reads U(11), the overhang
+    var h = ibt_frame();
+    assert_eq(av1_mc_pred_block_ext(h, h, 1, 8, 2, 2, 2, 0 - 16, 24, AV1_BILINEAR, AV1_BILINEAR, 12, 8), DR_OK,
+      "chroma intrabc copy, MI-grid extent");
+    var u = 0;
+    while (u < 2) {
+        var v = 0;
+        while (v < 2) {
+            var a = 50 + (7 * (9 + v)) + (3 * (1 + u));
+            var b = 50 + (7 * (10 + v)) + (3 * (1 + u));
+            assert_eq(dr_frame_get(h, 1, 8 + v, 2 + u), (a + b + 1) >> 1, "chroma half-sample bilinear");
+            v = v + 1;
+        }
+        u = u + 1;
+    }
+    var k = ibt_frame();
+    av1_mc_pred_block(k, k, 1, 8, 2, 2, 2, 0 - 16, 24, AV1_BILINEAR, AV1_BILINEAR);
+    assert_eq(dr_frame_get(k, 1, 9, 2), 50 + 70 + 3, "visible clamp: chroma U(11) reads U(10) (no average)");
+    # the HEIGHT too: a 4x4 luma copy into (0, 0) from rows 8..11 (mv row 64), past the visible 9 into the MI grid's 16
+    var m = ibt_frame();
+    assert_eq(av1_mc_pred_block_ext(m, m, 0, 0, 0, 4, 4, 64, 0, AV1_BILINEAR, AV1_BILINEAR, 24, 16), DR_OK,
+      "luma copy across the bottom edge");
+    assert_eq(dr_frame_get(m, 0, 1, 3), 10 + 1 + (20 * 11), "MI extent: row 11 is its own");
+    var q = ibt_frame();
+    av1_mc_pred_block(q, q, 0, 0, 0, 4, 4, 64, 0, AV1_BILINEAR, AV1_BILINEAR);
+    assert_eq(dr_frame_get(q, 0, 1, 3), 10 + 1 + (20 * 8), "visible clamp: row 11 reads row 8");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("assign_mv( 0 ) intrabc fallback");
+    test_ibc_default_pred();
+    test_group("is_mv_valid (intrabc)");
+    test_ibc_dv_boundary();
+    test_ibc_dv_sweep();
+    test_group("use_intrabc (5.11.7)");
+    test_ibc_mode_info();
+    test_group("the DV read context (MV_INTRABC_CONTEXT)");
+    test_ibc_dv_context();
+    test_group("the MI-grid read extent (7.11.3.1 step 11)");
+    test_ibc_mc_extent();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1038,6 +1038,13 @@ fn av1_mc_scaled_mid_h(h, step_y): i64 {
 # av1_mc_pred_block and the two-ref av1_mc_pred_compound. `dst` supplies the geometry
 # (dims/bit-depth/subsampling); `ref` is the source reference frame.
 fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, compound): i64 {
+    return av1_mc_pred_core_ext(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, compound, 0, 0);
+}
+# av1_mc_pred_core with an explicit reference READ extent (clamp_w x clamp_h samples of this plane) in place of the
+# visible plane's — 7.11.3.4's lastX / lastY come from RefUpscaledWidth / RefFrameHeight, which intra block copy
+# sets to the MI grid (7.11.3.1 step 11). 0 keeps the visible extent; the extent never exceeds the allocation.
+fn av1_mc_pred_core_ext(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, compound,
+  clamp_w, clamp_h): i64 {
     if ((dst == 0) || (ref == 0)) { return DR_ERR_BOUNDS; }
     if ((plane < 0) || (plane >= dr_frame_num_planes(dst)) || (plane >= dr_frame_num_planes(ref))) {
         return DR_ERR_BOUNDS;
@@ -1047,6 +1054,8 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
     var bd = dr_frame_bit_depth(dst);
     var pw = dr_frame_plane_width(dst, plane);
     var ph = dr_frame_plane_height(dst, plane);
+    if (clamp_w > 0) { pw = av1_min(clamp_w, dr_frame_plane_alloc_w(ref, plane)); }
+    if (clamp_h > 0) { ph = av1_min(clamp_h, dr_frame_plane_alloc_h(ref, plane)); }
     # Format incompatibility is PERMANENT — differing bit depth or subsampling makes the two
     # sample grids incomparable and no amount of scaling reconciles them.
     if (av1_mc_ref_compat(ref, dst) == 0) { return DR_ERR_UNSUPPORTED; }
@@ -1131,9 +1140,13 @@ fn av1_mc_pred_core(out, dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, fi
 # single-ref MC (7.11.3.1 non-compound): produce the final prediction and write it
 # into the frame. Returns DR_OK / DR_ERR_* (see av1_mc_pred_core).
 fn av1_mc_pred_block(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y): i64 {
+    return av1_mc_pred_block_ext(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, 0, 0);
+}
+# av1_mc_pred_block with an explicit reference read extent (see av1_mc_pred_core_ext): intra block copy's MI grid.
+fn av1_mc_pred_block_ext(dst, ref, plane, x, y, w, h, mv_row, mv_col, filt_x, filt_y, clamp_w, clamp_h): i64 {
     if (av1_mc_drv_scratch() != DR_OK) { return DR_ERR_OOM; }
-    var e = av1_mc_pred_core(Av1_McOut, dst, ref, plane, x, y, w, h, mv_row, mv_col,
-      filt_x, filt_y, 0);
+    var e = av1_mc_pred_core_ext(Av1_McOut, dst, ref, plane, x, y, w, h, mv_row, mv_col,
+      filt_x, filt_y, 0, clamp_w, clamp_h);
     if (e != DR_OK) { return e; }
     var r = 0;
     while (r < h) {

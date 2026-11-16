@@ -170,7 +170,8 @@ enum Av1ModeInfoOff {
     AV1MI_PAL_MAPY   = 288;   # encode plan: ColorMapY source (0 on decode)
     AV1MI_PAL_MAPUV  = 296;   # encode plan: ColorMapUV source
     AV1MI_PAL_VDELTA = 304;   # encode plan: delta-code the V colours when they fit
-    AV1MI_SIZE       = 312;
+    AV1MI_USE_IBC    = 312;   # use_intrabc (5.11.7, 0.8.4): the block copies from the current frame
+    AV1MI_SIZE       = 320;
 }
 fn av1_modeinfo_new(): i64 {
     var mi = alloc(AV1MI_SIZE);
@@ -1061,6 +1062,27 @@ fn av1_intra_frame_mode_info_decode(sd, ncc, mi, mi_size, has_chroma,
     # read_delta_qindex + read_delta_lf + ReadDeltas = 0 (5.11.7), straight after read_cdef.
     av1_read_deltas(sd, ncc, av1_tile_dctx(tile), mi_size, skip);
 
+    # use_intrabc (5.11.7, 0.8.4), read only where allow_intrabc. An intra block copy is an INTER block whose
+    # reference is the frame being decoded: YMode / UVMode DC_PRED, no palette, no filter intra. The caller (the
+    # inter lane, av1_intra_frame_mode_info_ibc — allow_intrabc frames decode there) reads its displacement vector.
+    store64(mi + AV1MI_USE_IBC, 0);
+    if (av1_tile_allow_intrabc(tile) != 0) {
+        if (av1_sym_read_symbol(sd, av1_ncdf_intrabc(ncc), 2) != 0) {
+            store64(mi + AV1MI_USE_IBC, 1);
+            store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+            store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+            store64(mi + AV1MI_ANGLE_Y, 0);
+            store64(mi + AV1MI_ANGLE_UV, 0);
+            store64(mi + AV1MI_CFL_U, 0);
+            store64(mi + AV1MI_CFL_V, 0);
+            store64(mi + AV1MI_PAL_NY, 0);
+            store64(mi + AV1MI_PAL_NUV, 0);
+            store64(mi + AV1MI_USE_FI, 0);
+            store64(mi + AV1MI_FI_MODE, 0);
+            return av1_sym_dec_err(sd);
+        }
+    }
+
     var ymode = av1_read_intra_frame_y_mode(sd, ncc, avail_u, above_ymode, avail_l, left_ymode);
     store64(mi + AV1MI_YMODE, ymode);
     store64(mi + AV1MI_ANGLE_Y, av1_read_angle_delta_y(sd, ncc, mi_size, ymode));
@@ -1123,6 +1145,12 @@ fn av1_intra_frame_mode_info_encode(enc, ncc, mi, mi_size, has_chroma,
     }
     var ewd = av1_write_deltas(enc, ncc, av1_tile_dctx(tile), mi_size, load64(mi + AV1MI_SKIP), mi_row, mi_col);
     if (ewd != DR_OK) { return ewd; }
+    # use_intrabc mirror (5.11.7): written wherever allow_intrabc, so the decoder's read stays in step. The plan
+    # writer cannot code a displacement vector, so an intrabc block in the plan is refused, never mis-written.
+    if (av1_tile_allow_intrabc(tile) != 0) {
+        av1_sym_encode_symbol(enc, av1_ncdf_intrabc(ncc), 2, load64(mi + AV1MI_USE_IBC));
+        if (load64(mi + AV1MI_USE_IBC) != 0) { return DR_ERR_UNSUPPORTED; }
+    }
 
     var ymode = load64(mi + AV1MI_YMODE);
     av1_write_intra_frame_y_mode(enc, ncc, avail_u, above_ymode, avail_l, left_ymode, ymode);
