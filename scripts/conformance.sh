@@ -95,6 +95,12 @@ fgrav_176x144 fgid_176x144 fgbt_176x144"
 # ibcmono every format and depth, ibcll lossless, ibc128 128x128 superblocks (gradient 6), ibctile four tiles (the
 # vector stays in its tile), ibcaq segmentation, ibcgop intrabc keyframes between inter frames. Each case's
 # ibc_property guard proves allow_intrabc, plus the property the case exists for.
+# LARGE SCALE TILE (0.8.4), lst_WxH_LFWxLFH_bsB: libaom's lightfield tools (built from the libaom checkout in ref/:
+# make -C ref/aom-build lightfield_encoder lightfield_bitstream_parsing lightfield_tile_list_decoder) on a W x H light
+# field of LFW x LFH mandelbrot views grouped in B x B blocks (one anchor each, >= 4: the tools refuse fewer), and four
+# seeded random tile lists of 1..64 entries — out of order, repeated tile windows, every anchor. Scored per anchor and
+# per tile list against lightfield_tile_list_decoder's YUV1D output. Skipped (counted) when the tools are not built.
+LST_CASES="lst_256x256_4x4_2 lst_384x256_3x3_2 lst_320x192_6x6_2 lst_512x320_4x4_2 lst_448x192_3x2_1"
 IBC_CASES="ibc_352x288 ibc0_352x288 ibcodd_349x197 ibcodd_173x101 ibc444_176x144 ibc422_352x288 ibcb10_352x288 \
 ibcb12_352x288 ibcmono_352x288 ibcll_352x288 ibc128_352x288 ibctile_640x360 ibcaq_352x288 ibcgop_352x288"
 # CROSS-FRAME CDF SAVE (0.8.2), name_WxH: multi-tile streams whose adapting frames save tile
@@ -177,6 +183,7 @@ skip_external() { # reason
     for c in $QM_CASES; do skip_case "$c" "$1"; done
     for c in $FG_CASES; do skip_case "$c" "$1"; done
     for c in $IBC_CASES; do skip_case "$c" "$1"; done
+    for c in $LST_CASES; do skip_case "$c" "$1"; done
     for c in $CDF_CASES; do skip_case "$c" "$1"; done
     for c in $PAL_CASES; do skip_case "$c" "$1"; done
     for c in $RAV1E_CASES; do skip_case "$c" "$1"; done
@@ -215,9 +222,20 @@ finish() {
 # failed copy can never leave the last case's stream (or its frames) in place to be scored
 # as this one. Returns 1 if the stream could not be put in place.
 run_drishti() { # ivf log
-    rm -f build/conformance-input.ivf build/conformance-out-*.yuv
+    # the large-scale tile sidecar (build/conformance-input.lst) is removed for every ordinary run: a leftover one
+    # would switch the next stream into large-scale tile mode
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-out-*.yuv
     cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
     ./build/drishti-conformance >"$2" 2>&1
+    return 0
+}
+# a large-scale tile file (0.8.4): its first N temporal units are the anchor frames (N in the .lst sidecar)
+run_drishti_lst() { # ivf lst log
+    rm -f build/conformance-input.ivf build/conformance-input.lst build/conformance-out-*.yuv
+    cp "$1" build/conformance-input.ivf 2>/dev/null || return 1
+    cp "$2" build/conformance-input.lst 2>/dev/null || return 1
+    ./build/drishti-conformance >"$3" 2>&1
+    rm -f build/conformance-input.lst
     return 0
 }
 
@@ -356,6 +374,34 @@ repro_seq  ibc-352x288 2 2
 repro_seq  ibc-sb128-352x288 2 2
 repro_seq  ibc-odd-349x197 2 2
 repro_seq  ibc-b10-352x288 2 2
+# LARGE SCALE TILE (0.8.4): libaom's lightfield pipeline (examples/lightfield_encoder -> lightfield_bitstream_parsing,
+# 8-bit 4:2:0, 64x64 tiles) on mandelbrot views: N anchor temporal units, the camera frame header, then tile list
+# OBUs. Each .md5 line is one temporal unit: an anchor (libaom's own anchor output), "-" for the camera header (no
+# output), or a tile list in libaom's YUV1D layout (lightfield_tile_list_decoder format 0: the decoded tiles only).
+# lst-256x256: 4 anchors, 3 lists of 6 / 7 / 54 tiles; lst-384x256: 4 anchors, 4 lists. Both refused (tile list
+# OBUs were skipped, the header-only camera OBU_FRAME failed) by the 0.8.4-bite-3 decoder.
+repro_lst() { # name
+    local n="$1" ivf="tests/repro/$1.ivf" lst="tests/repro/$1.lst" md5f="tests/repro/$1.md5"
+    if [ ! -f "$ivf" ] || [ ! -f "$lst" ] || [ ! -f "$md5f" ]; then
+        echo "  repro $n: FIXTURE MISSING ($ivf / $lst / $md5f)"; fail=$((fail+1)); return
+    fi
+    run_drishti_lst "$ivf" "$lst" /dev/null || { echo "  repro $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local line="  repro $n:" k=1 want got
+    while read -r want; do
+        if [ "$want" = "-" ]; then
+            if [ -e "build/conformance-out-$k.yuv" ]; then line="$line u$k=REGRESSED(output)"; fail=$((fail+1))
+            else line="$line u$k=camera"; fi
+        else
+            got=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+            if [ -n "$got" ] && [ "$got" = "$want" ]; then line="$line u$k=OK"; pass=$((pass+1))
+            else line="$line u$k=REGRESSED"; fail=$((fail+1)); fi
+        fi
+        k=$((k+1))
+    done < "$md5f"
+    echo "$line"
+}
+repro_lst lst-256x256
+repro_lst lst-384x256
 
 if ! command -v aomenc >/dev/null 2>&1 || ! command -v aomdec >/dev/null 2>&1; then
     echo "--- generated + published corpus ---"
@@ -1645,6 +1691,59 @@ ibccase() { # name = KIND_WxH (every frame hard)
 }
 echo "--- intra block copy (5.11.7 use_intrabc, 7.11.3 from the current frame; every frame hard) ---"
 for c in $IBC_CASES; do ibccase "$c"; done
+LST_TOOLS="ref/aom-build/examples"
+lstcase() { # name = lst_WxH_LFWxLFH_bsB ; seed = position in LST_CASES
+    local n="$1" seed="$2" geo lfx bsx
+    IFS=_ read -r _ geo lfx bsx <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" lfw="${lfx%x*}" lfh="${lfx#*x}" bs="${bsx#bs}" nl=4
+    [ "$bs" = "$bsx" ] && bs="$bsx"
+    local t
+    for t in lightfield_encoder lightfield_bitstream_parsing lightfield_tile_list_decoder; do
+        if [ ! -x "$LST_TOOLS/$t" ]; then skip_case "$n" "$LST_TOOLS/$t not built"; return; fi
+    done
+    local d="$WORK/$n.d" tools; tools="$(pwd)/$LST_TOOLS"
+    rm -rf "${d:?}"; mkdir -p "$d"
+    local nv=$((lfw * lfh)) nanch=$(( ((lfw + bs - 1) / bs) * ((lfh + bs - 1) / bs) ))
+    ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=${w}x${h}:rate=25:start_scale=3:end_scale=0.3" \
+        -frames:v "$nv" -pix_fmt yuv420p -f rawvideo "$d/lf.yuv" 2>/dev/null || {
+        echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    (cd "$d" && "$tools/lightfield_encoder" "$w" "$h" lf.yuv lf.ivf "$lfw" "$lfh" "$bs" >/dev/null 2>&1) || {
+        echo "  $n: SETUP FAILED (lightfield_encoder)"; fail=$((fail+1)); return; }
+    # four tile lists of 1..64 entries (the 512x512 output holds 8 x 8 tiles of 64): image, anchor, column, row
+    awk -v nl="$nl" -v seed="$seed" -v nv="$nv" -v na="$nanch" -v tc=$((w / 64)) -v tr=$((h / 64)) '
+        function r(m) { x = (x * 75 + 74) % 65537; return x % m }
+        BEGIN { x = seed * 7919 + 1
+                for (L = 0; L < nl; L++) { print "Frame " L; k = 1 + r(64)
+                    for (i = 0; i < k; i++) print r(nv), r(na), r(tc), r(tr) } }' > "$d/tiles.txt"
+    (cd "$d" && "$tools/lightfield_bitstream_parsing" lf.ivf tl.ivf "$nanch" tiles.txt >/dev/null 2>&1) || {
+        echo "  $n: SETUP FAILED (lightfield_bitstream_parsing)"; fail=$((fail+1)); return; }
+    (cd "$d" && "$tools/lightfield_tile_list_decoder" tl.ivf ref1d.yuv "$nanch" "$nl" 0 >/dev/null 2>&1) || {
+        echo "  $n: SETUP FAILED (lightfield_tile_list_decoder)"; fail=$((fail+1)); return; }
+    printf '%d\n' "$nanch" > "$d/tl.lst"
+    run_drishti_lst "$d/tl.ivf" "$d/tl.lst" "$d/drishti.log" || {
+        echo "  $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local line="  $n ($nanch anchors, $nl tile lists):" k=1 a b
+    while [ "$k" -le "$nanch" ]; do
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+        b=$(md5sum "$d/ref_$((k - 1)).yuv" 2>/dev/null | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line a$k=OK"; pass=$((pass+1))
+        else line="$line a$k=REGRESSED"; fail=$((fail+1)); fi
+        k=$((k+1))
+    done
+    local off=0 L=1 cnt
+    for cnt in $(awk '/^Frame/ { if (n) print n; n = 0; next } { n++ } END { if (n) print n }' "$d/tiles.txt"); do
+        k=$((nanch + 1 + L))
+        a=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+        b=$(dd if="$d/ref1d.yuv" bs=6144 skip="$off" count="$cnt" status=none | md5sum | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then line="$line l$L=OK($cnt)"; pass=$((pass+1))
+        else line="$line l$L=REGRESSED($cnt)"; fail=$((fail+1)); fi
+        off=$((off + cnt)); L=$((L + 1))
+    done
+    echo "$line"
+}
+echo "--- large scale tile (7.3: anchors, the camera header, tile list OBUs; every anchor and list hard) ---"
+lst_seed=1
+for c in $LST_CASES; do lstcase "$c" "$lst_seed"; lst_seed=$((lst_seed + 1)); done
 # does the probe show `want` — "ctxtile" (an adapting frame saving a tile other than 0) or "fp" (an adapting frame
 # with disable_frame_end_update_cdf 1) — AND a later frame inheriting CDFs (primary_ref_frame != 7)?
 cdf_property() { # want

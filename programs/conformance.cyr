@@ -120,6 +120,66 @@ fn conf_write_frame(f, path): i64 {
     return off;
 }
 
+# A large-scale tile output in libaom's YUV1D conformance layout (lightfield_tile_list_decoder, output format 0):
+# the DECODED tiles only, in tile-list order, each as its Y then U then V rows (16-bit LE above 8 bits). The rest of
+# the output frame is unspecified by the spec (7.3.1), so it is not written.
+fn conf_write_tiles(f, path, count, tw, th, ow): i64 {
+    var np = dr_frame_num_planes(f);
+    var sx = dr_frame_subx(f);
+    var sy = dr_frame_suby(f);
+    var bps = 1;
+    if (dr_frame_bit_depth(f) > 8) { bps = 2; }
+    var per = tw * th;
+    if (np > 1) { per = per + (2 * ((tw >> sx) * (th >> sy))); }
+    var out = alloc(count * per * bps);
+    if (out == 0) { return 0 - 1; }
+    var off = 0;
+    var t = 0;
+    while (t < count) {
+        var p = 0;
+        while (p < np) {
+            var psx = 0;
+            var psy = 0;
+            if (p > 0) { psx = sx; psy = sy; }
+            var x0 = ((t % ow) * tw) >> psx;
+            var y0 = ((t / ow) * th) >> psy;
+            var y = 0;
+            while (y < (th >> psy)) {
+                var x = 0;
+                while (x < (tw >> psx)) {
+                    var v = dr_frame_get(f, p, x0 + x, y0 + y);
+                    store8(out + off, v & 255);
+                    if (bps == 2) { store8(out + off + 1, (v >> 8) & 255); }
+                    off = off + bps;
+                    x = x + 1;
+                }
+                y = y + 1;
+            }
+            p = p + 1;
+        }
+        t = t + 1;
+    }
+    if (file_write_all(path, out, off) < 0) { return 0 - 2; }
+    return off;
+}
+
+# build/conformance-input.lst, when present, holds N: the stream is a large-scale tile file (libaom's lightfield
+# layout) whose first N temporal units are the anchor frames — decoded normally, each kept as AnchorFrames[ k - 1 ]
+# — after which the decoder switches to large-scale tile mode. Returns N, or 0 for an ordinary stream.
+fn conf_lst_anchors(): i64 {
+    var b = alloc(32);
+    var n = file_read_all("build/conformance-input.lst", b, 31);
+    if (n <= 0) { return 0; }
+    var v = 0;
+    var i = 0;
+    while ((i < n) && (load8(b + i) >= 48) && (load8(b + i) <= 57)) {
+        v = (v * 10) + (load8(b + i) - 48);
+        i = i + 1;
+    }
+    if ((v < 1) || (v > 128)) { return 0; }
+    return v;
+}
+
 fn main() {
     alloc_init();
     var buf = alloc(CONF_MAX_INPUT);
@@ -152,6 +212,12 @@ fn main() {
 
     var dec = av1_decoder_new(0);
     if (dec == 0) { conf_puts("SUMMARY oom\n"); return 1; }
+    var nanch = conf_lst_anchors();
+    if (nanch > 0) {
+        conf_puts("large-scale tile: ");
+        conf_putn(nanch);
+        conf_puts(" anchor temporal units\n");
+    }
     var ok = 0;
     var k = 0;
     var go = 1;
@@ -163,7 +229,13 @@ fn main() {
         else {
             k = k + 1;
             var derr = 0;
+            var lst_out = 0;
+            if ((nanch > 0) && (k > nanch)) { lst_out = 1; }
             var f = av1_decoder_decode(dec, pp, ps, &derr);
+            if ((nanch > 0) && (k <= nanch) && (derr == DR_OK)) {
+                av1_decoder_set_anchor(dec, k - 1, av1_decoder_last_decoded(dec));
+                if (k == nanch) { av1_decoder_set_large_scale_tile(dec, 1); }
+            }
             conf_puts("frame ");
             conf_putn(k);
             if (derr != DR_OK) {
@@ -176,7 +248,16 @@ fn main() {
                 if (f == 0) {
                     conf_puts(" NO-OUTPUT (the unit showed no frame)\n");
                 } else {
-                    var wrote = conf_write_frame(f, conf_out_path(k));
+                    var wrote = 0;
+                    if (lst_out != 0) {
+                        wrote = conf_write_tiles(f, conf_out_path(k), av1_decoder_tile_list_count(dec),
+                          av1_decoder_tile_list_tile_w(dec), av1_decoder_tile_list_tile_h(dec),
+                          av1_decoder_tile_list_out_w(dec));
+                        conf_puts(" tile-list tiles=");
+                        conf_putn(av1_decoder_tile_list_count(dec));
+                    } else {
+                        wrote = conf_write_frame(f, conf_out_path(k));
+                    }
                     conf_puts(" decoded ");
                     conf_putn(dr_frame_width(f));
                     conf_puts("x");

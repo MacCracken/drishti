@@ -114,6 +114,7 @@ fn probe_fh(fh, seq): i64 {
     probe_kv("tx_mode", load64(fh + AV1FH_TX_MODE));
     probe_kv("reduced_tx_set", load64(fh + AV1FH_REDUCED_TX_SET));
     probe_kv("primary_ref_frame", load64(fh + AV1FH_PRIMARY_REF_FRAME));
+    probe_arr("ref_frame_idx", fh + AV1FH_REF_FRAME_IDX, 7);   # LAST..ALTREF -> DPB slot (0.8.4)
     probe_kv("reference_select", load64(fh + AV1FH_REFERENCE_SELECT));   # compound prediction allowed
     probe_kv("refresh_frame_flags", load64(fh + AV1FH_REFRESH_FRAME_FLAGS));
     probe_kv("tile_cols", load64(fh + AV1FH_TILE_COLS));

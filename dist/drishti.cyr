@@ -14970,6 +14970,65 @@ fn av1_tile_grids_new(tile): i64 {
     store64(tile + AV1TILE_CDEFIDX, cix);
     return DR_OK;
 }
+# Restore one tile window of the frame grids to the state av1_tile_grids_new (and av1_tile_set_inter_ctx, for the MV
+# grid and SkipModes) allocates them in: 0 everywhere, CdefIdx -1. [rs, re) x [cs, ce) is the window in luma MI units;
+# the chroma LoopfilterTxSizes grids are plane-MI addressed, so theirs is the subsampled window. The large-scale tile
+# process (src/av1_lst.cyr) calls it before decoding a tile window a second time: the spec's decode never reads a
+# position the current tile has not written, but drishti's grids carry state that is only equivalent to that when it
+# starts fresh — the MV grid's per-cell "decoded this frame" marker, and CdefIdx, whose -1 is what makes read_cdef
+# read the symbol at all (a stale index skips it, a desync).
+fn av1_tile_grids_reset_window(tile, rs, re, cs, ce, subx, suby): i64 {
+    var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
+    var offs = alloc(16 * 8);   # the 16 luma-addressed zeroed grids
+    if (offs == 0) { return DR_ERR_OOM; }
+    store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
+    store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
+    store64(offs + 32, AV1TILE_INTERTX);  store64(offs + 40, AV1TILE_LFTX + 0);
+    store64(offs + 48, AV1TILE_TXTYPES);  store64(offs + 56, AV1TILE_SEGIDS);
+    store64(offs + 64, AV1TILE_REF0S);    store64(offs + 72, AV1TILE_DLF + 0);
+    store64(offs + 80, AV1TILE_DLF + 8);  store64(offs + 88, AV1TILE_DLF + 16);
+    store64(offs + 96, AV1TILE_DLF + 24); store64(offs + 104, AV1TILE_PALSZY);
+    store64(offs + 112, AV1TILE_PALSZUV); store64(offs + 120, AV1TILE_PALPTR);
+    var r = rs;
+    while (r < re) {
+        var c = cs;
+        while (c < ce) {
+            var cell = (r * fmi_cols) + c;
+            var g = 0;
+            while (g < 16) {
+                var arr = load64(tile + load64(offs + (g * 8)));
+                if (arr != 0) { store64(arr + (cell * 8), 0); }
+                g = g + 1;
+            }
+            var cix = load64(tile + AV1TILE_CDEFIDX);
+            if (cix != 0) { store64(cix + (cell * 8), 0 - 1); }
+            var sm = load64(tile + AV1TILE_SKIPMODES);
+            if (sm != 0) { store64(sm + (cell * 8), 0); }
+            var mvg = load64(tile + AV1TILE_MVGRID);
+            if (mvg != 0) { memset(av1_mv_grid_cell(mvg, fmi_cols, r, c), 0, AV1MIR_SIZE); }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    # chroma LoopfilterTxSizes: plane-MI positions [rs >> suby, ceil(re >> suby)) x [cs >> subx, ...)
+    var p = 1;
+    while (p <= 2) {
+        var arr2 = load64(tile + AV1TILE_LFTX + (p * 8));
+        if (arr2 != 0) {
+            var pr = rs >> suby;
+            while (pr < ((re + suby) >> suby)) {
+                var pc = cs >> subx;
+                while (pc < ((ce + subx) >> subx)) {
+                    store64(arr2 + (((pr * fmi_cols) + pc) * 8), 0);
+                    pc = pc + 1;
+                }
+                pr = pr + 1;
+            }
+        }
+        p = p + 1;
+    }
+    return DR_OK;
+}
 # MI-grid accessors: grid[r][c] flat as r*FrameMiCols + c (frame-addressed — r,c are
 # absolute MI coords into the shared frame grid). base is the AV1TILE_* off.
 fn av1_grid_get(tile, base, r, c): i64 {
@@ -26002,6 +26061,10 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
 }
 # wire the reference state an INTER frame needs (0.7.84): the DPB the MC reads and
 # the ref-frame metadata. Without them a non-intra frame is rejected UNSUPPORTED.
+# the frame under construction (CurrFrame) — the large-scale tile process copies each decoded tile out of it.
+fn av1_frame_dec_frame(fdc): i64 { return load64(fdc + AV1FDEC_FRAME); }
+# the tile that owns the frame grids (0 until the first tile) — the large-scale tile process resets its windows.
+fn av1_frame_dec_tile0(fdc): i64 { return load64(fdc + AV1FDEC_TILE0); }
 fn av1_frame_dec_set_inter(fdc, dpb, refs): i64 {
     store64(fdc + AV1FDEC_DPB, dpb);
     store64(fdc + AV1FDEC_REFS, refs);
@@ -26015,10 +26078,7 @@ fn av1_frame_dec_set_inter(fdc, dpb, refs): i64 {
 # the shared grids and becomes TILE0; every later tile shares them.
 fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
     store64(out_err, DR_OK);
-    var seq = load64(fdc + AV1FDEC_SEQ);
     var fh = load64(fdc + AV1FDEC_FH);
-    var frame = load64(fdc + AV1FDEC_FRAME);
-    var num_planes = av1_seq_num_planes(seq);
     var num_tiles = load64(fdc + AV1FDEC_NUM_TILES);
     var tg = av1_tile_group_new(av1_max(1, num_tiles));
     if (tg == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
@@ -26029,81 +26089,13 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
     if (av1_tg_start(tg) != load64(fdc + AV1FDEC_TILES_DONE)) {
         store64(out_err, DR_ERR_UNSUPPORTED); return 0 - 1;
     }
-    var fmi_cols = av1_fh_mi_cols(fh);
-    var fmi_rows = av1_fh_mi_rows(fh);
-    var tile_cols = av1_fh_tile_cols(fh);
-    var lr_params = load64(fdc + AV1FDEC_LR_PARAMS);
-    var enable_ef = load64(seq + AV1_SEQ_ENABLE_INTRA_EDGE);
-    var enable_fi = load64(seq + AV1_SEQ_ENABLE_FILTER_INTRA);
-    var base_q = av1_fh_base_q_idx(fh);
-    var reduced_tx = av1_fh_reduced_tx_set(fh);
-    var tx_mode = av1_fh_tx_mode(fh);
     var disable_cdf = av1_fh_disable_cdf_update(fh);
     var tn = av1_tg_start(tg);
     while (tn <= av1_tg_end(tg)) {
-        var tcol = av1_tg_tile_col(tn, tile_cols);
-        var trow = av1_tg_tile_row(tn, tile_cols);
-        var col_start = av1_fh_mi_col_start(fh, tcol);
-        var col_end = av1_fh_mi_col_start(fh, tcol + 1);
-        var row_start = av1_fh_mi_row_start(fh, trow);
-        var row_end = av1_fh_mi_row_start(fh, trow + 1);
-        var tile = av1_tile_new(frame, col_end - col_start, row_end - row_start,
-          base_q, enable_ef, reduced_tx, num_planes);
-        if (tile == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
-        store64(tile + AV1TILE_TX_MODE, tx_mode);
-        store64(tile + AV1TILE_ENABLE_FI, enable_fi);
-        store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
-        # LosslessArray (5.9.2) as a mask: per-block Lossless = bit segment_id (0.8.2), on both lanes.
-        store64(tile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(fh));
-        av1_tile_set_sb128(tile, av1_seq_use_128x128(seq));   # 128x128 superblocks (0.7.126 E2a)
-        # per-superblock deltas (0.8.2): one Av1DeltaCtx per TILE, since CurrentQIndex and DeltaLF are
-        # reset per tile (5.11.1 / 5.11.2). Only when delta_q_present (delta_lf_present implies it): a
-        # frame without deltas attaches none, so every splice and the qindex helper take the old path.
-        if (av1_fh_delta_q_present(fh) != 0) {
-            var dsb = AV1_BLOCK_64X64;
-            if (av1_seq_use_128x128(seq) != 0) { dsb = AV1_BLOCK_128X128; }
-            var dctx = av1_dctx_new(1, av1_fh_delta_q_res(fh), av1_fh_delta_lf_present(fh),
-              av1_fh_delta_lf_res(fh), av1_fh_delta_lf_multi(fh), num_planes, dsb, base_q);
-            if (dctx == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
-            av1_tile_set_dctx(tile, dctx);
-        }
-        av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows);
-        var tile0 = load64(fdc + AV1FDEC_TILE0);
-        if (tile0 == 0) {
-            if (av1_tile_grids_new(tile) != DR_OK) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
-            store64(fdc + AV1FDEC_TILE0, tile);
-        } else {
-            av1_tile_share_grids(tile, tile0);
-        }
-        # temporal segmentation (0.8.2): each tile's Av1SegCtx, carrying PrevSegmentIds — the primary
-        # reference's saved map when load_previous_segment_ids (5.9.2) finds one, else all zero.
-        if (av1_tile_seg_attach(tile, av1_frame_prev_segids(fh, load64(fdc + AV1FDEC_REFS))) != DR_OK) {
-            store64(out_err, DR_ERR_OOM); return 0 - 1;
-        }
-        av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
-        var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
-        if (ar != DR_OK) { store64(out_err, ar); return 0 - 1; }
-        if ((av1_fh_frame_is_intra(fh) == 0) || (av1_fh_allow_intrabc(fh) != 0)) {
-            # an INTER frame (0.7.84): needs the DPB + ref state for MC. An allow_intrabc INTRA frame (0.8.4)
-            # decodes on this lane too — an intra block copy is an inter block — but reads no reference, so a
-            # single-frame decode without a DPB gets an empty one.
-            var idpb = load64(fdc + AV1FDEC_DPB);
-            var irefs = load64(fdc + AV1FDEC_REFS);
-            if (av1_fh_frame_is_intra(fh) != 0) {
-                if (idpb == 0) { idpb = av1_dpb_new(); }
-                if (irefs == 0) { irefs = av1_ref_state_new(); }
-            }
-            if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0 - 1; }
-            var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
-            if (ir != DR_OK) { store64(out_err, ir); return 0 - 1; }
-            var dri = av1_decode_inter_tile(tile, buf + av1_tg_tile_offset(tg, tn),
-              av1_tg_tile_size(tg, tn), disable_cdf);
-            if (dri != DR_OK) { store64(out_err, dri); return 0 - 1; }
-        } else {
-            var dr = av1_decode_intra_tile(tile, buf + av1_tg_tile_offset(tg, tn),
-              av1_tg_tile_size(tg, tn), disable_cdf);
-            if (dr != DR_OK) { store64(out_err, dr); return 0 - 1; }
-        }
+        var derr = 0;
+        var tile = av1_frame_dec_tile(fdc, tn, buf + av1_tg_tile_offset(tg, tn), av1_tg_tile_size(tg, tn),
+          disable_cdf, &derr);
+        if (tile == 0) { store64(out_err, derr); return 0 - 1; }
         # exit_symbol (9.2.4): when the frame adapts (disable_frame_end_update_cdf == 0) and this is tile
         # context_update_tile_id, a copy of its FINAL CDFs is the frame's saved context. Taken now, while this
         # tile's families still hold them; one bundle per frame, never mutated after.
@@ -26119,6 +26111,89 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
     store64(fdc + AV1FDEC_TILES_DONE, av1_tg_end(tg) + 1);
     if ((av1_tg_end(tg) + 1) == num_tiles) { return 1; }
     return 0;
+}
+
+# Decode ONE tile, TileNum tn, from its tile data buf[0..sz) into the frame under construction — the tile setup and
+# lane dispatch of decode_tile (5.11.2 / 7.4), shared by a tile group (av1_frame_dec_group) and a large-scale tile
+# list entry (src/av1_lst.cyr, which passes disable_cdf 1: its tiles never adapt). Returns the decoded tile (its CDF
+# families hold the tile's final state), or 0 with *out_err set.
+fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
+    store64(out_err, DR_OK);
+    var seq = load64(fdc + AV1FDEC_SEQ);
+    var fh = load64(fdc + AV1FDEC_FH);
+    var frame = load64(fdc + AV1FDEC_FRAME);
+    var num_planes = av1_seq_num_planes(seq);
+    var fmi_cols = av1_fh_mi_cols(fh);
+    var fmi_rows = av1_fh_mi_rows(fh);
+    var tile_cols = av1_fh_tile_cols(fh);
+    var lr_params = load64(fdc + AV1FDEC_LR_PARAMS);
+    var enable_ef = load64(seq + AV1_SEQ_ENABLE_INTRA_EDGE);
+    var enable_fi = load64(seq + AV1_SEQ_ENABLE_FILTER_INTRA);
+    var base_q = av1_fh_base_q_idx(fh);
+    var reduced_tx = av1_fh_reduced_tx_set(fh);
+    var tx_mode = av1_fh_tx_mode(fh);
+    var tcol = av1_tg_tile_col(tn, tile_cols);
+    var trow = av1_tg_tile_row(tn, tile_cols);
+    var col_start = av1_fh_mi_col_start(fh, tcol);
+    var col_end = av1_fh_mi_col_start(fh, tcol + 1);
+    var row_start = av1_fh_mi_row_start(fh, trow);
+    var row_end = av1_fh_mi_row_start(fh, trow + 1);
+    var tile = av1_tile_new(frame, col_end - col_start, row_end - row_start,
+      base_q, enable_ef, reduced_tx, num_planes);
+    if (tile == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    store64(tile + AV1TILE_TX_MODE, tx_mode);
+    store64(tile + AV1TILE_ENABLE_FI, enable_fi);
+    store64(tile + AV1TILE_SEG_FH, fh);   # segmentation lookups on BOTH lanes (0.7.125 D1)
+    # LosslessArray (5.9.2) as a mask: per-block Lossless = bit segment_id (0.8.2), on both lanes.
+    store64(tile + AV1TILE_LOSSLESS_MASK, av1_fh_lossless_mask(fh));
+    av1_tile_set_sb128(tile, av1_seq_use_128x128(seq));   # 128x128 superblocks (0.7.126 E2a)
+    # per-superblock deltas (0.8.2): one Av1DeltaCtx per TILE, since CurrentQIndex and DeltaLF are
+    # reset per tile (5.11.1 / 5.11.2). Only when delta_q_present (delta_lf_present implies it): a
+    # frame without deltas attaches none, so every splice and the qindex helper take the old path.
+    if (av1_fh_delta_q_present(fh) != 0) {
+        var dsb = AV1_BLOCK_64X64;
+        if (av1_seq_use_128x128(seq) != 0) { dsb = AV1_BLOCK_128X128; }
+        var dctx = av1_dctx_new(1, av1_fh_delta_q_res(fh), av1_fh_delta_lf_present(fh),
+          av1_fh_delta_lf_res(fh), av1_fh_delta_lf_multi(fh), num_planes, dsb, base_q);
+        if (dctx == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+        av1_tile_set_dctx(tile, dctx);
+    }
+    av1_tile_set_frame_mi(tile, fmi_cols, fmi_rows);
+    var tile0 = load64(fdc + AV1FDEC_TILE0);
+    if (tile0 == 0) {
+        if (av1_tile_grids_new(tile) != DR_OK) { store64(out_err, DR_ERR_OOM); return 0; }
+        store64(fdc + AV1FDEC_TILE0, tile);
+    } else {
+        av1_tile_share_grids(tile, tile0);
+    }
+    # temporal segmentation (0.8.2): each tile's Av1SegCtx, carrying PrevSegmentIds — the primary
+    # reference's saved map when load_previous_segment_ids (5.9.2) finds one, else all zero.
+    if (av1_tile_seg_attach(tile, av1_frame_prev_segids(fh, load64(fdc + AV1FDEC_REFS))) != DR_OK) {
+        store64(out_err, DR_ERR_OOM); return 0;
+    }
+    av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
+    var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
+    if (ar != DR_OK) { store64(out_err, ar); return 0; }
+    if ((av1_fh_frame_is_intra(fh) == 0) || (av1_fh_allow_intrabc(fh) != 0)) {
+        # an INTER frame (0.7.84): needs the DPB + ref state for MC. An allow_intrabc INTRA frame (0.8.4)
+        # decodes on this lane too — an intra block copy is an inter block — but reads no reference, so a
+        # single-frame decode without a DPB gets an empty one.
+        var idpb = load64(fdc + AV1FDEC_DPB);
+        var irefs = load64(fdc + AV1FDEC_REFS);
+        if (av1_fh_frame_is_intra(fh) != 0) {
+            if (idpb == 0) { idpb = av1_dpb_new(); }
+            if (irefs == 0) { irefs = av1_ref_state_new(); }
+        }
+        if ((idpb == 0) || (irefs == 0)) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+        var ir = av1_tile_set_inter_ctx(tile, fh, irefs, seq, idpb);
+        if (ir != DR_OK) { store64(out_err, ir); return 0; }
+        var dri = av1_decode_inter_tile(tile, buf, sz, disable_cdf);
+        if (dri != DR_OK) { store64(out_err, dri); return 0; }
+    } else {
+        var dr = av1_decode_intra_tile(tile, buf, sz, disable_cdf);
+        if (dr != DR_OK) { store64(out_err, dr); return 0; }
+    }
+    return tile;
 }
 
 # av1_frame_dec_finish — the frame is fully decoded: run the in-loop filters over the
@@ -26255,9 +26330,10 @@ fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
 #   TILE_GROUP      -> feed a frame-decode context (av1_frame_dec_*); a frame may
 #                      span SEVERAL tile-group OBUs, so accumulate until complete,
 #                      then return the decoded + filtered frame,
-# and skips temporal_delimiter / metadata / padding / redundant_frame_header /
-# tile_list. Returns when a frame completes (embedded FRAME OBU, or the last of its
-# standalone tile groups).
+# and skips temporal_delimiter / metadata / padding / redundant_frame_header. A
+# tile_list is DR_ERR_UNSUPPORTED: it only decodes in av1_decoder_decode's large-scale
+# tile mode, against anchors the application supplies (src/av1_lst.cyr). Returns when
+# a frame completes (embedded FRAME OBU, or the last of its standalone tile groups).
 #
 # It returns the RECONSTRUCTED frame, shown or not, and does not run the output process: no film grain (7.18.3)
 # is applied. av1_decoder_decode / av1_decode_stream are the output path, and they apply it.
@@ -26282,6 +26358,7 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
     var osize = 0;
     var rc = av1_obu_next(it, &otype, &ooff, &osize);
     while (rc == DR_OK) {
+        if (otype == AV1_OBU_TILE_LIST) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
         if (otype == AV1_OBU_SEQUENCE_HEADER) {
             var serr = 0;
             seq = av1_seq_parse(buf + ooff, osize, &serr);
@@ -26528,7 +26605,16 @@ enum Av1DecOff {
     AV1DEC_COUNT  = 56;   # frames processed since av1_decoder_new (coded + show_existing)
     AV1DEC_ERR    = 64;   # sticky error (DR_OK while healthy)
     AV1DEC_GRAIN  = 72;   # Av1GrainCtx for the film grain output process (0 until a frame needs grain)
-    AV1DEC_SIZE   = 80;
+    AV1DEC_LAST   = 80;   # the most recently DECODED frame, shown or not (a large-scale-tile anchor source)
+    AV1DEC_LST    = 88;   # large-scale tile mode (7.3; 0 = off): frame headers are camera headers, tile lists decode
+    AV1DEC_ANCH   = 96;   # AnchorFrames: 128 DrFrame pointers (0 until the first av1_decoder_set_anchor)
+    AV1DEC_NANCH  = 104;  # 1 + the highest anchor index set
+    AV1DEC_CAMFH  = 112;  # the camera frame header the tile lists decode against (0 = none yet)
+    AV1DEC_TL_N   = 120;  # the last tile list: tile_count_minus_1 + 1
+    AV1DEC_TL_TW  = 128;  # ...its TileWidth / TileHeight in samples
+    AV1DEC_TL_TH  = 136;
+    AV1DEC_TL_OW  = 144;  # ...output_frame_width_in_tiles_minus_1 + 1
+    AV1DEC_SIZE   = 152;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
@@ -26552,6 +26638,9 @@ fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
 fn av1_decoder_count(dec): i64 { return load64(dec + AV1DEC_COUNT); }
 fn av1_decoder_shown_count(dec): i64 { return load64(dec + AV1DEC_NSHOWN); }
 fn av1_decoder_error(dec): i64 { return load64(dec + AV1DEC_ERR); }
+# the most recently decoded frame, shown or not (0 before the first) — what libaom's AV1_COPY_NEW_FRAME_IMAGE hands a
+# large-scale-tile application as an anchor.
+fn av1_decoder_last_decoded(dec): i64 { return load64(dec + AV1DEC_LAST); }
 
 # latch a decoder failure: the error becomes sticky and the call returns 0.
 fn av1_decoder_fail(dec, err, out_err): i64 {
@@ -26568,6 +26657,7 @@ fn av1_decoder_fail(dec, err, out_err): i64 {
 # Returns DR_OK, or the synthesis's allocation error.
 fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
     store64(dec + AV1DEC_COUNT, load64(dec + AV1DEC_COUNT) + 1);
+    store64(dec + AV1DEC_LAST, frame);
     if (shown == 1) {
         var outf = frame;
         if ((av1_seq_film_grain_present(seq) != 0) && (av1_fh_apply_grain(fh) != 0)) {
@@ -26602,8 +26692,13 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
 #                      run the ref update, record output if show_frame.
 #   TILE_GROUP      -> accumulate into a frame-decode context; on the last group,
 #                      finish the frame, run the ref update, record output if shown.
-# temporal_delimiter / metadata / padding / redundant_frame_header / tile_list are
-# skipped.
+#   TILE_LIST       -> large-scale tile mode only (av1_decoder_set_large_scale_tile): decode
+#                      the listed tiles against the camera frame header and the
+#                      application's AnchorFrames (src/av1_lst.cyr) and output the frame
+#                      they build. Outside that mode it is DR_ERR_UNSUPPORTED.
+# In large-scale tile mode a FRAME_HEADER / FRAME is the camera frame header: parsed and
+# kept, nothing decoded or output. temporal_delimiter / metadata / padding /
+# redundant_frame_header are skipped.
 #
 # The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
 # the decoder's reused grain frame, overwritten by the next grain output — consume it
@@ -26639,6 +26734,35 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             store64(dec + AV1DEC_SEQ, nseq);
+        }
+        if ((load64(dec + AV1DEC_LST) != 0)
+          && ((otype == AV1_OBU_FRAME_HEADER) || (otype == AV1_OBU_FRAME))) {
+            # large-scale tile mode (7.3): a frame header is the CAMERA frame header the tile lists decode
+            # against — no tile group of its own is decoded (an OBU_FRAME's tile data, if any, is skipped, as
+            # libaom does: its lightfield files carry a header-only OBU_FRAME), no reference update, no output.
+            if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var co = av1_obu_iter_obu(it);
+            var cerr = 0;
+            var cfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(co), av1_obu_sid(co),
+              buf + ooff, osize, &cerr);
+            if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
+            if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            store64(dec + AV1DEC_CAMFH, cfh);
+            otype = 0 - 1;   # handled: none of the branches below may see it
+        }
+        if (otype == AV1_OBU_TILE_LIST) {
+            # a tile list only means something to the large-scale tile process, which needs AnchorFrames supplied
+            # by the application: outside that mode it is refused, never silently skipped.
+            if (load64(dec + AV1DEC_LST) == 0) { return av1_decoder_fail(dec, DR_ERR_UNSUPPORTED, out_err); }
+            var lerr2 = 0;
+            var lout = av1_decode_tile_list(dec, buf + ooff, osize, &lerr2);
+            if (lout == 0) {
+                if (lerr2 == DR_OK) { lerr2 = DR_ERR_BAD_HEADER; }
+                return av1_decoder_fail(dec, lerr2, out_err);
+            }
+            store64(dec + AV1DEC_COUNT, load64(dec + AV1DEC_COUNT) + 1);
+            store64(dec + AV1DEC_SHOWN, lout);
+            store64(dec + AV1DEC_NSHOWN, load64(dec + AV1DEC_NSHOWN) + 1);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
@@ -26749,6 +26873,281 @@ fn av1_decode_stream(dpb, buf, sz, out_count, out_err): i64 {
     if (count == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
     if (out_count != 0) { store64(out_count, count); }
     return output;
+}
+
+# --- av1_lst.cyr ---
+
+# src/av1_lst.cyr — AV1 large scale tile decoding (spec 7.3; the tile list OBU, 5.12 / 6.11).
+#
+# A tile list OBU names tiles of a camera frame, each predicted from one frame of an AnchorFrames array the
+# APPLICATION supplies (7.3.1: "provided by external means"). For each tile_list_entry the decoder binds
+# AnchorFrames[ anchor_frame_idx ] to FrameStore[ ref_frame_idx[ 0 ] ] with the current frame's geometry (steps
+# 3-13), decodes that one tile (the decode camera tile process, 7.3.2: no deblocking, CDEF, superres, loop
+# restoration or reference update), and writes it into an output frame in raster order. The spec recommends tile
+# list support but does not require it for conformance; drishti implements it (0.8.4).
+#
+# How drishti does it. The tile is decoded by av1_frame_dec_tile — the same tile setup and inter lane a tile group
+# uses — with CDF adaptation OFF (disable_cdf 1, as the required disable_cdf_update = 1 means; libaom's lightfield
+# encoder leaves the header flag at 0 but codes, and its decoder reads, large-scale tiles without adaptation too),
+# against a SCRATCH DPB whose only frame is the anchor in slot ref_frame_idx[ 0 ] and a SCRATCH copy of the reference
+# metadata with that slot set to the current frame's geometry. The decoder's own DPB and reference state are never
+# touched, and a block referencing anything but LAST finds an empty slot and fails (DR_ERR_BOUNDS) — the 7.3.2
+# requirement RefFrame = { LAST_FRAME, NONE } is enforced rather than trusted.
+#
+# Refused (DR_ERR_BAD_HEADER): every limit whose violation would steer the decode out of bounds or make the output
+# meaningless — tile_count_minus_1 > 511, more tiles than the output frame holds, a truncated entry, an anchor index
+# with no anchor set, an anchor whose size or format differs from the frame's, a tile row / column outside the frame,
+# non-uniform tiles, a camera header that is not a shown INTER frame, superres, a frame not exactly MiCols x MiRows
+# samples, and film grain. Other 7.3.1 requirements (disable_cdf_update, enable_cdef / enable_restoration /
+# enable_order_hint = 0) are NOT enforced: libaom's own lightfield streams break them, harmlessly — no filter runs and
+# no tile adapts here whatever their values.
+#
+# FLAT module — wiring in src/main.cyr, after av1_dpb.cyr. Family av1_ (av1_tile_list_* / av1_lst_*).
+
+enum Av1TileListOff {
+    AV1TL_OUT_W   = 0;    # output_frame_width_in_tiles_minus_1 + 1
+    AV1TL_OUT_H   = 8;    # output_frame_height_in_tiles_minus_1 + 1
+    AV1TL_COUNT   = 16;   # tile_count_minus_1 + 1 (<= 512)
+    AV1TL_ENTRIES = 24;   # pointer: COUNT entries of AV1TLE_SIZE bytes
+    AV1TL_SIZE    = 32;
+}
+enum Av1TileListEntryOff {
+    AV1TLE_ANCHOR = 0;    # anchor_frame_idx
+    AV1TLE_ROW    = 8;    # anchor_tile_row
+    AV1TLE_COL    = 16;   # anchor_tile_col
+    AV1TLE_DATA   = 24;   # offset of coded_tile_data within the OBU payload
+    AV1TLE_DSIZE  = 32;   # tile_data_size_minus_1 + 1
+    AV1TLE_SIZE   = 40;
+}
+
+# tile_list_obu() (5.12.1 / 5.12.2) over the OBU payload buf[0..sz). Returns an Av1TileList, or 0 with *out_err:
+# DR_ERR_TRUNCATED when an entry or its data runs past the payload, DR_ERR_BAD_HEADER for tile_count_minus_1 > 511
+# (6.11.1) or more tiles than the output frame holds (7.3.1), DR_ERR_OOM.
+fn av1_tile_list_parse(buf, sz, out_err): i64 {
+    store64(out_err, DR_OK);
+    if ((buf == 0) || (sz < 4)) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+    var ow = load8(buf + 0) + 1;                                  # output_frame_width_in_tiles_minus_1 f(8)
+    var oh = load8(buf + 1) + 1;                                  # output_frame_height_in_tiles_minus_1 f(8)
+    var count = ((load8(buf + 2) << 8) | load8(buf + 3)) + 1;    # tile_count_minus_1 f(16)
+    if (count > 512) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+    if (count > (ow * oh)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+    var tl = alloc(AV1TL_SIZE);
+    var ents = alloc(count * AV1TLE_SIZE);   # count entries
+    if ((tl == 0) || (ents == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
+    store64(tl + AV1TL_OUT_W, ow);
+    store64(tl + AV1TL_OUT_H, oh);
+    store64(tl + AV1TL_COUNT, count);
+    store64(tl + AV1TL_ENTRIES, ents);
+    var pos = 4;
+    var i = 0;
+    while (i < count) {
+        # the 5 header bytes must all be in the payload: the data check below would reject a 4-byte remainder
+        # anyway (its sz - pos goes negative), but only after reading a byte past buf[ sz - 1 ]
+        if ((sz - pos) < 5) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+        var e = ents + (i * AV1TLE_SIZE);
+        store64(e + AV1TLE_ANCHOR, load8(buf + pos));          # anchor_frame_idx f(8)
+        store64(e + AV1TLE_ROW, load8(buf + pos + 1));         # anchor_tile_row f(8)
+        store64(e + AV1TLE_COL, load8(buf + pos + 2));         # anchor_tile_col f(8)
+        var dsz = ((load8(buf + pos + 3) << 8) | load8(buf + pos + 4)) + 1;   # tile_data_size_minus_1 f(16)
+        pos = pos + 5;
+        if ((sz - pos) < dsz) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+        store64(e + AV1TLE_DATA, pos);
+        store64(e + AV1TLE_DSIZE, dsz);                        # coded_tile_data f(N)
+        pos = pos + dsz;
+        i = i + 1;
+    }
+    return tl;
+}
+fn av1_tile_list_entry(tl, i): i64 { return load64(tl + AV1TL_ENTRIES) + (i * AV1TLE_SIZE); }
+
+# The destination of the tile-th decoded tile in the output frame (7.3.1): raster order over
+# output_frame_width_in_tiles columns, in samples of the plane (subsampled for chroma by sub).
+fn av1_lst_dest_x(tile, out_w_tiles, tile_w, sub): i64 { return (tile_w * (tile % out_w_tiles)) >> sub; }
+fn av1_lst_dest_y(tile, out_w_tiles, tile_h, sub): i64 { return (tile_h * (tile / out_w_tiles)) >> sub; }
+
+# The camera frame header's uniform tile size in MI units, or -1 when the tiles differ in size (7.3.1 requires
+# every tile the same: "TileWidth is identical for all tiles", and each tile one superblock row high).
+fn av1_lst_uniform_tile_w4(fh): i64 {
+    var cols = av1_fh_tile_cols(fh);
+    var w4 = av1_fh_mi_col_start(fh, 1) - av1_fh_mi_col_start(fh, 0);
+    var i = 1;
+    while (i < cols) {
+        if ((av1_fh_mi_col_start(fh, i + 1) - av1_fh_mi_col_start(fh, i)) != w4) { return 0 - 1; }
+        i = i + 1;
+    }
+    return w4;
+}
+fn av1_lst_uniform_tile_h4(fh): i64 {
+    var rows = av1_fh_tile_rows(fh);
+    var h4 = av1_fh_mi_row_start(fh, 1) - av1_fh_mi_row_start(fh, 0);
+    var i = 1;
+    while (i < rows) {
+        if ((av1_fh_mi_row_start(fh, i + 1) - av1_fh_mi_row_start(fh, i)) != h4) { return 0 - 1; }
+        i = i + 1;
+    }
+    return h4;
+}
+
+# Large scale tile mode on (1) / off (0) for a streaming decoder. In it, frame headers are camera headers and tile
+# list OBUs decode (av1_decoder_decode). The application supplies the anchors before the first tile list.
+fn av1_decoder_set_large_scale_tile(dec, on): i64 {
+    store64(dec + AV1DEC_LST, on);
+    return DR_OK;
+}
+# AnchorFrames[ idx ] = frame (idx 0..127, 6.11.2). The frame is borrowed, never modified. DR_ERR_BOUNDS for an idx
+# outside 0..127, DR_ERR_OOM.
+fn av1_decoder_set_anchor(dec, idx, frame): i64 {
+    if ((idx < 0) || (idx > 127)) { return DR_ERR_BOUNDS; }
+    var a = load64(dec + AV1DEC_ANCH);
+    if (a == 0) {
+        a = alloc(128 * 8);   # 128 DrFrame pointers
+        if (a == 0) { return DR_ERR_OOM; }
+        memset(a, 0, 128 * 8);
+        store64(dec + AV1DEC_ANCH, a);
+    }
+    store64(a + (idx * 8), frame);
+    if ((idx + 1) > load64(dec + AV1DEC_NANCH)) { store64(dec + AV1DEC_NANCH, idx + 1); }
+    return DR_OK;
+}
+# The last decoded tile list's shape, for writing its tiles out: tile count, TileWidth / TileHeight (samples), and
+# output_frame_width_in_tiles.
+fn av1_decoder_tile_list_count(dec): i64 { return load64(dec + AV1DEC_TL_N); }
+fn av1_decoder_tile_list_tile_w(dec): i64 { return load64(dec + AV1DEC_TL_TW); }
+fn av1_decoder_tile_list_tile_h(dec): i64 { return load64(dec + AV1DEC_TL_TH); }
+fn av1_decoder_tile_list_out_w(dec): i64 { return load64(dec + AV1DEC_TL_OW); }
+
+# The large scale tile decoding process (7.3.1) for one tile list OBU, payload buf[0..sz): returns the output frame
+# ((output_frame_width_in_tiles) * TileWidth by (output_frame_height_in_tiles) * TileHeight; samples outside the
+# decoded tiles are 0 — the spec leaves them unspecified), or 0 with *out_err.
+fn av1_decode_tile_list(dec, buf, sz, out_err): i64 {
+    store64(out_err, DR_OK);
+    var seq = load64(dec + AV1DEC_SEQ);
+    var fh = load64(dec + AV1DEC_CAMFH);
+    if ((seq == 0) || (fh == 0)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+    # the camera header limits whose violation would make this decode wrong (see the module header)
+    if ((av1_fh_frame_type(fh) != AV1_INTER_FRAME) || (av1_fh_show_existing_frame(fh) != 0)
+      || (av1_fh_show_frame(fh) == 0) || (av1_fh_use_superres(fh) != 0)
+      || (av1_seq_film_grain_present(seq) != 0)
+      || (av1_fh_frame_width(fh) != (av1_fh_mi_cols(fh) * AV1_MI_SIZE))
+      || (av1_fh_frame_height(fh) != (av1_fh_mi_rows(fh) * AV1_MI_SIZE))) {
+        store64(out_err, DR_ERR_BAD_HEADER); return 0;
+    }
+    var w4 = av1_lst_uniform_tile_w4(fh);
+    var h4 = av1_lst_uniform_tile_h4(fh);
+    if ((w4 <= 0) || (h4 <= 0)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+    var terr = 0;
+    var tl = av1_tile_list_parse(buf, sz, &terr);
+    if (tl == 0) { store64(out_err, terr); return 0; }
+    var tw = w4 * AV1_MI_SIZE;
+    var th = h4 * AV1_MI_SIZE;
+    var ow = load64(tl + AV1TL_OUT_W);
+    var count = load64(tl + AV1TL_COUNT);
+    var np = av1_seq_num_planes(seq);
+    var subx = av1_seq_subsampling_x(seq);
+    var suby = av1_seq_subsampling_y(seq);
+    var bd = av1_seq_bitdepth(seq);
+    # every entry is validated before anything is decoded or allocated: an anchor that exists and matches the
+    # frame's size and format, a tile inside the frame
+    var anchors = load64(dec + AV1DEC_ANCH);
+    var nanch = load64(dec + AV1DEC_NANCH);
+    var tile_cols = av1_fh_tile_cols(fh);
+    var vi = 0;
+    while (vi < count) {
+        var ve = av1_tile_list_entry(tl, vi);
+        var vai = load64(ve + AV1TLE_ANCHOR);
+        if ((anchors == 0) || (vai >= nanch)) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+        var va = load64(anchors + (vai * 8));
+        if (va == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+        if ((dr_frame_width(va) != av1_fh_upscaled_width(fh)) || (dr_frame_height(va) != av1_fh_frame_height(fh))
+          || (dr_frame_num_planes(va) != np) || (dr_frame_subx(va) != subx)
+          || (dr_frame_suby(va) != suby) || (dr_frame_bit_depth(va) != bd)) {
+            store64(out_err, DR_ERR_BAD_HEADER); return 0;
+        }
+        if ((load64(ve + AV1TLE_ROW) >= av1_fh_tile_rows(fh)) || (load64(ve + AV1TLE_COL) >= tile_cols)) {
+            store64(out_err, DR_ERR_BAD_HEADER); return 0;
+        }
+        vi = vi + 1;
+    }
+    var ferr = 0;
+    var out = dr_frame_new(ow * tw, load64(tl + AV1TL_OUT_H) * th, np, subx, suby, bd, 0, &ferr);
+    if (out == 0) { store64(out_err, ferr); return 0; }
+    var p = 0;
+    while (p < np) { dr_frame_fill(out, p, 0); p = p + 1; }
+    # the scratch reference state: the decoder's metadata, with slot last re-described as the current frame (steps
+    # 5-13); and a DPB holding nothing but the anchor in that slot. A tile decode reads only RefUpscaledWidth and
+    # RefFrameHeight of it (the 7.11.3.3 scale factors); the other fields are set to keep the slot whole.
+    var refs = load64(dec + AV1DEC_REFS);
+    var srefs = alloc(AV1REF_SIZE);
+    var sdpb = av1_dpb_new();
+    if ((srefs == 0) || (sdpb == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
+    memcpy(srefs, refs, AV1REF_SIZE);
+    var last = av1_fh_ref_frame_idx(fh, 0);
+    store64(srefs + AV1REF_VALID + (last * 8), 1);
+    store64(srefs + AV1REF_UPSCALED_W + (last * 8), av1_fh_upscaled_width(fh));
+    store64(srefs + AV1REF_FRAME_W + (last * 8), av1_fh_frame_width(fh));
+    store64(srefs + AV1REF_FRAME_H + (last * 8), av1_fh_frame_height(fh));
+    store64(srefs + AV1REF_MI_COLS + (last * 8), av1_fh_mi_cols(fh));
+    store64(srefs + AV1REF_MI_ROWS + (last * 8), av1_fh_mi_rows(fh));
+    store64(srefs + AV1REF_SUBX + (last * 8), subx);
+    store64(srefs + AV1REF_SUBY + (last * 8), suby);
+    store64(srefs + AV1REF_BITDEPTH + (last * 8), bd);
+    var nerr = 0;
+    var fdc = av1_frame_dec_new(seq, fh, &nerr);
+    if (fdc == 0) {
+        if (nerr == DR_OK) { nerr = DR_ERR_OOM; }
+        store64(out_err, nerr); return 0;
+    }
+    av1_frame_dec_set_inter(fdc, sdpb, srefs);
+    var frame = av1_frame_dec_frame(fdc);
+    var i = 0;
+    while (i < count) {
+        var e = av1_tile_list_entry(tl, i);
+        var anchor = load64(anchors + (load64(e + AV1TLE_ANCHOR) * 8));
+        var tr = load64(e + AV1TLE_ROW);
+        var tc = load64(e + AV1TLE_COL);
+        store64(sdpb + AV1DPB_FRAMES + (last * 8), anchor);   # FrameStore[ last ] = AnchorFrames[ anchor_frame_idx ]
+        # a tile window decoded before in this list starts from fresh grid state, exactly as its first decode did
+        var tile0 = av1_frame_dec_tile0(fdc);
+        if (tile0 != 0) {
+            var rre = av1_tile_grids_reset_window(tile0, av1_fh_mi_row_start(fh, tr), av1_fh_mi_row_start(fh, tr + 1),
+              av1_fh_mi_col_start(fh, tc), av1_fh_mi_col_start(fh, tc + 1), subx, suby);
+            if (rre != DR_OK) { store64(out_err, rre); return 0; }
+        }
+        var derr = 0;
+        var tile = av1_frame_dec_tile(fdc, (tr * tile_cols) + tc, buf + load64(e + AV1TLE_DATA),
+          load64(e + AV1TLE_DSIZE), 1, &derr);
+        if (tile == 0) {
+            if (derr == DR_OK) { derr = DR_ERR_BAD_HEADER; }
+            store64(out_err, derr); return 0;
+        }
+        # write the tile into the output frame in raster order
+        var x0 = av1_fh_mi_col_start(fh, tc) * AV1_MI_SIZE;
+        var y0 = av1_fh_mi_row_start(fh, tr) * AV1_MI_SIZE;
+        p = 0;
+        while (p < np) {
+            var sx = 0;
+            var sy = 0;
+            if (p > 0) { sx = subx; sy = suby; }
+            var dx = av1_lst_dest_x(i, ow, tw, sx);
+            var dy = av1_lst_dest_y(i, ow, th, sy);
+            var y = 0;
+            while (y < (th >> sy)) {
+                var x = 0;
+                while (x < (tw >> sx)) {
+                    dr_frame_set(out, p, dx + x, dy + y, dr_frame_get(frame, p, (x0 >> sx) + x, (y0 >> sy) + y));
+                    x = x + 1;
+                }
+                y = y + 1;
+            }
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    store64(dec + AV1DEC_TL_N, count);
+    store64(dec + AV1DEC_TL_TW, tw);
+    store64(dec + AV1DEC_TL_TH, th);
+    store64(dec + AV1DEC_TL_OW, ow);
+    return out;
 }
 
 # --- av1_intertile.cyr ---

@@ -493,6 +493,65 @@ fn av1_tile_grids_new(tile): i64 {
     store64(tile + AV1TILE_CDEFIDX, cix);
     return DR_OK;
 }
+# Restore one tile window of the frame grids to the state av1_tile_grids_new (and av1_tile_set_inter_ctx, for the MV
+# grid and SkipModes) allocates them in: 0 everywhere, CdefIdx -1. [rs, re) x [cs, ce) is the window in luma MI units;
+# the chroma LoopfilterTxSizes grids are plane-MI addressed, so theirs is the subsampled window. The large-scale tile
+# process (src/av1_lst.cyr) calls it before decoding a tile window a second time: the spec's decode never reads a
+# position the current tile has not written, but drishti's grids carry state that is only equivalent to that when it
+# starts fresh — the MV grid's per-cell "decoded this frame" marker, and CdefIdx, whose -1 is what makes read_cdef
+# read the symbol at all (a stale index skips it, a desync).
+fn av1_tile_grids_reset_window(tile, rs, re, cs, ce, subx, suby): i64 {
+    var fmi_cols = load64(tile + AV1TILE_FMI_COLS);
+    var offs = alloc(16 * 8);   # the 16 luma-addressed zeroed grids
+    if (offs == 0) { return DR_ERR_OOM; }
+    store64(offs + 0, AV1TILE_MISIZES);   store64(offs + 8, AV1TILE_YMODES);
+    store64(offs + 16, AV1TILE_UVMODES);  store64(offs + 24, AV1TILE_SKIPS);
+    store64(offs + 32, AV1TILE_INTERTX);  store64(offs + 40, AV1TILE_LFTX + 0);
+    store64(offs + 48, AV1TILE_TXTYPES);  store64(offs + 56, AV1TILE_SEGIDS);
+    store64(offs + 64, AV1TILE_REF0S);    store64(offs + 72, AV1TILE_DLF + 0);
+    store64(offs + 80, AV1TILE_DLF + 8);  store64(offs + 88, AV1TILE_DLF + 16);
+    store64(offs + 96, AV1TILE_DLF + 24); store64(offs + 104, AV1TILE_PALSZY);
+    store64(offs + 112, AV1TILE_PALSZUV); store64(offs + 120, AV1TILE_PALPTR);
+    var r = rs;
+    while (r < re) {
+        var c = cs;
+        while (c < ce) {
+            var cell = (r * fmi_cols) + c;
+            var g = 0;
+            while (g < 16) {
+                var arr = load64(tile + load64(offs + (g * 8)));
+                if (arr != 0) { store64(arr + (cell * 8), 0); }
+                g = g + 1;
+            }
+            var cix = load64(tile + AV1TILE_CDEFIDX);
+            if (cix != 0) { store64(cix + (cell * 8), 0 - 1); }
+            var sm = load64(tile + AV1TILE_SKIPMODES);
+            if (sm != 0) { store64(sm + (cell * 8), 0); }
+            var mvg = load64(tile + AV1TILE_MVGRID);
+            if (mvg != 0) { memset(av1_mv_grid_cell(mvg, fmi_cols, r, c), 0, AV1MIR_SIZE); }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    # chroma LoopfilterTxSizes: plane-MI positions [rs >> suby, ceil(re >> suby)) x [cs >> subx, ...)
+    var p = 1;
+    while (p <= 2) {
+        var arr2 = load64(tile + AV1TILE_LFTX + (p * 8));
+        if (arr2 != 0) {
+            var pr = rs >> suby;
+            while (pr < ((re + suby) >> suby)) {
+                var pc = cs >> subx;
+                while (pc < ((ce + subx) >> subx)) {
+                    store64(arr2 + (((pr * fmi_cols) + pc) * 8), 0);
+                    pc = pc + 1;
+                }
+                pr = pr + 1;
+            }
+        }
+        p = p + 1;
+    }
+    return DR_OK;
+}
 # MI-grid accessors: grid[r][c] flat as r*FrameMiCols + c (frame-addressed — r,c are
 # absolute MI coords into the shared frame grid). base is the AV1TILE_* off.
 fn av1_grid_get(tile, base, r, c): i64 {

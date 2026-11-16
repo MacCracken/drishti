@@ -4,6 +4,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.4 bite 4: large scale tile (7.3) — `OBU_TILE_LIST` decodes against application-supplied anchors
+
+**A tile list OBU is no longer skipped without a word.** Both OBU walks used to drop it. Large scale tile (light-field
+coding) decodes single tiles of a "camera" frame, each predicted from an `AnchorFrames` entry the APPLICATION supplies
+(7.3.1: "provided by external means"), into an output frame of tiles. The spec recommends this support but does not
+require it for conformance. drishti now implements it on the streaming decoder:
+- **API.** `av1_decoder_set_large_scale_tile(dec, 1)` switches the mode on, and `av1_decoder_set_anchor(dec, idx,
+  frame)` fills `AnchorFrames[ 0..127 ]` (borrowed, never modified). In the mode, a `FRAME_HEADER` / `FRAME` OBU is the
+  camera frame header: it is parsed and kept, and nothing is decoded or output (libaom's files carry a header-only
+  `OBU_FRAME`). Each `OBU_TILE_LIST` returns the output frame, `output_frame_width_in_tiles * TileWidth` by
+  `output_frame_height_in_tiles * TileHeight`, with samples outside the decoded tiles 0.
+  - `av1_decoder_tile_list_count` / `_tile_w` / `_tile_h` / `_out_w` describe the last list.
+  - `av1_decoder_last_decoded` hands back the most recently decoded frame, shown or not, as an anchor source (libaom's
+    `AV1_COPY_NEW_FRAME_IMAGE`).
+- **Refusals.** Outside the mode a tile list is `DR_ERR_UNSUPPORTED`. The single-frame `av1_decode_obus` refuses one
+  the same way.
+- **The process (`src/av1_lst.cyr`, new; 44 modules).** `av1_tile_list_parse` reads 5.12. For each entry,
+  `av1_decode_tile_list` binds the anchor to `FrameStore[ ref_frame_idx[ 0 ] ]` in a SCRATCH DPB and re-describes that
+  slot as the current frame in a SCRATCH copy of the reference metadata. The decoder's own DPB and reference state are
+  never touched. A block referencing anything but LAST finds an empty slot and fails, so 7.3.2's `{ LAST_FRAME, NONE }`
+  is enforced, not trusted.
+  - The tile decodes through `av1_frame_dec_tile`, the per-tile body now split out of `av1_frame_dec_group`, with CDF
+    adaptation off and no in-loop filter.
+  - It is copied into the output in raster order.
+- **The bug the gate found.** A list may name the same tile window twice. The second decode of a window started from
+  the first's grid state: the MV grid's "decoded this frame" markers and `CdefIdx` (`-1` is what makes `read_cdef`
+  read). The repeat decode failed with `DR_ERR_BOUNDS` (a generated case's third list, whose third entry repeated its
+  first). `av1_tile_grids_reset_window` now restores the window
+  to fresh state before every entry: 16 luma grids, `CdefIdx`, `SkipModes`, the MV grid, and chroma's loop-filter
+  transform sizes over the subsampled window.
+- **Refused (`DR_ERR_BAD_HEADER`), all checked before anything is allocated:**
+  - in the list: `tile_count_minus_1 > 511`, more tiles than the output frame holds, a truncated entry;
+  - for an anchor: an index with no anchor set, or a size or format other than the frame's;
+  - for a tile: a row or column outside the frame, or non-uniform tiles;
+  - for the camera header: not a shown INTER frame, superres, a frame not exactly `MiCols x MiRows` samples, or film
+    grain.
+- **Not enforced.** `disable_cdf_update` and `enable_cdef` / `enable_restoration` / `enable_order_hint = 0` are not
+  checked: libaom's own lightfield streams break all four, harmlessly. No filter runs and no tile adapts here, whatever
+  their values. libaom does the same (`allow_update_cdf = cm->tiles.large_scale ? 0 : 1`).
+
+**The reference, `scripts/refs/lst_ref.py`,** transcribes 5.12's syntax bit by bit with `f(n)`, the 6.11.1 / 7.3.1
+limits and the 7.3.1 placement, and ASSERTS every case pinned in the suite; two canaries confirm a mislabelled case
+fails it. **`tests/av1_lst.tcyr`** (106 assertions) pins:
+- the parse and every limit, including exactly 512 tiles;
+- the raster placement, luma and chroma;
+- the uniform-tile rule;
+- the window reset, inside and around a 4:2:0 window;
+- every refusal, and the mode dispatch of both walks;
+- the scratch slot: the committed reproducer decoded with the decoder's own slot metadata made stale (a 512x512
+  frame's) gives output identical to the clean decode, and leaves that stale metadata as it was. No real stream can
+  show this, because the decoder's slot always already holds a same-size anchor.
+
+Mutation testing:
+- **Unit:** 20 of 21 mutants go red. The survivor relaxes the 5-byte entry-header bound to 4 and is EQUIVALENT: the
+  data check after it rejects a 4-byte remainder anyway, but only after reading one byte past the payload. The code
+  comment says so.
+- **Gate, production wiring:** 6 of 7 go red: the window reset, CDF adaptation, the anchor slot, the camera-header
+  branch, the placement, and the tile index. The survivor drops the scratch slot's `RefFrameWidth`, which a tile
+  decode never reads (only `frame_size_with_refs` does, at header parse). The two fields it does read, for the
+  7.11.3.3 scale factors (`RefUpscaledWidth`, `RefFrameHeight`), are killed by the stale-slot unit test.
+
+**`make conformance`** gains a large scale tile section, every anchor and every tile list hard against libaom's own
+`lightfield_tile_list_decoder` (YUV1D output). libaom's `lightfield_encoder` and `lightfield_bitstream_parsing` build
+five configurations: 256x256 to 512x320, 4 to 9 anchors, and four seeded tile lists of 1..64 entries each, taking
+tiles from any anchor, any view and any position. Two committed reproducers (`lst-256x256`, 16 KB; `lst-384x256`,
+11 KB) run without libaom.
+
+`make conformance` is **2487 matched / 0 known-gap / 0 regressed / 0 skipped** (was 2425).
+
+**Gates:** 43 suites, **31,388** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Added — 0.8.4 bite 3: intra block copy (`allow_intrabc`), decoded on the inter lane
 
 **`allow_intrabc` no longer rejects.** Screen-content keyframes from libaom (`--tune-content=screen`, cpu-used 0..2)

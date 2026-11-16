@@ -181,7 +181,16 @@ enum Av1DecOff {
     AV1DEC_COUNT  = 56;   # frames processed since av1_decoder_new (coded + show_existing)
     AV1DEC_ERR    = 64;   # sticky error (DR_OK while healthy)
     AV1DEC_GRAIN  = 72;   # Av1GrainCtx for the film grain output process (0 until a frame needs grain)
-    AV1DEC_SIZE   = 80;
+    AV1DEC_LAST   = 80;   # the most recently DECODED frame, shown or not (a large-scale-tile anchor source)
+    AV1DEC_LST    = 88;   # large-scale tile mode (7.3; 0 = off): frame headers are camera headers, tile lists decode
+    AV1DEC_ANCH   = 96;   # AnchorFrames: 128 DrFrame pointers (0 until the first av1_decoder_set_anchor)
+    AV1DEC_NANCH  = 104;  # 1 + the highest anchor index set
+    AV1DEC_CAMFH  = 112;  # the camera frame header the tile lists decode against (0 = none yet)
+    AV1DEC_TL_N   = 120;  # the last tile list: tile_count_minus_1 + 1
+    AV1DEC_TL_TW  = 128;  # ...its TileWidth / TileHeight in samples
+    AV1DEC_TL_TH  = 136;
+    AV1DEC_TL_OW  = 144;  # ...output_frame_width_in_tiles_minus_1 + 1
+    AV1DEC_SIZE   = 152;
 }
 
 # av1_decoder_new — a streaming decoder over `dpb` (0 = allocate a fresh, empty
@@ -205,6 +214,9 @@ fn av1_decoder_seq(dec): i64 { return load64(dec + AV1DEC_SEQ); }
 fn av1_decoder_count(dec): i64 { return load64(dec + AV1DEC_COUNT); }
 fn av1_decoder_shown_count(dec): i64 { return load64(dec + AV1DEC_NSHOWN); }
 fn av1_decoder_error(dec): i64 { return load64(dec + AV1DEC_ERR); }
+# the most recently decoded frame, shown or not (0 before the first) — what libaom's AV1_COPY_NEW_FRAME_IMAGE hands a
+# large-scale-tile application as an anchor.
+fn av1_decoder_last_decoded(dec): i64 { return load64(dec + AV1DEC_LAST); }
 
 # latch a decoder failure: the error becomes sticky and the call returns 0.
 fn av1_decoder_fail(dec, err, out_err): i64 {
@@ -221,6 +233,7 @@ fn av1_decoder_fail(dec, err, out_err): i64 {
 # Returns DR_OK, or the synthesis's allocation error.
 fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
     store64(dec + AV1DEC_COUNT, load64(dec + AV1DEC_COUNT) + 1);
+    store64(dec + AV1DEC_LAST, frame);
     if (shown == 1) {
         var outf = frame;
         if ((av1_seq_film_grain_present(seq) != 0) && (av1_fh_apply_grain(fh) != 0)) {
@@ -255,8 +268,13 @@ fn av1_decoder_emit(dec, seq, fh, frame, shown): i64 {
 #                      run the ref update, record output if show_frame.
 #   TILE_GROUP      -> accumulate into a frame-decode context; on the last group,
 #                      finish the frame, run the ref update, record output if shown.
-# temporal_delimiter / metadata / padding / redundant_frame_header / tile_list are
-# skipped.
+#   TILE_LIST       -> large-scale tile mode only (av1_decoder_set_large_scale_tile): decode
+#                      the listed tiles against the camera frame header and the
+#                      application's AnchorFrames (src/av1_lst.cyr) and output the frame
+#                      they build. Outside that mode it is DR_ERR_UNSUPPORTED.
+# In large-scale tile mode a FRAME_HEADER / FRAME is the camera frame header: parsed and
+# kept, nothing decoded or output. temporal_delimiter / metadata / padding /
+# redundant_frame_header are skipped.
 #
 # The returned frame is the OUTPUT (7.18): when the shown frame carries film grain it is
 # the decoder's reused grain frame, overwritten by the next grain output — consume it
@@ -292,6 +310,35 @@ fn av1_decoder_decode(dec, buf, sz, out_err): i64 {
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
             store64(dec + AV1DEC_SEQ, nseq);
+        }
+        if ((load64(dec + AV1DEC_LST) != 0)
+          && ((otype == AV1_OBU_FRAME_HEADER) || (otype == AV1_OBU_FRAME))) {
+            # large-scale tile mode (7.3): a frame header is the CAMERA frame header the tile lists decode
+            # against — no tile group of its own is decoded (an OBU_FRAME's tile data, if any, is skipped, as
+            # libaom does: its lightfield files carry a header-only OBU_FRAME), no reference update, no output.
+            if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var co = av1_obu_iter_obu(it);
+            var cerr = 0;
+            var cfh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(co), av1_obu_sid(co),
+              buf + ooff, osize, &cerr);
+            if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
+            if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            store64(dec + AV1DEC_CAMFH, cfh);
+            otype = 0 - 1;   # handled: none of the branches below may see it
+        }
+        if (otype == AV1_OBU_TILE_LIST) {
+            # a tile list only means something to the large-scale tile process, which needs AnchorFrames supplied
+            # by the application: outside that mode it is refused, never silently skipped.
+            if (load64(dec + AV1DEC_LST) == 0) { return av1_decoder_fail(dec, DR_ERR_UNSUPPORTED, out_err); }
+            var lerr2 = 0;
+            var lout = av1_decode_tile_list(dec, buf + ooff, osize, &lerr2);
+            if (lout == 0) {
+                if (lerr2 == DR_OK) { lerr2 = DR_ERR_BAD_HEADER; }
+                return av1_decoder_fail(dec, lerr2, out_err);
+            }
+            store64(dec + AV1DEC_COUNT, load64(dec + AV1DEC_COUNT) + 1);
+            store64(dec + AV1DEC_SHOWN, lout);
+            store64(dec + AV1DEC_NSHOWN, load64(dec + AV1DEC_NSHOWN) + 1);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
             if (seq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
