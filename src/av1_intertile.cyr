@@ -652,8 +652,11 @@ fn av1_transform_block_inter(tile, r, c, sub_size, plane, tx_sz, x, y): i64 {
         }
         var q_dc = av1_get_dc_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, ddc);
         var q_ac = av1_get_ac_quant(load64(tile + AV1TILE_BIT_DEPTH), qindex, dac);
-        return av1_reconstruct(frame, plane, start_x, start_y, tx_sz,
-          load64(load64(tile + AV1TILE_OTT)), lossless, quant, q_dc, q_ac);
+        # quantizer matrix (7.12.3 step 1b, 0.8.4) off the same fh: SegQMLevel follows LosslessArray[ segment_id ].
+        var qm = av1_qm_matrix(qfh, plane, tx_sz, load64(load64(tile + AV1TILE_OTT)), lossless);
+        if (qm < 0) { return DR_ERR_OOM; }
+        return av1_reconstruct_qm(frame, plane, start_x, start_y, tx_sz,
+          load64(load64(tile + AV1TILE_OTT)), lossless, quant, q_dc, q_ac, qm);
     }
     return DR_OK;
 }

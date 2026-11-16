@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.4 bite 1: quantizer matrices (7.12.3 step 1b), both lanes; the 4 known gaps close
+
+**`using_qmatrix` no longer rejects.** From 0.8.2 to 0.8.3, a frame where a matrix could scale a coefficient was
+held as a clean `DR_ERR_UNSUPPORTED`; before that, matrices were parsed and ignored, a silent mis-decode. Now every
+transform block takes `q2 = Round2( q * Quantizer_Matrix[ SegQMLevel[ plane ][ segment_id ] ][ plane > 0 ]
+[ Qm_Offset[ txSz ] + i * tw + j ], 5 )` when `PlaneTxType < IDTX` and the level is below 15, on the intra and inter
+lanes alike. `SegQMLevel` (5.9.2) is 15 for a lossless segment and `qm_y` / `qm_u` / `qm_v` otherwise.
+- **New module `src/av1_qm.cyr`.** The 100,320-entry `Quantizer_Matrix` is stored as each level's fundamental
+  matrices: the 32x32's lower triangle and the 32x16, 31,200 bytes in all. They are expanded once by the spec's
+  informative 9.5.2 subsampling. The fill lines are generated from the spec markdown, never hand-edited.
+- **`src/av1_recon.cyr`:** step 1 is factored into `av1_dequant_block`. `av1_reconstruct_qm` takes the matrix, and
+  `av1_reconstruct` stays as the flat wrapper the unit tests use.
+- **The frame decoder** builds the table up front when a matrix can apply, so an allocation failure is a frame
+  error rather than a mid-tile one.
+
+**The reference, `scripts/refs/qm_ref.py`,** reads all 100,320 entries from the spec markdown. It proves three
+things over every entry: each 32x32 is symmetric, each 16x32 is its 32x16 transposed, and the 9.5.2 expansion
+reproduces the normative table. It also checks the table against libaom's `iwt_matrix_ref`, and that check found a
+trap. **libaom stores every region TRANSPOSED** (spec `[i][j]` is its `[j * th + i]`, matching its transposed scans).
+The square regions hide this because they are symmetric; the rectangular ones differ at 48,538 entries read
+directly. So libaom's table, copied into the spec's indexing, would mis-dequantise every rectangular transform.
+Read transposed, all 100,320 entries agree.
+
+**`tests/av1_qm.tcyr`** (111 assertions) pins:
+- all 19 `Qm_Offset` entries;
+- a whole-table digest;
+- spot values, including six transpose-sensitive ones;
+- the selection rule: levels per plane, the `plane > 0` table, `IDTX` and the six 1D types flat, lossless segments
+  flat, level 15 flat;
+- the step-1 dequantisation on five fixtures (8/10/12-bit, luma and chroma, 4x4, 8x4, 64x32 and 16x64).
+
+The fifth fixture was added because the "skip the matrix on DC" mutant survived the first four: most DC weights
+are 32, which is 1.0. Every one of 20 unit mutants and 6 production-wiring mutants goes red.
+
+**`make conformance` is 2092 matched / 0 known-gap / 0 regressed / 0 skipped** (was 1950 / 4): the 4 known gaps are
+gone. `qmon_176x144` is a hard case, joined by 12 more, every frame
+hard:
+- the steepest level alone, and levels 0..14 over a 128-SB GOP;
+- a mixed-lossless keyframe whose lossless segments must stay flat;
+- libaom `--tune=iq`, whose chroma level differs from luma, at 4:2:0 and 4:4:4;
+- 10-bit, 12-bit and monochrome;
+- screen content (identity transforms stay flat);
+- realtime and all-intra;
+- SVT-AV1 with a separate chroma level range.
+
+Each case's `qm_property` guard proves a matrix applied, plus the property it exists for. Two committed
+reproducers run without libaom: `qm-iq-128x96` (chroma one level above luma) and `qm-ll-96x64` (a mixed-lossless
+keyframe at level 0). dav1d agrees with `aomdec` on every stream. Every case except the flat `qm15` was REJECTED by
+the 0.8.3 decoder.
+
+Found, not fixed: an SVT-AV1 4.2.0 stream with chroma qindex offsets (`--chroma-v-ac-qindex-offset -30`) that
+`aomdec` ("Corrupt frame detected") and dav1d both refuse. drishti decodes its first frame without complaint, a
+strictness gap of the kind roadmap 0.8.5 schedules (the `av1_sym_decode` symbol-range bound).
+
+**Gates:** 40 suites, **31,073** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green; 42 modules.
+
 ## [0.8.3] - 2026-11-15
 
 **Real streams in every shape: long GOPs and the full geometry/format matrix decode bit-exact vs `aomdec`, as a

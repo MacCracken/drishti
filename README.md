@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 29 × `src/av1_*.cyr` — **`make conformance` 33 matched / 0 known-gap / 0 regressed**: every gated case is BIT-EXACT vs `aomdec`, keyframes and INTER frames alike (0.7.129). All eight published libaom vectors, the generated corpus with and without loop filters, and the committed reproducers. 8/10/12-bit, multi-tile, 64x64 + 128x128 superblocks, superres, segmentation, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. Still rejecting: delta-q/delta-lf, palette, intra block copy, film grain, scalability |
+| **AV1** | decode + encode | dav1d + rav1e | 31 × `src/av1_*.cyr` — **`make conformance` 2092 matched / 0 known-gap / 0 regressed**: every gated frame is BIT-EXACT vs `aomdec`. Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; 20 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, quantizer matrices, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. Still rejecting: intra block copy, film grain, scalability, large-scale tile |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -22,10 +22,10 @@ records + format sniff, an MSB-first bitreader/bitwriter with leb128 /
 uvlc / exp-Golomb (the VLCs of all four families), and the IVF
 test-bench container.
 
-## Status — 0.8.3 (AV1: **`make conformance` is 1950 matched / 4 KNOWN-GAP / 0 regressed / 0 skipped** — every hard case BIT-EXACT against libaom, with dav1d as a tiebreak. The gate is a standing matrix over every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome), GOPs to 90 frames with hidden frames and `show_existing_frame`, frame sizes from 1x1 up at both superblock sizes, superres and scaled references; it scores every frame of 20 published conformance vectors, and streams from three encoders (libaom, rav1e, SVT-AV1). The 4 known gaps are `--enable-qm=1` frames, held as clean REJECTS until quantizer matrices land (0.8.4); intra block copy, film grain, scalability and large-scale tile also still reject. Multi-tile, every segmentation feature, delta-q/lf, palette, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
+## Status — 0.8.3, with 0.8.4 in progress (AV1: **`make conformance` is 2092 matched / 0 KNOWN-GAP / 0 regressed / 0 skipped** — every hard case BIT-EXACT against libaom, with dav1d as a tiebreak. The gate is a standing matrix over every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome), GOPs to 90 frames with hidden frames and `show_existing_frame`, frame sizes from 1x1 up at both superblock sizes, superres and scaled references; it scores every frame of 20 published conformance vectors, and streams from three encoders (libaom, rav1e, SVT-AV1). Quantizer matrices decode (0.8.4: the 4 former known gaps, plus 13 libaom / SVT-AV1 QM cases); intra block copy, film grain, scalability and large-scale tile still reject (0.8.4). Multi-tile, every segmentation feature, delta-q/lf, palette, quantizer matrices, compound/warp/OBMC/inter-intra. The "encoder" remains a plan-driven bitstream writer, not an encoder. See docs/development/roadmap.md for the batched release plan through 0.8.11 — no "% done" is printed)
 
 The bitstream/container/header layer of every family is built, spec-
-derived, and adversarially tested (30,962 suite assertions + 7,410 fuzz
+derived, and adversarially tested (31,073 suite assertions + 7,410 fuzz
 assertions, all green). The 0.7.x AV1 arc has reached its first
 milestone — **profile-0 AV1 keyframes decode end-to-end to pixels, from raw
 OBU bytes** — and the **in-loop filter layer is complete**: the **deblocking
@@ -123,14 +123,13 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   VP9 uncompressed header
 
 AV1 decodes end-to-end to pixels, **keyframes and inter frames alike**, and
-`make conformance` is **33 matched / 0 known-gap / 0 regressed** against
-`aomdec`. The gate covers all eight published libaom vectors, a generated
-corpus with and without loop filters, and committed reproducers.
-
-That gate covers profile-0, 8-bit, 4:2:0. Beyond it:
-- 10/12-bit and 4:2:2/4:4:4 are parsed but not yet checked end-to-end;
-- palette, intra block copy, film grain, scalability, large-scale tile and
-  delta-q / delta-lf still reject;
+`make conformance` is **2092 matched / 0 known-gap / 0 regressed** against
+`aomdec`, on every frame. The gate covers every profile, bit depth and chroma
+format, long GOPs, frame sizes from 1x1 up, superres, scaled references, 20
+published libaom vectors, streams from three encoders, and committed
+reproducers that run without libaom. Beyond it:
+- intra block copy, film grain, scalability and large-scale tile still
+  reject (0.8.4);
 - there is **no encoder** yet: what ships as "encode" is a plan-driven
   bitstream writer.
 

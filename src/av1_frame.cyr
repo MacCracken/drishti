@@ -1029,8 +1029,8 @@ fn av1_fh_lossless_mask(fh): i64 {
 # (5.9.2) is 15 for a LOSSLESS segment and qm_y / qm_u / qm_v otherwise. So a matrix can apply iff using_qmatrix,
 # some segment is lossy (!CodedLossless), and a present plane's level is below 15 (15 is the flat matrix: a stream
 # coded at level 15 decodes identically without one). The tx-type condition is per block, so this is the exact
-# FRAME-level question. drishti does not implement the matrices (src/av1_recon.cyr: q2 == q), so the frame decoder
-# rejects when this returns 1 — they used to be parsed and ignored, a silent mis-decode (roadmap.md 0.8.4).
+# FRAME-level question. The frame decoder builds the matrix table when this returns 1 (src/av1_qm.cyr, 0.8.4; it
+# rejected such frames from 0.8.2), and the probe reports it so a gate case can prove a matrix applied.
 fn av1_fh_qm_applies(fh, num_planes): i64 {
     if (av1_fh_using_qmatrix(fh) == 0) { return 0; }
     if (av1_fh_coded_lossless(fh) != 0) { return 0; }

@@ -385,10 +385,12 @@ fn av1_frame_dec_new(seq, fh, out_err): i64 {
     # used to stand here (av1_seg_supported) went when its last two features did. The per-superblock delta_q /
     # delta_lf DECODE as of 0.8.2 (a per-tile Av1DeltaCtx, attached in the tile loop below); they used to
     # reject here because reading neither desynced the intra path.
-    # quantizer matrices (7.12.3 step 1b) are parsed but not applied: a frame where one could scale a
-    # coefficient (av1_fh_qm_applies — using_qmatrix with a lossy segment and a level below 15) would decode
-    # silently wrong. roadmap.md 0.8.4 implements them.
-    if (av1_fh_qm_applies(fh, av1_seq_num_planes(seq)) != 0) { store64(out_err, DR_ERR_UNSUPPORTED); return 0; }
+    # quantizer matrices (7.12.3 step 1b) apply as of 0.8.4 (src/av1_qm.cyr; both lanes pick the matrix per
+    # transform block). They REJECTED here from 0.8.2, and before that were parsed and ignored — a silent
+    # mis-decode. The table is built here, once, so its allocation failing is a frame error up front.
+    if (av1_fh_qm_applies(fh, av1_seq_num_planes(seq)) != 0) {
+        if (av1_qm_table() == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    }
     # allow_intrabc (5.11.6) is read by neither path; an intra-block-copy frame would desync (roadmap.md 0.8.4).
     # allow_screen_content_tools itself no longer rejects (0.8.2): its palette tools decode on both lanes
     # (src/av1_palette.cyr), and force_integer_mv was already honoured by the MV reads.

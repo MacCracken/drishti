@@ -796,8 +796,13 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
             }
             var q_dc = av1_get_dc_quant(bit_depth, qindex, ddc);
             var q_ac = av1_get_ac_quant(bit_depth, qindex, dac);
-            av1_reconstruct(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
-              load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac);
+            # quantizer matrix (7.12.3 step 1b, 0.8.4): SegQMLevel follows LosslessArray[ segment_id ], the
+            # block's lossless flag; 0 (flat) for a bare test tile (qfh 0).
+            var qm = av1_qm_matrix(qfh, plane, tx_sz, load64(load64(tile + AV1TILE_OTT)),
+              load64(blk + AV1BLK_LOSSLESS));
+            if (qm < 0) { return DR_ERR_OOM; }
+            av1_reconstruct_qm(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
+              load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac, qm);
         }
     }
     # mark this tx block decoded (BlockDecoded[plane][+i][+j] = 1) and record its

@@ -110,12 +110,12 @@ fn probe_fh(fh, seq): i64 {
     probe_puts(" --- drishti reject gates ---\n");
     probe_gate("allow_screen_content_tools", load64(fh + AV1FH_ALLOW_SCT), 1);
     probe_gate("allow_intrabc", load64(fh + AV1FH_ALLOW_INTRABC), 1);
-    # quantizer matrices: parsed, not applied — reject when one could scale a coefficient (0.8.2).
+    # quantizer matrices decode as of 0.8.4: reported, no longer gates (rejected 0.8.2 - 0.8.3).
     probe_kv("using_qmatrix", load64(fh + AV1FH_USING_QMATRIX));
     probe_kv("qm_y", load64(fh + AV1FH_QM_Y));
     probe_kv("qm_u", load64(fh + AV1FH_QM_U));
     probe_kv("qm_v", load64(fh + AV1FH_QM_V));
-    probe_gate("qmatrix_applies", av1_fh_qm_applies(fh, av1_seq_num_planes(seq)), 1);
+    probe_kv("qmatrix_applies", av1_fh_qm_applies(fh, av1_seq_num_planes(seq)));
     # per-superblock deltas decode as of 0.8.2: reported, no longer gates.
     probe_kv("delta_q_present", load64(fh + AV1FH_DELTA_Q_PRESENT));
     probe_kv("delta_q_res", load64(fh + AV1FH_DELTA_Q_RES));

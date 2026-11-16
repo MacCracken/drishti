@@ -1620,15 +1620,17 @@ fn test_silent_misdecode_rejects() {
     assert_eq(av1_decode_frame(frame_mk_seq(0), frame_mk_fh(1, 1, 0, 0), out, olen, oe) != 0, 1,
       "reject control: the unflagged stream still decodes");
     # segmentation is no longer a reject of any kind (0.8.2): every map config and every feature decodes.
-    # quantizer matrices are parsed, not applied: a frame where one would scale a coefficient REJECTS (it
-    # decoded silently wrong before 0.8.2); the flat level 15 is no matrix at all and still decodes.
+    # quantizer matrices are no longer a reject either (0.8.4; they rejected 0.8.2 - 0.8.3 and were silently
+    # ignored before): a frame where one can scale a coefficient decodes, and the frame decoder builds the
+    # matrix table up front. This all-skip fixture has no residual, so the matrix cannot move a pixel here —
+    # tests/av1_qm.tcyr pins the dequantisation, and make conformance's quantizer-matrix cases the pixels.
     var fqm = frame_mk_fh(1, 1, 0, 0);
     store64(fqm + AV1FH_USING_QMATRIX, 1);
     store64(fqm + AV1FH_QM_Y, 5);
     store64(fqm + AV1FH_QM_U, 5);
     store64(fqm + AV1FH_QM_V, 5);
-    assert_eq(av1_decode_frame(frame_mk_seq(0), fqm, out, olen, oe), 0, "using_qmatrix at level 5 rejected");
-    assert_eq(load64(oe), DR_ERR_UNSUPPORTED, "...with DR_ERR_UNSUPPORTED, not a mis-decode");
+    assert_eq(av1_decode_frame(frame_mk_seq(0), fqm, out, olen, oe) != 0, 1, "using_qmatrix at level 5 decodes");
+    assert(Av1_QmTbl != 0, "...and the frame decoder built the quantizer-matrix table");
     store64(fqm + AV1FH_QM_Y, 15);
     store64(fqm + AV1FH_QM_U, 15);
     store64(fqm + AV1FH_QM_V, 15);

@@ -1,0 +1,229 @@
+# tests/av1_qm.tcyr — AV1 quantizer matrices (spec 7.12.3 step 1b; Quantizer_Matrix / Qm_Offset, 9.5.3).
+#
+# EVERY known answer here comes from scripts/refs/qm_ref.py, which reads the spec markdown's own Quantizer_Matrix
+# (all 100,320 entries) and checks it against libaom's iwt_matrix_ref — never from the Cyrius. Run it to
+# regenerate them. What each group pins:
+#   - Qm_Offset, all 19 entries (the 64-dimension sizes alias their 32-clamped regions);
+#   - a position-weighted digest of the WHOLE expanded table and of the packed blob (a distribution check: the
+#     hash is not permutation-invariant, but the spot values below still carry the direction);
+#   - spot values, including TRANSPOSE-SENSITIVE ones: in each rectangular region the first entry that differs
+#     from the transposed read [j * th + i] — the layout libaom stores, which the spec indexing must not use;
+#   - the matrix SELECTION of 7.12.3 step 1b (using_qmatrix, PlaneTxType < IDTX, SegQMLevel < 15, lossless
+#     segments at level 15, the plane > 0 table, qm_y / qm_u / qm_v per plane);
+#   - the step-1 dequantisation with a matrix, on four fixtures spanning 8/10/12-bit, luma and chroma, a square,
+#     a rectangular and two 64-dimension sizes (whose matrix index runs over the 32-clamped tw x th).
+include "src/main.cyr"
+
+# h = (h * 131 + v) mod (2^31 - 1), over n BYTES at p — the reference's digest.
+fn qmt_digest_bytes(p, n): i64 {
+    var h = 0;
+    var k = 0;
+    while (k < n) {
+        h = ((h * 131) + load8(p + k)) % 2147483647;
+        k = k + 1;
+    }
+    return h;
+}
+
+# ---- Qm_Offset (9.5.3) ----
+fn test_qm_offset() {
+    # TX_4X4 8X8 16X16 32X32 64X64 4X8 8X4 8X16 16X8 16X32 32X16 32X64 64X32 4X16 16X4 8X32 32X8 16X64 64X16
+    assert_eq(av1_qm_offset(0), 0, "Qm_Offset TX_4X4");
+    assert_eq(av1_qm_offset(1), 16, "Qm_Offset TX_8X8");
+    assert_eq(av1_qm_offset(2), 80, "Qm_Offset TX_16X16");
+    assert_eq(av1_qm_offset(3), 336, "Qm_Offset TX_32X32");
+    assert_eq(av1_qm_offset(4), 336, "Qm_Offset TX_64X64 aliases TX_32X32");
+    assert_eq(av1_qm_offset(5), 1360, "Qm_Offset TX_4X8");
+    assert_eq(av1_qm_offset(6), 1392, "Qm_Offset TX_8X4");
+    assert_eq(av1_qm_offset(7), 1424, "Qm_Offset TX_8X16");
+    assert_eq(av1_qm_offset(8), 1552, "Qm_Offset TX_16X8");
+    assert_eq(av1_qm_offset(9), 1680, "Qm_Offset TX_16X32");
+    assert_eq(av1_qm_offset(10), 2192, "Qm_Offset TX_32X16");
+    assert_eq(av1_qm_offset(11), 336, "Qm_Offset TX_32X64 aliases TX_32X32");
+    assert_eq(av1_qm_offset(12), 336, "Qm_Offset TX_64X32 aliases TX_32X32");
+    assert_eq(av1_qm_offset(13), 2704, "Qm_Offset TX_4X16");
+    assert_eq(av1_qm_offset(14), 2768, "Qm_Offset TX_16X4");
+    assert_eq(av1_qm_offset(15), 2832, "Qm_Offset TX_8X32");
+    assert_eq(av1_qm_offset(16), 3088, "Qm_Offset TX_32X8");
+    assert_eq(av1_qm_offset(17), 1680, "Qm_Offset TX_16X64 aliases TX_16X32");
+    assert_eq(av1_qm_offset(18), 2192, "Qm_Offset TX_64X16 aliases TX_32X16");
+    assert_eq(av1_qm_offset(19), 0 - 1, "Qm_Offset tx 19 out of range");
+    assert_eq(av1_qm_offset(0 - 1), 0 - 1, "Qm_Offset tx -1 out of range");
+    return 0;
+}
+
+# ---- the table: digests and spot values ----
+fn qmt_at(lv, p, k): i64 { return load8(av1_qm_table() + (((lv * 2) + p) * 3344) + k); }
+
+fn test_qm_table() {
+    assert(av1_qm_table() != 0, "table builds");
+    assert(av1_qm_table() == av1_qm_table(), "table is built once (cached)");
+    assert_eq(qmt_digest_bytes(av1_qm_packed(), 31200), 2025464089, "digest of the packed fundamentals (31,200)");
+    assert_eq(qmt_digest_bytes(av1_qm_table(), 100320), 552360596, "digest of Quantizer_Matrix (100,320)");
+    # spot values Quantizer_Matrix[level][ptype][k]
+    assert_eq(qmt_at(0, 0, 0), 32, "[0][0][0] 4x4 luma DC");
+    assert_eq(qmt_at(0, 0, 15), 200, "[0][0][15] 4x4 luma corner");
+    assert_eq(qmt_at(0, 1, 15), 109, "[0][1][15] 4x4 chroma corner");
+    assert_eq(qmt_at(14, 1, 3343), 32, "[14][1][3343] last entry");
+    assert_eq(qmt_at(7, 0, 2382), 58, "[7][0][2382] 32x16 r5 c30");
+    assert_eq(qmt_at(7, 0, 2165), 58, "[7][0][2165] 16x32 r30 c5");
+    assert_eq(qmt_at(3, 1, 1328), 71, "[3][1][1328] 32x32 r31 c0");
+    assert_eq(qmt_at(3, 1, 367), 71, "[3][1][367] 32x32 r0 c31");
+    assert_eq(qmt_at(5, 0, 2767), 136, "[5][0][2767] 4x16 last");
+    assert_eq(qmt_at(5, 0, 2831), 136, "[5][0][2831] 16x4 last");
+    assert_eq(qmt_at(11, 1, 3087), 53, "[11][1][3087] 8x32 last");
+    assert_eq(qmt_at(11, 1, 3343), 53, "[11][1][3343] 32x8 last");
+    assert_eq(qmt_at(2, 0, 1389), 98, "[2][0][1389] 4x8 r7 c1");
+    assert_eq(qmt_at(2, 0, 1407), 98, "[2][0][1407] 8x4 r1 c7");
+    # transpose-sensitive: the value, and what a transposed (libaom-layout) read would give instead
+    assert_eq(qmt_at(0, 0, 1361), 42, "[0][0][1361] TX_4X8 i0 j1 (transposed read 37)");
+    assert_eq(qmt_at(4, 1, 1393), 36, "[4][1][1393] TX_8X4 i0 j1 (transposed read 47)");
+    assert_eq(qmt_at(6, 0, 1686), 36, "[6][0][1686] TX_16X32 i0 j6 (transposed read 35)");
+    assert_eq(qmt_at(8, 1, 2193), 31, "[8][1][2193] TX_32X16 i0 j1 (transposed read 49)");
+    assert_eq(qmt_at(10, 0, 2706), 34, "[10][0][2706] TX_4X16 i0 j2 (transposed read 32)");
+    assert_eq(qmt_at(12, 1, 3090), 31, "[12][1][3090] TX_32X8 i0 j2 (transposed read 33)");
+    return 0;
+}
+
+# ---- selection (7.12.3 step 1b; SegQMLevel, 5.9.2) ----
+fn qmt_fh(using_qm, qm_y, qm_u, qm_v): i64 {
+    var fh = alloc(AV1FH_SIZE);
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_USING_QMATRIX, using_qm);
+    store64(fh + AV1FH_QM_Y, qm_y);
+    store64(fh + AV1FH_QM_U, qm_u);
+    store64(fh + AV1FH_QM_V, qm_v);
+    return fh;
+}
+fn qmt_row(lv, p, tx): i64 { return av1_qm_table() + (((lv * 2) + p) * 3344) + av1_qm_offset(tx); }
+
+fn test_qm_select() {
+    var fh = qmt_fh(1, 3, 7, 11);
+    # levels per plane, and the plane > 0 table for BOTH chroma planes
+    assert_eq(av1_qm_level(fh, 0, 0), 3, "SegQMLevel[0] = qm_y");
+    assert_eq(av1_qm_level(fh, 1, 0), 7, "SegQMLevel[1] = qm_u");
+    assert_eq(av1_qm_level(fh, 2, 0), 11, "SegQMLevel[2] = qm_v");
+    assert_eq(av1_qm_level(fh, 0, 1), 15, "lossless segment: level 15");
+    assert_eq(av1_qm_level(fh, 2, 1), 15, "lossless segment: level 15 (chroma)");
+    assert_eq(av1_qm_level(qmt_fh(0, 3, 7, 11), 0, 0), 15, "using_qmatrix 0: level 15");
+    assert_eq(av1_qm_matrix(fh, 0, 6, AV1_DCT_DCT, 0), qmt_row(3, 0, 6), "luma TX_8X4 -> [3][0][1392]");
+    assert_eq(av1_qm_matrix(fh, 1, 6, AV1_DCT_DCT, 0), qmt_row(7, 1, 6), "U TX_8X4 -> [7][1][1392]");
+    assert_eq(av1_qm_matrix(fh, 2, 6, AV1_DCT_DCT, 0), qmt_row(11, 1, 6), "V TX_8X4 -> [11][1][1392]");
+    assert_eq(av1_qm_matrix(fh, 0, 4, AV1_DCT_DCT, 0), qmt_row(3, 0, 3), "TX_64X64 -> the 32x32 region");
+    assert_eq(av1_qm_matrix(fh, 1, 17, AV1_DCT_DCT, 0), qmt_row(7, 1, 9), "TX_16X64 -> the 16x32 region");
+    # PlaneTxType < IDTX: every 2D type has a matrix; IDTX and the six 1D types are flat
+    var tt = 0;
+    var have = 0;
+    var flat = 0;
+    while (tt < 16) {
+        var m = av1_qm_matrix(fh, 0, 1, tt, 0);
+        if ((tt < AV1_IDTX) && (m == qmt_row(3, 0, 1))) { have = have + 1; }
+        if ((tt >= AV1_IDTX) && (m == 0)) { flat = flat + 1; }
+        tt = tt + 1;
+    }
+    assert_eq(have, 9, "DCT_DCT..FLIPADST_ADST (0..8) take the matrix");
+    assert_eq(flat, 7, "IDTX and V_DCT..H_FLIPADST (9..15) are flat");
+    assert_eq(av1_qm_matrix(fh, 0, 1, AV1_IDTX - 1, 0), qmt_row(3, 0, 1), "FLIPADST_ADST (8) takes it");
+    assert_eq(av1_qm_matrix(fh, 0, 1, AV1_IDTX, 0), 0, "IDTX is flat");
+    # the no-matrix cases
+    assert_eq(av1_qm_matrix(fh, 0, 1, AV1_DCT_DCT, 1), 0, "lossless block: flat");
+    assert_eq(av1_qm_matrix(qmt_fh(0, 3, 7, 11), 0, 1, AV1_DCT_DCT, 0), 0, "using_qmatrix 0: flat");
+    assert_eq(av1_qm_matrix(qmt_fh(1, 15, 7, 11), 0, 1, AV1_DCT_DCT, 0), 0, "qm_y 15: flat luma");
+    assert(av1_qm_matrix(qmt_fh(1, 15, 7, 11), 1, 1, AV1_DCT_DCT, 0) != 0, "qm_y 15 leaves chroma matrixed");
+    assert_eq(av1_qm_matrix(qmt_fh(1, 0, 15, 11), 1, 1, AV1_DCT_DCT, 0), 0, "qm_u 15: flat U");
+    assert_eq(av1_qm_matrix(qmt_fh(1, 0, 15, 11), 2, 1, AV1_DCT_DCT, 0), qmt_row(11, 1, 1), "qm_u 15, V keeps 11");
+    assert_eq(av1_qm_matrix(qmt_fh(1, 0, 0, 0), 0, 1, AV1_DCT_DCT, 0), qmt_row(0, 0, 1), "level 0 has a matrix");
+    assert_eq(av1_qm_matrix(0, 0, 1, AV1_DCT_DCT, 0), 0, "fh 0 (a bare test tile): flat");
+    assert_eq(av1_qm_matrix(fh, 0, 19, AV1_DCT_DCT, 0), 0, "tx 19: flat (reconstruct rejects it)");
+    assert_eq(av1_qm_matrix(fh, 0, 0 - 1, AV1_DCT_DCT, 0), 0, "tx -1: flat");
+    assert_eq(av1_qm_matrix(fh, 0, 1, 0 - 1, 0), 0, "tx_type -1: flat");
+    return 0;
+}
+
+# ---- the step-1 dequantisation with a matrix ----
+# The reference's deterministic LCG coefficients: mostly small, every 7th large (drives the mask and the clip).
+fn qmt_quant(n, seed): i64 {
+    var q = alloc(n * 8);   # n i64 slots
+    var x = seed;
+    var k = 0;
+    while (k < n) {
+        x = ((x * 1103515245) + 12345) % 2147483648;
+        var v = ((x >> 16) % 41) - 20;
+        if ((k % 7) == 3) { v = v * 4099; }
+        store64(q + (k * 8), v);
+        k = k + 1;
+    }
+    return q;
+}
+
+# Dequantise fixture (tx, level, ptype) with q_dc / q_ac at bit_depth through av1_dequant_block; check the digest
+# of Dequant over tw x th in i * tw + j order (values masked to 32 bits, as the reference does), the first six
+# values, and that the FLAT dequantisation (qm 0) gives the reference's flat digest.
+fn qmt_fixture(tag, tx, lv, p, q_dc, q_ac, bd, seed, want, want_flat, d0, d1, d2, d3, d4, d5): i64 {
+    var w = av1_tx_width(tx);
+    var tw = av1_min(32, w);
+    var th = av1_min(32, av1_tx_height(tx));
+    var quant = qmt_quant(tw * th, seed);
+    var dq = alloc(w * av1_tx_height(tx) * 8);   # w * h i64 slots
+    var pass = 0;
+    while (pass < 2) {
+        memset(dq, 0, w * av1_tx_height(tx) * 8);
+        var qm = 0;
+        if (pass == 0) { qm = qmt_row(lv, p, tx); }
+        av1_dequant_block(quant, dq, tx, q_dc, q_ac, qm, bd);
+        var h = 0;
+        var i = 0;
+        while (i < th) {
+            var j = 0;
+            while (j < tw) {
+                h = ((h * 131) + (load64(dq + (((i * w) + j) * 8)) & 4294967295)) % 2147483647;
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        if (pass == 0) {
+            assert_eq(h, want, tag);
+            assert_eq(load64(dq + 0), d0, tag);
+            assert_eq(load64(dq + 8), d1, tag);
+            assert_eq(load64(dq + 16), d2, tag);
+            assert_eq(load64(dq + 24), d3, tag);
+            assert_eq(load64(dq + 32), d4, tag);
+            assert_eq(load64(dq + 40), d5, tag);
+        } else {
+            assert_eq(h, want_flat, tag);
+        }
+        pass = pass + 1;
+    }
+    return 0;
+}
+
+fn test_qm_dequant() {
+    qmt_fixture("8x4 luma L3 8-bit", 6, 3, 0, 52, 61, 8, 7, 1236580410, 1678066915,
+      0 - 676, 0 - 793, 0 - 1105, 0 - 32768, 0 - 194, 0 - 2108);
+    qmt_fixture("64x32 chroma L0 10-bit", 12, 0, 1, 1336, 1567, 10, 11, 505472932, 862464279,
+      0, 7590, 0 - 2203, 0 - 131072, 3232, 0 - 7052);
+    qmt_fixture("16x64 luma L14 12-bit", 17, 14, 0, 4247, 5347, 12, 13, 429821132, 1526303743,
+      14864, 41440, 0 - 2590, 524287, 0 - 18130, 44030);
+    qmt_fixture("4x4 chroma L9 8-bit", 0, 9, 1, 4, 4, 8, 17, 1182594559, 2063215089,
+      80, 45, 60, 32767, 60, 108);
+    # DC weight 35 with a q_dc Round2 cannot hide: Dequant[0] = -14 * Round2(1000 * 35, 5) = -15316 (flat: -14000)
+    qmt_fixture("4x4 chroma L0 10-bit DC35", 0, 0, 1, 1000, 900, 10, 19, 1130823, 1633252089,
+      0 - 15316, 6470, 25648, 0 - 131072, 0 - 5176, 32072);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("Qm_Offset");
+    test_qm_offset();
+    test_group("Quantizer_Matrix: digests + spot values");
+    test_qm_table();
+    test_group("matrix selection (7.12.3 step 1b)");
+    test_qm_select();
+    test_group("dequantisation with a matrix");
+    test_qm_dequant();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

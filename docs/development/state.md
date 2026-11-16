@@ -1867,6 +1867,13 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > `drop_obu`, and large-scale tile / `OBU_TILE_LIST`. Any reject left after it must be deliberate and
 > documented.
 >
+> **0.8.4 progress (bites, uncut):** bite 1 = **quantizer matrices DONE**. `src/av1_qm.cyr` (42 modules) holds the
+> packed fundamentals, expanded once by the 9.5.2 subsampling. `av1_dequant_block` / `av1_reconstruct_qm` apply
+> step 1b, and both lanes pick the matrix per transform block via `av1_qm_matrix`. `scripts/refs/qm_ref.py` proves
+> the table against the spec markdown and libaom. TRAP: libaom stores its table TRANSPOSED, so never copy it into
+> the spec's `i * tw + j`. The 4 `qmon` known gaps decode, and 13 more QM cases plus two reproducers are gated:
+> 2092 matched / 0 known-gap / 0 regressed / 0 skipped. Next in 0.8.4: intra block copy, film grain, scalability / `drop_obu`, large-scale tile.
+>
 > **Known-and-tracked, not in 0.8.3:** the encode lane has NEVER run at 128 superblocks
 > (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).
 > It is scheduled in 0.8.6, where the encoder first runs.
