@@ -97,7 +97,7 @@ fn av1_dequant_block(quant, dequant, tx_size, q_dc, q_ac, qm, bit_depth): i64 {
 # get_dc_quant(plane) / get_ac_quant(plane); qm is the step-1b quantizer
 # matrix (av1_qm_matrix) or 0 for the flat q2 == q. Adds the residual onto
 # the prediction already in CurrFrame. Returns DR_OK, AV1_ERR_BAD_TX,
-# DR_ERR_OOM.
+# DR_ERR_BOUNDS (the block outside the plane's memory), DR_ERR_OOM.
 fn av1_reconstruct_qm(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_dc, q_ac, qm): i64 {
     if ((tx_size < 0) || (tx_size > 18)) { return AV1_ERR_BAD_TX; }
     var log2w = av1_tx_width_log2(tx_size);
@@ -105,6 +105,10 @@ fn av1_reconstruct_qm(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_d
     var w = 1 << log2w;
     var h = 1 << log2h;
     var bit_depth = dr_frame_bit_depth(frame);
+    # the reconstruct guard: step 3 writes the whole w x h block at (x, y) through the unchecked dr_frame_set, so the
+    # block must lie inside the plane's memory — a broken caller invariant becomes DR_ERR_BOUNDS, not a heap write
+    # (0.8.3's superblock-grid overflow wrote up to 16 rows past a plane this way).
+    if (dr_frame_block_inside(frame, plane, x, y, w, h) == 0) { return DR_ERR_BOUNDS; }
 
     var dequant = alloc(w * h * 8);
     var residual = alloc(w * h * 8);

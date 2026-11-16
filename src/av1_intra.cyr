@@ -715,6 +715,8 @@ fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
     }
     var w = 1 << log2w;
     var h = 1 << log2h;
+    # the block-write guard: predicting into the frame writes the nominal w x h through dr_frame_set
+    if ((out_buf == 0) && (dr_frame_block_inside(frame, plane, x, y, w, h) == 0)) { return DR_ERR_BOUNDS; }
     var bit_depth = dr_frame_bit_depth(frame);
     var max_x = (mi_cols * AV1_MI_SIZE) - 1;
     var max_y = (mi_rows * AV1_MI_SIZE) - 1;
@@ -859,6 +861,8 @@ fn av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
   alpha, max_luma_w, max_luma_h): i64 {
     var w = 1 << log2w;
     var h = 1 << log2h;
+    # the block-write guard: the chroma block is written whole through dr_frame_set
+    if (dr_frame_block_inside(frame, plane, start_x, start_y, w, h) == 0) { return DR_ERR_BOUNDS; }
     var sub_x = dr_frame_subx(frame);
     var sub_y = dr_frame_suby(frame);
     var bit_depth = dr_frame_bit_depth(frame);

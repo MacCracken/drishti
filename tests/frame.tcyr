@@ -269,8 +269,88 @@ fn test_alloc_invariant() {
     return 0;
 }
 
+# ================================================================
+# The block-write guard (0.8.5): dr_frame_block_inside, and the four block-level writers that check it before
+# their unchecked dr_frame_set loops — reconstruct (7.12.3), intra (7.11.2), CfL (7.11.5) and palette (7.11.4).
+# ================================================================
+fn test_block_inside() {
+    var e = 0;
+    var f = dr_frame_new(16, 16, 3, 1, 1, 8, 8, &e);   # luma 16x16 + border 8: memory x, y in [-8, 24)
+    assert_eq(dr_frame_block_inside(f, 0, 0, 0, 24, 24), 1, "24x24 at (0,0) reaches the border's last sample");
+    assert_eq(dr_frame_block_inside(f, 0, 0, 0, 25, 1), 0, "25 wide is one past it");
+    assert_eq(dr_frame_block_inside(f, 0, 1, 0, 24, 1), 0, "24 wide at x 1 is one past it");
+    assert_eq(dr_frame_block_inside(f, 0, 0, 1, 1, 24), 0, "24 high at y 1 is one past it");
+    assert_eq(dr_frame_block_inside(f, 0, 8, 8, 16, 16), 1, "16x16 at (8,8) ends exactly at 24");
+    # chroma (4:2:0): allocation 8x8, the same border 8 -> [0, 16)
+    assert_eq(dr_frame_block_inside(f, 1, 0, 0, 16, 16), 1, "chroma: 16x16 at (0,0) fits its 8 + 8");
+    assert_eq(dr_frame_block_inside(f, 1, 1, 0, 16, 1), 0, "chroma: one sample further does not");
+    assert_eq(dr_frame_block_inside(f, 0, 0 - 1, 0, 4, 4), 0, "a negative origin");
+    assert_eq(dr_frame_block_inside(f, 0, 4611686018427387904, 0, 4, 4), 0, "x = 2^62: no wrap past the bound");
+    assert_eq(dr_frame_block_inside(f, 0, 0, 0, 0, 4), 0, "w = 0");
+    assert_eq(dr_frame_block_inside(f, 3, 0, 0, 4, 4), 0, "plane 3 of a 3-plane frame");
+    var g = dr_frame_new(16, 16, 1, 1, 1, 8, 0, &e);    # no border
+    assert_eq(dr_frame_block_inside(g, 0, 8, 0, 8, 8), 1, "no border: 8x8 at x 8 fits 16");
+    assert_eq(dr_frame_block_inside(g, 0, 12, 0, 8, 8), 0, "no border: 8x8 at x 12 does not");
+    return 0;
+}
+# Each writer, given a block crossing out of the plane's memory, must refuse BEFORE writing: a 16x16 border-0 frame,
+# an 8x8 block at (12, 0) whose columns 12..15 lie inside the frame and 16..19 outside. The in-frame columns carry a
+# sentinel, which must survive (without the guard the write lands, and columns 16..19 wrap into the next row).
+fn bw_frame(planes): i64 {
+    var e = 0;
+    var f = dr_frame_new(16, 16, planes, 1, 1, 8, 0, &e);
+    var p = 0;
+    while (p < planes) { dr_frame_fill(f, p, 77); p = p + 1; }
+    return f;
+}
+fn bw_untouched(f, p, x0, w, h): i64 {
+    var y = 0;
+    while (y < h) {
+        var x = x0;
+        while (x < (x0 + w)) {
+            if (dr_frame_get(f, p, x, y) != 77) { return 0; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 1;
+}
+fn test_block_writers_guarded() {
+    var f = bw_frame(1);
+    var quant = alloc(64 * 8);   # an 8x8 coefficient block, DC only
+    memset(quant, 0, 64 * 8);
+    store64(quant, 100);
+    assert_eq(av1_reconstruct(f, 0, 12, 0, 1, AV1_DCT_DCT, 0, quant, 8, 8), DR_ERR_BOUNDS,
+      "reconstruct: an 8x8 block at (12, 0) of a 16-wide border-0 plane");
+    assert_eq(bw_untouched(f, 0, 12, 4, 8), 1, "...writes nothing");
+    assert_eq(av1_reconstruct(f, 0, 8, 0, 1, AV1_DCT_DCT, 0, quant, 8, 8), DR_OK, "...at (8, 0) it fits");
+    var f2 = bw_frame(1);
+    assert_eq(av1_intra_predict(f2, 0, 12, 0, 0, 0, 0, 0, AV1_DC_PRED, 0, 0, 0, 0, 0, 3, 3, 4, 4), DR_ERR_BOUNDS,
+      "intra: the same 8x8 block");
+    assert_eq(bw_untouched(f2, 0, 12, 4, 8), 1, "...writes nothing");
+    var f3 = bw_frame(3);                                  # 4:2:0: chroma 8x8, no border
+    assert_eq(av1_predict_chroma_from_luma(f3, 1, 4, 0, 3, 3, 4, 16, 16), DR_ERR_BOUNDS,
+      "CfL: an 8x8 chroma block at (4, 0) of an 8-wide chroma plane");
+    assert_eq(bw_untouched(f3, 1, 4, 4, 8), 1, "...writes nothing");
+    var f4 = bw_frame(1);
+    var mi = alloc(AV1MI_SIZE);
+    memset(mi, 0, AV1MI_SIZE);
+    var map = alloc(AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);   # a zero colour map
+    memset(map, 0, AV1_PAL_MAP_STRIDE * AV1_PAL_MAP_STRIDE * 8);
+    var pc = alloc(AV1PC_SIZE);
+    memset(pc, 0, AV1PC_SIZE);
+    store64(pc + AV1PC_MAPY, map);
+    assert_eq(av1_pal_predict(f4, pc, mi, 0, 12, 0, 0, 0, 8, 8), DR_ERR_BOUNDS, "palette: the same 8x8 block");
+    assert_eq(bw_untouched(f4, 0, 12, 4, 8), 1, "...writes nothing");
+    assert_eq(av1_pal_predict(f4, pc, mi, 0, 8, 0, 0, 0, 8, 8), DR_OK, "...at (8, 0) it fits");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("the block-write guard (0.8.5)");
+    test_block_inside();
+    test_block_writers_guarded();
     test_group("frame geometry");
     test_frame_geometry_420();
     test_frame_geometry_odd();

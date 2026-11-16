@@ -59,6 +59,23 @@ fn mk_mi_dc(skip): i64 {
     return mi;
 }
 
+# A SKIPPED palette block in a frame too small for its tile (0.8.5): the palette writer refuses (dr_frame_block_inside)
+# and av1_residual must return that — a skipped block never reconstructs, so nothing later would catch it.
+fn test_palette_refusal_propagates() {
+    var oe = alloc(8);
+    var tile = av1_tile_new(dr_frame_new(4, 4, 1, 0, 0, 8, 0, oe), 4, 4, 0, 1, 0, 1);   # a 4x4 frame, 16x16 MI grid
+    av1_tile_grids_new(tile);
+    store64(tile + AV1TILE_SD, 0);
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, av1_noncoeff_cdf_blob());
+    av1_bd_clear(tile, 0, 0, 16, 1);
+    var mi = mk_mi_dc(1);
+    store64(mi + AV1MI_PAL_NY, 2);   # a 2-colour luma palette
+    assert_eq(av1_residual(tile, mk_block(3, 1, 0, mi)), DR_ERR_BOUNDS,
+      "a skipped 8x8 palette block in a 4x4 frame: DR_ERR_BOUNDS from av1_residual");
+    return 0;
+}
+
 # Skip DC block, no neighbours -> every luma pixel is the DC default 2^(bd-1)=128.
 fn test_dc_skip() {
     var tile = mk_luma_tile(0);
@@ -648,6 +665,7 @@ fn main() {
     test_get_tx_size();
     test_group("residual driver — prediction + BlockDecoded");
     test_dc_skip();
+    test_palette_refusal_propagates();
     test_all_zero_is_prediction();
     test_three_plane_skip();
     test_group("residual driver — reconstruct path");

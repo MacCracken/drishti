@@ -194,8 +194,12 @@ fn test_intra_driver_vertical() {
 # filter on, and the z2 fallback path.
 fn dir_flat(mode, delta): i64 {
     var e = 0;
-    var f = dr_frame_new(16, 16, 1, 1, 1, 8, 0, &e);
-    # Fill a 4x4 block at (8,8)'s neighbourhood (rows/cols 7..15) with 100.
+    # A 16x16 block (log2w = log2h = 4) predicted at (8, 8) writes rows and columns 8..23, so the frame is 32x32.
+    # Until 0.8.5 it was a 16x16 frame with NO border: the prediction wrote 8 rows past the plane's buffer, a heap
+    # overflow the assertions (all inside the frame) never saw — the block-write guard (dr_frame_block_inside)
+    # refused it. mi_cols / mi_rows 4 still clamp every reference read to the filled 7..15 region, as before.
+    var f = dr_frame_new(32, 32, 1, 1, 1, 8, 0, &e);
+    # Fill the 16x16 block at (8,8)'s neighbourhood (rows/cols 7..15) with 100.
     var r = 7; while (r < 16) { var c = 7; while (c < 16) { dr_frame_set(f, 0, c, r, 100); c = c + 1; } r = r + 1; }
     var rc = av1_intra_predict(f, 0, 8, 8, 1, 1, 1, 1, mode, delta, 0, 0, 1, 1, 4, 4, 4, 4);
     assert_eq(rc, DR_OK, "directional flat ok");

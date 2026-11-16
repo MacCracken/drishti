@@ -614,6 +614,8 @@ fn av1_write_palette_tokens(enc, ncc, pc, mi, mi_size, mi_row, mi_col, subx, sub
 # the palette prediction process (7.11.4): CurrFrame[ plane ][ startY + i ][ startX + j ] =
 # palette[ map[ y * 4 + i ][ x * 4 + j ] ] for the w x h transform block at 4x4 offset (x, y) inside the block.
 fn av1_pal_predict(frame, pc, mi, plane, start_x, start_y, x, y, w, h): i64 {
+    # the block-write guard: the w x h block is written through dr_frame_set
+    if (dr_frame_block_inside(frame, plane, start_x, start_y, w, h) == 0) { return DR_ERR_BOUNDS; }
     var pal = mi + AV1MI_PAL_Y;
     var map = load64(pc + AV1PC_MAPY);
     if (plane == 1) { pal = mi + AV1MI_PAL_U; }

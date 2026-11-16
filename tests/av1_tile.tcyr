@@ -238,8 +238,44 @@ fn test_lr_activation_from_fh() {
     return 0;
 }
 
+# A refused block write ends the tile (0.8.5). The same 2-superblock keyframe is encoded as keyframe_rt does, then
+# decoded into a 16x16 border-0 frame — far smaller than the tile's 128x64 MI grid, a broken caller invariant. The
+# first 32x32 block's prediction is refused by dr_frame_block_inside; the error travels av1_transform_block ->
+# av1_residual -> decode_block -> the symbol decoder's sticky error, and the tile reports DR_ERR_BOUNDS. Before
+# 0.8.5 av1_residual dropped transform_block's result and the tile reported DR_OK with the writes silently skipped.
+fn test_refused_write_ends_tile() {
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(6 * 8);
+    store64(pp + 0, AV1_PARTITION_SPLIT);
+    store64(pp + 8, AV1_PARTITION_NONE);   store64(pp + 16, AV1_PARTITION_NONE);
+    store64(pp + 24, AV1_PARTITION_NONE);  store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    var pm = alloc(5 * 8);
+    var pt = alloc(5 * 8);
+    var k = 0;
+    while (k < 4) { store64(pm + (k * 8), mi); store64(pt + (k * 8), 3); k = k + 1; }
+    store64(pm + (4 * 8), mi);
+    store64(pt + (4 * 8), 4);
+    var eoe = alloc(8);
+    var etile = av1_tile_new(dr_frame_new(128, 64, 1, 0, 0, 8, 8, eoe), 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    var olen = 0;
+    var out = av1_encode_intra_tile(etile, pp, pm, pt, 1, &olen);
+    assert_eq(olen > 0, 1, "refused write: the keyframe tile encodes");
+    var doe = alloc(8);
+    var dtile = av1_tile_new(dr_frame_new(16, 16, 1, 0, 0, 8, 0, doe), 32, 16, 40, 1, 0, 1);
+    av1_tile_grids_new(dtile);
+    assert_eq(av1_decode_intra_tile(dtile, out, olen, 1), DR_ERR_BOUNDS, "...into a 16x16 frame: DR_ERR_BOUNDS");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_group("a refused block write ends the tile (0.8.5)");
+    test_refused_write_ends_tile();
     test_group("qbucket / clear context");
     test_qbucket();
     test_clear_context();

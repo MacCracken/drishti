@@ -1354,6 +1354,23 @@ fn dr_frame_plane_stride(f, p): i64 { return load64(f + DR_FRAME_PLANE_STRIDE + 
 fn dr_frame_plane_alloc_w(f, p): i64 { return load64(f + DR_FRAME_PLANE_AW + (p * 8)); }
 fn dr_frame_plane_alloc_h(f, p): i64 { return load64(f + DR_FRAME_PLANE_AH + (p * 8)); }
 
+# 1 when the w x h block at plane-local (x, y) lies inside the memory plane p OWNS — x in [0, alloc_w + border - w],
+# y in [0, alloc_h + border - h] (each plane is allocated (alloc + 2 * border) square-on, origin at (border, border)).
+# The bound the block-level writers check before their unchecked dr_frame_set loops (reconstruction and intra / CfL
+# / palette prediction): a broken caller invariant becomes DR_ERR_BOUNDS instead of a heap write. Origins are never
+# negative for a block. Overflow-safe: the bound is formed by SUBTRACTION, never x + w, so a hostile x near i64-max
+# cannot wrap past it; w, h must be >= 1. 0 otherwise, and for a plane the frame lacks. (Motion compensation keeps
+# its own, stricter bound: the allocated extent alone.)
+fn dr_frame_block_inside(f, p, x, y, w, h): i64 {
+    if ((p < 0) || (p >= dr_frame_num_planes(f))) { return 0; }
+    if ((w < 1) || (h < 1) || (x < 0) || (y < 0)) { return 0; }
+    var b = dr_frame_border(f);
+    if ((x > ((dr_frame_plane_alloc_w(f, p) + b) - w)) || (y > ((dr_frame_plane_alloc_h(f, p) + b) - h))) {
+        return 0;
+    }
+    return 1;
+}
+
 # Sample get/set. x/y are plane-local coordinates; the valid range is
 # [-border, plane_w+border) x [-border, plane_h+border). No per-call
 # bounds check (hot path; the decoder guarantees the range via plane
@@ -4660,6 +4677,12 @@ fn av1_sym_dec_init(buf, sz, disable_cdf_update): i64 {
 }
 
 fn av1_sym_dec_err(sd): i64 { return load64(sd + AV1SD_ERR); }
+# Latch an error from outside the coder (a block write refused by dr_frame_block_inside, an OOM in a block's
+# prediction) into the sticky error, keeping the first: every later read then returns 0 and the tile ends with it.
+fn av1_sym_dec_fail(sd, e): i64 {
+    if ((e != DR_OK) && (load64(sd + AV1SD_ERR) == DR_OK)) { store64(sd + AV1SD_ERR, e); }
+    return e;
+}
 fn av1_sym_dec_range(sd): i64 { return load64(sd + AV1SD_RANGE); }
 fn av1_sym_dec_value(sd): i64 { return load64(sd + AV1SD_VALUE); }
 fn av1_sym_dec_max_bits(sd): i64 { return load64(sd + AV1SD_MAXBITS); }
@@ -6478,6 +6501,8 @@ fn av1_intra_predict_gen(frame, plane, x, y, have_left, have_above,
     }
     var w = 1 << log2w;
     var h = 1 << log2h;
+    # the block-write guard: predicting into the frame writes the nominal w x h through dr_frame_set
+    if ((out_buf == 0) && (dr_frame_block_inside(frame, plane, x, y, w, h) == 0)) { return DR_ERR_BOUNDS; }
     var bit_depth = dr_frame_bit_depth(frame);
     var max_x = (mi_cols * AV1_MI_SIZE) - 1;
     var max_y = (mi_rows * AV1_MI_SIZE) - 1;
@@ -6622,6 +6647,8 @@ fn av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
   alpha, max_luma_w, max_luma_h): i64 {
     var w = 1 << log2w;
     var h = 1 << log2h;
+    # the block-write guard: the chroma block is written whole through dr_frame_set
+    if (dr_frame_block_inside(frame, plane, start_x, start_y, w, h) == 0) { return DR_ERR_BOUNDS; }
     var sub_x = dr_frame_subx(frame);
     var sub_y = dr_frame_suby(frame);
     var bit_depth = dr_frame_bit_depth(frame);
@@ -8064,7 +8091,7 @@ fn av1_dequant_block(quant, dequant, tx_size, q_dc, q_ac, qm, bit_depth): i64 {
 # get_dc_quant(plane) / get_ac_quant(plane); qm is the step-1b quantizer
 # matrix (av1_qm_matrix) or 0 for the flat q2 == q. Adds the residual onto
 # the prediction already in CurrFrame. Returns DR_OK, AV1_ERR_BAD_TX,
-# DR_ERR_OOM.
+# DR_ERR_BOUNDS (the block outside the plane's memory), DR_ERR_OOM.
 fn av1_reconstruct_qm(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_dc, q_ac, qm): i64 {
     if ((tx_size < 0) || (tx_size > 18)) { return AV1_ERR_BAD_TX; }
     var log2w = av1_tx_width_log2(tx_size);
@@ -8072,6 +8099,10 @@ fn av1_reconstruct_qm(frame, plane, x, y, tx_size, tx_type, lossless, quant, q_d
     var w = 1 << log2w;
     var h = 1 << log2h;
     var bit_depth = dr_frame_bit_depth(frame);
+    # the reconstruct guard: step 3 writes the whole w x h block at (x, y) through the unchecked dr_frame_set, so the
+    # block must lie inside the plane's memory — a broken caller invariant becomes DR_ERR_BOUNDS, not a heap write
+    # (0.8.3's superblock-grid overflow wrote up to 16 rows past a plane this way).
+    if (dr_frame_block_inside(frame, plane, x, y, w, h) == 0) { return DR_ERR_BOUNDS; }
 
     var dequant = alloc(w * h * 8);
     var residual = alloc(w * h * 8);
@@ -13605,6 +13636,8 @@ fn av1_write_palette_tokens(enc, ncc, pc, mi, mi_size, mi_row, mi_col, subx, sub
 # the palette prediction process (7.11.4): CurrFrame[ plane ][ startY + i ][ startX + j ] =
 # palette[ map[ y * 4 + i ][ x * 4 + j ] ] for the w x h transform block at 4x4 offset (x, y) inside the block.
 fn av1_pal_predict(frame, pc, mi, plane, start_x, start_y, x, y, w, h): i64 {
+    # the block-write guard: the w x h block is written through dr_frame_set
+    if (dr_frame_block_inside(frame, plane, start_x, start_y, w, h) == 0) { return DR_ERR_BOUNDS; }
     var pal = mi + AV1MI_PAL_Y;
     var map = load64(pc + AV1PC_MAPY);
     if (plane == 1) { pal = mi + AV1MI_PAL_U; }
@@ -15403,8 +15436,9 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     if (av1_pal_plane_active(mi, plane) != 0) {
         # predict_palette (7.11.4), in place of predict_intra / CfL (5.11.35). The colour map is the tile's
         # scratch, filled by this block's palette_tokens (or, encoding, from the plan).
-        av1_pal_predict(frame, av1_tile_palctx(tile), mi, plane, start_x, start_y, x, y, av1_tx_width(tx_sz),
-          av1_tx_height(tx_sz));
+        var prc = av1_pal_predict(frame, av1_tile_palctx(tile), mi, plane, start_x, start_y, x, y,
+          av1_tx_width(tx_sz), av1_tx_height(tx_sz));
+        if (prc != DR_OK) { return prc; }
         is_cfl = 0;
     } else {
         var rc = av1_intra_predict(frame, plane, start_x, start_y, have_left, have_above,
@@ -15416,8 +15450,9 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
     if (is_cfl) {
         var alpha = load64(mi + AV1MI_CFL_U);
         if (plane == 2) { alpha = load64(mi + AV1MI_CFL_V); }
-        av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
+        var crc = av1_predict_chroma_from_luma(frame, plane, start_x, start_y, log2w, log2h,
           alpha, load64(tile + AV1TILE_MAXLW), load64(tile + AV1TILE_MAXLH));
+        if (crc != DR_OK) { return crc; }   # its OOM (a refused write is pre-empted by the prediction above)
     }
     if (plane == 0) {
         store64(tile + AV1TILE_MAXLW, start_x + (step_x * 4));
@@ -15459,8 +15494,9 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
             var qm = av1_qm_matrix(qfh, plane, tx_sz, load64(load64(tile + AV1TILE_OTT)),
               load64(blk + AV1BLK_LOSSLESS));
             if (qm < 0) { return DR_ERR_OOM; }
-            av1_reconstruct_qm(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
+            var rrc = av1_reconstruct_qm(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
               load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac, qm);
+            if (rrc != DR_OK) { return rrc; }   # its OOM / bad tx (the same-footprint prediction refuses first)
         }
     }
     # mark this tx block decoded (BlockDecoded[plane][+i][+j] = 1) and record its
@@ -15551,7 +15587,8 @@ fn av1_residual(tile, blk): i64 {
                 while (y < num4x4h) {
                     var x = 0;
                     while (x < num4x4w) {
-                        av1_transform_block(tile, blk, plane, tx_sz, x + off_x, y + off_y);
+                        var trc = av1_transform_block(tile, blk, plane, tx_sz, x + off_x, y + off_y);
+                        if (trc != DR_OK) { return trc; }   # a refused block write, an OOM: the first error ends it
                         x = x + step_x;
                     }
                     y = y + step_y;
@@ -16023,7 +16060,9 @@ fn av1_decode_block(tile, r, c, sub_size): i64 {
     store64(blk + AV1BLK_AVAIL_LC, avail_lc);
     store64(blk + AV1BLK_AVAIL_UC, avail_uc);
     store64(blk + AV1BLK_FILTER_TYPE, 0);        # reserved; get_filter_type derived in transform_block
-    av1_residual(tile, blk);
+    # a residual error (a refused block write, an OOM) used to vanish here; it now ends the tile, latched in sd
+    var rerr = av1_residual(tile, blk);
+    if (rerr != DR_OK) { return av1_sym_dec_fail(sd, rerr); }
 
     av1_block_write_grids(tile, r, c, bw4, bh4, sub_size, load64(mi + AV1MI_YMODE),
       load64(mi + AV1MI_UVMODE), skip, tx_size, has_chroma, 1);

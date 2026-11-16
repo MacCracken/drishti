@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 6: the reconstruct guard — every block-level frame writer bounds its footprint; intra-lane errors reach the tile
+
+**A block write outside the frame's memory is now refused, not performed.** 7.12.3's reconstruct step writes the
+whole transform block through `dr_frame_set`, which by design checks nothing ("callers stay inside the allocated
+plane"). So do intra (7.11.2), CfL (7.11.5) and palette (7.11.4) prediction just before it. Motion compensation
+already bounded its writes; these four ran on trust. That trust broke once already: 0.8.3's undersized allocation let
+a 128x128 intra block write up to 16 rows past a plane, a heap overflow.
+- **The guard.** `dr_frame_block_inside` (`src/frame.cyr`) is 1 when a `w x h` block lies inside the memory the plane
+  OWNS: x in `[0, alloc_w + border - w]`, y likewise. It is formed by subtraction, so a hostile origin near i64-max
+  cannot wrap past it. The bound is allocation plus border, because that is what each plane is given and what
+  `dr_frame_set` documents as valid; the 0.7.128 CfL overhang tests write into the border on purpose.
+  `av1_reconstruct_qm`, `av1_intra_predict_gen` (frame writes only), `av1_predict_chroma_from_luma` and
+  `av1_pal_predict` check it before any write and return `DR_ERR_BOUNDS`. Motion compensation keeps its stricter
+  bound (the allocation alone).
+- **Errors now reach the tile.** On the intra lane, `av1_residual` DROPPED `av1_transform_block`'s result, and the
+  intra `decode_block` dropped `av1_residual`'s. A refused write, or an OOM in a block's prediction, vanished and the
+  tile reported success. `av1_residual` now returns the first error. `decode_block` latches it into the symbol
+  decoder's sticky error (`av1_sym_dec_fail`), so the tile ends with it. The palette, CfL and reconstruct results,
+  discarded by their caller, are checked too.
+- **It found an out-of-bounds write in the test suite.** `tests/av1_intra.tcyr`'s `dir_flat` predicted a 16x16
+  block (its comment said 4x4) at (8, 8) of a 16x16 frame with NO border, writing 8 rows past the plane's buffer on
+  every call. The assertions all looked inside the frame. The frame is now 32x32, and the prediction is unchanged
+  because the reference reads are still clamped by `mi_cols`.
+
+**Tests** (+26):
+- `tests/frame.tcyr`: the predicate at the exact edges of plane memory (luma with border, chroma's smaller
+  allocation, no border), a negative origin, `x = 2^62`, `w = 0`, and a missing plane. Each of the four writers,
+  given an 8x8 block crossing out of a 16-wide border-0 plane, returns `DR_ERR_BOUNDS` and leaves an in-frame
+  sentinel untouched, proving the check runs before any write.
+- `tests/av1_residual.tcyr`: a SKIPPED palette block in a frame too small for its tile returns `DR_ERR_BOUNDS` from
+  `av1_residual`. A skipped block never reconstructs, so only the palette result can carry it.
+- `tests/av1_tile.tcyr`: a real encoded keyframe tile decoded into a 16x16 frame under its 128x64 MI grid ends with
+  `DR_ERR_BOUNDS`. It used to report `DR_OK` with the writes silently skipped.
+
+Mutation testing: **12 of 12** go red, covering each predicate clause, each writer's guard, and the three propagation
+links (`transform_block` -> `av1_residual`, the palette result, `decode_block`'s latch). Two links are equivalent for
+a refused write and are kept for their OOM. Dropping the CfL or reconstruct result survives, because the
+same-footprint prediction before each refuses first. But reconstruct and CfL can also return `DR_ERR_OOM`, which
+nothing pre-empts; the OOM fault injection still to come in 0.8.5 can witness them. Every real stream in
+`make conformance` passes the guard on every block.
+
+`make conformance` is **3930 matched / 0 known-gap / 0 regressed / 0 skipped** (unchanged).
+
+**Gates:** 44 suites, **31,557** assertions, **7,410** fuzz; bench, `vet`, `lint`, `fmt-check`, `version-check` and
+`distlib --check` all green.
+
 ### Added — 0.8.5 bite 5: the symbol-range bound — 8.2.6's precondition enforced on every symbol, both lanes
 
 **The symbol coder now refuses a CDF it cannot safely search.** 8.2.6 states its precondition in a note: "N will be

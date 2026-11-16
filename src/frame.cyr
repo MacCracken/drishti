@@ -177,6 +177,23 @@ fn dr_frame_plane_stride(f, p): i64 { return load64(f + DR_FRAME_PLANE_STRIDE + 
 fn dr_frame_plane_alloc_w(f, p): i64 { return load64(f + DR_FRAME_PLANE_AW + (p * 8)); }
 fn dr_frame_plane_alloc_h(f, p): i64 { return load64(f + DR_FRAME_PLANE_AH + (p * 8)); }
 
+# 1 when the w x h block at plane-local (x, y) lies inside the memory plane p OWNS — x in [0, alloc_w + border - w],
+# y in [0, alloc_h + border - h] (each plane is allocated (alloc + 2 * border) square-on, origin at (border, border)).
+# The bound the block-level writers check before their unchecked dr_frame_set loops (reconstruction and intra / CfL
+# / palette prediction): a broken caller invariant becomes DR_ERR_BOUNDS instead of a heap write. Origins are never
+# negative for a block. Overflow-safe: the bound is formed by SUBTRACTION, never x + w, so a hostile x near i64-max
+# cannot wrap past it; w, h must be >= 1. 0 otherwise, and for a plane the frame lacks. (Motion compensation keeps
+# its own, stricter bound: the allocated extent alone.)
+fn dr_frame_block_inside(f, p, x, y, w, h): i64 {
+    if ((p < 0) || (p >= dr_frame_num_planes(f))) { return 0; }
+    if ((w < 1) || (h < 1) || (x < 0) || (y < 0)) { return 0; }
+    var b = dr_frame_border(f);
+    if ((x > ((dr_frame_plane_alloc_w(f, p) + b) - w)) || (y > ((dr_frame_plane_alloc_h(f, p) + b) - h))) {
+        return 0;
+    }
+    return 1;
+}
+
 # Sample get/set. x/y are plane-local coordinates; the valid range is
 # [-border, plane_w+border) x [-border, plane_h+border). No per-call
 # bounds check (hot path; the decoder guarantees the range via plane

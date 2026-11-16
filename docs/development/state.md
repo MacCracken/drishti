@@ -1828,7 +1828,15 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > `[0, 1 << 15]`) is checked on every symbol in both lanes (`av1_sym_cdf_ok` + the per-entry check in the search),
 > `DR_ERR_BOUNDS` on a violation. Only a wrong N or a CDF overwritten in memory can break it (cf. E2d). The
 > terminator alone was NOT enough (an entry above 1 << 15 mid-CDF leaves a meaningless range); an entry of -1 is
-> the witness only the per-entry check catches. Gate: 3930 / 0 / 0 / 0. Next: the 7.12.3 reconstruct guard, OOM
+> the witness only the per-entry check catches. Gate: 3930 / 0 / 0 / 0.
+>
+> Bite 6 = **the reconstruct guard**: `dr_frame_block_inside` (a block inside the plane's memory, allocation +
+> border, overflow-safe) is checked before every block-level frame write: reconstruct (7.12.3) and intra / CfL /
+> palette prediction (MC already had its own). The intra lane used to DROP `av1_transform_block`'s result in
+> `av1_residual` (and `decode_block` dropped `av1_residual`'s), so a refused write or a prediction OOM vanished. It now
+> reaches the tile through the symbol decoder's sticky error (`av1_sym_dec_fail`). It caught `dir_flat` in
+> `tests/av1_intra.tcyr` writing 8 rows past a border-0 frame (fixed). The CfL / reconstruct result checks are
+> equivalent for BOUNDS and kept for OOM, for the OOM-injection bite to witness. Gate: 3930 / 0 / 0 / 0. Next: OOM
 > fault injection, corpus-guided fuzzing, the warp `LS_MAT` clamp, the missing MC ref generators, the two streams
 > others refuse.
 >

@@ -117,6 +117,12 @@ fn av1_sym_dec_init(buf, sz, disable_cdf_update): i64 {
 }
 
 fn av1_sym_dec_err(sd): i64 { return load64(sd + AV1SD_ERR); }
+# Latch an error from outside the coder (a block write refused by dr_frame_block_inside, an OOM in a block's
+# prediction) into the sticky error, keeping the first: every later read then returns 0 and the tile ends with it.
+fn av1_sym_dec_fail(sd, e): i64 {
+    if ((e != DR_OK) && (load64(sd + AV1SD_ERR) == DR_OK)) { store64(sd + AV1SD_ERR, e); }
+    return e;
+}
 fn av1_sym_dec_range(sd): i64 { return load64(sd + AV1SD_RANGE); }
 fn av1_sym_dec_value(sd): i64 { return load64(sd + AV1SD_VALUE); }
 fn av1_sym_dec_max_bits(sd): i64 { return load64(sd + AV1SD_MAXBITS); }
