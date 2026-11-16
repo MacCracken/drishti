@@ -1188,7 +1188,7 @@ fn test_comptype_wedge_sweep() {
 
 # ================================================================
 # The neighbour CDF contexts (5.11.15 preamble + spec 9 derivations). Known answers come
-# from the spec-literal Python port scratchpad/nbctx_ref.py — transcribed from the SPEC
+# from the spec-literal Python port scripts/refs/nbctx_ref.py — transcribed from the SPEC
 # TEXT, never from the Cyrius, so the expected values are an INDEPENDENT ground truth
 # rather than a restatement of the code under test.
 # ================================================================
@@ -1435,7 +1435,7 @@ fn test_nbctx_full_enumeration() {
     # proven absent across the ENTIRE input space, not just the sampled cases.
     assert_eq(ii_bad, 0, "is_inter_ctx in [0,4) for all 26244 combos");
     assert_eq(cm_bad, 0, "comp_mode_ctx in [0,5) for all 26244 combos");
-    # digests from scratchpad/nbctx_ref.py (the spec-literal port).
+    # digests from scripts/refs/nbctx_ref.py (the spec-literal port).
     assert_eq(ii_sum, 9072, "is_inter_ctx sum over all 26244 combos");
     assert_eq(cm_sum, 59967, "comp_mode_ctx sum over all 26244 combos");
     assert_eq(load64(ii_hist + 0), 20736, "is_inter_ctx==0 count");
@@ -2939,7 +2939,7 @@ fn test_inter_block_review_hardening() {
     var gc = mm_grid(8, 8, 1, 7);
     var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);
     # H1: ROTZOOM at an ASYMMETRIC position — 7.10.2.1's projection is position-
-    # dependent (KA from mv_ref.py: alpha 8192, 8x8 at mi_row 1 / mi_col 2 -> col 11),
+    # dependent (KA from scripts/refs/mv_ref.py: alpha 8192, 8x8 at mi_row 1 / mi_col 2 -> col 11),
     # so a mi_col/mi_row swap into setup_global_mv decodes col 7, not 11. GLOBALMV +
     # ROTZOOM: the 5.11.27 gate forces SIMPLE (no mm symbol); needs_interp = 0.
     var fh_rz = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, 0, 0);

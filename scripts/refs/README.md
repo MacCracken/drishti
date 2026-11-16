@@ -17,6 +17,8 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 | Port | Covers | Asserted by |
 |------|--------|-------------|
 | `warp_samples_ref.py` | `find_warp_samples` / `add_sample` (7.10.4) + `has_overlappable_candidates` | `tests/av1_mv.tcyr` (`test_find_warp_samples`, `test_has_overlappable_candidates`, `test_warp_nonsquare_and_clamp`) |
+| `mv_ref.py` | the MV-prediction foundation: `setup_global_mv` (7.10.2.1), `lower_mv_precision` (7.10.2.10) and `Round2Signed`, spec-literal, plus libaom's `gm_get_motion_vector` / `lower_mv_precision` transcribed and ASSERTED equal to the spec on 64,579 legal inputs; it records the two places they differ, both inputs no legal header produces (`allow_high_precision_mv` with `force_integer_mv`, and an odd low-precision translation, which one test case is) | `tests/av1_mv.tcyr` (`test_setup_global_mv`, `test_lower_mv_precision`, `test_round2_signed`), `tests/av1_intermode.tcyr` (`test_inter_block_review_hardening`) |
+| `find_mv_stack_ref.py` | the spatial MV candidate list (7.10.2 without the temporal scan): `scan_row` / `scan_col` / `scan_point`, `add_ref_mv_candidate`, the search stacks, sorting, extra search, context and clamping, `clamp_mv_row` / `_col`. Spec only, deliberately: libaom's and dav1d's forms do not follow the spec call for call (the composition is checked by the bit-exact corpus); the arithmetic cases are derived by hand | `tests/av1_mv.tcyr` (S1..S17, D1..D12) |
 | `nbctx_ref.py` | neighbour CDF contexts — the 5.11.15 `inter_frame_mode_info` preamble + §9 `is_inter` / `comp_mode` ctx, `check_backward`, `count_refs`, `ref_count_ctx` | `tests/av1_intermode.tcyr` (`test_nbctx_known_answers`, `test_nbctx_full_enumeration`) |
 | `motion_mode_ref.py` | `read_motion_mode` (5.11.27) branch decision + `is_scaled` | `tests/av1_intermode.tcyr` (`test_is_scaled`, `test_read_motion_mode_gate`, `test_motion_mode_driver_state`) |
 | `ref_frames_ref.py` | `read_ref_frames` (5.11.25) dispatch + `seg_feature_active` (5.11.14) | `tests/av1_intermode.tcyr` (`test_seg_feature_active`, `test_read_ref_frames_dispatch`, `test_read_ref_frames_tree`) |
@@ -26,6 +28,8 @@ file and section, so it can be re-derived and re-checked against the spec indepe
 | `mc_subpel_ref.py` | drishti's sub-pel filter table (7.11.3.4 `Subpel_Filters` in dav1d's form: halved, phase 0 dropped, sets permuted) derived from the spec table `bilinear_mc_ref` machine-generates — every tap asserted even, so the halving is exact — and its 90 position-weighted checksums; `--dav1d PATH` also checks it against dav1d's own `dav1d_mc_subpel_filters` (`src/tables.c`) entry for entry, parsed by designator | `tests/av1_mc.tcyr` (`test_subpel_checksum`) |
 | `mc_put8tap_ref.py` | the `put_8tap` kernel, twice: the spec's two-pass convolve (7.11.3.4: 128-sum taps, both passes always, `InterRound0` / `InterRound1`) and dav1d's `put_8tap_c` branch for branch (copy / H / V / H+V, `intermediate_bits`, the H-only rounding constant, the `w <= 4` set) — ASSERTED equal on 6,108 blocks (every phase pair x filter pair at 8x8 and 4x4, plus a seeded sweep at 8 / 10 / 12 bit). Eight known answers, two pixels by hand; the two H-only rounding-boundary cases are shown to change under a wrong constant | `tests/av1_mc_kernel.tcyr` (`test_put_8tap`) |
 | `emu_edge_ref.py` | the frame-boundary block fetch, twice: the spec's per-sample `ref[Clip3(0, lastY, y)][Clip3(0, lastX, x)]` and dav1d's `emu_edge_c` (copy the visible part, extend, replicate rows; extensions clipped to `bw - 1` / `bh - 1`) — ASSERTED equal on 186,624 fetches (every plane and block of 1..6 samples a side at every position from fully outside to fully outside); five known answers, one by hand | `tests/av1_mc_emu_edge.tcyr` |
+| `upscale_filter_ref.py` | the superres `Upscale_Filter[64][8]` (7.16) — the spec's table, checked against the spec markdown — and its 64 position-weighted checksums; `--dav1d PATH` checks dav1d's `dav1d_resize_filter` is that table negated, entry for entry | `tests/av1_superres.tcyr` (`test_upscale_filter_position_checksum`) |
+| `superres_upscale_ref.py` | superres upscaling (7.16), the spec's form (`superres_ref.py`) against dav1d's: `resize_c`'s split `src_x` / `mx` row loop, and `scale_fac` / `get_upscale_x0` — ASSERTED equal on every (downscaled, upscaled) width pair superres can produce up to 1024 and on 20,000 random rows; reproduces the row, geometry, chain, whole-frame and MI-clamp known answers (the last of which `superres_ref.py` printed but never asserted) | `tests/av1_superres.tcyr` (`test_superres_upscale_row`, `test_superres_geometry`, `test_superres_upscale_frame`, `test_superres_mi_clamp`) |
 | `scaled_geom_ref.py` | the motion vector scaling process (7.11.3.3) — scale factors, `startX`/`startY`, `stepX`/`stepY`, `lastX`/`lastY`, `intermediateHeight` — cross-checked against libaom's different algebraic form of `startX` over 2688 combinations | `tests/av1_mc.tcyr` (`test_scaled_geometry`, `test_scaled_geometry_bounds`) |
 | `scaled_mc_ref.py` | the scaled convolve (7.11.3.4 with a non-unit step) — imports the geometry from `scaled_geom_ref` and the table from `bilinear_mc_ref` so each is transcribed exactly once | `tests/av1_mc_driver.tcyr` (`test_mc_scaled_known_answers`) |
 | `superres_ref.py` | the superres upscaling process (7.16) — geometry, the MI-grid tap clamp (`maxX = (MiCols >> subX) * MI_SIZE - 1`), the 8-tap `Upscale_Filter` (checked against the spec markdown when `build/spec-dl/` is present); its fixture puts unlike values in the overhang columns so a visible-width clamp shows | `tests/av1_superres.tcyr` (`test_superres_mi_clamp`) |
@@ -54,10 +58,19 @@ ports here fixes that going forward, and the lost ones are being restored:
   now spec answers. The restoration found one gap the originals had left: dav1d's H-only
   rounding constant survived a mutation against all six kernel cases, and two boundary
   cases now pin it.
-- **Still dead:** the motion-vector prediction ports `mv_ref.py`, `mvscan_ref.py` and
-  `mvdriver_ref.py` (`tests/av1_mv.tcyr`, `tests/av1_intermode.tcyr`) and the superres
-  ports `resize_ref.py`, `upscale_geom.py` and `sr_ref.py` (`tests/av1_superres.tcyr`,
-  `src/av1_superres.cyr`) — roadmapped.
+- **Motion-vector prediction and superres — restored (0.8.5).** `mv_ref.py` (the same
+  name, a new port) and `find_mv_stack_ref.py` replace `mv_ref.py`, `mvscan_ref.py` and
+  `mvdriver_ref.py`; `upscale_filter_ref.py` and `superres_upscale_ref.py` replace the
+  checksum script, `resize_ref.py`, `upscale_geom.py` and `sr_ref.py`. The global-MV and
+  superres ports assert libaom's or dav1d's form equal to the spec's; `find_mv_stack_ref.py`
+  is spec-only (its docstring says why). This restoration found five Cyrius mutants that
+  survived `tests/av1_mv.tcyr`: three parity terms of the far-row / far-column scans, whose
+  fixtures put one MV over the cell a wrong probe would hit, and both branches of compound
+  extra search's combine that no case took. New and corrected cases (S14, S15 with decoys;
+  S17, D11, D12) now kill them.
+
+No citation in `src/`, `tests/` or `docs/` points at a lost generator any more; the
+CHANGELOG's history keeps the old names.
 
 To be precise about what was and wasn't lost, because it matters: the ports are
 transcriptions, not the authority. **The real oracle is the AV1 spec** — public,

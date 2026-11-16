@@ -377,7 +377,7 @@ fn av1_compound_idx_fwd_eq_bck(s, fh, ref0, ref1): i64 {
 # uses the SIGNED get_relative_dist ( > 0 ), NOT its Abs. INTRA_FRAME (0) and NONE are forward,
 # and everything is forward when enable_order_hint is off (get_relative_dist returns 0).
 #
-# Consumed by the MV candidate dedup (7.10.2.12): a compound block combining MVs from two refs
+# Consumed by the add extra MV candidate process (7.10.2.13): a compound block combining MVs from two refs
 # with DIFFERENT sign biases negates one, so a decoder that never derives this mishandles every
 # compound / backward-reference block. Until 0.7.x this was never wired (av1_mvctx_set_signbias
 # had no callers), which was safe only because no decoded frame had a backward reference.

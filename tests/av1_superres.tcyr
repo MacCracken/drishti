@@ -87,9 +87,11 @@ fn supg8(g, off, v0, v1, v2, v3, v4, v5, v6, v7) {
 # The cubic weights give every tap a distinct, non-symmetric position weight, so ANY
 # within-row permutation changes cs[p] — closing the gap that row-sum + mirror symmetry
 # miss (a palindrome scramble of the self-mirrored phase 32, or coordinated swaps in a
-# mirror-partner pair). The 64 goldens are computed INDEPENDENTLY (scratchpad Python,
-# a separate transcription of dav1d's raw dav1d_resize_filter), so a transcription slip
-# in the cyrius table is caught rather than matched.
+# mirror-partner pair). The 64 goldens come from scripts/refs/upscale_filter_ref.py (0.8.5),
+# which computes them from the SPEC's table (checked against the spec markdown) and checks
+# dav1d's dav1d_resize_filter is that table negated, entry for entry — so a transcription
+# slip in the cyrius table is caught rather than matched. (First generator: a lost
+# scratchpad transcription of dav1d.)
 fn test_upscale_filter_position_checksum() {
     var w = alloc(8 * 8);
     store64(w + 0, 1);    store64(w + 8, 8);    store64(w + 16, 27);   store64(w + 24, 64);
@@ -114,10 +116,11 @@ fn test_upscale_filter_position_checksum() {
     return 0;
 }
 
-# av1_superres_upscale_row vs a faithful Python port of dav1d resize_c (goldens from
-# scratchpad/resize_ref.py). The driver's combined subpel accumulator is proven equal
-# to dav1d's split src_x/mx form there, so these pin the whole row loop against the
-# reference. dx/mx0 are supplied directly (their geometry grows next; roadmap.md).
+# av1_superres_upscale_row, goldens from scripts/refs/superres_upscale_ref.py (0.8.5; first
+# from the lost scratchpad resize_ref.py), which asserts the spec's 7.16 row loop equal to
+# dav1d's resize_c (split src_x / mx form) on 20,000 random rows — the combined accumulator
+# drishti uses is the spec's srcX. dx / mx0 are supplied directly here; the geometry test
+# below derives them.
 fn test_superres_upscale_row() {
     var src = alloc(8 * 8);
     var i = 0;
@@ -159,7 +162,8 @@ fn test_superres_upscale_row() {
 }
 
 # av1_superres_step / av1_superres_x0 (dav1d get_upscale_x0 + scale_fac) + the full
-# geometry->driver chain, against the Python port (scratchpad/upscale_geom.py).
+# geometry->driver chain; scripts/refs/superres_upscale_ref.py asserts the spec's stepX /
+# initialSubpelX equal to dav1d's on every width pair superres can produce up to 1024.
 fn test_superres_geometry() {
     # step / x0 known-answers for several (down_w, up_w).
     assert_eq(av1_superres_step(8, 16), 8192, "step 8->16 = 8192");
@@ -209,7 +213,8 @@ fn test_superres_geometry() {
 }
 
 # av1_superres_upscale_frame — upscale a whole downscaled frame into an upscaled one,
-# per plane, against the dav1d reference (scratchpad/sr_ref.py). Covers mono and a
+# per plane; known answers from the spec's plane loop in scripts/refs/superres_upscale_ref.py
+# (first from the lost scratchpad sr_ref.py). Covers mono and a
 # 4:2:0 3-plane frame (chroma uses the subsampled widths 4->8).
 fn test_superres_upscale_frame() {
     var oe = alloc(8);

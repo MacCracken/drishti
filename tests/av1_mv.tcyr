@@ -1,9 +1,9 @@
 # tests/av1_mv.tcyr — MV-prediction foundation (spec 7.10.2.1 setup_global_mv +
 # 7.10.2.10 lower_mv_precision + the Av1Mv representation + Round2Signed).
 #
-# Known answers are independently computed by a spec-literal Python port
-# (scratchpad/mv_ref.py) transcribed straight from the spec pseudocode — it shares
-# no code with src/av1_mv.cyr, so a matching value cross-validates the port.
+# Known answers from scripts/refs/mv_ref.py (0.8.5), a spec-literal port that shares no code with
+# src/av1_mv.cyr and also asserts libaom's gm_get_motion_vector / lower_mv_precision equal to the spec on
+# every legal input. (The first generator, a scratchpad port, was lost.)
 include "src/main.cyr"
 
 # build a frame header carrying a global-motion model for ref = LAST_FRAME plus
@@ -92,7 +92,9 @@ fn test_lower_mv_precision() {
 }
 
 # ================================================================
-# setup_global_mv (7.10.2.1) — known answers from mv_ref.py. ONE = 1<<16.
+# setup_global_mv (7.10.2.1) — known answers from scripts/refs/mv_ref.py. ONE = 1<<16. ("translation lp
+# 4/-2" is an input no legal header produces — libaom returns 5/-3 there; the spec, which drishti follows,
+# lowers it.)
 # BLOCK_8X8 (enum 3) = 8x8; BLOCK_16X16 (enum 6) = 16x16.
 # ================================================================
 fn test_setup_global_mv() {
@@ -248,7 +250,7 @@ fn stack_5(): i64 {
 }
 
 # ================================================================
-# av1_mv_stack_sort (7.10.2.13) — stable descending sort by weight.
+# av1_mv_stack_sort (7.10.2.11) — stable descending sort by weight.
 # ================================================================
 fn test_stack_sort() {
     var s = stack_5();
@@ -332,7 +334,8 @@ fn test_stack_reset() {
 
 # ================================================================
 # Spatial neighbour scans (7.10.2.2/3/4) + add_ref_mv_candidate (7.10.2.7). Known
-# answers from the spec-literal Python port scratchpad/mvscan_ref.py. Base context:
+# answers from scripts/refs/find_mv_stack_ref.py (0.8.5; the spec-literal scratchpad mvscan_ref.py that first
+# generated them was lost). Base context:
 # 16x16 frame grid, tile [0,16)x[0,16), the given block, ref0=1/ref1=2, hp=1.
 # ================================================================
 fn mvs_ctx_dim(dim, mi_size, mi_row, mi_col): i64 {
@@ -540,10 +543,14 @@ fn test_scan_row_usestep16() {
 
 # S14: scan_row(-3) with ODD MiRow/MiCol -> the &1 parity terms are non-zero
 # (dr = -3 + 1 = -2, deltaCol = 1 - 1 = 0), so the probe is (MiRow-2, MiCol).
+# 0.8.5: the cells were one MV over (3,5)-(3,6), so a probe of (3,6) — deltaCol stuck at 1 —
+# passed (find_mv_stack_ref.py's canary, then a surviving Cyrius mutant). Now three 4x4 cells:
+# the target (3,5), and DECOYS at (3,6) (deltaCol without the parity) and (2,5) (dr without it).
 fn test_scan_row_odd_parity() {
     var ctx = mvs_ctx(3, 5, 5);   # 8x8 at (5,5), odd/odd
-    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, 0, 31, 0 - 17, 0, 0);
-    mvs_cell(ctx, 3, 6, 1, 1, 3, 14, 1, 0, 31, 0 - 17, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 0, 14, 1, 0, 31, 0 - 17, 0, 0);
+    mvs_cell(ctx, 3, 6, 1, 1, 0, 14, 1, 0, 99, 99, 0, 0);      # decoy: deltaCol = 1
+    mvs_cell(ctx, 2, 5, 1, 1, 0, 14, 1, 0, 77, 77, 0, 0);      # decoy: dr = -3
     av1_mv_scan_row(ctx, 0 - 3, 0);
     assert_eq(mvs_num(ctx), 1, "S14 odd parity -> probe at (3,5)");
     assert_eq(mvs_row(ctx, 0, 0), 31, "S14 mv row 31 (odd MiRow parity applied)");
@@ -552,14 +559,31 @@ fn test_scan_row_odd_parity() {
 }
 # S15: scan_col(-3) with ODD MiRow -> the transpose parity (delta_row = 1-(MiRow&1)
 # = 0, dc = -3 + (MiCol&1)); pins the scan_col parity keyed on the right operands.
+# 0.8.5: (6,5) carried the same MV, so a probe starting there (delta_row stuck at 1) passed; it
+# is a DECOY now.
 fn test_scan_col_odd_parity() {
     var ctx = mvs_ctx(9, 5, 8);   # 32x32 (bh4=8) at (5,8), odd MiRow
     mvs_cell(ctx, 5, 5, 1, 1, 6, 14, 1, 0, 40, 0 - 20, 0, 0);
-    mvs_cell(ctx, 6, 5, 1, 1, 6, 14, 1, 0, 40, 0 - 20, 0, 0);
+    mvs_cell(ctx, 6, 5, 1, 1, 6, 14, 1, 0, 88, 88, 0, 0);      # decoy: delta_row = 1
     av1_mv_scan_col(ctx, 0 - 3, 0);
     assert_eq(mvs_num(ctx), 1, "S15 scan_col odd parity -> probe at (5,5)");
     assert_eq(mvs_row(ctx, 0, 0), 40, "S15 mv row 40");
     assert_eq(mvs_wt(ctx, 0), 8, "S15 weight 8 (len max(2,min(8,4))=4 * 2)");
+    return 0;
+}
+# S17 (0.8.5): scan_col(-3) at an ODD MiCol — no case had one, so dropping the column parity term
+# (dc = -3 + (MiCol & 1)) survived. 8x8 at (4,5): delta_row = 1 - 0 = 1, dc = -3 + 1 = -2, so the probe
+# is (5,3); DECOYS at (5,2) (dc = -3) and (4,3) (delta_row = 0). Known answer: find_mv_stack_ref.py.
+fn test_scan_col_odd_col() {
+    var ctx = mvs_ctx(3, 4, 5);
+    mvs_cell(ctx, 5, 3, 1, 1, 0, 14, 1, 0, 12, 34, 0, 0);
+    mvs_cell(ctx, 5, 2, 1, 1, 0, 14, 1, 0, 56, 56, 0, 0);      # decoy: dc = -3
+    mvs_cell(ctx, 4, 3, 1, 1, 0, 14, 1, 0, 78, 78, 0, 0);      # decoy: delta_row = 0
+    av1_mv_scan_col(ctx, 0 - 3, 0);
+    assert_eq(mvs_num(ctx), 1, "S17 odd MiCol -> one probe");
+    assert_eq(mvs_row(ctx, 0, 0), 12, "S17 probe at (5,3): row 12");
+    assert_eq(mvs_col(ctx, 0, 0), 34, "S17 col 34");
+    assert_eq(mvs_wt(ctx, 0), 4, "S17 weight 4 (len max(2,1) = 2 * 2)");
     return 0;
 }
 # S16: compound GLOBAL_GLOBALMV per-list substitution — gmtype0=ROTZOOM(>TRANS)
@@ -579,8 +603,9 @@ fn test_scan_compound_global() {
 }
 
 # ================================================================
-# find_mv_stack driver (7.10.2) + extra_search (7.10.2.11) + context_and_clamping
-# (7.10.2.14) + clamp (spec 6). Known answers from scratchpad/mvdriver_ref.py.
+# find_mv_stack driver (7.10.2) + extra_search (7.10.2.12) + context_and_clamping
+# (7.10.2.14) + clamp (spec 6). Known answers from scripts/refs/find_mv_stack_ref.py (0.8.5; first from the
+# lost scratchpad mvdriver_ref.py).
 # ================================================================
 # D1: an above (NEARESTMV) + a left (NEWMV) neighbour -> 2 spatial candidates,
 # CloseMatches 2, the REF_CAT_LEVEL weight bonus, NewMvContext 4.
@@ -737,6 +762,57 @@ fn test_driver_clamp_negative() {
     assert_eq(mvs_num(ctx), 1, "D10 num 1");
     assert_eq(mvs_row(ctx, 0, 0), 0 - 256, "D10 clamped row -256 (top bound)");
     assert_eq(mvs_col(ctx, 0, 0), 0 - 256, "D10 clamped col -256 (left bound)");
+    return 0;
+}
+
+# D11 (0.8.5): compound extra search's OTHER branch. With one stack entry, 7.10.2.12 appends
+# combinedMvs[1] when combinedMvs[0] repeats the entry (D7) and combinedMvs[0] otherwise — no case
+# took "otherwise", and appending [1] there survived. The one compound candidate comes from the FAR
+# row (-3 -> probe (1,5)); the above row holds a single-ref LAST neighbour, so the extra search
+# builds combined[0] = ((20,21), (20,21)) (RefIdMvs[0], RefDiffMvs[1]) and combined[1] = the
+# GlobalMvs ((30,40), (50,60)). Known answers: find_mv_stack_ref.py.
+fn test_driver_compound_extra_miss() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_global(ctx, 30, 40, 50, 60, 0, 0);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, AV1_REF_NONE, 20, 21, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, AV1_REF_NONE, 20, 21, 0, 0);
+    mvs_cell(ctx, 1, 5, 1, 1, 3, AV1_NEW_NEWMV, 1, 2, 5, 6, 7, 8);
+    mvs_cell(ctx, 1, 6, 1, 1, 3, AV1_NEW_NEWMV, 1, 2, 5, 6, 7, 8);
+    av1_find_mv_stack(ctx, 1);
+    assert_eq(mvs_num(ctx), 2, "D11 num 2");
+    assert_eq(mvs_row(ctx, 0, 0), 5, "D11 entry0 list0 row 5 (far)");
+    assert_eq(mvs_row(ctx, 0, 1), 7, "D11 entry0 list1 row 7");
+    assert_eq(mvs_wt(ctx, 0), 4, "D11 entry0 weight 4 (far: no bonus)");
+    assert_eq(mvs_row(ctx, 1, 0), 20, "D11 entry1 = combined[0] list0 row 20 (not the global 30)");
+    assert_eq(mvs_col(ctx, 1, 0), 21, "D11 entry1 list0 col 21");
+    assert_eq(mvs_row(ctx, 1, 1), 20, "D11 entry1 list1 row 20 (not the global 50)");
+    assert_eq(mvs_col(ctx, 1, 1), 21, "D11 entry1 list1 col 21");
+    assert_eq(mvs_wt(ctx, 1), 2, "D11 entry1 weight 2");
+    assert_eq(av1_mvctx_close_matches(ctx), 0, "D11 CloseMatches 0");
+    assert_eq(av1_mvctx_total_matches(ctx), 1, "D11 TotalMatches 1 (the far row)");
+    assert_eq(av1_mvctx_newmv_context(ctx), 1, "D11 NewMvContext min(1,1)");
+    assert_eq(av1_mvctx_refmv_context(ctx), 1, "D11 RefMvContext 1");
+    assert_eq(av1_mvctx_drl_context(ctx, 0), 2, "D11 drl0 2 (w0 < REF_CAT_LEVEL)");
+    return 0;
+}
+# D12 (0.8.5): compound with NO stack entry — both combined pairs are appended, in order; swapping
+# them survived. Same neighbour as D11 without the far one: entry0 = ((20,21), (20,21)), entry1 = the
+# GlobalMvs ((30,40), (50,60)).
+fn test_driver_compound_extra_empty() {
+    var ctx = mvs_ctx(3, 4, 4);
+    av1_mvctx_set_global(ctx, 30, 40, 50, 60, 0, 0);
+    mvs_cell(ctx, 3, 4, 1, 1, 3, 14, 1, AV1_REF_NONE, 20, 21, 0, 0);
+    mvs_cell(ctx, 3, 5, 1, 1, 3, 14, 1, AV1_REF_NONE, 20, 21, 0, 0);
+    av1_find_mv_stack(ctx, 1);
+    assert_eq(mvs_num(ctx), 2, "D12 num 2 (both combined pairs)");
+    assert_eq(mvs_row(ctx, 0, 0), 20, "D12 entry0 list0 row 20");
+    assert_eq(mvs_row(ctx, 0, 1), 20, "D12 entry0 list1 row 20");
+    assert_eq(mvs_row(ctx, 1, 0), 30, "D12 entry1 = GlobalMvs[0] row 30");
+    assert_eq(mvs_col(ctx, 1, 0), 40, "D12 entry1 list0 col 40");
+    assert_eq(mvs_row(ctx, 1, 1), 50, "D12 entry1 = GlobalMvs[1] row 50");
+    assert_eq(mvs_col(ctx, 1, 1), 60, "D12 entry1 list1 col 60");
+    assert_eq(mvs_wt(ctx, 0), 2, "D12 weight 2");
+    assert_eq(av1_mvctx_total_matches(ctx), 0, "D12 TotalMatches 0");
     return 0;
 }
 
@@ -1903,7 +1979,7 @@ fn main() {
     test_stack_add_single();
     test_stack_full();
     test_stack_add_compound();
-    test_group("MV candidate stack: sort (7.10.2.13) + reset");
+    test_group("MV candidate stack: sort (7.10.2.11) + reset");
     test_stack_sort();
     test_stack_sort_subrange();
     test_stack_sort_compound();
@@ -1926,6 +2002,7 @@ fn main() {
     test_scan_row_usestep16();
     test_scan_row_odd_parity();
     test_scan_col_odd_parity();
+    test_scan_col_odd_col();
     test_group("temporal-MV producer (0.7.102)");
     test_tmvs_save();
     test_mv_projection_leaves();
@@ -1952,6 +2029,8 @@ fn main() {
     test_driver_drl_z2();
     test_driver_signbias_append();
     test_driver_clamp_negative();
+    test_driver_compound_extra_miss();
+    test_driver_compound_extra_empty();
     test_group("MI-grid addressing (absolute — accessor-independent)");
     test_mi_grid_addressing();
     test_group("MI-grid population (5.11.4 storage loops)");

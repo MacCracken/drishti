@@ -10,13 +10,13 @@
 #     the self-contained leaves the rest of the process composes;
 #   * (0.7.63) THE CANDIDATE STACK — the RefStackMv/WeightStack record, the
 #     dedup-or-append core of the search-stack processes (7.10.2.8/9), the stable
-#     sort (7.10.2.13), and has_newmv;
+#     sort (7.10.2.11), and has_newmv;
 #   * (0.7.64) THE SPATIAL NEIGHBOUR SCANS — scan_row/col/point (7.10.2.2/3/4) +
 #     add_ref_mv_candidate (7.10.2.7) + the search-stack selection preambles,
 #     reading a per-4x4 MI grid (Av1MiRec) bundled with the block/tile context in
 #     an Av1MvCtx. See the third section of this file.
 #   * (0.7.65) THE find_mv_stack DRIVER — the 7.10.2 scan sequence + extra_search
-#     (7.10.2.11/12) + context_and_clamping (7.10.2.14) + clamp_mv_row/col.
+#     (7.10.2.12/13) + context_and_clamping (7.10.2.14) + clamp_mv_row/col.
 #   * (0.7.74) THE MI-GRID POPULATION — av1_mi_store_mode / av1_mi_store_final, the
 #     spec 5.11.4 decode_block storage loops. This closes the producer->consumer
 #     loop: until now the grid the scans read was caller/test-built.
@@ -54,7 +54,7 @@
 # AV1_WARPEDMODEL_PREC_BITS / AV1_GM_* / AV1_INTRA_FRAME), drishti (DR_OK).
 #
 # Derived from the AV1 spec §7.10.2.1 (setup global MV) + §7.10.2.10 (lower
-# precision) + §4 (Round2Signed) + §7.10.2.8/9 (search stack) + §7.10.2.13
+# precision) + §4 (Round2Signed) + §7.10.2.8/9 (search stack) + §7.10.2.11
 # (sorting) + §7.10.2.2/3/4 (spatial scans) + §7.10.2.7 (add ref MV) + §7.10.4 (warp
 # samples). The MI grid the scans read is populated by av1_mi_store_mode / _final below
 # (0.7.74). The TEMPORAL scan (7.10.2.5/6) remains the one deferral (roadmap.md).
@@ -184,7 +184,7 @@ fn av1_setup_global_mv(out_mv, fh, ref, mi_col, mi_row, mi_size): i64 {
 # THE MV CANDIDATE STACK (spec 7.10.2) — the ordered list of candidate MVs that
 # find_mv_stack builds for an inter block, plus the two operations that manage it:
 # the dedup-or-append core of the search-stack processes (7.10.2.8 / 7.10.2.9) and
-# the stable sort (7.10.2.13). This is the STACK MECHANICS; the neighbour scans
+# the stable sort (7.10.2.11). This is the STACK MECHANICS; the neighbour scans
 # (scan_row/col/point) that FEED candidates into it read the per-block MI grid
 # (RefFrames / Mvs / YModes / MiSizes) that inter mode-info produces, the
 # temporal scan (7.10.2.5/6, 0.7.104) reads MotionFieldMvs, and the find_mv_stack
@@ -324,7 +324,7 @@ fn av1_mv_stack_add(mvs, r0, c0, r1, c1, is_compound, cand_mode, weight, allow_h
 }
 
 # av1_mv_stack_swap — swap entries i and j (weight + the MV components for
-# list = 0..isCompound), per swap_stack in the sorting process (7.10.2.13). For
+# list = 0..isCompound), per swap_stack in the sorting process (7.10.2.11). For
 # single prediction (is_compound = 0) only list 0 is touched (list 1 is never read).
 fn av1_mv_stack_swap(mvs, i, j, is_compound): i64 {
     var tw = load64(mvs + AV1MVS_WEIGHT + (i * 8));
@@ -348,7 +348,7 @@ fn av1_mv_stack_swap(mvs, i, j, is_compound): i64 {
 }
 
 # ================================================================
-# av1_mv_stack_sort — the sorting process (spec 7.10.2.13): a STABLE bubble sort of
+# av1_mv_stack_sort — the sorting process (spec 7.10.2.11): a STABLE bubble sort of
 # RefStackMv[start..end) into DESCENDING weight order (heaviest first). Each pass
 # bubbles a larger-weighted entry up past a lighter neighbour and records the last
 # swap position as the next pass's end, so an already-sorted tail is not re-scanned.
@@ -1151,7 +1151,7 @@ fn av1_mv_scan_point(ctx, delta_row, delta_col, is_compound): i64 {
 
 # ================================================================
 # THE find_mv_stack DRIVER (spec 7.10.2) + its remaining sub-processes: extra
-# search (7.10.2.11), add extra MV candidate (7.10.2.12), context and clamping
+# search (7.10.2.12), add extra MV candidate (7.10.2.13), context and clamping
 # (7.10.2.14), and clamp_mv_row/col (spec 6). This orchestrates the pieces built
 # above — setup_global_mv (the caller pre-sets GlobalMvs), the spatial scans, the
 # stack sort — into the full candidate list + the entropy contexts (NewMv / RefMv
@@ -1178,7 +1178,7 @@ fn av1_clamp_mv_col(ctx, mvec, border): i64 {
     return av1_clip3(mb_left - border, mb_right + border, mvec);
 }
 
-# add extra MV candidate (7.10.2.12) — examine a neighbour for partial-match MVs.
+# add extra MV candidate (7.10.2.13) — examine a neighbour for partial-match MVs.
 # Single: sign-adjust each list's MV (per RefFrameSignBias) and append (dedup vs
 # RefStackMv[idx][0], weight 2) — no lowering, no NewMvCount. Compound: bucket each
 # matching MV into RefIdMvs (same frame) or RefDiffMvs (different frame, sign-
@@ -1264,7 +1264,7 @@ fn av1_mv_store_combined(ctx, mvs, dst_idx, comb_idx): i64 {
     return DR_OK;
 }
 
-# extra search (7.10.2.11) — fill RefStackMv to 2 candidates when the scans found
+# extra search (7.10.2.12) — fill RefStackMv to 2 candidates when the scans found
 # fewer. Two-pass partial-match search (row above, then column left) via
 # add_extra_mv_candidate, then global-motion fill. Single prediction: the row-above
 # / col-left matches went straight on the stack; positions up to index 1 are filled

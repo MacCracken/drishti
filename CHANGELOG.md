@@ -4,6 +4,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.5 bite 12: the motion-vector and superres reference ports, restored; five unwitnessed MV lines found
+
+**Every known answer in `src/`, `tests/` and `docs/` now comes from a committed port.** The last lost generators
+were the 0.7.62–0.7.65 MV ports (`mv_ref.py`, `mvscan_ref.py`, `mvdriver_ref.py`) and the 0.7.85–0.7.87 superres
+ones (a checksum script, `resize_ref.py`, `upscale_geom.py`, `sr_ref.py`). Four ports replace them, each transcribed
+from the spec and, where a second implementation is comparable, asserting it equal:
+- **`mv_ref.py`** covers `setup_global_mv` (7.10.2.1), `lower_mv_precision` (7.10.2.10) and `Round2Signed`. It
+  transcribes libaom's `gm_get_motion_vector` and `lower_mv_precision` (`ref/aom`) and asserts them equal to the
+  spec on 64,579 legal inputs. It also records the two inputs where they differ, neither of which a legal header
+  produces:
+  - `allow_high_precision_mv` with `force_integer_mv`;
+  - an odd low-precision translation, which `tests/av1_mv.tcyr`'s "translation lp 4/-2" case is. drishti follows
+    the spec there.
+- **`find_mv_stack_ref.py`** covers the spatial candidate list (7.10.2: the scans, both search stacks, sorting,
+  extra search, context and clamping, `clamp_mv_row` / `_col`). It is spec-only, deliberately: libaom's
+  `setup_ref_mv_list` weights rows by `processed_rows`, folds rows -3 and -5 into one loop, and decides the
+  top-right probe from partition geometry. dav1d keeps its own grid. Neither is comparable call for call; the
+  composition is checked by the bit-exact corpus. The arithmetic cases (644, 656, the ±256 / 576 clamps) are
+  derived by hand.
+- **`upscale_filter_ref.py`** computes the 64 `Upscale_Filter` checksums from the spec's table (checked against
+  the spec markdown). `--dav1d` checks that `dav1d_resize_filter` is that table negated, entry for entry.
+- **`superres_upscale_ref.py`** compares dav1d's `resize_c` (split `src_x` / `mx`) and `scale_fac` /
+  `get_upscale_x0` with 7.16. They are equal on all 525,824 width pairs superres can produce up to 1024, and on
+  20,000 random rows. It reproduces the row, geometry, chain and whole-frame answers. It also asserts
+  `test_superres_mi_clamp`'s, which `superres_ref.py` had only printed.
+
+**What it found: five Cyrius mutants that survived `tests/av1_mv.tcyr`.** The decoder's code is right: the spec
+port agrees with it, and real streams decode bit-exact. But the tests did not witness these lines:
+- **The parity terms of the far scans.** S14 (`scan_row(-3)` at odd row and column) laid ONE MV over cells (3,5)
+  and (3,6), so a probe of (3,6) — `delta_col = 1` with the parity dropped — passed. S15 did the same down a
+  column for `delta_row`. No case had `scan_col(-3)` at an odd column, so its column term was free.
+- **Both branches of compound extra search's combine that D7 does not take.**
+  - With one stack entry the spec appends `combinedMvs[1]` when `combinedMvs[0]` repeats it, and
+    `combinedMvs[0]` otherwise. D7 only repeats.
+  - With none, both pairs are appended in order.
+
+  Taking `[1]` on a miss, and swapping the order, both survived.
+
+The fix:
+- S14 and S15 now carry DECOY cells where a wrong probe would land.
+- **S17** is new (`scan_col(-3)` at an odd column).
+- **D11** (the miss branch, its one candidate from the far row) and **D12** (the empty branch) are new.
+
+All five mutants are red now. The port's two surviving canaries showed the gaps first: the row-parity term and
+the combine miss branch. The port mirrors every case.
+
+**Verified.**
+- **Cyrius mutants**, each in an isolated tree copy: 19 red, plus two green controls.
+  - the five above, plus the row term of `scan_row`'s parity;
+  - global MV: `x` from `mi_row`, the flooring `Round2`, the translation shift;
+  - lowering: the `force_integer_mv` rounding, an odd negative pushed away from zero;
+  - the `find_mv_stack` driver: the `REF_CAT_LEVEL` bonus, the clamp border, the DRL `z = 2`;
+  - `scan_row`: the `useStep16` threshold;
+  - superres: the row accumulator start, the step's rounding term, `x0`'s `+ 128`, and two filter taps swapped
+    with the row sum kept.
+- **Port canaries:** 22, all red on the assertion they target, none on an import or path error. Two were green
+  until the new cases (the row-parity term and the combine miss branch): they were the MV gaps above.
+- **Gates:** 44 suites, 31,882 suite assertions (+27, all in `tests/av1_mv.tcyr`) + 7,416 fuzz; `make conformance`
+  3971 / 0 / 0 / 0, unchanged. `src/` changes are comments only.
+
+**Also fixed: spec section numbers.**
+- drishti cited sorting, extra search and add extra MV candidate as 7.10.2.13, .11 and .12. The spec's own
+  cross-references number them .11, .12 and .13. Fixed in `src/av1_mv.cyr` and `src/av1_frame.cyr`
+  (comments only), `tests/av1_mv.tcyr`, `tests/av1_intertile.tcyr`, `docs/sources.md`, the roadmap and
+  `state.md`.
+- `docs/sources.md` no longer calls the temporal scan deferred; it landed in 0.7.104.
+- Two `tests/av1_intermode.tcyr` citations named `scratchpad/nbctx_ref.py`, a port that has been in
+  `scripts/refs/` all along.
+
 ### Added — 0.8.5 bite 11: the motion-compensation reference ports, restored from the spec and dav1d
 
 **The MC suites' known answers come from committed ports again, and now from the SPEC, not from one

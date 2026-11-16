@@ -1443,8 +1443,8 @@ fn its_blk_nearest_ref(ref): i64 {
 # Build + encode + decode a 128x128 four-SB inter tile whose ALTREF order hint is `altref_hint`
 # (the ONLY knob). Layout: SB1/SB2/SB3 = NEWMV ref ALTREF, MV (20,40) (they decode to (20,40)
 # exactly); SB4 (bottom-right) = NEARESTMV ref LAST. SB4's neighbours (SB2 above, SB3 left) are all
-# ref ALTREF != LAST, so SB4 finds ZERO full-match candidates -> extra_search (7.10.2.11) fires and
-# examines them as partial matches: each is sign-adjusted per RefFrameSignBias (7.10.2.12) before
+# ref ALTREF != LAST, so SB4 finds ZERO full-match candidates -> extra_search (7.10.2.12) fires and
+# examines them as partial matches: each is sign-adjusted per RefFrameSignBias (7.10.2.13) before
 # being appended. With LAST forward (hint 2 < OrderHint 4) and ALTREF `altref_hint`, the bias
 # differs iff ALTREF is backward -> SB4's NEARESTMV predictor is +/- (20,40). Returns the decode
 # tile (read SB4's MI cell + reconstructed pixels from it). The gradient ref is in BOTH slots
@@ -1512,7 +1512,7 @@ fn its_signbias_tile(altref_hint): i64 {
     return dt;
 }
 # THE SIGN-BIAS MV-NEGATION WITNESS (0.7.x): the FULL chain — OrderHints -> av1_frame_sign_bias ->
-# tile ctx -> find_mv_stack extra_search -> the 7.10.2.12 negation -> SB4's NEARESTMV predictor ->
+# tile ctx -> find_mv_stack extra_search -> the 7.10.2.13 negation -> SB4's NEARESTMV predictor ->
 # the DECODED block's MV and pixels. Cross-bias flips the neighbour MV's sign; the ONLY input that
 # changes between the two decodes is ALTREF's order hint. (D9 in av1_mv.tcyr pins the negation at
 # the find_mv_stack unit level with a hand-set bias; this proves it survives a real derive+decode.)
