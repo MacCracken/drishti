@@ -602,6 +602,20 @@ fn dr_ue_write(bw, value): i64 {
     return dr_bw_put_bits(bw, x, lz + 1);
 }
 
+# Write uvlc() — AV1 4.10.3, the inverse of dr_uvlc_read: exp-Golomb (the ue(v) code) for value in [0, 2^32 - 2], and
+# for value 2^32 - 1 the reader's escape, 32 leading zeros and the terminating 1 with no suffix. Outside [0, 2^32 - 1]
+# sets sticky DR_ERR_BAD_VLC. Returns DR_OK / error code.
+fn dr_uvlc_write(bw, value): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }
+    if (value == 0xFFFFFFFF) {
+        var rc = dr_bw_put_bits(bw, 0, 32);
+        if (rc != DR_OK) { return rc; }
+        return dr_bw_put_bit(bw, 1);
+    }
+    return dr_ue_write(bw, value);
+}
+
 # Write se(v). value must be in [-(2^31 - 1), 2^31 - 1] (H.264 9.1.1);
 # out of range sets sticky DR_ERR_BAD_VLC. Mapping: v > 0 -> 2v - 1,
 # v <= 0 -> -2v. Returns DR_OK / error code.

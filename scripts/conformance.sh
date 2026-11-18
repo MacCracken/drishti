@@ -253,6 +253,8 @@ skip_external() { # reason
     for c in $PUBLISHED_MKV; do skip_case "$c" "$1"; done
     for c in $BD_CASES; do skip_case "$c" "$1"; done
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
+    for c in $WRITER_CASES; do skip_case "$c" "$1"; done
+    skip_case "rewrite-published+generated" "$1"
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
 finish() {
@@ -339,6 +341,14 @@ cyrius build programs/conformance.cyr build/drishti-conformance >/dev/null 2>&1 
 # the header probe proves a delta case's stream really carries deltas before it is scored.
 cyrius build programs/vector-probe.cyr build/drishti-vector-probe >/dev/null 2>&1 || {
     echo "conformance: vector-probe build FAILED"; exit 1; }
+# the header writers' corpus check (programs/hdr-rewrite.cyr, the "header writers" sections)
+cyrius build programs/hdr-rewrite.cyr build/drishti-hdr-rewrite >/dev/null 2>&1 || {
+    echo "conformance: hdr-rewrite build FAILED"; exit 1; }
+# the streams this run generates are the ones newer than this stamp (the header-writer rewrite reads only those: an
+# .ivf a previous run left in $WORK is never scored)
+mkdir -p "$WORK"
+HDR_STAMP="$WORK/.run-stamp"
+: > "$HDR_STAMP"
 echo "=== drishti conformance ==="
 # A committed MULTI-FRAME reproducer: 6 frames with their per-frame aomdec MD5s, one per
 # line. Runs anywhere. hard_n = how many leading frames are HARD gates; the rest are xfail.
@@ -567,6 +577,64 @@ refused_case() { # name
 }
 echo "--- refused streams: what libaom and dav1d refuse, refused for the same reason (no libaom needed) ---"
 for c in $REFUSED_CASES; do refused_case "$c"; done
+
+# ---- HEADER WRITERS (0.8.6) — src/av1_hdrw.cyr through programs/hdr-rewrite.cyr ----
+# REWRITE: every sequence header and every intra frame header of a stream, parsed and written back, must be exactly the
+# bits it was parsed from. One coded value outside its clip range (a segmentation feature, 5.9.14's Clip3) has two
+# codings of one header: EQUIV — the rewrite parses back to the same record — passes. Inter frame headers are roadmap
+# 0.8.8, and a header naming a reference slot cannot parse against the empty state each header gets, so those are
+# counted, not rewritten; a sequence or intra frame header that does not parse is a failure. One case per stream: the
+# committed reproducers here (no libaom), the published vectors and THIS run's generated streams at the end.
+# WRITER STREAMS: keyframes the writers alone build (TD + sequence header OBU + frame OBU around the tile writer's
+# all-skip DC tile) at 8-bit 4:2:0, monochrome, 10-bit, 4:4:4 and 12-bit 4:2:2, each decoded by drishti to aomdec's
+# bytes, with dav1d agreeing (vs_judge) — the acceptance shape of batch 0.8.6, with no hand-built byte in the stream.
+WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-444-64x64 writer-422-b12-64x64"
+hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_inter=0; hdr_refs=0; hdr_streams=0
+hdr_rewrite_case() { # ivf
+    local f="$1" n out rc sum
+    n=$(basename "$f" .ivf)
+    rm -f build/hdr-rewrite-input.ivf build/hdr-rewrite.emit
+    cp "$f" build/hdr-rewrite-input.ivf 2>/dev/null || { echo "  rewrite $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    out=$(timeout 60 ./build/drishti-hdr-rewrite 2>&1); rc=$?
+    sum=$(echo "$out" | grep '^SUMMARY seq=')
+    if [ "$rc" -ne 0 ] || [ -z "$sum" ]; then
+        echo "  rewrite $n: REGRESSED (exit $rc: a crash, timeout or unreadable stream)"; fail=$((fail+1)); return
+    fi
+    if echo "$out" | grep -qE ' DIFF |UNPARSED'; then
+        echo "  rewrite $n: REGRESSED"; echo "$out" | grep -E ' DIFF |UNPARSED' | head -3 | sed 's/^/    /'
+        fail=$((fail+1)); return
+    fi
+    local v=()
+    read -r -a v <<< "$(echo "$sum" | sed -E 's/.*seq=([0-9]+)\/([0-9]+) intra=([0-9]+)\/([0-9]+) inter_skipped=([0-9]+) equiv=([0-9]+) unparsed=[0-9]+ needs_refs=([0-9]+).*/\1 \2 \3 \4 \5 \6 \7/')"
+    if [ "${#v[@]}" -ne 7 ] || [ "${v[1]}" -eq 0 ]; then
+        echo "  rewrite $n: REGRESSED (no sequence header rewritten: $sum)"; fail=$((fail+1)); return
+    fi
+    hdr_s_ok=$((hdr_s_ok+v[0])); hdr_s_n=$((hdr_s_n+v[1])); hdr_f_ok=$((hdr_f_ok+v[2])); hdr_f_n=$((hdr_f_n+v[3]))
+    hdr_inter=$((hdr_inter+v[4])); hdr_eq=$((hdr_eq+v[5])); hdr_refs=$((hdr_refs+v[6])); hdr_streams=$((hdr_streams+1))
+    pass=$((pass+1))
+}
+hdr_group() { # label ivf... — one rewrite case per stream, then the group's header counts
+    local label="$1" f; shift
+    hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_inter=0; hdr_refs=0; hdr_streams=0
+    for f in "$@"; do [ -f "$f" ] && hdr_rewrite_case "$f"; done
+    echo "  rewrite $label: $hdr_streams streams; sequence headers $hdr_s_ok/$hdr_s_n and intra frame headers" \
+      "$hdr_f_ok/$hdr_f_n bit-exact, $hdr_eq EQUIV; $hdr_inter inter + $hdr_refs reference-naming headers not rewritten"
+}
+writer_streams() {
+    rm -f build/writer-*.ivf
+    : > build/hdr-rewrite.emit
+    timeout 60 ./build/drishti-hdr-rewrite > "$WORK/writer-emit.log" 2>&1
+    rm -f build/hdr-rewrite.emit
+    local c
+    for c in $WRITER_CASES; do
+        rm -f "${WORK:?}/$c.ivf"
+        if [ ! -s "build/$c.ivf" ]; then echo "  $c: SETUP FAILED (the writers emitted no stream)"; fail=$((fail+1)); continue; fi
+        cp "build/$c.ivf" "$WORK/$c.ivf"
+        vs_judge "$c" 1
+    done
+}
+echo "--- header writers: every sequence and intra frame header rewritten bit-exact (committed reproducers) ---"
+hdr_group "committed reproducers" tests/repro/*.ivf tests/repro/refused/*.ivf
 
 # ---- OOM FAULT INJECTION (0.8.5) — scripts/oom-sweep.sh, over the committed reproducers (no libaom needed) ----
 # Every allocation in src/ goes through dr_alloc, and the harness's build/conformance-input.oom = k makes the k-th one
@@ -2423,5 +2491,14 @@ invcase() { # name[:res-suffix]
 }
 echo "--- invalid streams: libaom's fuzz/crash corpus, decoded as its test does (no crash; per unit = libaom) ---"
 for c in $INVALID_CASES; do invcase "$c"; done
+
+echo "--- header writers: the published vectors' and this run's generated streams' headers rewritten bit-exact ---"
+pubivf=()
+for v in $PUBLISHED $PUBLISHED_MKV; do [ -f "$VDIR/$v.ivf" ] && pubivf+=("$VDIR/$v.ivf"); done
+hdr_group "published vectors" "${pubivf[@]}"
+mapfile -t genivf < <(find "$WORK" -maxdepth 1 -name '*.ivf' -newer "$HDR_STAMP" | sort)
+hdr_group "generated this run" "${genivf[@]}"
+echo "--- header writers: streams the writers alone build, decoded by drishti = aomdec = dav1d ---"
+writer_streams
 
 finish

@@ -136,7 +136,8 @@ fn test_av1_fh_reduced_key() {
     assert_eq(av1_fh_frame_is_intra(fh), 1, "FrameIsIntra");
     assert_eq(av1_fh_show_frame(fh), 1, "show_frame");
     assert_eq(av1_fh_showable_frame(fh), 0, "not showable");
-    assert_eq(av1_fh_error_resilient_mode(fh), 0, "reduced leaves error_resilient 0");
+    # 5.9.2 assigns none on the reduced path; libaom (read_uncompressed_header) and dav1d (parse_frame_hdr) set 1
+    assert_eq(av1_fh_error_resilient_mode(fh), 1, "reduced: error_resilient_mode 1, as libaom and dav1d record it");
     assert_eq(av1_fh_show_existing_frame(fh), 0, "not show_existing");
     assert_eq(av1_fh_refresh_frame_flags(fh), 255, "key+show refreshes all slots");
     assert_eq(av1_fh_primary_ref_frame(fh), AV1_PRIMARY_REF_NONE, "intra -> PRIMARY_REF_NONE");

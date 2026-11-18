@@ -4,6 +4,112 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.6 bite 4: the header, OBU and tile group writers — nothing in a stream is hand-built
+
+**The encode lane writes its own headers.** `src/av1_hdrw.cyr` (a new module) is the exact inverse of the two header
+parsers, writing from the same records:
+- `av1_seq_write` inverts `av1_seq_parse`: all of 5.5. That covers reduced still pictures, timing info, the decoder
+  model, every operating point with its tier, delays and initial display delay, frame ids, every tool flag, screen
+  content and integer-MV selection, and colour config in all three profiles.
+- `av1_frame_write_uncompressed_header` inverts `av1_frame_parse_uncompressed_header`: the 5.9.2 header of an intra
+  frame (KEY_FRAME, INTRA_ONLY_FRAME) or a shown existing frame. That covers frame size, superres, render size,
+  uniform and explicit tiles, quantizer deltas and matrices, segmentation, delta q / lf, loop filter deltas, CDEF,
+  restoration, film grain, frame ids, the temporal point, and the buffer removal times for the OBU's own layer. An
+  inter frame's header returns `DR_ERR_UNSUPPORTED` (roadmap 0.8.8).
+- The OBUs: `av1_obu_write`, `av1_td_write_obu`, `av1_seq_write_obu` and `av1_frame_header_write_obu` (5.3.1, with
+  trailing bits); `av1_tile_group_write` (5.11.1: the tg_start / tg_end flag, byte alignment, little-endian
+  `tile_size_minus_1`); `av1_frame_write_obu` (5.10). The IVF writer (`dr_ivf_writer_*`) already existed.
+- Records for the encoder:
+  - `av1_seq_init` picks the profile from the format, the fewest frame size bits, level 31 and 7 order hint bits.
+  - `av1_seq_set_sb128` switches on 128x128 superblocks.
+  - `av1_fh_init_key` builds a shown key frame in one tile, TX_MODE_SELECT, or ONLY_4X4 when lossless.
+  - `av1_fh_set_tiles_uniform` lays out uniform tiles at any legal log2.
+- `dr_uvlc_write` (4.10.3, with the 2^32 - 1 escape) in `src/bits.cyr`.
+
+**The contract: a record the writer accepts is the record its parser reads back, word for word.** It refuses
+(`DR_ERR_BOUNDS`) a value its field cannot carry, and an implied value the record contradicts. It also refuses a
+value in any field the syntax does NOT code. Without that, a header could silently mean a different record from the
+one the encoder built. Such fields:
+- a slot past a count: tile starts, operating points, grain points, AR coefficients, CDEF strengths past
+  `1 << cdef_bits`;
+- a value its condition drops: `cb_mult` with no cb points, `ref_order_hint` without error resilience, a removal
+  time for an operating point that does not hold the OBU's temporal / spatial layer;
+- a derived value: MiCols / MiRows, CodedLossless, an intra frame's identity global motion, the
+  `loop_filter_delta_enabled` that `setup_past_independence` leaves.
+
+The writer refuses what the parser's 6.8.20 checks refuse too: grain point values must increase, and 4:2:0 grain
+covers both chroma planes or neither.
+
+**Decoder change, decode-neutral.** A reduced still picture's frame header now records `error_resilient_mode = 1`.
+5.9.2 assigns none on that path. libaom (`read_uncompressed_header`) and dav1d (`parse_frame_hdr`) both set 1. Every
+condition that reads it is already settled by FrameIsIntra or by `refresh_frame_flags` 0xFF, so no stream decodes
+differently. It is the recorded value, though, so the writer must round trip it.
+
+**Verified:**
+- **The corpus, rewritten** (the new "header writers" sections of `make conformance`, through the new
+  `programs/hdr-rewrite.cyr`): 471 streams, each parsed and written back to its exact bits. They are:
+  - the 34 committed reproducers (no libaom needed);
+  - all 242 published libaom vectors;
+  - the 195 libaom, rav1e and SVT-AV1 streams the run generates.
+
+  That is 538 of 538 sequence headers and 1,107 of 1,108 intra frame headers. The other one is EQUIV: an SVT-AV1
+  segmentation feature coded -64, which the parser clips to -63. It has two codings of one header, and the rewrite
+  parses back to the same record. Counted, not rewritten: 2,941 inter headers, and 57 that name a reference slot
+  (inter frames, and shown existing frames of a slot the empty state does not hold). No sequence or intra header
+  fails to parse.
+- **Streams the writers alone build**, decoded by drishti identically to `aomdec`, with dav1d agreeing: a
+  temporal delimiter, a sequence header OBU, and a frame OBU around the tile writer's all-skip DC tile. Five formats:
+  8-bit 4:2:0 64x64, monochrome 128x64, 10-bit 128x128, 8-bit 4:4:4, 12-bit 4:2:2. This is the shape of 0.8.6's
+  acceptance outcome, a standalone `.ivf` `aomdec` decodes. For now the picture is flat and the superblocks 64x64:
+  real content and the 128x128 encode lane are the next two bites.
+- **Hand-packed known answers**, field by field from the syntax tables: the default sequence header
+  (`00 00 00 F9 57 FF C4 21 80 04`), the key frame header (`10 01 28 00 00 02`), a reduced still picture, the OBU
+  framing and the tile group framing. They are the same bytes aomdec and dav1d decode above.
+
+**Tests:**
+- `tests/av1_hdrw.tcyr`, 557 assertions. Every round trip asserts the parsed record equal to the written one, word
+  for word, plus exact bits consumed, valid trailing bits and an identical rewrite. It covers:
+  - every format `av1_seq_init` accepts, sizes 1x1 to 65536x65536, and every tool, timing and decoder model option;
+  - all 20 uniform tile layouts of a 16 x 8 superblock frame; explicit tiles, including the 4096 x 4608 frames whose
+    area forces two tile rows;
+  - every quantizer, segmentation, delta, loop filter, CDEF, restoration and film grain branch;
+  - superres down to the small-width floor; intra-only frames, shown existing frames, frame ids, and removal times by
+    temporal and spatial layer;
+  - a refusal for every implied, range-limited or uncoded field, each isolated as the record's only fault;
+  - the OBU and tile-group framing, read back by the decoder's own walker and `av1_tile_group_parse`, including a
+    4-tile frame OBU whose header is not byte aligned;
+  - end to end through `av1_decode_obus`: eight cases in five formats, partial superblocks and lossless among them, as
+    one frame OBU and as a frame header plus tile group;
+  - the OOM sweep.
+- `tests/av1_hdrw.fcyr`, a new fuzz harness. 6,000 random records are generated: valid ones, then random field writes
+  in range and just past it, with the derived fields sometimes recomputed. The writer accepts about 40% of them and
+  every accepted record must round trip word for word. Its first run found a leak the unit suite had missed:
+  operating point slots past `operating_points_cnt_minus_1` were never checked.
+
+**Mutation testing:** 145 mutants over the writers and `dr_uvlc_write`, run against both suites, all killed; the
+canary dies first. The first run left 14 survivors, all test gaps:
+- 7 refusal tests passed for the wrong reason, the record holding a second fault (one isolated "diff_uv without
+  separate_uv_delta_q" was in fact refused by its qm_v);
+- 7 cases no test reached. The subtlest: a frame OBU's own byte alignment only matters with several tiles behind a
+  header that is not byte aligned.
+
+The parser's `error_resilient_mode` change is killed by both suites.
+
+**Also found and fixed in the writers, before they shipped:**
+- `av1_fh_init_key` gave a frame past MAX_TILE_AREA (4096 x 4608) a one-tile record, which 5.9.15's minLog2Tiles
+  forbids. It now refuses those as it already refused frames wider than MAX_TILE_WIDTH.
+- `av1_tile_group_write` accepted an empty or negative last tile.
+- The film grain writer emitted 4:2:0 grain on one chroma plane, which the parser refuses.
+
+One new module (47), one new program (`programs/hdr-rewrite.cyr`; four programs).
+
+**Gates:**
+- `make test`: 47 suites, **34,675** assertions (+557).
+- `make fuzz`: **7,422** assertions (4 harnesses, +6).
+- bench, `vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` all green; `dist/drishti.cyr` regenerated.
+- `make conformance`: **4450 matched / 0 known-gap / 0 regressed / 0 skipped**. That is +476: the 471 rewrite cases
+  and the 5 writer streams.
+
 ### Added — 0.8.6 bite 3: the quantizer, the inverse of 7.12.3's dequantization
 
 **The encode lane has a quantizer:** `av1_quantize_block` (`src/av1_fquant.cyr`, a new module) turns a block of

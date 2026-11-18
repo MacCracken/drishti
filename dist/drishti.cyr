@@ -1003,6 +1003,20 @@ fn dr_ue_write(bw, value): i64 {
     return dr_bw_put_bits(bw, x, lz + 1);
 }
 
+# Write uvlc() — AV1 4.10.3, the inverse of dr_uvlc_read: exp-Golomb (the ue(v) code) for value in [0, 2^32 - 2], and
+# for value 2^32 - 1 the reader's escape, 32 leading zeros and the terminating 1 with no suffix. Outside [0, 2^32 - 1]
+# sets sticky DR_ERR_BAD_VLC. Returns DR_OK / error code.
+fn dr_uvlc_write(bw, value): i64 {
+    var e = load64(bw + 24);
+    if (e != DR_OK) { return e; }
+    if (value == 0xFFFFFFFF) {
+        var rc = dr_bw_put_bits(bw, 0, 32);
+        if (rc != DR_OK) { return rc; }
+        return dr_bw_put_bit(bw, 1);
+    }
+    return dr_ue_write(bw, value);
+}
+
 # Write se(v). value must be in [-(2^31 - 1), 2^31 - 1] (H.264 9.1.1);
 # out of range sets sticky DR_ERR_BAD_VLC. Mapping: v > 0 -> 2v - 1,
 # v <= 0 -> -2v. Returns DR_OK / error code.
@@ -2270,9 +2284,27 @@ enum Av1SeqOff {
     AV1_SEQ_ENABLE_JNT_COMP      = 320;
     AV1_SEQ_MATRIX_COEFF         = 328;  # matrix_coefficients (6.4.2; MC_UNSPECIFIED 2 when not described)
     AV1_SEQ_BITS_CONSUMED        = 336;  # reader bit position at the end of sequence_header_obu (payloadBits, 5.3.1)
+    # 0.8.6: every remaining coded field, kept so the record is the whole header and av1_seq_write (src/av1_hdrw.cyr)
+    # can write it back bit for bit; the decode reads none of them.
+    AV1_SEQ_IDD_PRESENT          = 344;  # initial_display_delay_present_flag
+    AV1_SEQ_UNITS_IN_TICK        = 352;  # timing_info: num_units_in_display_tick
+    AV1_SEQ_TIME_SCALE           = 360;  # timing_info: time_scale
+    AV1_SEQ_TICKS_PER_PIC_M1     = 368;  # timing_info: num_ticks_per_picture_minus_1 (equal_picture_interval)
+    AV1_SEQ_BUF_DELAY_LEN_M1     = 376;  # decoder_model_info: buffer_delay_length_minus_1
     AV1_SEQ_OP_IDC               = 384;  # operating_point_idc[32]     -> 640
     AV1_SEQ_OP_DM                = 640;  # dm_present_for_this_op[32]   -> 896
-    AV1_SEQ_SIZE                 = 896;
+    AV1_SEQ_LEVEL_IDX            = 896;  # seq_level_idx[32]            -> 1152
+    AV1_SEQ_TIER                 = 1152; # seq_tier[32] (0 when not coded) -> 1408
+    AV1_SEQ_OP_IDD_PRESENT       = 1408; # initial_display_delay_present_for_this_op[32] -> 1664
+    AV1_SEQ_OP_IDD_M1            = 1664; # initial_display_delay_minus_1[32] -> 1920
+    AV1_SEQ_OP_DEC_DELAY         = 1920; # decoder_buffer_delay[32]     -> 2176
+    AV1_SEQ_OP_ENC_DELAY         = 2176; # encoder_buffer_delay[32]     -> 2432
+    AV1_SEQ_OP_LOW_DELAY         = 2432; # low_delay_mode_flag[32]      -> 2688
+    AV1_SEQ_UNITS_IN_DEC_TICK    = 2688; # decoder_model_info: num_units_in_decoding_tick
+    AV1_SEQ_COLOR_DESC           = 2696; # color_description_present_flag
+    AV1_SEQ_COLOR_PRIMARIES      = 2704; # color_primaries (CP_UNSPECIFIED 2 when not described)
+    AV1_SEQ_TRANSFER             = 2712; # transfer_characteristics (TC_UNSPECIFIED 2 when not described)
+    AV1_SEQ_SIZE                 = 2720;
 }
 
 # ================================================================
@@ -2282,17 +2314,18 @@ enum Av1SeqOff {
 # ================================================================
 
 # timing_info() — 5.5.3. Stores equal_picture_interval (the frame header
-# consults it to decide whether temporal_point_info is coded). The tick
-# counts are display concerns and are discarded.
+# consults it to decide whether temporal_point_info is coded) and the tick
+# counts (display concerns the decode ignores; kept for av1_seq_write).
 fn av1_timing_info_skip(br, s): i64 {
-    dr_br_read_bits(br, 32);            # num_units_in_display_tick f(32)
-    dr_br_read_bits(br, 32);            # time_scale                f(32)
+    store64(s + AV1_SEQ_UNITS_IN_TICK, dr_br_read_bits(br, 32));   # num_units_in_display_tick f(32)
+    store64(s + AV1_SEQ_TIME_SCALE, dr_br_read_bits(br, 32));      # time_scale                f(32)
     var equal = dr_br_read_bit(br);     # equal_picture_interval    f(1)
     store64(s + AV1_SEQ_EQUAL_PIC_INT, equal);
     if (equal) {
         var ticks = 0;
         var rc = dr_uvlc_read(br, &ticks);   # num_ticks_per_picture_minus_1 uvlc()
         if (rc != DR_OK) { return rc; }
+        store64(s + AV1_SEQ_TICKS_PER_PIC_M1, ticks);
     }
     return dr_br_err(br);
 }
@@ -2303,18 +2336,19 @@ fn av1_timing_info_skip(br, s): i64 {
 # *out_bdl_m1; the decoding-tick count is discarded.
 fn av1_decoder_model_info_skip(br, s, out_bdl_m1): i64 {
     store64(out_bdl_m1, dr_br_read_bits(br, 5));   # buffer_delay_length_minus_1 f(5)
-    dr_br_read_bits(br, 32);   # num_units_in_decoding_tick             f(32)
+    store64(s + AV1_SEQ_BUF_DELAY_LEN_M1, load64(out_bdl_m1));
+    store64(s + AV1_SEQ_UNITS_IN_DEC_TICK, dr_br_read_bits(br, 32));   # num_units_in_decoding_tick f(32)
     store64(s + AV1_SEQ_BRT_LEN, dr_br_read_bits(br, 5) + 1);   # buffer_removal_time_length_minus_1 f(5)
     store64(s + AV1_SEQ_FPT_LEN, dr_br_read_bits(br, 5) + 1);   # frame_presentation_time_length_minus_1 f(5)
     return dr_br_err(br);
 }
 
 # operating_parameters_info(op) — 5.5.5. n = buffer_delay_length_minus_1
-# + 1 (at most 32, always legal for dr_br_read_bits). All discarded.
-fn av1_operating_parameters_info_skip(br, bdl_m1): i64 {
-    dr_br_read_bits(br, bdl_m1 + 1);   # decoder_buffer_delay[op] f(n)
-    dr_br_read_bits(br, bdl_m1 + 1);   # encoder_buffer_delay[op] f(n)
-    dr_br_read_bit(br);                # low_delay_mode_flag[op]  f(1)
+# + 1 (at most 32, always legal for dr_br_read_bits). Kept for av1_seq_write.
+fn av1_operating_parameters_info_skip(br, s, op, bdl_m1): i64 {
+    store64(s + AV1_SEQ_OP_DEC_DELAY + (op * 8), dr_br_read_bits(br, bdl_m1 + 1));   # decoder_buffer_delay[op] f(n)
+    store64(s + AV1_SEQ_OP_ENC_DELAY + (op * 8), dr_br_read_bits(br, bdl_m1 + 1));   # encoder_buffer_delay[op] f(n)
+    store64(s + AV1_SEQ_OP_LOW_DELAY + (op * 8), dr_br_read_bit(br));                # low_delay_mode_flag[op]  f(1)
     return dr_br_err(br);
 }
 
@@ -2354,6 +2388,9 @@ fn av1_color_config_parse(br, profile, s): i64 {
         tc = dr_br_read_bits(br, 8);        # transfer_characteristics f(8)
         mc = dr_br_read_bits(br, 8);        # matrix_coefficients      f(8)
     }
+    store64(s + AV1_SEQ_COLOR_DESC, desc);
+    store64(s + AV1_SEQ_COLOR_PRIMARIES, cp);
+    store64(s + AV1_SEQ_TRANSFER, tc);
     # kept for the film grain output process: clip_to_restricted_range widens chroma to the luma range
     # when matrix_coefficients is MC_IDENTITY (7.18.3.5).
     store64(s + AV1_SEQ_MATRIX_COEFF, mc);
@@ -2468,7 +2505,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
         # 5.5.1 reduced path: a single implied operating point; all the
         # timing/model/scalability machinery is absent (defaults 0, set
         # by memset). operating_point_idc[0] = 0, dm_present_op[0] = 0.
-        dr_br_read_bits(br, 5);             # seq_level_idx[0] f(5) (discard)
+        store64(s + AV1_SEQ_LEVEL_IDX, dr_br_read_bits(br, 5));   # seq_level_idx[0] f(5)
     } else {
         var timing = dr_br_read_bit(br);    # timing_info_present_flag f(1)
         store64(s + AV1_SEQ_TIMING_PRESENT, timing);
@@ -2489,6 +2526,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
             }
         }
         var idd_present = dr_br_read_bit(br);   # initial_display_delay_present_flag f(1)
+        store64(s + AV1_SEQ_IDD_PRESENT, idd_present);
         var ops_m1 = dr_br_read_bits(br, 5);    # operating_points_cnt_minus_1 f(5)
         store64(s + AV1_SEQ_OP_CNT_M1, ops_m1);
         if (dr_br_err(br) != DR_OK) {
@@ -2501,14 +2539,15 @@ fn av1_seq_parse(buf, len, out_err): i64 {
             var idc = dr_br_read_bits(br, 12);  # operating_point_idc[i] f(12)
             store64(s + AV1_SEQ_OP_IDC + (i * 8), idc);
             var level = dr_br_read_bits(br, 5); # seq_level_idx[i]       f(5)
+            store64(s + AV1_SEQ_LEVEL_IDX + (i * 8), level);
             if (level > 7) {
-                dr_br_read_bit(br);             # seq_tier[i] f(1) (else implied 0)
+                store64(s + AV1_SEQ_TIER + (i * 8), dr_br_read_bit(br));   # seq_tier[i] f(1) (else implied 0)
             }
             if (dm_present) {
                 var dm_this = dr_br_read_bit(br);   # decoder_model_present_for_this_op[i] f(1)
                 store64(s + AV1_SEQ_OP_DM + (i * 8), dm_this);
                 if (dm_this) {
-                    var rc2 = av1_operating_parameters_info_skip(br, bdl_m1);
+                    var rc2 = av1_operating_parameters_info_skip(br, s, i, bdl_m1);
                     if (rc2 != DR_OK) {
                         store64(out_err, rc2);
                         return 0;
@@ -2517,8 +2556,9 @@ fn av1_seq_parse(buf, len, out_err): i64 {
             }
             if (idd_present) {
                 var idd_this = dr_br_read_bit(br);  # initial_display_delay_present_for_this_op[i] f(1)
+                store64(s + AV1_SEQ_OP_IDD_PRESENT + (i * 8), idd_this);
                 if (idd_this) {
-                    dr_br_read_bits(br, 4);         # initial_display_delay_minus_1[i] f(4)
+                    store64(s + AV1_SEQ_OP_IDD_M1 + (i * 8), dr_br_read_bits(br, 4));   # initial_display_delay_minus_1
                 }
             }
             if (dr_br_err(br) != DR_OK) {
@@ -2887,7 +2927,15 @@ enum Av1FhOff {
     AV1FH_MI_COL_STARTS          = 2656;  # [65]          -> 3176
     AV1FH_MI_ROW_STARTS          = 3176;  # [65]          -> 3696
     AV1FH_GRAIN                  = 3712;  # film_grain_params block (Av1FgOff, AV1FG_SIZE) -> 5232
-    AV1FH_SIZE                   = 5232;
+    # 0.8.6: the coded fields the decode never reads, kept so the record is the whole header and
+    # av1_frame_write_uncompressed_header (src/av1_hdrw.cyr) writes it back bit for bit
+    AV1FH_FORCE_INT_MV_CODED     = 5232;  # the force_integer_mv bit as coded (an intra frame forces 1 after it)
+    AV1FH_DISPLAY_FRAME_ID       = 5240;  # display_frame_id (show_existing_frame with frame ids)
+    AV1FH_PRESENTATION_TIME      = 5248;  # temporal_point_info: frame_presentation_time
+    AV1FH_BRT_PRESENT            = 5256;  # buffer_removal_time_present_flag
+    AV1FH_REF_ORDER_HINT_CODED   = 5264;  # ref_order_hint[ 8 ] as coded (error resilient, partial refresh) -> 5328
+    AV1FH_BUFFER_REMOVAL_TIME    = 5328;  # buffer_removal_time[ 32 ] -> 5584
+    AV1FH_SIZE                   = 5584;
 }
 
 # The film_grain_params() syntax elements (5.9.30), every one, as a block inside the frame header at
@@ -4481,9 +4529,9 @@ fn av1_film_grain_params(br, s, refs, fh): i64 {
 }
 
 # temporal_point_info() — 5.9.31.
-fn av1_temporal_point_info_skip(br, s): i64 {
-    dr_br_read_bits(br, av1_seq_frame_presentation_time_len(s));   # frame_presentation_time f(n)
-    return dr_br_err(br);
+fn av1_temporal_point_info(br, s, fh): i64 {
+    store64(fh + AV1FH_PRESENTATION_TIME, dr_br_read_bits(br, av1_seq_frame_presentation_time_len(s)));
+    return dr_br_err(br);   # frame_presentation_time f(n)
 }
 
 # ================================================================
@@ -4689,7 +4737,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 
     if (reduced) {
         store64(fh + AV1FH_SHOW_EXISTING, 0);
-        # frame_type KEY_FRAME, FrameIsIntra 1, show_frame 1, showable 0.
+        # frame_type KEY_FRAME, FrameIsIntra 1, show_frame 1, showable 0. 5.9.2 assigns no error_resilient_mode on
+        # this path; libaom (read_uncompressed_header) and dav1d (parse_frame_hdr) both set it 1, as the shown key
+        # frame of the full syntax implies. Decode-neutral (every condition reading it is settled by FrameIsIntra or
+        # refresh_frame_flags 0xFF), but it is the recorded value, so the header writer can round trip it.
+        error_resilient = 1;
     } else {
         var show_existing = dr_br_read_bit(br);   # show_existing_frame f(1)
         store64(fh + AV1FH_SHOW_EXISTING, show_existing);
@@ -4698,11 +4750,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             store64(fh + AV1FH_FRAME_TO_SHOW, idx);
             if (av1_seq_decoder_model_present(s)
               && (av1_seq_equal_picture_interval(s) == 0)) {
-                av1_temporal_point_info_skip(br, s);
+                av1_temporal_point_info(br, s, fh);
             }
             store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 0);
             if (av1_seq_frame_id_present(s)) {
-                dr_br_read_bits(br, id_len);   # display_frame_id f(idLen)
+                store64(fh + AV1FH_DISPLAY_FRAME_ID, dr_br_read_bits(br, id_len));   # display_frame_id f(idLen)
             }
             var ft = av1_ref_frame_type(refs, idx);
             store64(fh + AV1FH_FRAME_TYPE, ft);
@@ -4747,7 +4799,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
         show_frame = dr_br_read_bit(br);   # show_frame f(1)
         if (show_frame && av1_seq_decoder_model_present(s)
           && (av1_seq_equal_picture_interval(s) == 0)) {
-            av1_temporal_point_info_skip(br, s);
+            av1_temporal_point_info(br, s, fh);
         }
         if (show_frame) {
             showable_frame = 0;
@@ -4791,6 +4843,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             force_int_mv = dr_br_read_bit(br);   # force_integer_mv f(1)
         }
     }
+    store64(fh + AV1FH_FORCE_INT_MV_CODED, force_int_mv);
     if (frame_is_intra) { force_int_mv = 1; }
     store64(fh + AV1FH_FORCE_INT_MV, force_int_mv);
     if (av1_seq_frame_id_present(s)) {
@@ -4822,6 +4875,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 
     if (av1_seq_decoder_model_present(s)) {
         var brt_present = dr_br_read_bit(br);   # buffer_removal_time_present_flag f(1)
+        store64(fh + AV1FH_BRT_PRESENT, brt_present);
         if (brt_present) {
             var op = 0;
             var op_cnt = av1_seq_op_cnt_minus_1(s);
@@ -4831,7 +4885,8 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
                     var in_temporal = (op_idc >> tid) & 1;
                     var in_spatial = (op_idc >> (sid + 8)) & 1;
                     if ((op_idc == 0) || (in_temporal && in_spatial)) {
-                        dr_br_read_bits(br, av1_seq_buffer_removal_time_len(s));   # buffer_removal_time[op] f(n)
+                        store64(fh + AV1FH_BUFFER_REMOVAL_TIME + (op * 8),
+                          dr_br_read_bits(br, av1_seq_buffer_removal_time_len(s)));   # buffer_removal_time[op] f(n)
                     }
                 }
                 op = op + 1;
@@ -4856,6 +4911,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             var ri2 = 0;
             while (ri2 < AV1_NUM_REF_FRAMES) {
                 var roh = dr_br_read_bits(br, order_hint_bits);   # ref_order_hint[i] f(OrderHintBits)
+                store64(fh + AV1FH_REF_ORDER_HINT_CODED + (ri2 * 8), roh);
                 if (roh != av1_ref_order_hint(refs, ri2)) {
                     store64(refs + AV1REF_VALID + (ri2 * 8), 0);
                 }
@@ -5075,6 +5131,1282 @@ fn av1_frame_type_name(frame_type): i64 {
     if (frame_type == AV1_INTRA_ONLY_FRAME) { return "intra_only"; }
     if (frame_type == AV1_SWITCH_FRAME)     { return "switch"; }
     return "unknown";
+}
+
+# --- av1_hdrw.cyr ---
+
+# @public — drishti AV1: the header WRITERS (the encode lane) — sequence_header_obu (5.5), the uncompressed frame
+# header (5.9.2) of an intra frame or a shown existing frame, the tile group framing (5.11.1), and the OBUs that carry
+# them (5.3.1 / 5.10). Each is the exact inverse of the parser that reads it, writing from the SAME record:
+#   av1_seq_write              <- av1_seq_parse                          (src/av1_seq.cyr,   Av1Seq)
+#   av1_frame_write_uncompressed_header <- av1_frame_parse_uncompressed_header (src/av1_frame.cyr, Av1FrameHeader)
+# so a record a parser produced writes back to the bits it was parsed from (scripts/conformance.sh's "header rewrite"
+# section checks that on every sequence header and intra frame header of the corpus, with programs/hdr-rewrite.cyr),
+# and a record the encoder fills (av1_seq_init / av1_fh_init_key below) writes a header its parser reads back as that
+# record.
+#
+# FLAT module (no includes) — wiring in src/main.cyr, after src/av1_frame.cyr (the records, their accessors and
+# derivations, av1_tile_log2, the seg feature tables) and src/av1_obu.cyr (av1_obu_write_header, trailing bits).
+#
+# Scope: the INTRA frame header (KEY_FRAME and INTRA_ONLY_FRAME) and show_existing_frame — what the encode lane emits
+# through batch 0.8.7. An inter frame's header (references, motion, skip mode, global motion) returns
+# DR_ERR_UNSUPPORTED until the inter encoder needs it (roadmap 0.8.8). Values a field cannot carry, or that its parser
+# would read back as something else, return DR_ERR_BOUNDS: the writer never emits a header that means a different
+# record. That includes the fields the syntax does not code at all — a slot past a count, a strength the frame does
+# not signal, a derived value — which must hold what the parser leaves there (zero, or the default it derives). So for
+# every intra record R it accepts, parsing what it writes gives R back word for word (BITS_CONSUMED aside); a shown
+# existing frame's record is the coded fields only (the parser fills the rest from the reference slot). Every function
+# returns DR_OK or the error, and leaves the bit writer's sticky error set on a writer fault.
+
+# loop_filter_ref_deltas / mode_deltas after setup_past_independence (5.9.2): what an intra frame's deltas are coded
+# against (it has no primary reference frame). Indexed by reference frame, INTRA_FRAME 0 .. ALTREF_FRAME 7.
+fn av1_hdrw_default_ref_delta(i): i64 {
+    if (i == AV1_INTRA_FRAME) { return 1; }
+    if ((i == AV1_GOLDEN_FRAME) || (i == AV1_ALTREF_FRAME) || (i == AV1_ALTREF2_FRAME)) { return 0 - 1; }
+    return 0;
+}
+
+# f(n) with a range check: value must be in [0, 2^n) or the header cannot carry it.
+fn av1_hdrw_f(bw, value, n): i64 {
+    if ((value < 0) || ((n < 63) && (value >= (1 << n)))) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    return dr_bw_put_bits(bw, value, n);
+}
+# a flag: 0 or 1 only
+fn av1_hdrw_bit(bw, value): i64 {
+    if ((value != 0) && (value != 1)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    return dr_bw_put_bit(bw, value);
+}
+# a derived value the record must hold for the parser to read it back (no bits)
+fn av1_hdrw_must(bw, cond): i64 {
+    if (cond == 0) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    return dr_bw_err(bw);
+}
+# words base[from .. to) are 0: slots the syntax does not code, which its parser leaves zeroed — a value there is one
+# the header would drop
+fn av1_hdrw_zero(bw, base, from, to): i64 {
+    var i = from;
+    while (i < to) {
+        if (load64(base + (i * 8)) != 0) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        i = i + 1;
+    }
+    return dr_bw_err(bw);
+}
+
+# ================================================================
+# sequence_header_obu( ) — 5.5.1 .. 5.5.5
+# ================================================================
+
+# color_config( ) — 5.5.2, from the record's BitDepth / mono / color description / range / subsampling / chroma
+# position / separate_uv_delta_q, with the implied fields checked.
+fn av1_hdrw_color_config(bw, s, profile): i64 {
+    var bd = av1_seq_bitdepth(s);
+    if (profile == 2) {
+        if ((bd != 8) && (bd != 10) && (bd != 12)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_bit(bw, bd > 8);                        # high_bitdepth f(1)
+        if (bd > 8) { av1_hdrw_bit(bw, bd == 12); }      # twelve_bit f(1)
+    } else {
+        if ((bd != 8) && (bd != 10)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_bit(bw, bd == 10);                      # high_bitdepth f(1)
+    }
+    var mono = av1_seq_mono(s);
+    if (profile == 1) {
+        av1_hdrw_must(bw, mono == 0);                    # mono_chrome is not coded for profile 1
+    } else {
+        av1_hdrw_bit(bw, mono);                          # mono_chrome f(1)
+    }
+    av1_hdrw_must(bw, av1_seq_num_planes(s) == (3 - (2 * mono)));
+    var desc = load64(s + AV1_SEQ_COLOR_DESC);
+    var cp = load64(s + AV1_SEQ_COLOR_PRIMARIES);
+    var tc = load64(s + AV1_SEQ_TRANSFER);
+    var mc = av1_seq_matrix_coefficients(s);
+    av1_hdrw_bit(bw, desc);                              # color_description_present_flag f(1)
+    if (desc) {
+        av1_hdrw_f(bw, cp, 8);                           # color_primaries f(8)
+        av1_hdrw_f(bw, tc, 8);                           # transfer_characteristics f(8)
+        av1_hdrw_f(bw, mc, 8);                           # matrix_coefficients f(8)
+    } else {
+        av1_hdrw_must(bw, (cp == 2) && (tc == 2) && (mc == 2));   # CP / TC / MC_UNSPECIFIED
+    }
+    var ssx = av1_seq_subsampling_x(s);
+    var ssy = av1_seq_subsampling_y(s);
+    if (mono) {
+        av1_hdrw_bit(bw, av1_seq_color_range(s));       # color_range f(1)
+        av1_hdrw_must(bw, (ssx == 1) && (ssy == 1) && (av1_seq_chroma_position(s) == 0)
+          && (av1_seq_separate_uv_delta_q(s) == 0));
+        return dr_bw_err(bw);
+    }
+    if ((cp == 1) && (tc == 13) && (mc == 0)) {
+        # sRGB: color_range 1 and 4:4:4, both implied
+        av1_hdrw_must(bw, (av1_seq_color_range(s) == 1) && (ssx == 0) && (ssy == 0));
+    } else {
+        av1_hdrw_bit(bw, av1_seq_color_range(s));       # color_range f(1)
+        if (profile == 0) {
+            av1_hdrw_must(bw, (ssx == 1) && (ssy == 1));
+        }
+        if (profile == 1) {
+            av1_hdrw_must(bw, (ssx == 0) && (ssy == 0));
+        }
+        if (profile == 2) {
+            if (bd == 12) {
+                av1_hdrw_bit(bw, ssx);                   # subsampling_x f(1)
+                if (ssx) { av1_hdrw_bit(bw, ssy); } else { av1_hdrw_must(bw, ssy == 0); }   # subsampling_y f(1)
+            } else {
+                av1_hdrw_must(bw, (ssx == 1) && (ssy == 0));
+            }
+        }
+        if (ssx && ssy) {
+            av1_hdrw_f(bw, av1_seq_chroma_position(s), 2);   # chroma_sample_position f(2)
+        } else {
+            av1_hdrw_must(bw, av1_seq_chroma_position(s) == 0);
+        }
+    }
+    av1_hdrw_bit(bw, av1_seq_separate_uv_delta_q(s));   # separate_uv_delta_q f(1)
+    return dr_bw_err(bw);
+}
+
+# The per-operating-point arrays (32 words each) are zero from slot `from` on: slots past the operating points coded.
+fn av1_hdrw_seq_ops_zero(bw, s, from): i64 {
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_IDC, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_LEVEL_IDX, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_TIER, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_DM, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_DEC_DELAY, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_ENC_DELAY, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_LOW_DELAY, from, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_IDD_PRESENT, from, 32);
+    return av1_hdrw_zero(bw, s + AV1_SEQ_OP_IDD_M1, from, 32);
+}
+# the timing_info( ) fields are zero (no timing info coded)
+fn av1_hdrw_seq_timing_zero(bw, s): i64 {
+    return av1_hdrw_must(bw, (load64(s + AV1_SEQ_UNITS_IN_TICK) == 0) && (load64(s + AV1_SEQ_TIME_SCALE) == 0)
+      && (av1_seq_equal_picture_interval(s) == 0) && (load64(s + AV1_SEQ_TICKS_PER_PIC_M1) == 0));
+}
+# the decoder_model_info( ) fields are zero (no decoder model coded)
+fn av1_hdrw_seq_dm_zero(bw, s): i64 {
+    av1_hdrw_must(bw, (av1_seq_decoder_model_present(s) == 0) && (load64(s + AV1_SEQ_BUF_DELAY_LEN_M1) == 0)
+      && (load64(s + AV1_SEQ_UNITS_IN_DEC_TICK) == 0) && (load64(s + AV1_SEQ_BRT_LEN) == 0)
+      && (load64(s + AV1_SEQ_FPT_LEN) == 0));
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_DM, 0, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_DEC_DELAY, 0, 32);
+    av1_hdrw_zero(bw, s + AV1_SEQ_OP_ENC_DELAY, 0, 32);
+    return av1_hdrw_zero(bw, s + AV1_SEQ_OP_LOW_DELAY, 0, 32);
+}
+
+# sequence_header_obu( ) — 5.5.1: the payload syntax, without its trailing bits (av1_seq_write_obu adds them). Like
+# the frame header writer, it refuses a record whose uncoded fields are not what the parser leaves (zero: it starts
+# from a zeroed record and stores only what it reads, and the SELECT_* / CP_UNSPECIFIED defaults it derives).
+fn av1_seq_write(bw, s): i64 {
+    if ((bw == 0) || (s == 0)) { return DR_ERR_BOUNDS; }
+    var profile = av1_seq_profile(s);
+    var still = av1_seq_still(s);
+    var reduced = av1_seq_reduced(s);
+    if ((profile < 0) || (profile > 2) || (reduced && (still == 0))) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    av1_hdrw_f(bw, profile, 3);                          # seq_profile f(3)
+    av1_hdrw_bit(bw, still);                             # still_picture f(1)
+    av1_hdrw_bit(bw, reduced);                           # reduced_still_picture_header f(1)
+    var dm = 0;
+    var bdl_m1 = 0;
+    if (reduced) {
+        av1_hdrw_f(bw, load64(s + AV1_SEQ_LEVEL_IDX), 5);   # seq_level_idx[ 0 ] f(5)
+        # one implied operating point (idc 0, tier 0), no timing, decoder model or display delay
+        av1_hdrw_must(bw, (av1_seq_timing_present(s) == 0) && (av1_seq_op_cnt_minus_1(s) == 0)
+          && (load64(s + AV1_SEQ_IDD_PRESENT) == 0));
+        av1_hdrw_seq_timing_zero(bw, s);
+        av1_hdrw_seq_dm_zero(bw, s);
+        av1_hdrw_must(bw, (av1_seq_op_idc(s, 0) == 0) && (load64(s + AV1_SEQ_TIER) == 0)
+          && (load64(s + AV1_SEQ_OP_IDD_PRESENT) == 0) && (load64(s + AV1_SEQ_OP_IDD_M1) == 0));
+        av1_hdrw_seq_ops_zero(bw, s, 1);
+    } else {
+        var timing = av1_seq_timing_present(s);
+        av1_hdrw_bit(bw, timing);                        # timing_info_present_flag f(1)
+        if (timing) {
+            av1_hdrw_f(bw, load64(s + AV1_SEQ_UNITS_IN_TICK), 32);   # num_units_in_display_tick f(32)
+            av1_hdrw_f(bw, load64(s + AV1_SEQ_TIME_SCALE), 32);      # time_scale f(32)
+            var equal = av1_seq_equal_picture_interval(s);
+            av1_hdrw_bit(bw, equal);                                  # equal_picture_interval f(1)
+            if (equal) {
+                dr_uvlc_write(bw, load64(s + AV1_SEQ_TICKS_PER_PIC_M1));   # num_ticks_per_picture_minus_1 uvlc( )
+            } else {
+                av1_hdrw_must(bw, load64(s + AV1_SEQ_TICKS_PER_PIC_M1) == 0);
+            }
+            dm = av1_seq_decoder_model_present(s);
+            av1_hdrw_bit(bw, dm);                                     # decoder_model_info_present_flag f(1)
+            if (dm) {
+                bdl_m1 = load64(s + AV1_SEQ_BUF_DELAY_LEN_M1);
+                av1_hdrw_f(bw, bdl_m1, 5);                            # buffer_delay_length_minus_1 f(5)
+                av1_hdrw_f(bw, load64(s + AV1_SEQ_UNITS_IN_DEC_TICK), 32);   # num_units_in_decoding_tick f(32)
+                av1_hdrw_f(bw, av1_seq_buffer_removal_time_len(s) - 1, 5);    # buffer_removal_time_length_minus_1
+                av1_hdrw_f(bw, av1_seq_frame_presentation_time_len(s) - 1, 5); # frame_presentation_time_length_m1
+            } else {
+                av1_hdrw_seq_dm_zero(bw, s);
+            }
+        } else {
+            av1_hdrw_seq_timing_zero(bw, s);
+            av1_hdrw_seq_dm_zero(bw, s);
+        }
+        var idd = load64(s + AV1_SEQ_IDD_PRESENT);
+        av1_hdrw_bit(bw, idd);                           # initial_display_delay_present_flag f(1)
+        var ops = av1_seq_op_cnt_minus_1(s);
+        av1_hdrw_f(bw, ops, 5);                          # operating_points_cnt_minus_1 f(5)
+        var i = 0;
+        while ((i <= ops) && (i < 32)) {
+            av1_hdrw_f(bw, av1_seq_op_idc(s, i), 12);    # operating_point_idc[ i ] f(12)
+            var level = load64(s + AV1_SEQ_LEVEL_IDX + (i * 8));
+            av1_hdrw_f(bw, level, 5);                    # seq_level_idx[ i ] f(5)
+            if (level > 7) {
+                av1_hdrw_bit(bw, load64(s + AV1_SEQ_TIER + (i * 8)));   # seq_tier[ i ] f(1)
+            } else {
+                av1_hdrw_must(bw, load64(s + AV1_SEQ_TIER + (i * 8)) == 0);
+            }
+            if (dm) {
+                var dm_this = av1_seq_op_dm_present(s, i);
+                av1_hdrw_bit(bw, dm_this);               # decoder_model_present_for_this_op[ i ] f(1)
+                if (dm_this) {
+                    av1_hdrw_f(bw, load64(s + AV1_SEQ_OP_DEC_DELAY + (i * 8)), bdl_m1 + 1);   # decoder_buffer_delay
+                    av1_hdrw_f(bw, load64(s + AV1_SEQ_OP_ENC_DELAY + (i * 8)), bdl_m1 + 1);   # encoder_buffer_delay
+                    av1_hdrw_bit(bw, load64(s + AV1_SEQ_OP_LOW_DELAY + (i * 8)));            # low_delay_mode_flag
+                } else {
+                    av1_hdrw_must(bw, (load64(s + AV1_SEQ_OP_DEC_DELAY + (i * 8)) == 0)
+                      && (load64(s + AV1_SEQ_OP_ENC_DELAY + (i * 8)) == 0)
+                      && (load64(s + AV1_SEQ_OP_LOW_DELAY + (i * 8)) == 0));
+                }
+            }
+            var idd_this = load64(s + AV1_SEQ_OP_IDD_PRESENT + (i * 8));
+            if (idd) {
+                av1_hdrw_bit(bw, idd_this);              # initial_display_delay_present_for_this_op[ i ] f(1)
+            } else {
+                av1_hdrw_must(bw, idd_this == 0);
+            }
+            if (idd_this) {
+                av1_hdrw_f(bw, load64(s + AV1_SEQ_OP_IDD_M1 + (i * 8)), 4);   # initial_display_delay_minus_1 f(4)
+            } else {
+                av1_hdrw_must(bw, load64(s + AV1_SEQ_OP_IDD_M1 + (i * 8)) == 0);
+            }
+            i = i + 1;
+        }
+        av1_hdrw_seq_ops_zero(bw, s, ops + 1);
+    }
+    var wbits = av1_seq_frame_width_bits(s);
+    var hbits = av1_seq_frame_height_bits(s);
+    if ((wbits < 1) || (wbits > 16) || (hbits < 1) || (hbits > 16)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    av1_hdrw_f(bw, wbits - 1, 4);                        # frame_width_bits_minus_1 f(4)
+    av1_hdrw_f(bw, hbits - 1, 4);                        # frame_height_bits_minus_1 f(4)
+    av1_hdrw_f(bw, av1_seq_width(s) - 1, wbits);         # max_frame_width_minus_1 f(n)
+    av1_hdrw_f(bw, av1_seq_height(s) - 1, hbits);        # max_frame_height_minus_1 f(n)
+    var fid = av1_seq_frame_id_present(s);
+    if (reduced == 0) {
+        av1_hdrw_bit(bw, fid);                           # frame_id_numbers_present_flag f(1)
+        if (fid) {
+            av1_hdrw_f(bw, av1_seq_delta_frame_id_len(s) - 2, 4);   # delta_frame_id_length_minus_2 f(4)
+            av1_hdrw_f(bw, av1_seq_add_frame_id_len(s) - 1, 3);     # additional_frame_id_length_minus_1 f(3)
+        }
+    } else {
+        av1_hdrw_must(bw, fid == 0);
+    }
+    if (fid == 0) { av1_hdrw_must(bw, (av1_seq_delta_frame_id_len(s) == 0) && (av1_seq_add_frame_id_len(s) == 0)); }
+    av1_hdrw_bit(bw, av1_seq_use_128x128(s));            # use_128x128_superblock f(1)
+    av1_hdrw_bit(bw, load64(s + AV1_SEQ_ENABLE_FILTER_INTRA));   # enable_filter_intra f(1)
+    av1_hdrw_bit(bw, load64(s + AV1_SEQ_ENABLE_INTRA_EDGE));     # enable_intra_edge_filter f(1)
+    var force_sct = av1_seq_force_screen_content_tools(s);
+    var force_imv = av1_seq_force_integer_mv(s);
+    var oh = av1_seq_enable_order_hint(s);
+    if (reduced) {
+        av1_hdrw_must(bw, (force_sct == AV1_SELECT_SCREEN_CONTENT_TOOLS) && (force_imv == AV1_SELECT_INTEGER_MV)
+          && (av1_seq_enable_interintra_compound(s) == 0) && (av1_seq_enable_masked_compound(s) == 0)
+          && (av1_seq_enable_warped_motion(s) == 0) && (av1_seq_enable_dual_filter(s) == 0) && (oh == 0)
+          && (av1_seq_enable_jnt_comp(s) == 0) && (av1_seq_enable_ref_frame_mvs(s) == 0)
+          && (av1_seq_order_hint_bits(s) == 0));
+    } else {
+        av1_hdrw_bit(bw, av1_seq_enable_interintra_compound(s));   # enable_interintra_compound f(1)
+        av1_hdrw_bit(bw, av1_seq_enable_masked_compound(s));       # enable_masked_compound f(1)
+        av1_hdrw_bit(bw, av1_seq_enable_warped_motion(s));         # enable_warped_motion f(1)
+        av1_hdrw_bit(bw, av1_seq_enable_dual_filter(s));           # enable_dual_filter f(1)
+        av1_hdrw_bit(bw, oh);                                      # enable_order_hint f(1)
+        if (oh) {
+            av1_hdrw_bit(bw, av1_seq_enable_jnt_comp(s));          # enable_jnt_comp f(1)
+            av1_hdrw_bit(bw, av1_seq_enable_ref_frame_mvs(s));     # enable_ref_frame_mvs f(1)
+        } else {
+            av1_hdrw_must(bw, (av1_seq_enable_jnt_comp(s) == 0) && (av1_seq_enable_ref_frame_mvs(s) == 0));
+        }
+        av1_hdrw_bit(bw, force_sct == AV1_SELECT_SCREEN_CONTENT_TOOLS);   # seq_choose_screen_content_tools f(1)
+        if (force_sct != AV1_SELECT_SCREEN_CONTENT_TOOLS) { av1_hdrw_bit(bw, force_sct); }   # seq_force_..._tools
+        if (force_sct > 0) {
+            av1_hdrw_bit(bw, force_imv == AV1_SELECT_INTEGER_MV);       # seq_choose_integer_mv f(1)
+            if (force_imv != AV1_SELECT_INTEGER_MV) { av1_hdrw_bit(bw, force_imv); }   # seq_force_integer_mv f(1)
+        } else {
+            av1_hdrw_must(bw, force_imv == AV1_SELECT_INTEGER_MV);
+        }
+        if (oh) {
+            av1_hdrw_f(bw, av1_seq_order_hint_bits(s) - 1, 3);           # order_hint_bits_minus_1 f(3)
+        } else {
+            av1_hdrw_must(bw, av1_seq_order_hint_bits(s) == 0);
+        }
+    }
+    av1_hdrw_bit(bw, av1_seq_enable_superres(s));        # enable_superres f(1)
+    av1_hdrw_bit(bw, av1_seq_enable_cdef(s));            # enable_cdef f(1)
+    av1_hdrw_bit(bw, av1_seq_enable_restoration(s));     # enable_restoration f(1)
+    av1_hdrw_color_config(bw, s, profile);
+    av1_hdrw_bit(bw, av1_seq_film_grain_present(s));     # film_grain_params_present f(1)
+    return dr_bw_err(bw);
+}
+
+# A consistent sequence header record for the encoder: profile 0 / 1 / 2 as the bit depth and format need (0 for
+# 4:2:0 and monochrome at 8 / 10 bits, 1 for 4:4:4, else 2), one operating point at level 31 (no level constraint)
+# tier 0, no timing or decoder model, frame size bits fitting width x height, order hints of 7 bits, intra edge
+# filtering on and every other tool off (the caller turns on what it codes: cdef, restoration, superres, filter
+# intra, 128x128 superblocks with av1_seq_set_sb128), no screen content tools, no colour description. Returns the
+# record (heap, AV1_SEQ_SIZE bytes) or 0 on OOM / an impossible format (DR_ERR_* in *out_err).
+fn av1_seq_init(width, height, bit_depth, mono, subx, suby, out_err): i64 {
+    store64(out_err, DR_OK);
+    if ((width < 1) || (width > 65536) || (height < 1) || (height > 65536)) {
+        store64(out_err, DR_ERR_BOUNDS); return 0;
+    }
+    if ((bit_depth != 8) && (bit_depth != 10) && (bit_depth != 12)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if ((subx < 0) || (subx > 1) || (suby < 0) || (suby > subx)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if (mono && ((subx == 0) || (suby == 0))) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var profile = 2;
+    if ((bit_depth < 12) && (subx == 1) && (suby == 1)) { profile = 0; }
+    if ((bit_depth < 12) && (subx == 0) && (suby == 0) && (mono == 0)) { profile = 1; }
+    var s = dr_alloc(AV1_SEQ_SIZE);
+    if (s == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    memset(s, 0, AV1_SEQ_SIZE);
+    store64(s + AV1_SEQ_PROFILE, profile);
+    store64(s + AV1_SEQ_LEVEL_IDX, 31);
+    var wb = dr_floor_log2(width - 1) + 1;
+    if (width == 1) { wb = 1; }
+    var hb = dr_floor_log2(height - 1) + 1;
+    if (height == 1) { hb = 1; }
+    store64(s + AV1_SEQ_FW_BITS, wb);
+    store64(s + AV1_SEQ_FH_BITS, hb);
+    store64(s + AV1_SEQ_WIDTH, width);
+    store64(s + AV1_SEQ_HEIGHT, height);
+    store64(s + AV1_SEQ_ENABLE_INTRA_EDGE, 1);
+    store64(s + AV1_SEQ_ENABLE_ORDER_HINT, 1);
+    store64(s + AV1_SEQ_ORDER_HINT_BITS, 7);
+    store64(s + AV1_SEQ_FORCE_SCT, 0);
+    store64(s + AV1_SEQ_FORCE_INT_MV, AV1_SELECT_INTEGER_MV);
+    store64(s + AV1_SEQ_BITDEPTH, bit_depth);
+    store64(s + AV1_SEQ_MONO, mono);
+    store64(s + AV1_SEQ_NUM_PLANES, 3 - (2 * mono));
+    store64(s + AV1_SEQ_SUBX, subx);
+    store64(s + AV1_SEQ_SUBY, suby);
+    store64(s + AV1_SEQ_COLOR_PRIMARIES, 2);
+    store64(s + AV1_SEQ_TRANSFER, 2);
+    store64(s + AV1_SEQ_MATRIX_COEFF, 2);
+    return s;
+}
+fn av1_seq_set_sb128(s, on): i64 { store64(s + AV1_SEQ_SB128, on); return 0; }
+
+# ================================================================
+# The uncompressed frame header — 5.9.2 .. 5.9.21, 5.9.30, for an intra frame or a shown existing frame
+# ================================================================
+
+# frame_size( ) + superres_params( ) — 5.9.5 / 5.9.8: the coded width is the UPSCALED width.
+fn av1_hdrw_frame_size(bw, s, fh): i64 {
+    var up = av1_fh_upscaled_width(fh);
+    var hgt = av1_fh_frame_height(fh);
+    if (av1_fh_frame_size_override(fh)) {
+        av1_hdrw_f(bw, up - 1, av1_seq_frame_width_bits(s));    # frame_width_minus_1 f(n)
+        av1_hdrw_f(bw, hgt - 1, av1_seq_frame_height_bits(s));  # frame_height_minus_1 f(n)
+    } else {
+        av1_hdrw_must(bw, (up == av1_seq_width(s)) && (hgt == av1_seq_height(s)));
+    }
+    var use_sr = av1_fh_use_superres(fh);
+    var denom = av1_fh_superres_denom(fh);
+    if (av1_seq_enable_superres(s)) {
+        av1_hdrw_bit(bw, use_sr);                        # use_superres f(1)
+    } else {
+        av1_hdrw_must(bw, use_sr == 0);
+    }
+    if (use_sr) {
+        av1_hdrw_f(bw, denom - AV1_SUPERRES_DENOM_MIN, 3);   # coded_denom f(3)
+    } else {
+        av1_hdrw_must(bw, denom == AV1_SUPERRES_NUM);
+    }
+    av1_hdrw_must(bw, av1_fh_frame_width(fh) == av1_superres_downscaled_width(up, denom));
+    return dr_bw_err(bw);
+}
+# render_size( ) — 5.9.6
+fn av1_hdrw_render_size(bw, fh): i64 {
+    var rw = av1_fh_render_width(fh);
+    var rh = av1_fh_render_height(fh);
+    var diff = 0;
+    if ((rw != av1_fh_upscaled_width(fh)) || (rh != av1_fh_frame_height(fh))) { diff = 1; }
+    av1_hdrw_bit(bw, diff);                              # render_and_frame_size_different f(1)
+    if (diff) {
+        av1_hdrw_f(bw, rw - 1, 16);                      # render_width_minus_1 f(16)
+        av1_hdrw_f(bw, rh - 1, 16);                      # render_height_minus_1 f(16)
+    }
+    return dr_bw_err(bw);
+}
+
+# tile_info( ) — 5.9.15: uniform spacing writes the log2 increments, explicit spacing each tile's size in
+# superblocks, from the record's MiColStarts / MiRowStarts.
+fn av1_hdrw_tile_info(bw, s, fh): i64 {
+    var mi_cols = av1_fh_mi_cols(fh);
+    var mi_rows = av1_fh_mi_rows(fh);
+    var sb128 = av1_seq_use_128x128(s);
+    var sb_shift = 4;
+    if (sb128) { sb_shift = 5; }
+    var sb_cols = (mi_cols + 15) >> 4;
+    var sb_rows = (mi_rows + 15) >> 4;
+    if (sb128) {
+        sb_cols = (mi_cols + 31) >> 5;
+        sb_rows = (mi_rows + 31) >> 5;
+    }
+    var sb_size = sb_shift + 2;
+    var max_tile_width_sb = AV1_MAX_TILE_WIDTH >> sb_size;
+    var max_tile_area_sb = AV1_MAX_TILE_AREA >> (2 * sb_size);
+    var min_log2_tile_cols = av1_tile_log2(max_tile_width_sb, sb_cols);
+    var max_log2_tile_cols = av1_tile_log2(1, av1_min(sb_cols, AV1_MAX_TILE_COLS));
+    var max_log2_tile_rows = av1_tile_log2(1, av1_min(sb_rows, AV1_MAX_TILE_ROWS));
+    var min_log2_tiles = av1_max(min_log2_tile_cols, av1_tile_log2(max_tile_area_sb, sb_rows * sb_cols));
+    var cols = av1_fh_tile_cols(fh);
+    var rows = av1_fh_tile_rows(fh);
+    if ((cols < 1) || (cols > AV1_MAX_TILE_COLS) || (rows < 1) || (rows > AV1_MAX_TILE_ROWS)) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
+    var cl2 = av1_fh_tile_cols_log2(fh);
+    var rl2 = av1_fh_tile_rows_log2(fh);
+    var uniform = load64(fh + AV1FH_UNIFORM_TILE);
+    av1_hdrw_bit(bw, uniform);                           # uniform_tile_spacing_flag f(1)
+    if (uniform) {
+        if ((cl2 < min_log2_tile_cols) || (cl2 > max_log2_tile_cols)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        var l = min_log2_tile_cols;
+        while (l < cl2) { dr_bw_put_bit(bw, 1); l = l + 1; }           # increment_tile_cols_log2 f(1)
+        if (cl2 < max_log2_tile_cols) { dr_bw_put_bit(bw, 0); }
+        var min_log2_tile_rows = av1_max(min_log2_tiles - cl2, 0);
+        if ((rl2 < min_log2_tile_rows) || (rl2 > max_log2_tile_rows)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        l = min_log2_tile_rows;
+        while (l < rl2) { dr_bw_put_bit(bw, 1); l = l + 1; }           # increment_tile_rows_log2 f(1)
+        if (rl2 < max_log2_tile_rows) { dr_bw_put_bit(bw, 0); }
+        # the starts the parser derives from the log2s must be the record's
+        var tw = (sb_cols + (1 << cl2) - 1) >> cl2;
+        var th = (sb_rows + (1 << rl2) - 1) >> rl2;
+        var i = 0;
+        while (i < cols) {
+            av1_hdrw_must(bw, load64(fh + AV1FH_MI_COL_STARTS + (i * 8)) == ((i * tw) << sb_shift));
+            i = i + 1;
+        }
+        av1_hdrw_must(bw, cols == (((sb_cols + tw) - 1) / tw));
+        var r = 0;
+        while (r < rows) {
+            av1_hdrw_must(bw, load64(fh + AV1FH_MI_ROW_STARTS + (r * 8)) == ((r * th) << sb_shift));
+            r = r + 1;
+        }
+        av1_hdrw_must(bw, rows == (((sb_rows + th) - 1) / th));
+    } else {
+        var widest = 0;
+        var i2 = 0;
+        while (i2 < cols) {
+            var start = load64(fh + AV1FH_MI_COL_STARTS + (i2 * 8)) >> sb_shift;
+            var stop = sb_cols;
+            if ((i2 + 1) < cols) { stop = load64(fh + AV1FH_MI_COL_STARTS + ((i2 + 1) * 8)) >> sb_shift; }
+            var size_sb = stop - start;
+            var max_width = av1_min(sb_cols - start, max_tile_width_sb);
+            dr_ns_write(bw, size_sb - 1, max_width);       # width_in_sbs_minus_1 ns(maxWidth)
+            widest = av1_max(widest, size_sb);
+            i2 = i2 + 1;
+        }
+        av1_hdrw_must(bw, cl2 == av1_tile_log2(1, cols));
+        var max_area = sb_rows * sb_cols;
+        if (min_log2_tiles > 0) { max_area = (sb_rows * sb_cols) >> (min_log2_tiles + 1); }
+        if (widest < 1) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        var max_tile_height_sb = av1_max(max_area / widest, 1);
+        var i3 = 0;
+        while (i3 < rows) {
+            var rstart = load64(fh + AV1FH_MI_ROW_STARTS + (i3 * 8)) >> sb_shift;
+            var rstop = sb_rows;
+            if ((i3 + 1) < rows) { rstop = load64(fh + AV1FH_MI_ROW_STARTS + ((i3 + 1) * 8)) >> sb_shift; }
+            var max_height = av1_min(sb_rows - rstart, max_tile_height_sb);
+            dr_ns_write(bw, (rstop - rstart) - 1, max_height);   # height_in_sbs_minus_1 ns(maxHeight)
+            i3 = i3 + 1;
+        }
+        av1_hdrw_must(bw, rl2 == av1_tile_log2(1, rows));
+        # the parser stores superblock starts: each one a whole number of superblocks
+        i2 = 0;
+        while (i2 < cols) {
+            var cs = load64(fh + AV1FH_MI_COL_STARTS + (i2 * 8));
+            av1_hdrw_must(bw, cs == ((cs >> sb_shift) << sb_shift));
+            i2 = i2 + 1;
+        }
+        i3 = 0;
+        while (i3 < rows) {
+            var rs = load64(fh + AV1FH_MI_ROW_STARTS + (i3 * 8));
+            av1_hdrw_must(bw, rs == ((rs >> sb_shift) << sb_shift));
+            i3 = i3 + 1;
+        }
+    }
+    # MiColStarts[ 0 ] = 0 and MiColStarts[ TileCols ] = MiCols (rows alike), and nothing past them
+    av1_hdrw_must(bw, (load64(fh + AV1FH_MI_COL_STARTS) == 0) && (load64(fh + AV1FH_MI_ROW_STARTS) == 0));
+    av1_hdrw_must(bw, (load64(fh + AV1FH_MI_COL_STARTS + (cols * 8)) == mi_cols)
+      && (load64(fh + AV1FH_MI_ROW_STARTS + (rows * 8)) == mi_rows));
+    av1_hdrw_zero(bw, fh + AV1FH_MI_COL_STARTS, cols + 1, AV1_MAX_TILE_COLS + 1);
+    av1_hdrw_zero(bw, fh + AV1FH_MI_ROW_STARTS, rows + 1, AV1_MAX_TILE_ROWS + 1);
+    if ((cl2 > 0) || (rl2 > 0)) {
+        av1_hdrw_f(bw, av1_fh_context_update_tile_id(fh), cl2 + rl2);   # context_update_tile_id f(n)
+        av1_hdrw_f(bw, av1_fh_tile_size_bytes(fh) - 1, 2);              # tile_size_bytes_minus_1 f(2)
+    } else {
+        av1_hdrw_must(bw, (av1_fh_context_update_tile_id(fh) == 0) && (av1_fh_tile_size_bytes(fh) == 1));
+    }
+    return dr_bw_err(bw);
+}
+
+# delta_q( ) — 5.9.13: delta_coded, then su(1+6) when the value is not 0
+fn av1_hdrw_delta_q(bw, v): i64 {
+    av1_hdrw_bit(bw, v != 0);                            # delta_coded f(1)
+    if (v != 0) { dr_su_write(bw, v, 7); }               # delta_q su(1+6)
+    return dr_bw_err(bw);
+}
+# quantization_params( ) — 5.9.12
+fn av1_hdrw_quantization(bw, s, fh): i64 {
+    av1_hdrw_f(bw, av1_fh_base_q_idx(fh), 8);            # base_q_idx f(8)
+    av1_hdrw_delta_q(bw, av1_fh_delta_q_y_dc(fh));       # DeltaQYDc
+    var sep = av1_seq_separate_uv_delta_q(s);
+    if (av1_seq_num_planes(s) == 1) {
+        av1_hdrw_must(bw, (load64(fh + AV1FH_DIFF_UV_DELTA) == 0) && (av1_fh_delta_q_u_dc(fh) == 0)
+          && (av1_fh_delta_q_u_ac(fh) == 0) && (av1_fh_delta_q_v_dc(fh) == 0) && (av1_fh_delta_q_v_ac(fh) == 0));
+    } else {
+        var diff = load64(fh + AV1FH_DIFF_UV_DELTA);
+        if (sep) { av1_hdrw_bit(bw, diff); } else { av1_hdrw_must(bw, diff == 0); }   # diff_uv_delta f(1)
+        av1_hdrw_delta_q(bw, av1_fh_delta_q_u_dc(fh));   # DeltaQUDc
+        av1_hdrw_delta_q(bw, av1_fh_delta_q_u_ac(fh));   # DeltaQUAc
+        if (diff) {
+            av1_hdrw_delta_q(bw, av1_fh_delta_q_v_dc(fh));   # DeltaQVDc
+            av1_hdrw_delta_q(bw, av1_fh_delta_q_v_ac(fh));   # DeltaQVAc
+        } else {
+            av1_hdrw_must(bw, (av1_fh_delta_q_v_dc(fh) == av1_fh_delta_q_u_dc(fh))
+              && (av1_fh_delta_q_v_ac(fh) == av1_fh_delta_q_u_ac(fh)));
+        }
+    }
+    var qm = av1_fh_using_qmatrix(fh);
+    av1_hdrw_bit(bw, qm);                                # using_qmatrix f(1)
+    if (qm) {
+        av1_hdrw_f(bw, av1_fh_qm_y(fh), 4);              # qm_y f(4)
+        av1_hdrw_f(bw, av1_fh_qm_u(fh), 4);              # qm_u f(4)
+        if (sep) { av1_hdrw_f(bw, av1_fh_qm_v(fh), 4); } else { av1_hdrw_must(bw, av1_fh_qm_v(fh) == av1_fh_qm_u(fh)); }
+    } else {
+        av1_hdrw_must(bw, (av1_fh_qm_y(fh) == 0) && (av1_fh_qm_u(fh) == 0) && (av1_fh_qm_v(fh) == 0));
+    }
+    return dr_bw_err(bw);
+}
+# segmentation_params( ) — 5.9.14, for a frame without a primary reference (update_map and update_data implied)
+fn av1_hdrw_segmentation(bw, fh): i64 {
+    var en = av1_fh_segmentation_enabled(fh);
+    av1_hdrw_bit(bw, en);                                # segmentation_enabled f(1)
+    var i = 0;
+    while (i < AV1_MAX_SEGMENTS) {
+        var j = 0;
+        while (j < AV1_SEG_LVL_MAX) {
+            var fe = av1_fh_feature_enabled(fh, i, j);
+            var fv = av1_fh_feature_data(fh, i, j);
+            if (en == 0) {
+                av1_hdrw_must(bw, (fe == 0) && (fv == 0));
+            } else {
+                av1_hdrw_bit(bw, fe);                    # feature_enabled f(1)
+                if (fe) {
+                    var bits = av1_seg_feature_bits(j);
+                    var limit = av1_seg_feature_max(j);
+                    if (av1_seg_feature_signed(j)) {
+                        if ((fv < (0 - limit)) || (fv > limit)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+                        dr_su_write(bw, fv, bits + 1);   # feature_value su(1+bitsToRead)
+                    } else {
+                        if ((fv < 0) || (fv > limit)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+                        av1_hdrw_f(bw, fv, bits);        # feature_value f(bitsToRead)
+                    }
+                } else {
+                    av1_hdrw_must(bw, fv == 0);
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if (en) {
+        av1_hdrw_must(bw, (load64(fh + AV1FH_SEG_UPDATE_MAP) == 1) && (load64(fh + AV1FH_SEG_TEMPORAL_UPDATE) == 0)
+          && (load64(fh + AV1FH_SEG_UPDATE_DATA) == 1));
+    } else {
+        av1_hdrw_must(bw, (load64(fh + AV1FH_SEG_UPDATE_MAP) == 0) && (load64(fh + AV1FH_SEG_TEMPORAL_UPDATE) == 0)
+          && (load64(fh + AV1FH_SEG_UPDATE_DATA) == 0));
+    }
+    return dr_bw_err(bw);
+}
+# delta_q_params( ) + delta_lf_params( ) — 5.9.17 / 5.9.18
+fn av1_hdrw_delta_params(bw, fh): i64 {
+    var dq = av1_fh_delta_q_present(fh);
+    if (av1_fh_base_q_idx(fh) > 0) { av1_hdrw_bit(bw, dq); } else { av1_hdrw_must(bw, dq == 0); }   # delta_q_present
+    if (dq) { av1_hdrw_f(bw, av1_fh_delta_q_res(fh), 2); } else { av1_hdrw_must(bw, av1_fh_delta_q_res(fh) == 0); }
+    var dl = av1_fh_delta_lf_present(fh);
+    if (dq && (av1_fh_allow_intrabc(fh) == 0)) {
+        av1_hdrw_bit(bw, dl);                            # delta_lf_present f(1)
+    } else {
+        av1_hdrw_must(bw, dl == 0);
+    }
+    if (dl) {
+        av1_hdrw_f(bw, av1_fh_delta_lf_res(fh), 2);      # delta_lf_res f(2)
+        av1_hdrw_bit(bw, av1_fh_delta_lf_multi(fh));     # delta_lf_multi f(1)
+    } else {
+        av1_hdrw_must(bw, (av1_fh_delta_lf_res(fh) == 0) && (av1_fh_delta_lf_multi(fh) == 0));
+    }
+    return dr_bw_err(bw);
+}
+# CodedLossless (5.9.2), from the record's quantizer and segmentation fields — what the parser derives at this point
+fn av1_hdrw_coded_lossless(fh): i64 {
+    var seg = 0;
+    while (seg < AV1_MAX_SEGMENTS) {
+        if (av1_fh_seg_lossless(fh, seg) == 0) { return 0; }
+        seg = seg + 1;
+    }
+    return 1;
+}
+# loop_filter_params( ) — 5.9.11, the deltas coded against the defaults setup_past_independence leaves (no primary
+# reference): loop_filter_delta_update is the record's, and must be 1 when any delta differs; each update_*_delta is
+# set where its delta differs (libaom's rule, encode_loopfilter).
+fn av1_hdrw_loop_filter(bw, s, fh, coded_lossless): i64 {
+    var differ = 0;
+    var i = 0;
+    while (i < 8) {
+        if (av1_fh_loop_filter_ref_delta(fh, i) != av1_hdrw_default_ref_delta(i)) { differ = 1; }
+        i = i + 1;
+    }
+    if ((av1_fh_loop_filter_mode_delta(fh, 0) != 0) || (av1_fh_loop_filter_mode_delta(fh, 1) != 0)) { differ = 1; }
+    var update = load64(fh + AV1FH_LF_DELTA_UPDATE);
+    if (coded_lossless || av1_fh_allow_intrabc(fh)) {
+        # nothing coded: every level 0, the default deltas, and loop_filter_delta_enabled as setup_past_independence
+        # left it (1)
+        av1_hdrw_must(bw, (av1_fh_loop_filter_level(fh, 0) == 0) && (av1_fh_loop_filter_level(fh, 1) == 0)
+          && (av1_fh_loop_filter_level(fh, 2) == 0) && (av1_fh_loop_filter_level(fh, 3) == 0)
+          && (av1_fh_loop_filter_sharpness(fh) == 0) && (av1_fh_loop_filter_delta_enabled(fh) == 1)
+          && (update == 0) && (differ == 0));
+        return dr_bw_err(bw);
+    }
+    var l0 = av1_fh_loop_filter_level(fh, 0);
+    var l1 = av1_fh_loop_filter_level(fh, 1);
+    av1_hdrw_f(bw, l0, 6);                               # loop_filter_level[ 0 ] f(6)
+    av1_hdrw_f(bw, l1, 6);                               # loop_filter_level[ 1 ] f(6)
+    if ((av1_seq_num_planes(s) > 1) && (l0 || l1)) {
+        av1_hdrw_f(bw, av1_fh_loop_filter_level(fh, 2), 6);   # loop_filter_level[ 2 ] f(6)
+        av1_hdrw_f(bw, av1_fh_loop_filter_level(fh, 3), 6);   # loop_filter_level[ 3 ] f(6)
+    } else {
+        av1_hdrw_must(bw, (av1_fh_loop_filter_level(fh, 2) == 0) && (av1_fh_loop_filter_level(fh, 3) == 0));
+    }
+    av1_hdrw_f(bw, av1_fh_loop_filter_sharpness(fh), 3);  # loop_filter_sharpness f(3)
+    var enabled = av1_fh_loop_filter_delta_enabled(fh);
+    av1_hdrw_bit(bw, enabled);                           # loop_filter_delta_enabled f(1)
+    if (enabled == 0) {
+        av1_hdrw_must(bw, (differ == 0) && (update == 0));   # without the deltas coded, they stay the defaults
+        return dr_bw_err(bw);
+    }
+    if (differ) { av1_hdrw_must(bw, update == 1); }       # a changed delta is only coded under an update
+    av1_hdrw_bit(bw, update);                            # loop_filter_delta_update f(1)
+    if (update) {
+        i = 0;
+        while (i < 8) {
+            var v = av1_fh_loop_filter_ref_delta(fh, i);
+            var ch = v != av1_hdrw_default_ref_delta(i);
+            dr_bw_put_bit(bw, ch);                       # update_ref_delta f(1)
+            if (ch) { dr_su_write(bw, v, 7); }           # loop_filter_ref_deltas[ i ] su(1+6)
+            i = i + 1;
+        }
+        i = 0;
+        while (i < 2) {
+            var m = av1_fh_loop_filter_mode_delta(fh, i);
+            dr_bw_put_bit(bw, m != 0);                   # update_mode_delta f(1)
+            if (m != 0) { dr_su_write(bw, m, 7); }       # loop_filter_mode_deltas[ i ] su(1+6)
+            i = i + 1;
+        }
+    }
+    return dr_bw_err(bw);
+}
+# cdef_params( ) — 5.9.19 (a secondary strength of 4 is coded as 3)
+fn av1_hdrw_cdef_sec(bw, v): i64 {
+    if ((v < 0) || (v == 3) || (v > 4)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    if (v == 4) { return dr_bw_put_bits(bw, 3, 2); }
+    return dr_bw_put_bits(bw, v, 2);
+}
+fn av1_hdrw_cdef(bw, s, fh, coded_lossless): i64 {
+    if (coded_lossless || av1_fh_allow_intrabc(fh) || (av1_seq_enable_cdef(s) == 0)) {
+        av1_hdrw_must(bw, (av1_fh_cdef_bits(fh) == 0) && (av1_fh_cdef_damping(fh) == 3));
+        av1_hdrw_zero(bw, fh + AV1FH_CDEF_Y_PRI, 0, 8);   # every strength 0 (the parser zeroes [ 0 ])
+        av1_hdrw_zero(bw, fh + AV1FH_CDEF_Y_SEC, 0, 8);
+        av1_hdrw_zero(bw, fh + AV1FH_CDEF_UV_PRI, 0, 8);
+        av1_hdrw_zero(bw, fh + AV1FH_CDEF_UV_SEC, 0, 8);
+        return dr_bw_err(bw);
+    }
+    av1_hdrw_f(bw, av1_fh_cdef_damping(fh) - 3, 2);      # cdef_damping_minus_3 f(2)
+    var bits = av1_fh_cdef_bits(fh);
+    av1_hdrw_f(bw, bits, 2);                             # cdef_bits f(2)
+    if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
+    var n = 1 << bits;
+    av1_hdrw_zero(bw, fh + AV1FH_CDEF_Y_PRI, n, 8);      # past the 1 << cdef_bits strengths coded
+    av1_hdrw_zero(bw, fh + AV1FH_CDEF_Y_SEC, n, 8);
+    var uv_from = n;
+    if (av1_seq_num_planes(s) == 1) { uv_from = 0; }     # monochrome codes no chroma strengths
+    av1_hdrw_zero(bw, fh + AV1FH_CDEF_UV_PRI, uv_from, 8);
+    av1_hdrw_zero(bw, fh + AV1FH_CDEF_UV_SEC, uv_from, 8);
+    var i = 0;
+    while ((i < n) && (dr_bw_err(bw) == DR_OK)) {
+        av1_hdrw_f(bw, load64(fh + AV1FH_CDEF_Y_PRI + (i * 8)), 4);   # cdef_y_pri_strength f(4)
+        av1_hdrw_cdef_sec(bw, load64(fh + AV1FH_CDEF_Y_SEC + (i * 8)));   # cdef_y_sec_strength f(2)
+        if (av1_seq_num_planes(s) > 1) {
+            av1_hdrw_f(bw, load64(fh + AV1FH_CDEF_UV_PRI + (i * 8)), 4);   # cdef_uv_pri_strength f(4)
+            av1_hdrw_cdef_sec(bw, load64(fh + AV1FH_CDEF_UV_SEC + (i * 8)));   # cdef_uv_sec_strength f(2)
+        }
+        i = i + 1;
+    }
+    return dr_bw_err(bw);
+}
+# lr_params( ) — 5.9.20: Remap_Lr_Type inverted, and the unit size as its shifts
+fn av1_hdrw_lr_type_code(rt): i64 {
+    if (rt == AV1_RESTORE_NONE) { return 0; }
+    if (rt == AV1_RESTORE_SWITCHABLE) { return 1; }
+    if (rt == AV1_RESTORE_WIENER) { return 2; }
+    if (rt == AV1_RESTORE_SGRPROJ) { return 3; }
+    return 0 - 1;
+}
+fn av1_hdrw_lr(bw, s, fh, all_lossless): i64 {
+    var np = av1_seq_num_planes(s);
+    if (all_lossless || av1_fh_allow_intrabc(fh) || (av1_seq_enable_restoration(s) == 0)) {
+        av1_hdrw_zero(bw, fh + AV1FH_FRAME_RESTORATION_TYPE, 0, 3);   # RESTORE_NONE everywhere
+        av1_hdrw_zero(bw, fh + AV1FH_LR_SIZE, 0, 3);
+        av1_hdrw_must(bw, av1_fh_uses_lr(fh) == 0);
+        return dr_bw_err(bw);
+    }
+    av1_hdrw_zero(bw, fh + AV1FH_FRAME_RESTORATION_TYPE, np, 3);   # planes past NumPlanes
+    if (av1_fh_uses_lr(fh) == 0) { av1_hdrw_zero(bw, fh + AV1FH_LR_SIZE, 0, 3); }   # no unit size coded
+    var uses = 0;
+    var chroma = 0;
+    var i = 0;
+    while (i < np) {
+        var code = av1_hdrw_lr_type_code(load64(fh + AV1FH_FRAME_RESTORATION_TYPE + (i * 8)));
+        if (code < 0) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_f(bw, code, 2);                         # lr_type f(2)
+        if (code != 0) {
+            uses = 1;
+            if (i > 0) { chroma = 1; }
+        }
+        i = i + 1;
+    }
+    av1_hdrw_must(bw, av1_fh_uses_lr(fh) == uses);
+    if (uses) {
+        var size0 = load64(fh + AV1FH_LR_SIZE);
+        var shift = 0 - 1;
+        if (size0 == 64) { shift = 0; }
+        if (size0 == 128) { shift = 1; }
+        if (size0 == 256) { shift = 2; }
+        if (shift < 0) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        if (av1_seq_use_128x128(s)) {
+            if (shift == 0) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+            dr_bw_put_bit(bw, shift - 1);                # lr_unit_shift f(1)
+        } else {
+            dr_bw_put_bit(bw, shift > 0);                # lr_unit_shift f(1)
+            if (shift > 0) { dr_bw_put_bit(bw, shift - 1); }   # lr_unit_extra_shift f(1)
+        }
+        var size1 = load64(fh + AV1FH_LR_SIZE + 8);
+        var uvs = 0;
+        if (size1 == (size0 >> 1)) { uvs = 1; }
+        if ((size1 != size0) && (uvs == 0)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        if (av1_seq_subsampling_x(s) && av1_seq_subsampling_y(s) && chroma) {
+            dr_bw_put_bit(bw, uvs);                      # lr_uv_shift f(1)
+        } else {
+            av1_hdrw_must(bw, uvs == 0);
+        }
+        av1_hdrw_must(bw, load64(fh + AV1FH_LR_SIZE + 16) == size1);
+    }
+    return dr_bw_err(bw);
+}
+# num points of a scaling function: point_*_value f(8) / point_*_scaling f(8) from vals / scal, the values strictly
+# increasing (6.8.20 — the parser refuses any other), every slot past num zero (AV1FG_* arrays hold 16).
+fn av1_hdrw_grain_points(bw, vals, scal, num): i64 {
+    var i = 0;
+    while (i < num) {
+        var v = load64(vals + (i * 8));
+        if ((i > 0) && (v <= load64(vals + ((i - 1) * 8)))) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_f(bw, v, 8);                            # point_*_value[ i ] f(8)
+        av1_hdrw_f(bw, load64(scal + (i * 8)), 8);       # point_*_scaling[ i ] f(8)
+        i = i + 1;
+    }
+    av1_hdrw_zero(bw, vals, num, 16);
+    av1_hdrw_zero(bw, scal, num, 16);
+    return dr_bw_err(bw);
+}
+# n auto-regression coefficients ar_coeffs_*_plus_128 f(8) from c (cap words), the rest zero
+fn av1_hdrw_grain_ar(bw, c, n, cap): i64 {
+    var i = 0;
+    while (i < n) {
+        av1_hdrw_f(bw, load64(c + (i * 8)), 8);          # ar_coeffs_*_plus_128[ i ] f(8)
+        i = i + 1;
+    }
+    return av1_hdrw_zero(bw, c, n, cap);
+}
+# film_grain_params( ) — 5.9.30, for an intra frame (update_grain is implied 1). The record is what the parser stores:
+# a zeroed block (reset_grain_params) when no grain is coded, and otherwise zero in every slot it does not read.
+fn av1_hdrw_film_grain(bw, s, fh): i64 {
+    var g = fh + AV1FH_GRAIN;
+    var apply = load64(g + AV1FG_APPLY);
+    if ((av1_seq_film_grain_present(s) == 0) || ((av1_fh_show_frame(fh) == 0) && (av1_fh_showable_frame(fh) == 0))) {
+        return av1_hdrw_zero(bw, g, 0, AV1FG_SIZE / 8);
+    }
+    av1_hdrw_bit(bw, apply);                             # apply_grain f(1)
+    if (apply == 0) { return av1_hdrw_zero(bw, g, 0, AV1FG_SIZE / 8); }
+    av1_hdrw_f(bw, load64(g + AV1FG_SEED), 16);          # grain_seed f(16)
+    av1_hdrw_must(bw, (load64(g + AV1FG_UPDATE) == 1) && (load64(g + AV1FG_REF_IDX) == 0));
+    var num_y = load64(g + AV1FG_NUM_Y);
+    if ((num_y < 0) || (num_y > 14)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    av1_hdrw_f(bw, num_y, 4);                            # num_y_points f(4)
+    av1_hdrw_grain_points(bw, g + AV1FG_Y_VALUE, g + AV1FG_Y_SCALING, num_y);
+    var mono = av1_seq_mono(s);
+    var csfl = load64(g + AV1FG_CSFL);
+    if (mono) { av1_hdrw_must(bw, csfl == 0); } else { av1_hdrw_bit(bw, csfl); }   # chroma_scaling_from_luma f(1)
+    var num_cb = load64(g + AV1FG_NUM_CB);
+    var num_cr = load64(g + AV1FG_NUM_CR);
+    var ssx = av1_seq_subsampling_x(s);
+    var ssy = av1_seq_subsampling_y(s);
+    if ((mono == 0) && (csfl == 0) && (((ssx == 1) && (ssy == 1) && (num_y == 0)) == 0)) {
+        if ((num_cb < 0) || (num_cb > 10) || (num_cr < 0) || (num_cr > 10)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        # 4:2:0: grain on both chroma planes or on neither (6.8.20 — the parser refuses one)
+        if ((ssx == 1) && (ssy == 1) && ((num_cb == 0) != (num_cr == 0))) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_f(bw, num_cb, 4);                       # num_cb_points f(4)
+        av1_hdrw_grain_points(bw, g + AV1FG_CB_VALUE, g + AV1FG_CB_SCALING, num_cb);
+        av1_hdrw_f(bw, num_cr, 4);                       # num_cr_points f(4)
+        av1_hdrw_grain_points(bw, g + AV1FG_CR_VALUE, g + AV1FG_CR_SCALING, num_cr);
+    } else {
+        av1_hdrw_must(bw, (num_cb == 0) && (num_cr == 0));
+        av1_hdrw_grain_points(bw, g + AV1FG_CB_VALUE, g + AV1FG_CB_SCALING, 0);
+        av1_hdrw_grain_points(bw, g + AV1FG_CR_VALUE, g + AV1FG_CR_SCALING, 0);
+    }
+    av1_hdrw_f(bw, load64(g + AV1FG_SCALING_M8), 2);     # grain_scaling_minus_8 f(2)
+    var lag = load64(g + AV1FG_AR_LAG);
+    av1_hdrw_f(bw, lag, 2);                              # ar_coeff_lag f(2)
+    if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
+    var npl = 2 * lag * (lag + 1);                       # numPosLuma, <= 24
+    var npc = npl;                                       # numPosChroma, <= 25
+    var ny = 0;
+    if (num_y) {
+        npc = npl + 1;
+        ny = npl;
+    }
+    av1_hdrw_grain_ar(bw, g + AV1FG_AR_Y, ny, 24);
+    var ncb = 0;
+    if (csfl || num_cb) { ncb = npc; }
+    av1_hdrw_grain_ar(bw, g + AV1FG_AR_CB, ncb, 25);
+    var ncr = 0;
+    if (csfl || num_cr) { ncr = npc; }
+    av1_hdrw_grain_ar(bw, g + AV1FG_AR_CR, ncr, 25);
+    av1_hdrw_f(bw, load64(g + AV1FG_AR_SHIFT_M6), 2);    # ar_coeff_shift_minus_6 f(2)
+    av1_hdrw_f(bw, load64(g + AV1FG_SCALE_SHIFT), 2);    # grain_scale_shift f(2)
+    if (num_cb) {
+        av1_hdrw_f(bw, load64(g + AV1FG_CB_MULT), 8);        # cb_mult f(8)
+        av1_hdrw_f(bw, load64(g + AV1FG_CB_LUMA_MULT), 8);   # cb_luma_mult f(8)
+        av1_hdrw_f(bw, load64(g + AV1FG_CB_OFFSET), 9);      # cb_offset f(9)
+    } else {
+        av1_hdrw_must(bw, (load64(g + AV1FG_CB_MULT) == 0) && (load64(g + AV1FG_CB_LUMA_MULT) == 0)
+          && (load64(g + AV1FG_CB_OFFSET) == 0));
+    }
+    if (num_cr) {
+        av1_hdrw_f(bw, load64(g + AV1FG_CR_MULT), 8);        # cr_mult f(8)
+        av1_hdrw_f(bw, load64(g + AV1FG_CR_LUMA_MULT), 8);   # cr_luma_mult f(8)
+        av1_hdrw_f(bw, load64(g + AV1FG_CR_OFFSET), 9);      # cr_offset f(9)
+    } else {
+        av1_hdrw_must(bw, (load64(g + AV1FG_CR_MULT) == 0) && (load64(g + AV1FG_CR_LUMA_MULT) == 0)
+          && (load64(g + AV1FG_CR_OFFSET) == 0));
+    }
+    av1_hdrw_bit(bw, load64(g + AV1FG_OVERLAP));         # overlap_flag f(1)
+    av1_hdrw_bit(bw, load64(g + AV1FG_CLIP_RR));         # clip_to_restricted_range f(1)
+    return dr_bw_err(bw);
+}
+
+# temporal_point_info( ) (5.9.31) where 5.9.2 codes it
+fn av1_hdrw_temporal_point(bw, s, fh): i64 {
+    if (av1_seq_decoder_model_present(s) && (av1_seq_equal_picture_interval(s) == 0)) {
+        av1_hdrw_f(bw, load64(fh + AV1FH_PRESENTATION_TIME), av1_seq_frame_presentation_time_len(s));
+    } else {
+        av1_hdrw_must(bw, load64(fh + AV1FH_PRESENTATION_TIME) == 0);
+    }
+    return dr_bw_err(bw);
+}
+
+# uncompressed_header( ) — 5.9.2, for an intra frame (KEY_FRAME, INTRA_ONLY_FRAME) or a shown existing frame. tid / sid
+# are the OBU's temporal_id / spatial_id (they select the buffer removal times coded). The payload syntax only: a
+# frame header OBU adds trailing bits (av1_frame_header_write_obu), a frame OBU byte alignment (av1_frame_write_obu).
+fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
+    if ((bw == 0) || (s == 0) || (fh == 0)) { return DR_ERR_BOUNDS; }
+    if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
+    var id_len = 0;
+    if (av1_seq_frame_id_present(s)) { id_len = av1_seq_add_frame_id_len(s) + av1_seq_delta_frame_id_len(s); }
+    var reduced = av1_seq_reduced(s);
+    var ftype = av1_fh_frame_type(fh);
+    var show = av1_fh_show_frame(fh);
+    if (reduced) {
+        if (av1_fh_show_existing_frame(fh) || (ftype != AV1_KEY_FRAME) || (show == 0)) {
+            return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+        }
+        # implied: not showable again, error resilient (the parser records what libaom and dav1d do), no temporal
+        # point (a reduced sequence has no decoder model)
+        av1_hdrw_must(bw, (av1_fh_showable_frame(fh) == 0) && (av1_fh_error_resilient_mode(fh) == 1));
+        av1_hdrw_temporal_point(bw, s, fh);
+    } else {
+        var se = av1_fh_show_existing_frame(fh);
+        av1_hdrw_bit(bw, se);                            # show_existing_frame f(1)
+        if (se) {
+            av1_hdrw_f(bw, av1_fh_frame_to_show(fh), 3);   # frame_to_show_map_idx f(3)
+            av1_hdrw_temporal_point(bw, s, fh);
+            if (av1_seq_frame_id_present(s)) {
+                av1_hdrw_f(bw, load64(fh + AV1FH_DISPLAY_FRAME_ID), id_len);   # display_frame_id f(idLen)
+            } else {
+                av1_hdrw_must(bw, load64(fh + AV1FH_DISPLAY_FRAME_ID) == 0);
+            }
+            return dr_bw_err(bw);
+        }
+        # an inter frame's header needs the reference syntax this writer leaves out: roadmap 0.8.8
+        if ((ftype != AV1_KEY_FRAME) && (ftype != AV1_INTRA_ONLY_FRAME)) {
+            return dr_bw_set_err(bw, DR_ERR_UNSUPPORTED);
+        }
+        av1_hdrw_f(bw, ftype, 2);                        # frame_type f(2)
+        av1_hdrw_bit(bw, show);                          # show_frame f(1)
+        if (show) {
+            av1_hdrw_temporal_point(bw, s, fh);
+            av1_hdrw_must(bw, av1_fh_showable_frame(fh) == (ftype != AV1_KEY_FRAME));
+        } else {
+            av1_hdrw_must(bw, load64(fh + AV1FH_PRESENTATION_TIME) == 0);   # a hidden frame has no temporal point
+            av1_hdrw_bit(bw, av1_fh_showable_frame(fh));   # showable_frame f(1)
+        }
+        if ((ftype == AV1_KEY_FRAME) && show) {
+            av1_hdrw_must(bw, av1_fh_error_resilient_mode(fh) == 1);
+        } else {
+            av1_hdrw_bit(bw, av1_fh_error_resilient_mode(fh));   # error_resilient_mode f(1)
+        }
+    }
+    av1_hdrw_must(bw, (av1_fh_frame_is_intra(fh) == 1) && (av1_fh_frame_to_show(fh) == 0)
+      && (load64(fh + AV1FH_DISPLAY_FRAME_ID) == 0));
+    av1_hdrw_bit(bw, av1_fh_disable_cdf_update(fh));     # disable_cdf_update f(1)
+    var sct = av1_fh_allow_screen_content_tools(fh);
+    if (av1_seq_force_screen_content_tools(s) == AV1_SELECT_SCREEN_CONTENT_TOOLS) {
+        av1_hdrw_bit(bw, sct);                           # allow_screen_content_tools f(1)
+    } else {
+        av1_hdrw_must(bw, sct == av1_seq_force_screen_content_tools(s));
+    }
+    # force_integer_mv: the coded (or sequence-forced) value is recorded apart from the intra override to 1
+    var fimv = load64(fh + AV1FH_FORCE_INT_MV_CODED);
+    if (sct) {
+        if (av1_seq_force_integer_mv(s) == AV1_SELECT_INTEGER_MV) {
+            av1_hdrw_bit(bw, fimv);                      # force_integer_mv f(1)
+        } else {
+            av1_hdrw_must(bw, fimv == av1_seq_force_integer_mv(s));
+        }
+    } else {
+        av1_hdrw_must(bw, fimv == 0);
+    }
+    av1_hdrw_must(bw, av1_fh_force_integer_mv(fh) == 1);
+    if (av1_seq_frame_id_present(s)) {
+        av1_hdrw_f(bw, av1_fh_current_frame_id(fh), id_len);   # current_frame_id f(idLen)
+    } else {
+        av1_hdrw_must(bw, av1_fh_current_frame_id(fh) == 0);
+    }
+    if (reduced == 0) {
+        av1_hdrw_bit(bw, av1_fh_frame_size_override(fh));   # frame_size_override_flag f(1)
+    } else {
+        av1_hdrw_must(bw, av1_fh_frame_size_override(fh) == 0);
+    }
+    av1_hdrw_f(bw, av1_fh_order_hint(fh), av1_seq_order_hint_bits(s));   # order_hint f(OrderHintBits)
+    av1_hdrw_must(bw, av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE);
+    # buffer removal times: coded for each operating point with a decoder model that holds this OBU's layer (tid /
+    # sid); every other slot of the 32 is 0
+    var dm = av1_seq_decoder_model_present(s);
+    var brt = load64(fh + AV1FH_BRT_PRESENT);
+    if (dm) { av1_hdrw_bit(bw, brt); } else { av1_hdrw_must(bw, brt == 0); }   # buffer_removal_time_present_flag
+    var op = 0;
+    while (op < 32) {
+        var coded = 0;
+        if (dm && brt && (op <= av1_seq_op_cnt_minus_1(s)) && av1_seq_op_dm_present(s, op)) {
+            var idc = av1_seq_op_idc(s, op);
+            if ((idc == 0) || (((idc >> tid) & 1) && ((idc >> (sid + 8)) & 1))) { coded = 1; }
+        }
+        var t = load64(fh + AV1FH_BUFFER_REMOVAL_TIME + (op * 8));
+        if (coded) {
+            av1_hdrw_f(bw, t, av1_seq_buffer_removal_time_len(s));   # buffer_removal_time[ opNum ] f(n)
+        } else {
+            av1_hdrw_must(bw, t == 0);
+        }
+        op = op + 1;
+    }
+    var refresh = av1_fh_refresh_frame_flags(fh);
+    if ((ftype == AV1_KEY_FRAME) && show) {
+        av1_hdrw_must(bw, refresh == 255);
+    } else {
+        av1_hdrw_f(bw, refresh, 8);                      # refresh_frame_flags f(8)
+    }
+    if ((refresh != 255) && av1_fh_error_resilient_mode(fh) && av1_seq_enable_order_hint(s)) {
+        var ri = 0;
+        while (ri < 8) {
+            # ref_order_hint[ i ] f(OrderHintBits)
+            av1_hdrw_f(bw, load64(fh + AV1FH_REF_ORDER_HINT_CODED + (ri * 8)), av1_seq_order_hint_bits(s));
+            ri = ri + 1;
+        }
+    } else {
+        av1_hdrw_zero(bw, fh + AV1FH_REF_ORDER_HINT_CODED, 0, 8);
+    }
+    av1_hdrw_frame_size(bw, s, fh);
+    # compute_image_size( ): the MiCols / MiRows the tile layout and the parser derive from FrameWidth / FrameHeight
+    av1_hdrw_must(bw, (av1_fh_mi_cols(fh) == (2 * ((av1_fh_frame_width(fh) + 7) >> 3)))
+      && (av1_fh_mi_rows(fh) == (2 * ((av1_fh_frame_height(fh) + 7) >> 3))));
+    av1_hdrw_render_size(bw, fh);
+    var ibc = av1_fh_allow_intrabc(fh);
+    if (sct && (av1_fh_upscaled_width(fh) == av1_fh_frame_width(fh))) {
+        av1_hdrw_bit(bw, ibc);                           # allow_intrabc f(1)
+    } else {
+        av1_hdrw_must(bw, ibc == 0);
+    }
+    var dfe = av1_fh_disable_frame_end_update_cdf(fh);
+    if (reduced || av1_fh_disable_cdf_update(fh)) {
+        av1_hdrw_must(bw, dfe == 1);
+    } else {
+        av1_hdrw_bit(bw, dfe);                           # disable_frame_end_update_cdf f(1)
+    }
+    av1_hdrw_tile_info(bw, s, fh);
+    av1_hdrw_quantization(bw, s, fh);
+    av1_hdrw_segmentation(bw, fh);
+    av1_hdrw_delta_params(bw, fh);
+    var coded_lossless = av1_hdrw_coded_lossless(fh);
+    var all_lossless = coded_lossless && (av1_fh_frame_width(fh) == av1_fh_upscaled_width(fh));
+    av1_hdrw_must(bw, (av1_fh_coded_lossless(fh) == coded_lossless) && (av1_fh_all_lossless(fh) == all_lossless));
+    av1_hdrw_loop_filter(bw, s, fh, coded_lossless);
+    av1_hdrw_cdef(bw, s, fh, coded_lossless);
+    av1_hdrw_lr(bw, s, fh, all_lossless);
+    var txm = av1_fh_tx_mode(fh);
+    if (coded_lossless) {
+        av1_hdrw_must(bw, txm == AV1_ONLY_4X4);
+    } else {
+        if ((txm != AV1_TX_MODE_SELECT) && (txm != AV1_TX_MODE_LARGEST)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_bit(bw, txm == AV1_TX_MODE_SELECT);     # tx_mode_select f(1)
+    }
+    av1_hdrw_bit(bw, av1_fh_reduced_tx_set(fh));         # reduced_tx_set f(1)
+    # global_motion_params( ): an intra frame codes none, and every reference's parameters are the identity
+    var ref = 0;
+    while (ref < AV1_REFS_PER_FRAME) {
+        av1_hdrw_must(bw, load64(fh + AV1FH_GM_TYPE + (ref * 8)) == AV1_GM_IDENTITY);
+        var j = 0;
+        while (j < 6) {
+            var def = 0;
+            if ((j % 3) == 2) { def = 1 << AV1_WARPEDMODEL_PREC_BITS; }
+            av1_hdrw_must(bw, load64(fh + AV1FH_GM_PARAMS + (((ref * 6) + j) * 8)) == def);
+            j = j + 1;
+        }
+        ref = ref + 1;
+    }
+    av1_hdrw_film_grain(bw, s, fh);
+    return dr_bw_err(bw);
+}
+
+# A consistent KEY_FRAME header record for the encoder, against sequence s: shown, the sequence's frame size (no
+# override, no superres), render size = frame size, base_q_idx with no deltas or matrices, one uniform tile, no
+# segmentation, deltas, loop filtering, CDEF or restoration, tx_mode TX_MODE_SELECT (ONLY_4X4 when base_q_idx is 0:
+# lossless), CDFs adapted and saved — field for field the record its header parses back to (the derived fields set as
+# the parser derives them: setup_past_independence's loop filter deltas, identity global motion). Returns the record
+# (heap, AV1FH_SIZE bytes) or 0: DR_ERR_BOUNDS for a bad base_q_idx, DR_ERR_UNSUPPORTED for a frame the syntax gives
+# more than one tile (wider than MAX_TILE_WIDTH or larger than MAX_TILE_AREA — av1_fh_set_tiles_uniform lays those
+# out), DR_ERR_OOM.
+fn av1_fh_init_key(s, base_q_idx, out_err): i64 {
+    store64(out_err, DR_OK);
+    if ((s == 0) || (base_q_idx < 0) || (base_q_idx > 255)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var fh = dr_alloc(AV1FH_SIZE);
+    if (fh == 0) { store64(out_err, DR_ERR_OOM); return 0; }
+    memset(fh, 0, AV1FH_SIZE);
+    store64(fh + AV1FH_FRAME_TYPE, AV1_KEY_FRAME);
+    store64(fh + AV1FH_FRAME_IS_INTRA, 1);
+    store64(fh + AV1FH_SHOW_FRAME, 1);
+    store64(fh + AV1FH_ERROR_RESILIENT, 1);
+    store64(fh + AV1FH_FORCE_INT_MV, 1);
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    store64(fh + AV1FH_ALLOW_SCT, av1_seq_force_screen_content_tools(s) & 1);
+    var w = av1_seq_width(s);
+    var h = av1_seq_height(s);
+    store64(fh + AV1FH_UPSCALED_WIDTH, w);
+    store64(fh + AV1FH_FRAME_WIDTH, w);
+    store64(fh + AV1FH_FRAME_HEIGHT, h);
+    store64(fh + AV1FH_RENDER_WIDTH, w);
+    store64(fh + AV1FH_RENDER_HEIGHT, h);
+    store64(fh + AV1FH_SUPERRES_DENOM, AV1_SUPERRES_NUM);
+    av1_compute_image_size(fh);
+    if (av1_seq_reduced(s)) { store64(fh + AV1FH_DISABLE_FE_UPDATE_CDF, 1); }
+    # one uniform tile: the log2s at their minima, which are 0 up to MAX_TILE_WIDTH samples wide and MAX_TILE_AREA
+    # samples in all (5.9.15's minLog2TileCols / minLog2Tiles); a frame past either needs more tiles than one
+    var sb_shift = 4;
+    if (av1_seq_use_128x128(s)) { sb_shift = 5; }
+    var mi_cols = av1_fh_mi_cols(fh);
+    var mi_rows = av1_fh_mi_rows(fh);
+    var sb_cols = (mi_cols + ((1 << sb_shift) - 1)) >> sb_shift;
+    var sb_rows = (mi_rows + ((1 << sb_shift) - 1)) >> sb_shift;
+    if ((av1_tile_log2(AV1_MAX_TILE_WIDTH >> (sb_shift + 2), sb_cols) > 0)
+      || (av1_tile_log2(AV1_MAX_TILE_AREA >> (2 * (sb_shift + 2)), sb_rows * sb_cols) > 0)) {
+        store64(out_err, DR_ERR_UNSUPPORTED); return 0;
+    }
+    store64(fh + AV1FH_UNIFORM_TILE, 1);
+    store64(fh + AV1FH_TILE_COLS, 1);
+    store64(fh + AV1FH_TILE_ROWS, 1);
+    store64(fh + AV1FH_MI_COL_STARTS + 8, mi_cols);
+    store64(fh + AV1FH_MI_ROW_STARTS + 8, mi_rows);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    store64(fh + AV1FH_BASE_Q_IDX, base_q_idx);
+    av1_setup_past_independence(fh);
+    store64(fh + AV1FH_CDEF_DAMPING, 3);
+    av1_compute_lossless(fh);
+    if (av1_fh_coded_lossless(fh)) {
+        store64(fh + AV1FH_TX_MODE, AV1_ONLY_4X4);
+        # no loop filter syntax: loop_filter_delta_enabled stays as setup_past_independence leaves it
+    } else {
+        store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_SELECT);
+        store64(fh + AV1FH_LF_DELTA_ENABLED, 0);         # deltas not coded (one bit)
+    }
+    # global motion: the identity for every reference (global_motion_params( ) of an intra frame)
+    var ref = 0;
+    while (ref < AV1_REFS_PER_FRAME) {
+        store64(fh + AV1FH_GM_PARAMS + (((ref * 6) + 2) * 8), 1 << AV1_WARPEDMODEL_PREC_BITS);
+        store64(fh + AV1FH_GM_PARAMS + (((ref * 6) + 5) * 8), 1 << AV1_WARPEDMODEL_PREC_BITS);
+        ref = ref + 1;
+    }
+    return fh;
+}
+
+# Uniform tile spacing at TileColsLog2 cl2 / TileRowsLog2 rl2 for a frame of fh's MiCols x MiRows under sequence s: the
+# counts and MiColStarts / MiRowStarts tile_info( ) (5.9.15) derives from them. tile_size_bytes is 4 and
+# context_update_tile_id 0 when there is more than one tile. Returns DR_OK, or DR_ERR_BOUNDS when cl2 / rl2 lie
+# outside the log2 range 5.9.15 allows.
+fn av1_fh_set_tiles_uniform(s, fh, cl2, rl2): i64 {
+    var mi_cols = av1_fh_mi_cols(fh);
+    var mi_rows = av1_fh_mi_rows(fh);
+    var sb_shift = 4;
+    if (av1_seq_use_128x128(s)) { sb_shift = 5; }
+    var sb_cols = (mi_cols + ((1 << sb_shift) - 1)) >> sb_shift;
+    var sb_rows = (mi_rows + ((1 << sb_shift) - 1)) >> sb_shift;
+    var sb_size = sb_shift + 2;
+    var min_c = av1_tile_log2(AV1_MAX_TILE_WIDTH >> sb_size, sb_cols);
+    var max_c = av1_tile_log2(1, av1_min(sb_cols, AV1_MAX_TILE_COLS));
+    var max_r = av1_tile_log2(1, av1_min(sb_rows, AV1_MAX_TILE_ROWS));
+    var min_t = av1_max(min_c, av1_tile_log2(AV1_MAX_TILE_AREA >> (2 * sb_size), sb_rows * sb_cols));
+    var min_r = av1_max(min_t - cl2, 0);
+    if ((cl2 < min_c) || (cl2 > max_c) || (rl2 < min_r) || (rl2 > max_r)) { return DR_ERR_BOUNDS; }
+    var tw = (sb_cols + (1 << cl2) - 1) >> cl2;
+    var th = (sb_rows + (1 << rl2) - 1) >> rl2;
+    var i = 0;
+    var start = 0;
+    while (start < sb_cols) {
+        store64(fh + AV1FH_MI_COL_STARTS + (i * 8), start << sb_shift);
+        i = i + 1;
+        start = start + tw;
+    }
+    store64(fh + AV1FH_MI_COL_STARTS + (i * 8), mi_cols);
+    store64(fh + AV1FH_TILE_COLS, i);
+    var z = i + 1;
+    while (z <= AV1_MAX_TILE_COLS) { store64(fh + AV1FH_MI_COL_STARTS + (z * 8), 0); z = z + 1; }
+    var r = 0;
+    start = 0;
+    while (start < sb_rows) {
+        store64(fh + AV1FH_MI_ROW_STARTS + (r * 8), start << sb_shift);
+        r = r + 1;
+        start = start + th;
+    }
+    store64(fh + AV1FH_MI_ROW_STARTS + (r * 8), mi_rows);
+    store64(fh + AV1FH_TILE_ROWS, r);
+    z = r + 1;
+    while (z <= AV1_MAX_TILE_ROWS) { store64(fh + AV1FH_MI_ROW_STARTS + (z * 8), 0); z = z + 1; }
+    store64(fh + AV1FH_UNIFORM_TILE, 1);
+    store64(fh + AV1FH_TILE_COLS_LOG2, cl2);
+    store64(fh + AV1FH_TILE_ROWS_LOG2, rl2);
+    store64(fh + AV1FH_CONTEXT_UPDATE_TILE_ID, 0);
+    store64(fh + AV1FH_TILE_SIZE_BYTES, 1);
+    if ((cl2 > 0) || (rl2 > 0)) { store64(fh + AV1FH_TILE_SIZE_BYTES, 4); }
+    return DR_OK;
+}
+
+# ================================================================
+# OBUs (5.3.1) and the tile group (5.11.1)
+# ================================================================
+
+# Append the bytes of payload[0..n) to a byte-aligned writer.
+fn av1_hdrw_append(bw, payload, n): i64 {
+    var i = 0;
+    while ((i < n) && (dr_bw_err(bw) == DR_OK)) {
+        dr_bw_put_bits(bw, load8(payload + i), 8);
+        i = i + 1;
+    }
+    return dr_bw_err(bw);
+}
+# An OBU of type otype with obu_size, its extension header when ext != 0, around payload[0..n).
+fn av1_obu_write(bw, otype, ext, tid, sid, payload, n): i64 {
+    var rc = av1_obu_write_header(bw, otype, ext, tid, sid, 1, n);
+    if (rc != DR_OK) { return rc; }
+    return av1_hdrw_append(bw, payload, n);
+}
+# A temporal delimiter OBU (5.6: empty).
+fn av1_td_write_obu(bw): i64 { return av1_obu_write_header(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0, 0, 1, 0); }
+# A sequence header OBU: sequence_header_obu( ) + trailing_bits( ) (5.3.1).
+fn av1_seq_write_obu(bw, s): i64 {
+    var pw = dr_bw_init(64);
+    if (pw == 0) { return DR_ERR_OOM; }
+    var rc = av1_seq_write(pw, s);
+    if (rc == DR_OK) { rc = av1_obu_write_trailing_bits(pw); }
+    if (rc != DR_OK) { return rc; }
+    var n = dr_bw_flush(pw);
+    return av1_obu_write(bw, AV1_OBU_SEQUENCE_HEADER, 0, 0, 0, dr_bw_buf(pw), n);
+}
+# A frame header OBU: uncompressed_header( ) + trailing_bits( ) (5.3.1).
+fn av1_frame_header_write_obu(bw, s, fh, ext, tid, sid): i64 {
+    var pw = dr_bw_init(128);
+    if (pw == 0) { return DR_ERR_OOM; }
+    var rc = av1_frame_write_uncompressed_header(pw, s, fh, tid, sid);
+    if (rc == DR_OK) { rc = av1_obu_write_trailing_bits(pw); }
+    if (rc != DR_OK) { return rc; }
+    var n = dr_bw_flush(pw);
+    return av1_obu_write(bw, AV1_OBU_FRAME_HEADER, ext, tid, sid, dr_bw_buf(pw), n);
+}
+# tile_group_obu( ) (5.11.1) over tiles tg_start..tg_end of a frame with header fh: the group header when the frame has
+# more than one tile, byte alignment, then each tile's bytes (tiles[ k ] / sizes[ k ], k = 0..tg_end - tg_start), every
+# one but the last prefixed by tile_size_minus_1 in TileSizeBytes little-endian bytes. Writes into a byte-aligned bw.
+fn av1_tile_group_write(bw, fh, tg_start, tg_end, tiles, sizes): i64 {
+    var num = av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh);
+    if ((tg_start < 0) || (tg_end < tg_start) || (tg_end >= num)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    if (num > 1) {
+        var present = 1;
+        if ((tg_start == 0) && (tg_end == (num - 1))) { present = 0; }
+        dr_bw_put_bit(bw, present);                      # tile_start_and_end_present_flag f(1)
+        if (present) {
+            var tb = av1_fh_tile_cols_log2(fh) + av1_fh_tile_rows_log2(fh);
+            av1_hdrw_f(bw, tg_start, tb);                # tg_start f(tileBits)
+            av1_hdrw_f(bw, tg_end, tb);                  # tg_end f(tileBits)
+        }
+    }
+    while ((dr_bw_bit_pos(bw) & 7) != 0) { dr_bw_put_bit(bw, 0); }   # byte_alignment( )
+    var tsb = av1_fh_tile_size_bytes(fh);
+    var k = 0;
+    while ((k <= (tg_end - tg_start)) && (dr_bw_err(bw) == DR_OK)) {
+        var sz = load64(sizes + (k * 8));
+        # every tile, the last included, holds at least the byte init_symbol (8.2.2) reads
+        if (sz < 1) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        if ((tg_start + k) != tg_end) {
+            if ((tsb < 8) && ((sz - 1) >= (1 << (8 * tsb)))) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+            var b = 0;
+            # tile_size_minus_1 le(TileSizeBytes)
+            while (b < tsb) { dr_bw_put_bits(bw, ((sz - 1) >> (8 * b)) & 255, 8); b = b + 1; }
+        }
+        av1_hdrw_append(bw, load64(tiles + (k * 8)), sz);
+        k = k + 1;
+    }
+    return dr_bw_err(bw);
+}
+# A frame OBU (5.10): uncompressed_header( ), byte_alignment( ), then a tile group of the whole frame (tiles / sizes
+# as av1_tile_group_write takes them, all av1_fh_tile_cols * av1_fh_tile_rows of them).
+fn av1_frame_write_obu(bw, s, fh, ext, tid, sid, tiles, sizes): i64 {
+    var pw = dr_bw_init(4096);
+    if (pw == 0) { return DR_ERR_OOM; }
+    var rc = av1_frame_write_uncompressed_header(pw, s, fh, tid, sid);
+    if (rc != DR_OK) { return rc; }
+    while ((dr_bw_bit_pos(pw) & 7) != 0) { dr_bw_put_bit(pw, 0); }   # byte_alignment( )
+    rc = av1_tile_group_write(pw, fh, 0, (av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh)) - 1, tiles, sizes);
+    if (rc != DR_OK) { return rc; }
+    var n = dr_bw_flush(pw);
+    return av1_obu_write(bw, AV1_OBU_FRAME, ext, tid, sid, dr_bw_buf(pw), n);
 }
 
 # --- av1_symbol.cyr ---

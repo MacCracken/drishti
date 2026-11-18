@@ -1,0 +1,314 @@
+# tests/av1_hdrw.fcyr — the header WRITERS under random records (0.8.6): the writer's contract, fuzzed.
+#
+# THE CONTRACT UNDER FUZZ (src/av1_hdrw.cyr): for ANY record, av1_seq_write / av1_frame_write_uncompressed_header
+# either refuses it (a DR_ERR_* code, nothing emitted that means another record) or writes a header its parser reads
+# back as THAT record, word for word, consuming exactly the bits written and rewriting to the same bits. The unit
+# suite (tests/av1_hdrw.tcyr) holds each rule to a hand-chosen case; this harness throws records at it that nobody
+# chose: valid ones from av1_seq_init / av1_fh_init_key, then a run of random field writes, in range and just past it,
+# with the derived fields sometimes recomputed (so lossless frames, superres and restoration occur consistently).
+# Both outcomes must be common — a fuzz that only ever refuses (or only ever accepts) proves nothing — so the run
+# counts them and asserts each is a real share.
+include "src/main.cyr"
+
+# Deterministic xorshift PRNG so any failure reproduces from the fixed seed.
+var hfz_seed = 0x2545F4914F6CDD1D;
+fn hfz_rand(): i64 {
+    var s = hfz_seed;
+    s = s ^ (s << 13);
+    s = s ^ (s >> 7);
+    s = s ^ (s << 17);
+    s = s & 0x7FFFFFFFFFFFFFFF;
+    hfz_seed = s;
+    return s;
+}
+fn hfz_range(lo, hi): i64 { return lo + (hfz_rand() % ((hi - lo) + 1)); }   # uniform in [lo, hi]
+
+fn hfz_report(what, acc, n): i64 {
+    print("  ", 2); print(what, strlen(what)); print(": accepted ", 11); print_num(acc); print(" of ", 4); print_num(n);
+    print(" random records (the rest refused)\n", 35);
+    return 0;
+}
+fn hfz_diff(a, b, size, skip): i64 {
+    var o = 0;
+    while (o < size) {
+        if ((o != skip) && (load64(a + o) != load64(b + o))) { return o; }
+        o = o + 8;
+    }
+    return 0 - 1;
+}
+
+# ---- sequence headers ----
+# write s; DR_OK and a parse that is s word for word (BITS_CONSUMED aside), its bits, and the same bits again —
+# else the failing step (1 parse, 2 bits consumed, 3 trailing, 4 record, 5 rewrite); 0 - 1 when the writer refused
+var Hfz_Off = 0;
+fn hfz_seq_check(s): i64 {
+    var bw = dr_bw_init(64);
+    if (av1_seq_write(bw, s) != DR_OK) { return 0 - 1; }
+    var nb = dr_bw_bit_pos(bw);
+    av1_obu_write_trailing_bits(bw);
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var s2 = av1_seq_parse(dr_bw_buf(bw), n, &e);
+    if ((s2 == 0) || (e != DR_OK)) { return 1; }
+    if (av1_seq_bits_consumed(s2) != nb) { return 2; }
+    if (av1_seq_header_end(s2, dr_bw_buf(bw), n) != DR_OK) { return 3; }
+    Hfz_Off = hfz_diff(s, s2, AV1_SEQ_SIZE, AV1_SEQ_BITS_CONSUMED);
+    if (Hfz_Off >= 0) { return 4; }
+    var bw2 = dr_bw_init(64);
+    if (av1_seq_write(bw2, s2) != DR_OK) { return 5; }
+    av1_obu_write_trailing_bits(bw2);
+    var n2 = dr_bw_flush(bw2);
+    if ((n2 != n) || (memeq(dr_bw_buf(bw), dr_bw_buf(bw2), n) == 0)) { return 5; }
+    return 0;
+}
+# a reduced still picture sequence header, parsed from bytes hand-packed as tests/av1_hdrw.tcyr's (64x64 4:2:0)
+fn hfz_seq_reduced(): i64 {
+    var b = alloc(6);
+    store8(b, 0x18); store8(b + 1, 0x15); store8(b + 2, 0x7F); store8(b + 3, 0xFC); store8(b + 4, 0x00);
+    store8(b + 5, 0x08);
+    var e = 0;
+    return av1_seq_parse(b, 6, &e);
+}
+fn hfz_seq_base(): i64 {
+    var e = 0;
+    var k = hfz_range(0, 6);
+    if (k == 6) { return hfz_seq_reduced(); }
+    var w = hfz_range(1, 400);
+    var h = hfz_range(1, 300);
+    if (k == 0) { return av1_seq_init(w, h, 8, 0, 1, 1, &e); }
+    if (k == 1) { return av1_seq_init(w, h, 10, 1, 1, 1, &e); }
+    if (k == 2) { return av1_seq_init(w, h, 8, 0, 0, 0, &e); }
+    if (k == 3) { return av1_seq_init(w, h, 12, 0, 1, 0, &e); }
+    if (k == 4) { return av1_seq_init(w, h, 12, 0, 1, 1, &e); }
+    return av1_seq_init(w, h, 10, 0, 1, 0, &e);
+}
+# one random write to a sequence field: (offset, lo, hi) picked from the fields the syntax carries
+fn hfz_seq_poke(s): i64 {
+    var f = hfz_range(0, 37);
+    var o = 0;
+    var v = 0;
+    if (f == 32) { o = AV1_SEQ_IDD_PRESENT; v = hfz_range(0, 1); }
+    if (f == 33) { o = AV1_SEQ_OP_IDD_PRESENT + (8 * hfz_range(0, 3)); v = hfz_range(0, 1); }
+    if (f == 34) { o = AV1_SEQ_OP_IDD_M1 + (8 * hfz_range(0, 3)); v = hfz_range(0, 16); }
+    if (f == 35) {                                       # decoder / encoder delay, low delay mode: slots 0..3
+        o = AV1_SEQ_OP_DEC_DELAY + (256 * hfz_range(0, 2)) + (8 * hfz_range(0, 3));
+        v = hfz_range(0, 1100);
+    }
+    if (f == 36) { o = AV1_SEQ_BUF_DELAY_LEN_M1; v = hfz_range(0, 31); }
+    if (f == 37) { o = AV1_SEQ_STILL + (8 * hfz_range(0, 1)); v = hfz_range(0, 1); }              # still / reduced
+    if (f == 0) { o = AV1_SEQ_PROFILE; v = hfz_range(0, 3); }
+    if (f == 1) { o = AV1_SEQ_BITDEPTH; v = 8 + (2 * hfz_range(0, 2)); }
+    if (f == 2) { o = AV1_SEQ_MONO; v = hfz_range(0, 1); store64(s + AV1_SEQ_NUM_PLANES, 3 - (2 * v)); }
+    if (f == 3) { o = AV1_SEQ_SUBX; v = hfz_range(0, 1); }
+    if (f == 4) { o = AV1_SEQ_SUBY; v = hfz_range(0, 1); }
+    if (f == 5) { o = AV1_SEQ_CHROMA_POS; v = hfz_range(0, 4); }
+    if (f == 6) { o = AV1_SEQ_COLOR_DESC; v = hfz_range(0, 1); }
+    if (f == 7) { o = AV1_SEQ_COLOR_PRIMARIES; v = hfz_range(0, 3); }
+    if (f == 8) { o = AV1_SEQ_TRANSFER; v = hfz_range(12, 14); }
+    if (f == 9) { o = AV1_SEQ_MATRIX_COEFF; v = hfz_range(0, 2); }
+    if (f == 10) { o = AV1_SEQ_COLOR_RANGE; v = hfz_range(0, 1); }
+    if (f == 11) { o = AV1_SEQ_SEP_UV_DQ; v = hfz_range(0, 1); }
+    if (f == 12) { o = AV1_SEQ_SB128; v = hfz_range(0, 1); }
+    if (f == 13) { o = AV1_SEQ_ENABLE_FILTER_INTRA + (8 * hfz_range(0, 5)); v = hfz_range(0, 1); }   # 280 .. 320
+    if (f == 14) { o = AV1_SEQ_ENABLE_ORDER_HINT; v = hfz_range(0, 1); }
+    if (f == 15) { o = AV1_SEQ_ORDER_HINT_BITS; v = hfz_range(0, 9); }
+    if (f == 16) { o = AV1_SEQ_ENABLE_SUPERRES + (8 * hfz_range(0, 4)); v = hfz_range(0, 1); }      # 168 .. 200
+    if (f == 17) { o = AV1_SEQ_FORCE_SCT; v = hfz_range(0, 2); }
+    if (f == 18) { o = AV1_SEQ_FORCE_INT_MV; v = hfz_range(0, 2); }
+    if (f == 19) { o = AV1_SEQ_FRAME_ID_PRESENT; v = hfz_range(0, 1); }
+    if (f == 20) { o = AV1_SEQ_DELTA_FID_LEN; v = hfz_range(1, 18); }
+    if (f == 21) { o = AV1_SEQ_ADD_FID_LEN; v = hfz_range(0, 9); }
+    if (f == 22) { o = AV1_SEQ_TIMING_PRESENT; v = hfz_range(0, 1); }
+    if (f == 23) { o = AV1_SEQ_EQUAL_PIC_INT; v = hfz_range(0, 1); }
+    if (f == 24) { o = AV1_SEQ_TICKS_PER_PIC_M1; v = hfz_range(0, 0x1FFFFFFFF); }
+    if (f == 25) { o = AV1_SEQ_DM_PRESENT; v = hfz_range(0, 1); }
+    if (f == 26) { o = AV1_SEQ_BRT_LEN; v = hfz_range(0, 33); }
+    if (f == 27) { o = AV1_SEQ_OP_CNT_M1; v = hfz_range(0, 3); }
+    if (f == 28) { o = AV1_SEQ_OP_IDC + (8 * hfz_range(0, 3)); v = hfz_range(0, 0x1FFF); }
+    if (f == 29) { o = AV1_SEQ_LEVEL_IDX + (8 * hfz_range(0, 3)); v = hfz_range(0, 32); }
+    if (f == 30) { o = AV1_SEQ_TIER + (8 * hfz_range(0, 3)); v = hfz_range(0, 1); }
+    if (f == 31) { o = AV1_SEQ_OP_DM + (8 * hfz_range(0, 3)); v = hfz_range(0, 1); }
+    store64(s + o, v);
+    return 0;
+}
+fn hfz_pass_seq(n): i64 {
+    var acc = 0;
+    var bad = 0;
+    var k = 0;
+    while (k < n) {
+        var s = hfz_seq_base();
+        var p = hfz_range(0, 4);
+        var j = 0;
+        while (j < p) { hfz_seq_poke(s); j = j + 1; }
+        var r = hfz_seq_check(s);
+        if (r == 0) { acc = acc + 1; }
+        if (r > 0) {
+            if (bad == 0) {
+                assert_eq(r * 10000 + Hfz_Off, 0 - 1, "seq fuzz: the first broken round trip (step, word)");
+            }
+            bad = bad + 1;
+        }
+        k = k + 1;
+    }
+    hfz_report("seq fuzz", acc, n);
+    assert_eq(bad, 0, "seq fuzz: every sequence header the writer accepts round trips word for word");
+    assert(acc > (n / 10), "seq fuzz: over a tenth of the random records are accepted (the property is exercised)");
+    assert(acc < n, "seq fuzz: some random records are refused (the refusals are exercised)");
+    return 0;
+}
+
+# ---- frame headers ----
+fn hfz_fh_check(s, fh): i64 {
+    var bw = dr_bw_init(64);
+    if (av1_frame_write_uncompressed_header(bw, s, fh, 0, 0) != DR_OK) { return 0 - 1; }
+    var nb = dr_bw_bit_pos(bw);
+    av1_obu_write_trailing_bits(bw);
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var fh2 = av1_frame_parse_uncompressed_header(s, av1_ref_state_new(), 0, 0, dr_bw_buf(bw), n, &e);
+    if ((fh2 == 0) || (e != DR_OK)) { return 1; }
+    if (av1_fh_bits_consumed(fh2) != nb) { return 2; }
+    if (av1_frame_header_end(AV1_OBU_FRAME_HEADER, fh2, dr_bw_buf(bw), n) != DR_OK) { return 3; }
+    Hfz_Off = hfz_diff(fh, fh2, AV1FH_SIZE, AV1FH_BITS_CONSUMED);
+    if (Hfz_Off >= 0) { return 4; }
+    var bw2 = dr_bw_init(64);
+    if (av1_frame_write_uncompressed_header(bw2, s, fh2, 0, 0) != DR_OK) { return 5; }
+    av1_obu_write_trailing_bits(bw2);
+    var n2 = dr_bw_flush(bw2);
+    if ((n2 != n) || (memeq(dr_bw_buf(bw), dr_bw_buf(bw2), n) == 0)) { return 5; }
+    return 0;
+}
+# a sequence for the frame records: a random format and size, with the tools that open frame syntax switched on at
+# random (CDEF, restoration, superres, film grain, screen content, frame ids, 128x128 superblocks)
+fn hfz_fh_seq(): i64 {
+    var s = hfz_seq_base();
+    store64(s + AV1_SEQ_ENABLE_CDEF, hfz_range(0, 1));
+    store64(s + AV1_SEQ_ENABLE_RESTORATION, hfz_range(0, 1));
+    store64(s + AV1_SEQ_ENABLE_SUPERRES, hfz_range(0, 1));
+    store64(s + AV1_SEQ_FILM_GRAIN_PRESENT, hfz_range(0, 1));
+    store64(s + AV1_SEQ_SB128, hfz_range(0, 1));
+    if (hfz_range(0, 2) == 0) { store64(s + AV1_SEQ_FORCE_SCT, AV1_SELECT_SCREEN_CONTENT_TOOLS); }
+    if (hfz_range(0, 3) == 0) {
+        store64(s + AV1_SEQ_FRAME_ID_PRESENT, 1);
+        store64(s + AV1_SEQ_DELTA_FID_LEN, 14);
+        store64(s + AV1_SEQ_ADD_FID_LEN, 1);
+    }
+    if (av1_seq_mono(s) == 0) { store64(s + AV1_SEQ_SEP_UV_DQ, hfz_range(0, 1)); }
+    return s;
+}
+fn hfz_fh_poke(fh): i64 {
+    var f = hfz_range(0, 39);
+    var o = 0;
+    var v = 0;
+    if (f == 0) { o = AV1FH_SHOW_FRAME; v = hfz_range(0, 1); }
+    if (f == 1) { o = AV1FH_SHOWABLE_FRAME; v = hfz_range(0, 1); }
+    if (f == 2) { o = AV1FH_ERROR_RESILIENT; v = hfz_range(0, 1); }
+    if (f == 3) { o = AV1FH_DISABLE_CDF_UPDATE; v = hfz_range(0, 1); }
+    if (f == 4) { o = AV1FH_ALLOW_SCT; v = hfz_range(0, 1); }
+    if (f == 5) { o = AV1FH_FORCE_INT_MV_CODED; v = hfz_range(0, 1); }
+    if (f == 6) { o = AV1FH_FRAME_TYPE; v = 2 * hfz_range(0, 1); }             # KEY or INTRA_ONLY
+    if (f == 7) { o = AV1FH_ORDER_HINT; v = hfz_range(0, 130); }
+    if (f == 8) { o = AV1FH_REFRESH_FRAME_FLAGS; v = hfz_range(0, 255); }
+    if (f == 9) { o = AV1FH_DISABLE_FE_UPDATE_CDF; v = hfz_range(0, 1); }
+    if (f == 10) { o = AV1FH_RENDER_WIDTH + (8 * hfz_range(0, 1)); v = hfz_range(0, 70); }
+    if (f == 11) { o = AV1FH_ALLOW_INTRABC; v = hfz_range(0, 1); }
+    if (f == 12) { o = AV1FH_BASE_Q_IDX; v = hfz_range(0, 256); }
+    if (f == 13) { o = AV1FH_DELTA_Q_Y_DC + (8 * hfz_range(0, 4)); v = hfz_range(0 - 65, 65); }
+    if (f == 14) { o = AV1FH_USING_QMATRIX; v = hfz_range(0, 1); }
+    if (f == 15) { o = AV1FH_QM_Y + (8 * hfz_range(0, 2)); v = hfz_range(0, 16); }
+    if (f == 16) { o = AV1FH_DIFF_UV_DELTA; v = hfz_range(0, 1); }
+    if (f == 17) { o = AV1FH_DELTA_Q_PRESENT + (8 * hfz_range(0, 4)); v = hfz_range(0, 4); }   # dq/lf present/res/multi
+    if (f == 18) { o = AV1FH_LF_LEVEL + (8 * hfz_range(0, 3)); v = hfz_range(0, 64); }
+    if (f == 19) { o = AV1FH_LF_SHARPNESS; v = hfz_range(0, 8); }
+    if (f == 20) { o = AV1FH_LF_DELTA_ENABLED + (8 * hfz_range(0, 1)); v = hfz_range(0, 1); }
+    if (f == 21) { o = AV1FH_LF_REF_DELTAS + (8 * hfz_range(0, 9)); v = hfz_range(0 - 65, 64); }   # + mode deltas
+    if (f == 22) { o = AV1FH_CDEF_DAMPING; v = hfz_range(2, 7); }
+    if (f == 23) { o = AV1FH_CDEF_BITS; v = hfz_range(0, 3); }
+    if (f == 24) { o = AV1FH_CDEF_Y_PRI + (8 * hfz_range(0, 31)); v = hfz_range(0, 16); }      # all 4 strength arrays
+    if (f == 25) { o = AV1FH_FRAME_RESTORATION_TYPE + (8 * hfz_range(0, 2)); v = hfz_range(0, 3); }
+    if (f == 26) { o = AV1FH_LR_SIZE + (8 * hfz_range(0, 2)); v = 32 << hfz_range(0, 4); }
+    if (f == 27) { o = AV1FH_TX_MODE; v = hfz_range(0, 2); }
+    if (f == 28) { o = AV1FH_REDUCED_TX_SET; v = hfz_range(0, 1); }
+    if (f == 29) { o = AV1FH_SEG_ENABLED + (8 * hfz_range(0, 3)); v = hfz_range(0, 1); }       # enabled + 3 flags
+    if (f == 30) { o = AV1FH_FEATURE_ENABLED + (8 * hfz_range(0, 63)); v = hfz_range(0, 1); }
+    if (f == 31) { o = AV1FH_FEATURE_DATA + (8 * hfz_range(0, 63)); v = hfz_range(0 - 260, 260); }
+    if (f == 32) { o = AV1FH_GRAIN + AV1FG_APPLY; v = hfz_range(0, 1); }
+    if (f == 33) { o = AV1FH_GRAIN + AV1FG_NUM_Y + (8 * hfz_range(0, 3)); v = hfz_range(0, 3); }   # y, csfl, cb, cr
+    if (f == 34) { o = AV1FH_GRAIN + AV1FG_Y_VALUE + (8 * hfz_range(0, 95)); v = hfz_range(0, 255); }   # the points
+    if (f == 35) { o = AV1FH_GRAIN + AV1FG_AR_LAG; v = hfz_range(0, 3); }
+    if (f == 36) { o = AV1FH_GRAIN + AV1FG_AR_Y + (8 * hfz_range(0, 73)); v = hfz_range(0, 255); }  # AR coefficients
+    if (f == 37) { o = AV1FH_GRAIN + AV1FG_CB_MULT + (8 * hfz_range(0, 5)); v = hfz_range(0, 300); }
+    if (f == 38) { o = AV1FH_GRAIN + AV1FG_UPDATE; v = 1; }
+    if (f == 39) { o = AV1FH_PRESENTATION_TIME + (8 * hfz_range(0, 1)); v = hfz_range(0, 1); }   # + BRT_PRESENT
+    store64(fh + o, v);
+    return 0;
+}
+# the derived fields an encoder sets after changing the frame: some of the time, so records stay consistent often
+# enough for the writer to accept them
+fn hfz_fh_derive(s, fh): i64 {
+    av1_compute_lossless(fh);
+    if (av1_fh_coded_lossless(fh)) {
+        store64(fh + AV1FH_TX_MODE, AV1_ONLY_4X4);
+        store64(fh + AV1FH_LF_DELTA_ENABLED, 1);
+    }
+    var uses = 0;
+    var i = 0;
+    while (i < 3) {
+        if (load64(fh + AV1FH_FRAME_RESTORATION_TYPE + (i * 8)) != AV1_RESTORE_NONE) { uses = 1; }
+        i = i + 1;
+    }
+    store64(fh + AV1FH_USES_LR, uses);
+    if (uses) {
+        var sz = 128 << hfz_range(0, 1);
+        store64(fh + AV1FH_LR_SIZE, sz);
+        store64(fh + AV1FH_LR_SIZE + 8, sz);
+        store64(fh + AV1FH_LR_SIZE + 16, sz);
+    }
+    return 0;
+}
+fn hfz_pass_fh(n): i64 {
+    var acc = 0;
+    var bad = 0;
+    var k = 0;
+    while (k < n) {
+        var s = hfz_fh_seq();
+        var e = 0;
+        var fh = av1_fh_init_key(s, hfz_range(0, 255), &e);
+        if (fh != 0) {
+            if (hfz_range(0, 3) == 0) {
+                av1_fh_set_tiles_uniform(s, fh, hfz_range(0, 2), hfz_range(0, 2));
+            }
+            var p = hfz_range(0, 3);
+            var j = 0;
+            while (j < p) { hfz_fh_poke(fh); j = j + 1; }
+            if (hfz_range(0, 1) == 0) { hfz_fh_derive(s, fh); }
+            var r = hfz_fh_check(s, fh);
+            if (r == 0) { acc = acc + 1; }
+            if (r > 0) {
+                if (bad == 0) {
+                    assert_eq(r * 10000 + Hfz_Off, 0 - 1, "fh fuzz: the first broken round trip (step, word)");
+                }
+                bad = bad + 1;
+            }
+        }
+        k = k + 1;
+    }
+    hfz_report("fh fuzz", acc, n);
+    assert_eq(bad, 0, "fh fuzz: every frame header the writer accepts round trips word for word");
+    assert(acc > (n / 10), "fh fuzz: over a tenth of the random records are accepted (the property is exercised)");
+    assert(acc < n, "fh fuzz: some random records are refused (the refusals are exercised)");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { return 1; }
+    test_group("header writer fuzz: random sequence header records");
+    hfz_pass_seq(3000);
+    test_group("header writer fuzz: random intra frame header records");
+    hfz_pass_fh(3000);
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

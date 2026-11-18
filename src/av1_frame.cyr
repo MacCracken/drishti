@@ -208,7 +208,15 @@ enum Av1FhOff {
     AV1FH_MI_COL_STARTS          = 2656;  # [65]          -> 3176
     AV1FH_MI_ROW_STARTS          = 3176;  # [65]          -> 3696
     AV1FH_GRAIN                  = 3712;  # film_grain_params block (Av1FgOff, AV1FG_SIZE) -> 5232
-    AV1FH_SIZE                   = 5232;
+    # 0.8.6: the coded fields the decode never reads, kept so the record is the whole header and
+    # av1_frame_write_uncompressed_header (src/av1_hdrw.cyr) writes it back bit for bit
+    AV1FH_FORCE_INT_MV_CODED     = 5232;  # the force_integer_mv bit as coded (an intra frame forces 1 after it)
+    AV1FH_DISPLAY_FRAME_ID       = 5240;  # display_frame_id (show_existing_frame with frame ids)
+    AV1FH_PRESENTATION_TIME      = 5248;  # temporal_point_info: frame_presentation_time
+    AV1FH_BRT_PRESENT            = 5256;  # buffer_removal_time_present_flag
+    AV1FH_REF_ORDER_HINT_CODED   = 5264;  # ref_order_hint[ 8 ] as coded (error resilient, partial refresh) -> 5328
+    AV1FH_BUFFER_REMOVAL_TIME    = 5328;  # buffer_removal_time[ 32 ] -> 5584
+    AV1FH_SIZE                   = 5584;
 }
 
 # The film_grain_params() syntax elements (5.9.30), every one, as a block inside the frame header at
@@ -1802,9 +1810,9 @@ fn av1_film_grain_params(br, s, refs, fh): i64 {
 }
 
 # temporal_point_info() — 5.9.31.
-fn av1_temporal_point_info_skip(br, s): i64 {
-    dr_br_read_bits(br, av1_seq_frame_presentation_time_len(s));   # frame_presentation_time f(n)
-    return dr_br_err(br);
+fn av1_temporal_point_info(br, s, fh): i64 {
+    store64(fh + AV1FH_PRESENTATION_TIME, dr_br_read_bits(br, av1_seq_frame_presentation_time_len(s)));
+    return dr_br_err(br);   # frame_presentation_time f(n)
 }
 
 # ================================================================
@@ -2010,7 +2018,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 
     if (reduced) {
         store64(fh + AV1FH_SHOW_EXISTING, 0);
-        # frame_type KEY_FRAME, FrameIsIntra 1, show_frame 1, showable 0.
+        # frame_type KEY_FRAME, FrameIsIntra 1, show_frame 1, showable 0. 5.9.2 assigns no error_resilient_mode on
+        # this path; libaom (read_uncompressed_header) and dav1d (parse_frame_hdr) both set it 1, as the shown key
+        # frame of the full syntax implies. Decode-neutral (every condition reading it is settled by FrameIsIntra or
+        # refresh_frame_flags 0xFF), but it is the recorded value, so the header writer can round trip it.
+        error_resilient = 1;
     } else {
         var show_existing = dr_br_read_bit(br);   # show_existing_frame f(1)
         store64(fh + AV1FH_SHOW_EXISTING, show_existing);
@@ -2019,11 +2031,11 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             store64(fh + AV1FH_FRAME_TO_SHOW, idx);
             if (av1_seq_decoder_model_present(s)
               && (av1_seq_equal_picture_interval(s) == 0)) {
-                av1_temporal_point_info_skip(br, s);
+                av1_temporal_point_info(br, s, fh);
             }
             store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 0);
             if (av1_seq_frame_id_present(s)) {
-                dr_br_read_bits(br, id_len);   # display_frame_id f(idLen)
+                store64(fh + AV1FH_DISPLAY_FRAME_ID, dr_br_read_bits(br, id_len));   # display_frame_id f(idLen)
             }
             var ft = av1_ref_frame_type(refs, idx);
             store64(fh + AV1FH_FRAME_TYPE, ft);
@@ -2068,7 +2080,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
         show_frame = dr_br_read_bit(br);   # show_frame f(1)
         if (show_frame && av1_seq_decoder_model_present(s)
           && (av1_seq_equal_picture_interval(s) == 0)) {
-            av1_temporal_point_info_skip(br, s);
+            av1_temporal_point_info(br, s, fh);
         }
         if (show_frame) {
             showable_frame = 0;
@@ -2112,6 +2124,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             force_int_mv = dr_br_read_bit(br);   # force_integer_mv f(1)
         }
     }
+    store64(fh + AV1FH_FORCE_INT_MV_CODED, force_int_mv);
     if (frame_is_intra) { force_int_mv = 1; }
     store64(fh + AV1FH_FORCE_INT_MV, force_int_mv);
     if (av1_seq_frame_id_present(s)) {
@@ -2143,6 +2156,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
 
     if (av1_seq_decoder_model_present(s)) {
         var brt_present = dr_br_read_bit(br);   # buffer_removal_time_present_flag f(1)
+        store64(fh + AV1FH_BRT_PRESENT, brt_present);
         if (brt_present) {
             var op = 0;
             var op_cnt = av1_seq_op_cnt_minus_1(s);
@@ -2152,7 +2166,8 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
                     var in_temporal = (op_idc >> tid) & 1;
                     var in_spatial = (op_idc >> (sid + 8)) & 1;
                     if ((op_idc == 0) || (in_temporal && in_spatial)) {
-                        dr_br_read_bits(br, av1_seq_buffer_removal_time_len(s));   # buffer_removal_time[op] f(n)
+                        store64(fh + AV1FH_BUFFER_REMOVAL_TIME + (op * 8),
+                          dr_br_read_bits(br, av1_seq_buffer_removal_time_len(s)));   # buffer_removal_time[op] f(n)
                     }
                 }
                 op = op + 1;
@@ -2177,6 +2192,7 @@ fn av1_frame_parse_uncompressed_header(s, refs, tid, sid, buf, len, out_err): i6
             var ri2 = 0;
             while (ri2 < AV1_NUM_REF_FRAMES) {
                 var roh = dr_br_read_bits(br, order_hint_bits);   # ref_order_hint[i] f(OrderHintBits)
+                store64(fh + AV1FH_REF_ORDER_HINT_CODED + (ri2 * 8), roh);
                 if (roh != av1_ref_order_hint(refs, ri2)) {
                     store64(refs + AV1REF_VALID + (ri2 * 8), 0);
                 }

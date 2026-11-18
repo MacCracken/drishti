@@ -1,0 +1,316 @@
+# drishti header rewrite (0.8.6) — the header writers (src/av1_hdrw.cyr) checked against streams drishti did not make.
+#
+# REWRITE mode (the default): reads build/hdr-rewrite-input.ivf, and for every sequence header OBU and every frame
+# header (OBU_FRAME_HEADER, or the header of an OBU_FRAME) of an intra frame or a shown existing frame, parses it
+# (av1_seq_parse / av1_frame_parse_uncompressed_header), writes the record back (av1_seq_write /
+# av1_frame_write_uncompressed_header) and compares the written bits with the ones the parse consumed, bit for bit.
+# An intra frame header's values do not depend on the reference state (its size comes from the sequence header, it
+# has no primary reference frame, its ref_order_hint[ ] are read raw), so each is parsed against a fresh one, and
+# must parse ("frame UNPARSED intra" otherwise). Inter frame headers are counted and skipped: the writer does not
+# write them yet (roadmap 0.8.8). A header that names a reference slot (an inter frame, or a shown existing frame of a
+# slot the empty state does not hold) can fail that parse: it is counted as needs_refs, not rewritten.
+# A header whose rewrite differs is re-parsed: if the record is identical it is EQUIV, not a failure — a coded value
+# outside its clip range (5.9.14's Clip3 of a segmentation feature) has two codings of one header, and the record keeps
+# only the clipped value.
+#   stdout: "seq <k> OK|EQUIV|DIFF ...", "frame <k> OK|EQUIV|DIFF ..." for each header, then
+#           "SUMMARY seq=<ok>/<n> intra=<ok>/<n> inter_skipped=<n> equiv=<n> unparsed=<n> needs_refs=<n>"
+#           (unparsed = sequence headers and intra frame headers that did not parse: each one a failure)
+#
+# EMIT mode (when build/hdr-rewrite.emit exists): writes streams made by the writers ALONE — temporal delimiter,
+# sequence header OBU, frame OBU with an all-skip DC keyframe tile from the plan-driven tile writer — to
+# build/writer-<name>.ivf, for make conformance to decode with aomdec, dav1d and drishti.
+#
+# Build: cyrius build programs/hdr-rewrite.cyr build/drishti-hdr-rewrite
+
+include "src/main.cyr"
+
+enum HrConst {
+    HR_MAX_INPUT = 67108864;
+}
+
+fn hr_puts(s): i64 { return print(s, strlen(s)); }
+fn hr_putn(n): i64 {
+    if (n == 0) { return hr_puts("0"); }
+    var v = n;
+    if (v < 0) { hr_puts("-"); v = 0 - v; }
+    var d = alloc(24);
+    var i = 0;
+    while (v > 0) { store8(d + i, 48 + (v % 10)); v = v / 10; i = i + 1; }
+    var o = alloc(24);
+    var j = 0;
+    while (j < i) { store8(o + j, load8((d + i - 1) - j)); j = j + 1; }
+    return print(o, i);
+}
+
+# 1 when the first nbits bits of a and b agree (MSB first)
+fn hr_bits_equal(a, b, nbits): i64 {
+    var k = 0;
+    while (k < nbits) {
+        var x = (load8(a + (k >> 3)) >> (7 - (k & 7))) & 1;
+        var y = (load8(b + (k >> 3)) >> (7 - (k & 7))) & 1;
+        if (x != y) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+# the first differing bit, or -1
+fn hr_first_diff(a, b, nbits): i64 {
+    var k = 0;
+    while (k < nbits) {
+        var x = (load8(a + (k >> 3)) >> (7 - (k & 7))) & 1;
+        var y = (load8(b + (k >> 3)) >> (7 - (k & 7))) & 1;
+        if (x != y) { return k; }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+var Hr_SeqOk = 0;
+var Hr_SeqN = 0;
+var Hr_FrOk = 0;
+var Hr_FrN = 0;
+var Hr_Inter = 0;
+var Hr_Unparsed = 0;
+var Hr_NeedsRefs = 0;
+var Hr_Equiv = 0;
+
+# 1 when records a and b (size bytes) agree everywhere but the 8-byte field at skip (the bit count each parse records)
+fn hr_records_equal(a, b, size, skip): i64 {
+    var k = 0;
+    while (k < size) {
+        if ((k < skip) || (k >= (skip + 8))) {
+            if (load8(a + k) != load8(b + k)) { return 0; }
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn hr_report(kind, k, ok, nbits, written, diff, err): i64 {
+    hr_puts(kind);
+    hr_puts(" ");
+    hr_putn(k);
+    if (ok) { hr_puts(" OK bits="); hr_putn(nbits); hr_puts("\n"); return 0; }
+    hr_puts(" DIFF bits=");
+    hr_putn(nbits);
+    hr_puts(" written=");
+    hr_putn(written);
+    hr_puts(" first_diff=");
+    hr_putn(diff);
+    hr_puts(" err=");
+    hr_putn(err);
+    hr_puts("\n");
+    return 0;
+}
+
+fn hr_rewrite(): i64 {
+    var buf = alloc(HR_MAX_INPUT);
+    var n = file_read_all("build/hdr-rewrite-input.ivf", buf, HR_MAX_INPUT);
+    if (n <= 0) { hr_puts("SUMMARY no-input\n"); return 1; }
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, n, &e);
+    if (r == 0) { hr_puts("SUMMARY not-an-ivf\n"); return 1; }
+    var seq = 0;
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+        var it = av1_obu_iter_init(pp, ps);
+        if (it == 0) { return 2; }
+        var t = 0;
+        var off = 0;
+        var sz = 0;
+        while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+            var o = av1_obu_iter_obu(it);
+            if (t == AV1_OBU_SEQUENCE_HEADER) {
+                var se = 0;
+                var ns = av1_seq_parse(pp + off, sz, &se);
+                if ((ns == 0) || (se != DR_OK)) { Hr_Unparsed = Hr_Unparsed + 1; hr_puts("seq UNPARSED\n"); }
+                else {
+                    seq = ns;
+                    Hr_SeqN = Hr_SeqN + 1;
+                    var bw = dr_bw_init(64);
+                    var rc = av1_seq_write(bw, ns);
+                    var nb = av1_seq_bits_consumed(ns);
+                    var wb = dr_bw_bit_pos(bw);
+                    dr_bw_flush(bw);
+                    var ok = 0;
+                    if ((rc == DR_OK) && (wb == nb) && hr_bits_equal(pp + off, dr_bw_buf(bw), nb)) { ok = 1; }
+                    if (ok) { Hr_SeqOk = Hr_SeqOk + 1; }
+                    if ((ok == 0) && (rc == DR_OK)) {
+                        # not the same bits: is it the same header? (a value outside its clip range has two codings)
+                        var re = 0;
+                        var rs = av1_seq_parse(dr_bw_buf(bw), (wb + 7) >> 3, &re);
+                        if ((rs != 0) && (re == DR_OK)
+                          && hr_records_equal(rs, ns, AV1_SEQ_SIZE, AV1_SEQ_BITS_CONSUMED)) {
+                            Hr_Equiv = Hr_Equiv + 1;
+                            ok = 2;
+                        }
+                    }
+                    if (ok == 2) { hr_puts("seq "); hr_putn(Hr_SeqN); hr_puts(" EQUIV\n"); }
+                    else {
+                        var d1 = hr_first_diff(pp + off, dr_bw_buf(bw), av1_min(nb, wb));
+                        hr_report("seq", Hr_SeqN, ok, nb, wb, d1, rc);
+                    }
+                }
+            }
+            if (((t == AV1_OBU_FRAME_HEADER) || (t == AV1_OBU_FRAME)) && (seq != 0)) {
+                var fe = 0;
+                var fh = av1_frame_parse_uncompressed_header(seq, av1_ref_state_new(), av1_obu_tid(o), av1_obu_sid(o),
+                  pp + off, sz, &fe);
+                if ((fh == 0) || (fe != DR_OK)) {
+                    # each header is parsed against an EMPTY reference state, so one that names a reference (an inter
+                    # frame, a shown existing frame) can fail here, and is not this writer's (roadmap 0.8.8). An intra
+                    # one must parse: its first bits are show_existing_frame 0 and frame_type KEY / INTRA_ONLY.
+                    var b0 = load8(pp + off);
+                    var intra_hdr = av1_seq_reduced(seq);
+                    var ft = (b0 >> 5) & 3;
+                    if (((b0 & 0x80) == 0) && ((ft == AV1_KEY_FRAME) || (ft == AV1_INTRA_ONLY_FRAME))) {
+                        intra_hdr = 1;
+                    }
+                    if (intra_hdr) {
+                        Hr_Unparsed = Hr_Unparsed + 1;
+                        hr_puts("frame UNPARSED intra err=");
+                        hr_putn(fe);
+                        hr_puts("\n");
+                    } else {
+                        Hr_NeedsRefs = Hr_NeedsRefs + 1;
+                    }
+                }
+                else {
+                    if ((av1_fh_show_existing_frame(fh) == 0) && (av1_fh_frame_is_intra(fh) == 0)) {
+                        Hr_Inter = Hr_Inter + 1;
+                    } else {
+                        Hr_FrN = Hr_FrN + 1;
+                        var bw2 = dr_bw_init(256);
+                        var rc2 = av1_frame_write_uncompressed_header(bw2, seq, fh, av1_obu_tid(o), av1_obu_sid(o));
+                        var nb2 = av1_fh_bits_consumed(fh);
+                        var wb2 = dr_bw_bit_pos(bw2);
+                        dr_bw_flush(bw2);
+                        var ok2 = 0;
+                        if ((rc2 == DR_OK) && (wb2 == nb2) && hr_bits_equal(pp + off, dr_bw_buf(bw2), nb2)) { ok2 = 1; }
+                        if (ok2) { Hr_FrOk = Hr_FrOk + 1; }
+                        if ((ok2 == 0) && (rc2 == DR_OK)) {
+                            var re2 = 0;
+                            var rf = av1_frame_parse_uncompressed_header(seq, av1_ref_state_new(), av1_obu_tid(o),
+                              av1_obu_sid(o), dr_bw_buf(bw2), (wb2 + 7) >> 3, &re2);
+                            if ((rf != 0) && (re2 == DR_OK)
+                              && hr_records_equal(rf, fh, AV1FH_SIZE, AV1FH_BITS_CONSUMED)) {
+                                Hr_Equiv = Hr_Equiv + 1;
+                                ok2 = 2;
+                            }
+                        }
+                        if (ok2 == 2) { hr_puts("frame "); hr_putn(Hr_FrN); hr_puts(" EQUIV\n"); }
+                        else {
+                            hr_report("frame", Hr_FrN, ok2, nb2, wb2,
+                              hr_first_diff(pp + off, dr_bw_buf(bw2), av1_min(nb2, wb2)), rc2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hr_puts("SUMMARY seq=");
+    hr_putn(Hr_SeqOk);
+    hr_puts("/");
+    hr_putn(Hr_SeqN);
+    hr_puts(" intra=");
+    hr_putn(Hr_FrOk);
+    hr_puts("/");
+    hr_putn(Hr_FrN);
+    hr_puts(" inter_skipped=");
+    hr_putn(Hr_Inter);
+    hr_puts(" equiv=");
+    hr_putn(Hr_Equiv);
+    hr_puts(" unparsed=");
+    hr_putn(Hr_Unparsed);
+    hr_puts(" needs_refs=");
+    hr_putn(Hr_NeedsRefs);
+    hr_puts("\n");
+    return 0;
+}
+
+# ---- EMIT: a keyframe of w x h, every 64x64 superblock one skip DC_PRED block, from the writers alone ----
+fn hr_emit_one(path, w, h, bd, mono, subx, suby, qidx): i64 {
+    var e = 0;
+    var s = av1_seq_init(w, h, bd, mono, subx, suby, &e);
+    if (s == 0) { return e; }
+    var fh = av1_fh_init_key(s, qidx, &e);
+    if (fh == 0) { return e; }
+    var np = av1_seq_num_planes(s);
+    var frame = dr_frame_new(w, h, np, subx, suby, bd, 8, &e);
+    if (frame == 0) { return e; }
+    var mi_cols = av1_fh_mi_cols(fh);
+    var mi_rows = av1_fh_mi_rows(fh);
+    var tile = av1_tile_new(frame, mi_cols, mi_rows, qidx, load64(s + AV1_SEQ_ENABLE_INTRA_EDGE),
+      av1_fh_reduced_tx_set(fh), np);
+    if (tile == 0) { return DR_ERR_OOM; }
+    if (av1_tile_grids_new(tile) != DR_OK) { return DR_ERR_OOM; }
+    var sbc = (mi_cols + 15) >> 4;
+    var sbr = (mi_rows + 15) >> 4;
+    var nsb = sbc * sbr;
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(nsb * 8);
+    var pm = alloc(nsb * 8);
+    var ptx = alloc(nsb * 8);
+    var k = 0;
+    while (k < nsb) {
+        store64(pp + (k * 8), AV1_PARTITION_NONE);
+        store64(pm + (k * 8), mi);
+        store64(ptx + (k * 8), AV1_TX_64X64);
+        k = k + 1;
+    }
+    var tlen = 0;
+    var tbytes = av1_encode_intra_tile(tile, pp, pm, ptx, av1_fh_disable_cdf_update(fh), &tlen);
+    if (tbytes == 0) { return DR_ERR_OOM; }
+    var tiles = alloc(8);
+    var sizes = alloc(8);
+    store64(tiles, tbytes);
+    store64(sizes, tlen);
+    var bw = dr_bw_init(4096);
+    av1_td_write_obu(bw);
+    av1_seq_write_obu(bw, s);
+    var rc = av1_frame_write_obu(bw, s, fh, 0, 0, 0, tiles, sizes);
+    if (rc != DR_OK) { return rc; }
+    var n = dr_bw_flush(bw);
+    var iw = dr_ivf_writer_init(DR_FOURCC_AV01, w, h, 30, 1);
+    if (iw == 0) { return DR_ERR_OOM; }
+    dr_ivf_write_frame(iw, dr_bw_buf(bw), n, 0);
+    var ilen = 0;
+    var ibuf = dr_ivf_writer_finish(iw, &ilen);
+    if (ibuf == 0) { return DR_ERR_OOM; }
+    if (file_write_all(path, ibuf, ilen) < 0) { return DR_ERR_OTHER; }
+    hr_puts("emit ");
+    hr_puts(path);
+    hr_puts(" ");
+    hr_putn(ilen);
+    hr_puts(" bytes\n");
+    return DR_OK;
+}
+
+fn hr_emit(): i64 {
+    var bad = 0;
+    if (hr_emit_one("build/writer-420-64x64.ivf", 64, 64, 8, 0, 1, 1, 40) != DR_OK) { bad = bad + 1; }
+    if (hr_emit_one("build/writer-mono-128x64.ivf", 128, 64, 8, 1, 1, 1, 40) != DR_OK) { bad = bad + 1; }
+    if (hr_emit_one("build/writer-b10-420-128x128.ivf", 128, 128, 10, 0, 1, 1, 100) != DR_OK) { bad = bad + 1; }
+    if (hr_emit_one("build/writer-444-64x64.ivf", 64, 64, 8, 0, 0, 0, 60) != DR_OK) { bad = bad + 1; }
+    if (hr_emit_one("build/writer-422-b12-64x64.ivf", 64, 64, 12, 0, 1, 0, 200) != DR_OK) { bad = bad + 1; }
+    hr_puts("SUMMARY emit_failed=");
+    hr_putn(bad);
+    hr_puts("\n");
+    return bad;
+}
+
+fn main(): i64 {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { hr_puts("SUMMARY oom\n"); return 1; }
+    var probe = alloc(8);
+    if (file_read_all("build/hdr-rewrite.emit", probe, 8) >= 0) { return hr_emit(); }
+    return hr_rewrite();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

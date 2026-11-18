@@ -1843,8 +1843,31 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > asserts its properties over every qindex / depth / dqDenom and checks it against libaom's own quantizer compiled from
 > `ref/` (`scripts/refs/quant_libaom.c`): equal wherever libaom's 16-bit reciprocal divides exactly (90,954), libaom
 > only ever rounding UP elsewhere (630, numerators from ~55,000). Lossless blocks pass through end to end exactly.
-> `tests/av1_fquant.tcyr` (473); 21 mutants killed but one equivalent. Next: the sequence / frame header + OBU + IVF
-> writers.
+> `tests/av1_fquant.tcyr` (473); 21 mutants killed but one equivalent.
+>
+> Bite 4 = **the header writers** (`src/av1_hdrw.cyr`, new module, 47): `av1_seq_write` (all of 5.5) and
+> `av1_frame_write_uncompressed_header` (5.9.2 for KEY / INTRA_ONLY / show_existing; inter -> `DR_ERR_UNSUPPORTED`,
+> roadmap 0.8.8), each the exact inverse of its parser, writing from the SAME record. Also the OBU, tile group and
+> frame OBU writers; the encoder's records `av1_seq_init`, `av1_fh_init_key` and `av1_fh_set_tiles_uniform`; and
+> `dr_uvlc_write`.
+>
+> THE CONTRACT: an accepted record is the record its parser reads back, word for word. That makes every field the
+> syntax does NOT code (slots past a count, values a condition drops, derived values) a refusal unless it holds what
+> the parser leaves. Testing found leaks of each kind, and the fuzz harness found the operating point slots.
+>
+> Evidence:
+> - every sequence and intra frame header of 471 corpus streams (34 reproducers, 242 published, 195 generated)
+>   rewritten to its exact bits, 1 EQUIV;
+> - five writer-only keyframe streams, each decoded by drishti identically to aomdec, with dav1d agreeing (flat
+>   picture, 64x64 SB);
+> - hand-packed known answers.
+>
+> `tests/av1_hdrw.tcyr` (557) and `tests/av1_hdrw.fcyr` (6,000 random records); 145 mutants killed.
+>
+> Decoder change, decode-neutral: a reduced still picture records `error_resilient_mode` 1, as libaom and dav1d do.
+> Gate: 4450 / 0 / 0 / 0 (+476: the header-writer sections). New program `programs/hdr-rewrite.cyr`.
+>
+> Next: the fixed-partition DC intra encoder (real content), then the encode lane at 128x128 superblocks.
 >
 > **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,

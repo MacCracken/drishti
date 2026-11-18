@@ -91,9 +91,27 @@ enum Av1SeqOff {
     AV1_SEQ_ENABLE_JNT_COMP      = 320;
     AV1_SEQ_MATRIX_COEFF         = 328;  # matrix_coefficients (6.4.2; MC_UNSPECIFIED 2 when not described)
     AV1_SEQ_BITS_CONSUMED        = 336;  # reader bit position at the end of sequence_header_obu (payloadBits, 5.3.1)
+    # 0.8.6: every remaining coded field, kept so the record is the whole header and av1_seq_write (src/av1_hdrw.cyr)
+    # can write it back bit for bit; the decode reads none of them.
+    AV1_SEQ_IDD_PRESENT          = 344;  # initial_display_delay_present_flag
+    AV1_SEQ_UNITS_IN_TICK        = 352;  # timing_info: num_units_in_display_tick
+    AV1_SEQ_TIME_SCALE           = 360;  # timing_info: time_scale
+    AV1_SEQ_TICKS_PER_PIC_M1     = 368;  # timing_info: num_ticks_per_picture_minus_1 (equal_picture_interval)
+    AV1_SEQ_BUF_DELAY_LEN_M1     = 376;  # decoder_model_info: buffer_delay_length_minus_1
     AV1_SEQ_OP_IDC               = 384;  # operating_point_idc[32]     -> 640
     AV1_SEQ_OP_DM                = 640;  # dm_present_for_this_op[32]   -> 896
-    AV1_SEQ_SIZE                 = 896;
+    AV1_SEQ_LEVEL_IDX            = 896;  # seq_level_idx[32]            -> 1152
+    AV1_SEQ_TIER                 = 1152; # seq_tier[32] (0 when not coded) -> 1408
+    AV1_SEQ_OP_IDD_PRESENT       = 1408; # initial_display_delay_present_for_this_op[32] -> 1664
+    AV1_SEQ_OP_IDD_M1            = 1664; # initial_display_delay_minus_1[32] -> 1920
+    AV1_SEQ_OP_DEC_DELAY         = 1920; # decoder_buffer_delay[32]     -> 2176
+    AV1_SEQ_OP_ENC_DELAY         = 2176; # encoder_buffer_delay[32]     -> 2432
+    AV1_SEQ_OP_LOW_DELAY         = 2432; # low_delay_mode_flag[32]      -> 2688
+    AV1_SEQ_UNITS_IN_DEC_TICK    = 2688; # decoder_model_info: num_units_in_decoding_tick
+    AV1_SEQ_COLOR_DESC           = 2696; # color_description_present_flag
+    AV1_SEQ_COLOR_PRIMARIES      = 2704; # color_primaries (CP_UNSPECIFIED 2 when not described)
+    AV1_SEQ_TRANSFER             = 2712; # transfer_characteristics (TC_UNSPECIFIED 2 when not described)
+    AV1_SEQ_SIZE                 = 2720;
 }
 
 # ================================================================
@@ -103,17 +121,18 @@ enum Av1SeqOff {
 # ================================================================
 
 # timing_info() — 5.5.3. Stores equal_picture_interval (the frame header
-# consults it to decide whether temporal_point_info is coded). The tick
-# counts are display concerns and are discarded.
+# consults it to decide whether temporal_point_info is coded) and the tick
+# counts (display concerns the decode ignores; kept for av1_seq_write).
 fn av1_timing_info_skip(br, s): i64 {
-    dr_br_read_bits(br, 32);            # num_units_in_display_tick f(32)
-    dr_br_read_bits(br, 32);            # time_scale                f(32)
+    store64(s + AV1_SEQ_UNITS_IN_TICK, dr_br_read_bits(br, 32));   # num_units_in_display_tick f(32)
+    store64(s + AV1_SEQ_TIME_SCALE, dr_br_read_bits(br, 32));      # time_scale                f(32)
     var equal = dr_br_read_bit(br);     # equal_picture_interval    f(1)
     store64(s + AV1_SEQ_EQUAL_PIC_INT, equal);
     if (equal) {
         var ticks = 0;
         var rc = dr_uvlc_read(br, &ticks);   # num_ticks_per_picture_minus_1 uvlc()
         if (rc != DR_OK) { return rc; }
+        store64(s + AV1_SEQ_TICKS_PER_PIC_M1, ticks);
     }
     return dr_br_err(br);
 }
@@ -124,18 +143,19 @@ fn av1_timing_info_skip(br, s): i64 {
 # *out_bdl_m1; the decoding-tick count is discarded.
 fn av1_decoder_model_info_skip(br, s, out_bdl_m1): i64 {
     store64(out_bdl_m1, dr_br_read_bits(br, 5));   # buffer_delay_length_minus_1 f(5)
-    dr_br_read_bits(br, 32);   # num_units_in_decoding_tick             f(32)
+    store64(s + AV1_SEQ_BUF_DELAY_LEN_M1, load64(out_bdl_m1));
+    store64(s + AV1_SEQ_UNITS_IN_DEC_TICK, dr_br_read_bits(br, 32));   # num_units_in_decoding_tick f(32)
     store64(s + AV1_SEQ_BRT_LEN, dr_br_read_bits(br, 5) + 1);   # buffer_removal_time_length_minus_1 f(5)
     store64(s + AV1_SEQ_FPT_LEN, dr_br_read_bits(br, 5) + 1);   # frame_presentation_time_length_minus_1 f(5)
     return dr_br_err(br);
 }
 
 # operating_parameters_info(op) — 5.5.5. n = buffer_delay_length_minus_1
-# + 1 (at most 32, always legal for dr_br_read_bits). All discarded.
-fn av1_operating_parameters_info_skip(br, bdl_m1): i64 {
-    dr_br_read_bits(br, bdl_m1 + 1);   # decoder_buffer_delay[op] f(n)
-    dr_br_read_bits(br, bdl_m1 + 1);   # encoder_buffer_delay[op] f(n)
-    dr_br_read_bit(br);                # low_delay_mode_flag[op]  f(1)
+# + 1 (at most 32, always legal for dr_br_read_bits). Kept for av1_seq_write.
+fn av1_operating_parameters_info_skip(br, s, op, bdl_m1): i64 {
+    store64(s + AV1_SEQ_OP_DEC_DELAY + (op * 8), dr_br_read_bits(br, bdl_m1 + 1));   # decoder_buffer_delay[op] f(n)
+    store64(s + AV1_SEQ_OP_ENC_DELAY + (op * 8), dr_br_read_bits(br, bdl_m1 + 1));   # encoder_buffer_delay[op] f(n)
+    store64(s + AV1_SEQ_OP_LOW_DELAY + (op * 8), dr_br_read_bit(br));                # low_delay_mode_flag[op]  f(1)
     return dr_br_err(br);
 }
 
@@ -175,6 +195,9 @@ fn av1_color_config_parse(br, profile, s): i64 {
         tc = dr_br_read_bits(br, 8);        # transfer_characteristics f(8)
         mc = dr_br_read_bits(br, 8);        # matrix_coefficients      f(8)
     }
+    store64(s + AV1_SEQ_COLOR_DESC, desc);
+    store64(s + AV1_SEQ_COLOR_PRIMARIES, cp);
+    store64(s + AV1_SEQ_TRANSFER, tc);
     # kept for the film grain output process: clip_to_restricted_range widens chroma to the luma range
     # when matrix_coefficients is MC_IDENTITY (7.18.3.5).
     store64(s + AV1_SEQ_MATRIX_COEFF, mc);
@@ -289,7 +312,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
         # 5.5.1 reduced path: a single implied operating point; all the
         # timing/model/scalability machinery is absent (defaults 0, set
         # by memset). operating_point_idc[0] = 0, dm_present_op[0] = 0.
-        dr_br_read_bits(br, 5);             # seq_level_idx[0] f(5) (discard)
+        store64(s + AV1_SEQ_LEVEL_IDX, dr_br_read_bits(br, 5));   # seq_level_idx[0] f(5)
     } else {
         var timing = dr_br_read_bit(br);    # timing_info_present_flag f(1)
         store64(s + AV1_SEQ_TIMING_PRESENT, timing);
@@ -310,6 +333,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
             }
         }
         var idd_present = dr_br_read_bit(br);   # initial_display_delay_present_flag f(1)
+        store64(s + AV1_SEQ_IDD_PRESENT, idd_present);
         var ops_m1 = dr_br_read_bits(br, 5);    # operating_points_cnt_minus_1 f(5)
         store64(s + AV1_SEQ_OP_CNT_M1, ops_m1);
         if (dr_br_err(br) != DR_OK) {
@@ -322,14 +346,15 @@ fn av1_seq_parse(buf, len, out_err): i64 {
             var idc = dr_br_read_bits(br, 12);  # operating_point_idc[i] f(12)
             store64(s + AV1_SEQ_OP_IDC + (i * 8), idc);
             var level = dr_br_read_bits(br, 5); # seq_level_idx[i]       f(5)
+            store64(s + AV1_SEQ_LEVEL_IDX + (i * 8), level);
             if (level > 7) {
-                dr_br_read_bit(br);             # seq_tier[i] f(1) (else implied 0)
+                store64(s + AV1_SEQ_TIER + (i * 8), dr_br_read_bit(br));   # seq_tier[i] f(1) (else implied 0)
             }
             if (dm_present) {
                 var dm_this = dr_br_read_bit(br);   # decoder_model_present_for_this_op[i] f(1)
                 store64(s + AV1_SEQ_OP_DM + (i * 8), dm_this);
                 if (dm_this) {
-                    var rc2 = av1_operating_parameters_info_skip(br, bdl_m1);
+                    var rc2 = av1_operating_parameters_info_skip(br, s, i, bdl_m1);
                     if (rc2 != DR_OK) {
                         store64(out_err, rc2);
                         return 0;
@@ -338,8 +363,9 @@ fn av1_seq_parse(buf, len, out_err): i64 {
             }
             if (idd_present) {
                 var idd_this = dr_br_read_bit(br);  # initial_display_delay_present_for_this_op[i] f(1)
+                store64(s + AV1_SEQ_OP_IDD_PRESENT + (i * 8), idd_this);
                 if (idd_this) {
-                    dr_br_read_bits(br, 4);         # initial_display_delay_minus_1[i] f(4)
+                    store64(s + AV1_SEQ_OP_IDD_M1 + (i * 8), dr_br_read_bits(br, 4));   # initial_display_delay_minus_1
                 }
             }
             if (dr_br_err(br) != DR_OK) {
