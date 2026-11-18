@@ -9153,6 +9153,157 @@ fn av1_forward_transform_2d(residual, coeff, tx_size, tx_type, lossless): i64 {
     return DR_OK;
 }
 
+# --- av1_fquant.cyr ---
+
+# @public — drishti AV1: the QUANTIZER (the encode lane's inverse of 7.12.3's dequantization). Turns a block of
+# transform coefficients (av1_forward_transform_2d, src/av1_ftx.cyr) into the levels Quant[] that coeffs() codes and
+# the decoder dequantizes back.
+#
+# FLAT module (no includes) — wiring in src/main.cyr, after src/av1_ftx.cyr: it reuses get_dc_quant / get_ac_quant
+# (src/av1_quant.cyr: Dc_Qlookup / Ac_Qlookup, 7.12.2), dqDenom (av1_dq_denom, src/av1_recon.cyr), Round2 and the
+# transform size tables (src/av1_itx.cyr).
+#
+# The spec defines only dequantization (7.12.3 step 1): Dequant = Clip3( -2^(7+BitDepth), 2^(7+BitDepth) - 1,
+# sign * ( |Quant * q2| & 0xFFFFFF ) / dqDenom ), q2 the DC step at (0, 0) and the AC step elsewhere (scaled by
+# Round2( q * Quantizer_Matrix, 5 ) when a matrix applies), dqDenom 1 / 2 / 4 by size. The quantizer is the encoder's
+# choice. drishti's is libaom's dead-zone "B" quantizer RULE SET (av1/encoder/av1_quantize.c av1_build_quantizer,
+# aom_dsp/quantize.c aom_highbd_quantize_b_helper_c) in exact integer arithmetic. For a coefficient c, S = the q2 the
+# decoder will use at its position, D = dqDenom:
+#     zbin  = Round2( Round2( fz * S, 7 ), log2 D )     the dead zone: |c| < zbin quantizes to 0
+#     round = Round2( ( fr * S ) >> 7, log2 D )          the rounding offset
+#     |level| = Min( floor( ( |c| + round ) * D / S ), Lmax ),  Lmax = floor( ( 2^(7+BitDepth) * D - 1 ) / S )
+# with the sign of c. The default factors are libaom's: fz = 64 at qindex 0, else 84 while dc_q( qindex ) is below
+# 148 / 592 / 2368 (8 / 10 / 12 bits), else 80; fr = 64 at qindex 0, else 48 (both in 1/128 of a step). Lmax is the
+# largest level the decoder does not clamp, and keeps |level * S| < 2^24 so the 0xFFFFFF mask never wraps; the cap is
+# symmetric (quantize( -c ) = -quantize( c ); the clamp's one extra negative value is forgone).
+#
+# libaom divides through a 16-bit reciprocal (invert_quant), which can round a level UP once the numerator grows
+# (( |c| + round ) * D from about 55,000, most often at D = 4); drishti's i64 divides exactly.
+# scripts/refs/quant_ref.py compiles libaom's own quantizer from ref/ and checks drishti equal to it wherever that
+# reciprocal is exact (90,954 coefficients), and libaom's level only ever above, within its provable bound, elsewhere.
+# At qindex 0 (S = 4, D = 1, both factors 64) a coefficient 4y quantizes to y exactly: a lossless block (the forward
+# WHT's output, 4x its lifting) passes through unchanged.
+
+# Av1FQuant — the per-plane quantizer parameters (heap, AV1FQ_SIZE bytes).
+enum Av1FqOff {
+    AV1FQ_BD       = 0;    # BitDepth (8 / 10 / 12)
+    AV1FQ_QINDEX   = 8;    # the block's qindex (get_qindex, 7.12.2)
+    AV1FQ_DC_Q     = 16;   # get_dc_quant( plane ) = dc_q( qindex + the plane's DC delta )
+    AV1FQ_AC_Q     = 24;   # get_ac_quant( plane ) = ac_q( qindex + the plane's AC delta )
+    AV1FQ_ZBIN_F   = 32;   # dead zone factor, 1/128 of a step
+    AV1FQ_ROUND_F  = 40;   # rounding offset factor, 1/128 of a step
+    AV1FQ_SIZE     = 48;
+}
+
+fn av1_fquant_new(): i64 {
+    var p = dr_alloc(AV1FQ_SIZE);
+    if (p == 0) { return 0; }
+    memset(p, 0, AV1FQ_SIZE);
+    return p;
+}
+
+# libaom's default factors (get_qzbin_factor; the B quantizer's qrounding_factor), in 1/128 of a step.
+fn av1_fquant_default_zbin(bit_depth, qindex): i64 {
+    if (qindex == 0) { return 64; }
+    var thresh = 148;
+    if (bit_depth == 10) { thresh = 592; }
+    if (bit_depth == 12) { thresh = 2368; }
+    if (av1_dc_q(bit_depth, qindex) < thresh) { return 84; }
+    return 80;
+}
+fn av1_fquant_default_round(qindex): i64 {
+    if (qindex == 0) { return 64; }
+    return 48;
+}
+
+# Set p for a plane at bit_depth and qindex, with that plane's DC / AC deltas (7.12.2: DeltaQYDc / UDc / VDc for DC; 0
+# / DeltaQUAc / DeltaQVAc for AC — av1_plane_dc_delta / av1_plane_ac_delta), and libaom's default factors. Returns
+# DR_OK, or DR_ERR_BOUNDS for a bit depth other than 8 / 10 / 12 or a qindex outside 0..255.
+fn av1_fquant_set(p, bit_depth, qindex, delta_dc, delta_ac): i64 {
+    if ((bit_depth != 8) && (bit_depth != 10) && (bit_depth != 12)) { return DR_ERR_BOUNDS; }
+    if ((qindex < 0) || (qindex > 255)) { return DR_ERR_BOUNDS; }
+    if ((av1_dc_qlookup() == 0) || (av1_ac_qlookup() == 0)) { return DR_ERR_OOM; }
+    store64(p + AV1FQ_BD, bit_depth);
+    store64(p + AV1FQ_QINDEX, qindex);
+    store64(p + AV1FQ_DC_Q, av1_get_dc_quant(bit_depth, qindex, delta_dc));
+    store64(p + AV1FQ_AC_Q, av1_get_ac_quant(bit_depth, qindex, delta_ac));
+    store64(p + AV1FQ_ZBIN_F, av1_fquant_default_zbin(bit_depth, qindex));
+    store64(p + AV1FQ_ROUND_F, av1_fquant_default_round(qindex));
+    return DR_OK;
+}
+# Override the dead zone and rounding factors (each 0..128, in 1/128 of a step): 64 / 64 is round-to-nearest.
+fn av1_fquant_set_factors(p, zbin_f, round_f): i64 {
+    if ((zbin_f < 0) || (zbin_f > 128) || (round_f < 0) || (round_f > 128)) { return DR_ERR_BOUNDS; }
+    store64(p + AV1FQ_ZBIN_F, zbin_f);
+    store64(p + AV1FQ_ROUND_F, round_f);
+    return DR_OK;
+}
+fn av1_fquant_dc_q(p): i64 { return load64(p + AV1FQ_DC_Q); }
+fn av1_fquant_ac_q(p): i64 { return load64(p + AV1FQ_AC_Q); }
+
+# log2 of dqDenom (1 / 2 / 4)
+fn av1_fquant_log2d(dq_denom): i64 {
+    if (dq_denom == 4) { return 2; }
+    if (dq_denom == 2) { return 1; }
+    return 0;
+}
+
+# The level of one coefficient c, for the decoder's step s at its position, dqDenom dq_denom and the factors (the
+# definition in the header). s below 1 is treated as 1 (no real step is).
+fn av1_quantize_coeff(c, s, dq_denom, bit_depth, zbin_f, round_f): i64 {
+    var st = s;
+    if (st < 1) { st = 1; }
+    var ls = av1_fquant_log2d(dq_denom);
+    var zb = av1_round2(av1_round2(zbin_f * st, 7), ls);
+    var rd = av1_round2((round_f * st) >> 7, ls);
+    var a = c;
+    if (a < 0) { a = 0 - a; }
+    if (a < zb) { return 0; }
+    var lev = ((a + rd) * dq_denom) / st;                         # non-negative operands: an exact floor
+    var top = (((1 << (7 + bit_depth)) * dq_denom) - 1) / st;     # Lmax
+    if (lev > top) { lev = top; }
+    if (c < 0) { return 0 - lev; }
+    return lev;
+}
+
+# Quantize a transform block: coeff is the forward transform's output (h * w row-major i64, Dequant's layout, stride
+# the FULL width w); quant receives Quant[] (th * tw row-major i64, stride tw = Min( 32, w ), th = Min( 32, h ): what
+# coeffs() codes and av1_dequant_block reads). qm is 7.12.3 step 1b's matrix (av1_qm_matrix: tw * th bytes, or 0 for
+# flat): the step at (i, j) is then Round2( q * qm[ i * tw + j ], 5 ), exactly as the decoder computes it.
+# *out_nz (when out_nz != 0) receives the number of nonzero levels. Returns DR_OK or AV1_ERR_BAD_TX.
+fn av1_quantize_block(coeff, quant, tx_size, p, qm, out_nz): i64 {
+    if ((tx_size < 0) || (tx_size > 18)) { return AV1_ERR_BAD_TX; }
+    if (av1_itx_tables() == 0) { return DR_ERR_OOM; }   # the size tables read it unchecked
+    var log2w = av1_tx_width_log2(tx_size);
+    var log2h = av1_tx_height_log2(tx_size);
+    var w = 1 << log2w;
+    var tw = av1_min(32, w);
+    var th = av1_min(32, 1 << log2h);
+    var dq_denom = av1_dq_denom(log2w, log2h);
+    var bd = load64(p + AV1FQ_BD);
+    var zf = load64(p + AV1FQ_ZBIN_F);
+    var rf = load64(p + AV1FQ_ROUND_F);
+    var q_dc = load64(p + AV1FQ_DC_Q);
+    var q_ac = load64(p + AV1FQ_AC_Q);
+    var nz = 0;
+    var i = 0;
+    while (i < th) {
+        var j = 0;
+        while (j < tw) {
+            var s = q_ac;
+            if ((i == 0) && (j == 0)) { s = q_dc; }
+            if (qm != 0) { s = ((s * load8(qm + (i * tw) + j)) + 16) >> 5; }   # 7.12.3 step 1b
+            var lev = av1_quantize_coeff(load64(coeff + (((i * w) + j) * 8)), s, dq_denom, bd, zf, rf);
+            store64(quant + (((i * tw) + j) * 8), lev);
+            if (lev != 0) { nz = nz + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if (out_nz != 0) { store64(out_nz, nz); }
+    return DR_OK;
+}
+
 # --- av1_scan.cyr ---
 
 # src/av1_scan.cyr — AV1 coefficient scan orders (spec 5.11.41 get_scan +

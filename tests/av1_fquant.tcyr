@@ -1,0 +1,476 @@
+# tests/av1_fquant.tcyr — the quantizer (src/av1_fquant.cyr): the encode lane's inverse of 7.12.3's dequantization.
+#
+# Every known answer comes from scripts/refs/quant_ref.py, which defines the quantizer in exact arithmetic, checks its
+# properties over every qindex, bit depth and dqDenom, and checks it against libaom's own quantizer compiled from ref/
+# (scripts/refs/quant_libaom.c) — never from this Cyrius; the block answers also run its forward transform port
+# (scripts/refs/fwd_txfm_ref.py). Regenerate with
+#   python3 scripts/refs/quant_ref.py --emit
+# The values are seeded LCG blocks both sides compute alike: x = (x * 1103515245 + 12345) & (2^31 - 1), value
+# ((x >> 8) % (2 * maxv + 1)) - maxv. D1 = sum (k + 1) * v[ k ], D2 = sum v[ k ]^2.
+include "src/main.cyr"
+
+var Fq_P = 0;       # Av1FQuant
+var Fq_C = 0;       # 4096 i64: coefficients
+var Fq_L = 0;       # 4096 i64: levels
+var Fq_R = 0;       # 4096 i64: residual / dequantized
+fn fq_bufs(): i64 {
+    if (Fq_C == 0) {
+        Fq_P = av1_fquant_new();
+        Fq_C = alloc(4096 * 8);
+        Fq_L = alloc(4096 * 8);
+        Fq_R = alloc(4096 * 8);
+    }
+    return 0;
+}
+fn fq_lcg(buf, seed, count, maxv): i64 {
+    var x = seed;
+    var k = 0;
+    while (k < count) {
+        x = ((x * 1103515245) + 12345) & 2147483647;
+        store64(buf + (k * 8), ((x >> 8) % ((2 * maxv) + 1)) - maxv);
+        k = k + 1;
+    }
+    return 0;
+}
+fn fq_d1(buf, count): i64 {
+    var s = 0;
+    var k = 0;
+    while (k < count) { s = s + ((k + 1) * load64(buf + (k * 8))); k = k + 1; }
+    return s;
+}
+fn fq_d2(buf, count): i64 {
+    var s = 0;
+    var k = 0;
+    while (k < count) { var v = load64(buf + (k * 8)); s = s + (v * v); k = k + 1; }
+    return s;
+}
+
+# ---- one coefficient at a time: 64 values, c[0] with the DC step, the rest AC ----
+fn fq_kat(bd, qi, d, d1, d2): i64 {
+    av1_fquant_set(Fq_P, bd, qi, 0, 0);
+    fq_lcg(Fq_C, ((1 + qi) + (1000 * d)) + (7 * bd), 64, 1 << (6 + bd));
+    var zf = av1_fquant_default_zbin(bd, qi);
+    var rf = av1_fquant_default_round(qi);
+    var k = 0;
+    while (k < 64) {
+        var s = av1_fquant_ac_q(Fq_P);
+        if (k == 0) { s = av1_fquant_dc_q(Fq_P); }
+        store64(Fq_L + (k * 8), av1_quantize_coeff(load64(Fq_C + (k * 8)), s, d, bd, zf, rf));
+        k = k + 1;
+    }
+    assert_eq(fq_d1(Fq_L, 64), d1, "levels: positions digest");
+    assert_eq(fq_d2(Fq_L, 64), d2, "levels: energy digest");
+    return 0;
+}
+fn test_fq_coeff_kats() {
+    fq_kat(8, 0, 1, 529497, 362908309);
+    fq_kat(8, 0, 2, 370757, 1697256717);
+    fq_kat(8, 0, 4, -305540, 6093902002);
+    fq_kat(8, 1, 1, 28559, 82290527);
+    fq_kat(8, 1, 2, -34009, 378192268);
+    fq_kat(8, 1, 4, -233926, 1324289627);
+    fq_kat(8, 17, 1, 88391, 11015700);
+    fq_kat(8, 17, 2, -57930, 42224629);
+    fq_kat(8, 17, 4, -80508, 142369224);
+    fq_kat(8, 60, 1, 29799, 1309839);
+    fq_kat(8, 60, 2, -103522, 5500259);
+    fq_kat(8, 60, 4, -36619, 13011210);
+    fq_kat(8, 100, 1, -21921, 529840);
+    fq_kat(8, 100, 2, 21225, 1904485);
+    fq_kat(8, 100, 4, -119747, 7820267);
+    fq_kat(8, 140, 1, -243, 127097);
+    fq_kat(8, 140, 2, -80754, 484807);
+    fq_kat(8, 140, 4, 4749, 1981734);
+    fq_kat(8, 200, 1, 2930, 13483);
+    fq_kat(8, 200, 2, -1830, 52369);
+    fq_kat(8, 200, 4, -10652, 236571);
+    fq_kat(8, 255, 1, -1289, 1617);
+    fq_kat(8, 255, 2, -5833, 7574);
+    fq_kat(8, 255, 4, -2021, 26858);
+    fq_kat(10, 0, 1, 2099652, 4072309739);
+    fq_kat(10, 0, 2, -5902993, 19981287618);
+    fq_kat(10, 0, 4, 15681119, 76877507395);
+    fq_kat(10, 1, 1, -2926575, 1158083330);
+    fq_kat(10, 1, 2, -1693920, 3903265790);
+    fq_kat(10, 1, 4, 10111207, 19388953616);
+    fq_kat(10, 17, 1, -336262, 25556573);
+    fq_kat(10, 17, 2, -309163, 100920364);
+    fq_kat(10, 17, 4, -435474, 417265106);
+    fq_kat(10, 60, 1, -42706, 1133338);
+    fq_kat(10, 60, 2, -86719, 6759519);
+    fq_kat(10, 60, 4, -243754, 26350353);
+    fq_kat(10, 100, 1, 49351, 583301);
+    fq_kat(10, 100, 2, 39705, 1846845);
+    fq_kat(10, 100, 4, -163077, 7647304);
+    fq_kat(10, 140, 1, -6410, 112559);
+    fq_kat(10, 140, 2, -19214, 579193);
+    fq_kat(10, 140, 4, -32393, 1905495);
+    fq_kat(10, 200, 1, -13633, 15119);
+    fq_kat(10, 200, 2, 13753, 74934);
+    fq_kat(10, 200, 4, -8011, 205289);
+    fq_kat(10, 255, 1, 323, 1275);
+    fq_kat(10, 255, 2, -6347, 6384);
+    fq_kat(10, 255, 4, -343, 32017);
+    fq_kat(12, 0, 1, -2189677, 84376229905);
+    fq_kat(12, 0, 2, 14813250, 342435748575);
+    fq_kat(12, 0, 4, -13141892, 1635309235595);
+    fq_kat(12, 1, 1, 1121393, 7511598752);
+    fq_kat(12, 1, 2, -6935983, 31731757294);
+    fq_kat(12, 1, 4, -7838889, 142751732625);
+    fq_kat(12, 17, 1, -177989, 33658509);
+    fq_kat(12, 17, 2, -729196, 200663429);
+    fq_kat(12, 17, 4, 264419, 746459990);
+    fq_kat(12, 60, 1, -14152, 1536394);
+    fq_kat(12, 60, 2, -71836, 6938629);
+    fq_kat(12, 60, 4, -112706, 21039213);
+    fq_kat(12, 100, 1, -26412, 496757);
+    fq_kat(12, 100, 2, -98787, 2013489);
+    fq_kat(12, 100, 4, 163099, 9125512);
+    fq_kat(12, 140, 1, -49435, 134020);
+    fq_kat(12, 140, 2, 4660, 521934);
+    fq_kat(12, 140, 4, 31074, 2297873);
+    fq_kat(12, 200, 1, -6388, 14055);
+    fq_kat(12, 200, 2, 2011, 49651);
+    fq_kat(12, 200, 4, -5913, 236972);
+    fq_kat(12, 255, 1, -614, 1614);
+    fq_kat(12, 255, 2, -3550, 5240);
+    fq_kat(12, 255, 4, 11808, 26092);
+    return 0;
+}
+
+# ---- whole blocks: a residual through the forward transform and the quantizer, every size ----
+fn fq_blk(t, bd, qi, d1, d2, nz): i64 {
+    var w = 1 << av1_tx_width_log2(t);
+    var h = 1 << av1_tx_height_log2(t);
+    var n = av1_min(32, w) * av1_min(32, h);
+    fq_lcg(Fq_R, 3 + t, w * h, (1 << bd) - 1);
+    assert_eq(av1_forward_transform_2d(Fq_R, Fq_C, t, AV1_DCT_DCT, 0), DR_OK, "forward transform");
+    av1_fquant_set(Fq_P, bd, qi, 0, 0);
+    var got_nz = 0 - 1;
+    assert_eq(av1_quantize_block(Fq_C, Fq_L, t, Fq_P, 0, &got_nz), DR_OK, "quantize block");
+    assert_eq(fq_d1(Fq_L, n), d1, "block levels (tw x th, stride tw): positions digest");
+    assert_eq(fq_d2(Fq_L, n), d2, "block levels: energy digest");
+    assert_eq(got_nz, nz, "block levels: the nonzero count");
+    return 0;
+}
+fn test_fq_block_kats() {
+    fq_blk(0, 8, 60, 656, 5666, 15);
+    fq_blk(0, 10, 180, 21, 118, 15);
+    fq_blk(0, 12, 7, 8891, 1136708, 16);
+    fq_blk(1, 8, 60, -3033, 19236, 62);
+    fq_blk(1, 10, 180, 1006, 507, 50);
+    fq_blk(1, 12, 7, 137000, 5358485, 64);
+    fq_blk(2, 8, 60, -31404, 82150, 252);
+    fq_blk(2, 10, 180, -6325, 1565, 210);
+    fq_blk(2, 12, 7, 409678, 23635061, 256);
+    fq_blk(3, 8, 60, 275436, 304786, 995);
+    fq_blk(3, 10, 180, 17965, 6845, 827);
+    fq_blk(3, 12, 7, 1532018, 88796271, 1023);
+    fq_blk(4, 8, 60, -250689, 291821, 987);
+    fq_blk(4, 10, 180, 33593, 6642, 837);
+    fq_blk(4, 12, 7, -7645220, 89739715, 1024);
+    fq_blk(5, 8, 60, 1861, 11594, 31);
+    fq_blk(5, 10, 180, 73, 171, 27);
+    fq_blk(5, 12, 7, -26381, 2365908, 32);
+    fq_blk(6, 8, 60, -266, 7866, 32);
+    fq_blk(6, 10, 180, -43, 191, 25);
+    fq_blk(6, 12, 7, 59210, 2867152, 32);
+    fq_blk(7, 8, 60, -16116, 34482, 121);
+    fq_blk(7, 10, 180, -646, 840, 101);
+    fq_blk(7, 12, 7, 454731, 12579838, 127);
+    fq_blk(8, 8, 60, -2862, 34152, 124);
+    fq_blk(8, 10, 180, -6415, 964, 108);
+    fq_blk(8, 12, 7, -135177, 12454489, 128);
+    fq_blk(9, 8, 60, 16997, 161948, 497);
+    fq_blk(9, 10, 180, 16748, 3442, 414);
+    fq_blk(9, 12, 7, 1292602, 39905149, 511);
+    fq_blk(10, 8, 60, 216843, 150687, 494);
+    fq_blk(10, 10, 180, -18702, 3443, 417);
+    fq_blk(10, 12, 7, -3105472, 42124552, 510);
+    fq_blk(11, 8, 60, -193131, 327221, 999);
+    fq_blk(11, 10, 180, -33488, 6758, 833);
+    fq_blk(11, 12, 7, 3091088, 93053990, 1024);
+    fq_blk(12, 8, 60, -46292, 315365, 987);
+    fq_blk(12, 10, 180, -56421, 6774, 838);
+    fq_blk(12, 12, 7, -2063702, 89192347, 1021);
+    fq_blk(13, 8, 60, 954, 22574, 62);
+    fq_blk(13, 10, 180, 635, 445, 51);
+    fq_blk(13, 12, 7, 47131, 5914991, 64);
+    fq_blk(14, 8, 60, -4313, 20422, 62);
+    fq_blk(14, 10, 180, 1920, 461, 54);
+    fq_blk(14, 12, 7, -35653, 6317056, 64);
+    fq_blk(15, 8, 60, 29094, 73020, 245);
+    fq_blk(15, 10, 180, 4070, 1837, 212);
+    fq_blk(15, 12, 7, 258384, 22114084, 256);
+    fq_blk(16, 8, 60, -13581, 77052, 244);
+    fq_blk(16, 10, 180, -6610, 1935, 214);
+    fq_blk(16, 12, 7, -242956, 22847135, 256);
+    fq_blk(17, 8, 60, -37631, 154985, 491);
+    fq_blk(17, 10, 180, -28468, 3603, 407);
+    fq_blk(17, 12, 7, 861254, 41490127, 511);
+    fq_blk(18, 8, 60, 63540, 161548, 497);
+    fq_blk(18, 10, 180, 9888, 3348, 427);
+    fq_blk(18, 12, 7, -1690355, 45955024, 512);
+    return 0;
+}
+
+# ---- the default factors (libaom's): 64 / 64 at qindex 0; the dead zone 84 until dc_q reaches 148 / 592 / 2368 ----
+fn test_fq_factors() {
+    assert_eq(av1_fquant_default_zbin(8, 0), 64, "qindex 0: zbin 64");
+    assert_eq(av1_fquant_default_round(0), 64, "qindex 0: round 64");
+    assert_eq(av1_fquant_default_round(1), 48, "qindex 1: round 48");
+    # (no 8-bit dc_q is 147, so a threshold of 147 is indistinguishable from 148; 149 is not: qindex 132 below)
+    assert_eq(av1_fquant_default_zbin(8, 131), 84, "8-bit qindex 131 (dc_q 146): 84");
+    assert_eq(av1_fquant_default_zbin(8, 132), 80, "8-bit qindex 132 (dc_q 148): 80");
+    assert_eq(av1_fquant_default_zbin(10, 131), 84, "10-bit qindex 131 (dc_q 584): 84");
+    assert_eq(av1_fquant_default_zbin(10, 132), 80, "10-bit qindex 132 (dc_q 592): 80");
+    assert_eq(av1_fquant_default_zbin(12, 132), 84, "12-bit qindex 132 (dc_q 2367): 84");
+    assert_eq(av1_fquant_default_zbin(12, 133), 80, "12-bit qindex 133 (dc_q 2400): 80");
+    fq_bufs();
+    assert_eq(av1_fquant_set(Fq_P, 8, 100, 0, 0), DR_OK, "set 8-bit qindex 100");
+    assert_eq(av1_fquant_dc_q(Fq_P), av1_dc_q(8, 100), "the DC step is get_dc_quant");
+    assert_eq(av1_fquant_set(Fq_P, 8, 100, 3, 0 - 5), DR_OK, "with plane deltas");
+    assert_eq(av1_fquant_dc_q(Fq_P), av1_dc_q(8, 103), "DC step at qindex + DC delta (7.12.2)");
+    assert_eq(av1_fquant_ac_q(Fq_P), av1_ac_q(8, 95), "AC step at qindex + AC delta");
+    return 0;
+}
+
+# ---- properties, against the DECODER's own dequantization (av1_dequant_coeff, 7.12.3 steps 1c-1f) ----
+fn test_fq_properties() {
+    var bad_sym = 0;
+    var bad_mono = 0;
+    var bad_dz = 0;
+    var bad_err = 0;
+    var bad_cap = 0;
+    var bd = 8;
+    while (bd <= 12) {
+        var qi = 0;
+        while (qi < 256) {
+            var d = 1;
+            while (d <= 4) {
+                var s = av1_ac_q(bd, qi);
+                var zf = av1_fquant_default_zbin(bd, qi);
+                var rf = av1_fquant_default_round(qi);
+                var ls = av1_fquant_log2d(d);
+                var zb = av1_round2(av1_round2(zf * s, 7), ls);
+                var rd = av1_round2((rf * s) >> 7, ls);
+                var bound = zb;
+                if ((((s + d) - 1) / d) - rd + 1 > bound) { bound = ((((s + d) - 1) / d) - rd) + 1; }
+                if (rd + 1 > bound) { bound = rd + 1; }
+                var top = (((1 << (7 + bd)) * d) - 1) / s;
+                var prev = 0;
+                var x = 0;
+                while (x <= ((3 * s) / d) + 2) {
+                    var lv = av1_quantize_coeff(x, s, d, bd, zf, rf);
+                    if (av1_quantize_coeff(0 - x, s, d, bd, zf, rf) != (0 - lv)) { bad_sym = bad_sym + 1; }
+                    if (lv < prev) { bad_mono = bad_mono + 1; }
+                    if ((x < zb) && (lv != 0)) { bad_dz = bad_dz + 1; }
+                    var e = av1_dequant_coeff(lv, s, d, bd) - x;
+                    if (e < 0) { e = 0 - e; }
+                    if (e > bound) { bad_err = bad_err + 1; }
+                    prev = lv;
+                    x = x + 1;
+                }
+                # the cap: far past the clamp, the level is Lmax, which the decoder neither clamps nor wraps
+                var big = av1_quantize_coeff(1 << (9 + bd), s, d, bd, zf, rf);
+                var clamped = av1_dequant_coeff(top, s, d, bd) > ((1 << (7 + bd)) - 1);
+                if ((big != top) || clamped || ((top * s) >= 16777216)) {
+                    bad_cap = bad_cap + 1;
+                }
+                d = d * 2;
+            }
+            qi = qi + 1;
+        }
+        bd = bd + 2;
+    }
+    assert_eq(bad_sym, 0, "symmetric: quantize( -c ) = -quantize( c )");
+    assert_eq(bad_mono, 0, "non-decreasing in |c|");
+    assert_eq(bad_dz, 0, "0 inside the dead zone");
+    assert_eq(bad_err, 0, "|Dequant( quantize( c ) ) - c| within the bound the definition implies");
+    assert_eq(bad_cap, 0, "the cap: Lmax, never clamped or wrapped by the decoder");
+    return 0;
+}
+
+# ---- a quantizer matrix: each position's step is the decoder's Round2( q * qm, 5 ) ----
+fn test_fq_qm() {
+    fq_bufs();
+    var t = AV1_TX_8X8;
+    fq_lcg(Fq_R, 77, 64, 255);
+    av1_forward_transform_2d(Fq_R, Fq_C, t, AV1_DCT_DCT, 0);
+    av1_fquant_set(Fq_P, 8, 90, 0, 0);
+    var qm = av1_qm_table() + ((4 * 2) * 3344) + av1_qm_offset(t);   # level 4, luma: a sloped matrix
+    assert_eq(av1_quantize_block(Fq_C, Fq_L, t, Fq_P, qm, 0), DR_OK, "quantize with a matrix");
+    memset(Fq_R, 0, 64 * 8);
+    av1_dequant_block(Fq_L, Fq_R, t, av1_fquant_dc_q(Fq_P), av1_fquant_ac_q(Fq_P), qm, 8);
+    var off = 0;
+    var flat_off = 0;
+    var k = 0;
+    while (k < 64) {
+        var s = av1_fquant_ac_q(Fq_P);
+        if (k == 0) { s = av1_fquant_dc_q(Fq_P); }
+        var s2 = ((s * load8(qm + k)) + 16) >> 5;
+        var e = load64(Fq_R + (k * 8)) - load64(Fq_C + (k * 8));
+        if (e < 0) { e = 0 - e; }
+        if (e > s2) { off = off + 1; }                                  # within one weighted step: the matrix used
+        if (load64(Fq_L + (k * 8)) != av1_quantize_coeff(load64(Fq_C + (k * 8)), s2, 1, 8,
+            av1_fquant_default_zbin(8, 90), 48)) {
+            flat_off = flat_off + 1;
+        }
+        k = k + 1;
+    }
+    assert_eq(off, 0, "every dequantized value within its weighted step of the coefficient");
+    assert_eq(flat_off, 0, "every level is the coefficient quantized at the decoder's weighted step");
+    return 0;
+}
+
+# ---- end to end through the DECODER: lossless is exact; lossy error falls as qindex falls ----
+fn fq_frame(bd): i64 {
+    var e = 0;
+    var f = dr_frame_new(64, 64, 1, 0, 0, bd, 0, &e);
+    return f;
+}
+fn fq_fill(f, v): i64 {
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { dr_frame_set(f, 0, x, y, v); x = x + 1; }
+        y = y + 1;
+    }
+    return 0;
+}
+fn test_fq_lossless_e2e() {
+    fq_bufs();
+    var bad = 0;
+    var bd = 8;
+    while (bd <= 12) {
+        var f = fq_frame(bd);
+        var mid = 1 << (bd - 1);
+        var b = 0;
+        while (b < 200) {
+            fq_fill(f, mid);
+            fq_lcg(Fq_R, 300 + b + (bd * 1000), 16, mid - 1);
+            av1_forward_transform_2d(Fq_R, Fq_C, AV1_TX_4X4, AV1_DCT_DCT, 1);
+            av1_fquant_set(Fq_P, bd, 0, 0, 0);
+            av1_quantize_block(Fq_C, Fq_L, AV1_TX_4X4, Fq_P, 0, 0);
+            av1_reconstruct(f, 0, 0, 0, AV1_TX_4X4, AV1_DCT_DCT, 1, Fq_L, 4, 4);
+            var k = 0;
+            while (k < 16) {
+                if (dr_frame_get(f, 0, k % 4, k / 4) != (mid + load64(Fq_R + (k * 8)))) { bad = bad + 1; }
+                k = k + 1;
+            }
+            b = b + 1;
+        }
+        bd = bd + 2;
+    }
+    assert_eq(bad, 0, "600 lossless blocks: forward WHT -> quantize at qindex 0 -> av1_reconstruct, exact");
+    return 0;
+}
+fn fq_sse(t, qi): i64 {
+    var f = fq_frame(8);
+    fq_fill(f, 128);
+    var w = 1 << av1_tx_width_log2(t);
+    var h = 1 << av1_tx_height_log2(t);
+    fq_lcg(Fq_R, 55, w * h, 100);
+    av1_forward_transform_2d(Fq_R, Fq_C, t, AV1_DCT_DCT, 0);
+    av1_fquant_set(Fq_P, 8, qi, 0, 0);
+    av1_quantize_block(Fq_C, Fq_L, t, Fq_P, 0, 0);
+    av1_reconstruct(f, 0, 0, 0, t, AV1_DCT_DCT, 0, Fq_L, av1_fquant_dc_q(Fq_P), av1_fquant_ac_q(Fq_P));
+    var sse = 0;
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            var dd = dr_frame_get(f, 0, j, i) - (128 + load64(Fq_R + (((i * w) + j) * 8)));
+            sse = sse + (dd * dd);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return sse;
+}
+fn test_fq_lossy_e2e() {
+    fq_bufs();
+    var sizes = alloc(3 * 8);
+    store64(sizes, AV1_TX_8X8);
+    store64(sizes + 8, AV1_TX_32X32);
+    store64(sizes + 16, AV1_TX_64X64);
+    var s = 0;
+    while (s < 3) {
+        var t = load64(sizes + (s * 8));
+        var a = fq_sse(t, 4);
+        var b = fq_sse(t, 60);
+        var c = fq_sse(t, 200);
+        assert(a < b, "reconstruction error at qindex 4 below qindex 60");
+        assert(b < c, "...and qindex 60 below qindex 200");
+        s = s + 1;
+    }
+    # a fine step reconstructs a sub-64 block to within a few levels per sample (the sum over 64 samples is small)
+    assert(fq_sse(AV1_TX_8X8, 1) < 64 * 4, "8x8 at qindex 1: mean squared error under 4");
+    return 0;
+}
+
+# ---- refusals ----
+fn test_fq_refusals() {
+    fq_bufs();
+    assert_eq(av1_fquant_set(Fq_P, 9, 10, 0, 0), DR_ERR_BOUNDS, "bit depth 9");
+    assert_eq(av1_fquant_set(Fq_P, 8, 256, 0, 0), DR_ERR_BOUNDS, "qindex 256");
+    assert_eq(av1_fquant_set(Fq_P, 8, 0 - 1, 0, 0), DR_ERR_BOUNDS, "qindex -1");
+    assert_eq(av1_fquant_set_factors(Fq_P, 129, 64), DR_ERR_BOUNDS, "zbin factor 129");
+    assert_eq(av1_fquant_set_factors(Fq_P, 128, 128), DR_OK, "factors of 128 (a whole step) are accepted");
+    assert_eq(av1_fquant_set_factors(Fq_P, 0, 0), DR_OK, "factors of 0 are accepted");
+    assert_eq(av1_fquant_set_factors(Fq_P, 64, 0 - 1), DR_ERR_BOUNDS, "round factor -1");
+    av1_fquant_set(Fq_P, 8, 10, 0, 0);
+    assert_eq(av1_quantize_block(Fq_C, Fq_L, 19, Fq_P, 0, 0), AV1_ERR_BAD_TX, "tx_size 19");
+    assert_eq(av1_quantize_block(Fq_C, Fq_L, 0 - 1, Fq_P, 0, 0), AV1_ERR_BAD_TX, "tx_size -1");
+    # nearest rounding (64 / 64) recovers every level from its own reconstruction at D = 1
+    assert_eq(av1_fquant_set_factors(Fq_P, 64, 64), DR_OK, "round-to-nearest factors");
+    var lost = 0;
+    var lv = 0 - 300;
+    while (lv <= 300) {
+        var x = av1_dequant_coeff(lv, 52, 1, 8);
+        if (av1_quantize_coeff(x, 52, 1, 8, 64, 64) != lv) { lost = lost + 1; }
+        lv = lv + 1;
+    }
+    assert_eq(lost, 0, "nearest rounding: quantize( Dequant( L ) ) = L for every L in -300..300");
+    return 0;
+}
+
+# ---- memory: the record is the only allocation; quantizing allocates nothing ----
+fn fq_sweep_op(arg): i64 {
+    return av1_quantize_block(Fq_C, Fq_L, arg, Fq_P, 0, 0);
+}
+fn test_fq_oom() {
+    dr_alloc_fail_at(1);
+    assert_eq(av1_fquant_new(), 0, "the record cannot be allocated: 0");
+    dr_alloc_fail_at(0);
+    fq_bufs();
+    av1_fquant_set(Fq_P, 8, 60, 0, 0);
+    var n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&fq_sweep_op, AV1_TX_64X64, &n), 0, "the OOM sweep over a 64x64 block holds");
+    assert_eq(n, 0, "quantizing allocates nothing");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { return 1; }
+    test_group("quantizer: OOM");
+    test_fq_oom();
+    test_group("quantizer: libaom's default factors, the Qlookup steps");
+    test_fq_factors();
+    test_group("quantizer: known answers (the port)");
+    test_fq_coeff_kats();
+    test_fq_block_kats();
+    test_group("quantizer: properties against the decoder's dequantization");
+    test_fq_properties();
+    test_fq_qm();
+    test_group("quantizer: end to end through av1_reconstruct");
+    test_fq_lossless_e2e();
+    test_fq_lossy_e2e();
+    test_group("quantizer: refusals and nearest rounding");
+    test_fq_refusals();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

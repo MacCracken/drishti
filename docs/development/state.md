@@ -1835,8 +1835,16 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > against libaom's own forward transform compiled from `ref/` (`scripts/refs/fwd_txfm_libaom.c`), on every kernel,
 > all 193 legal (size, type) pairs and the lossless WHT, once libaom's 10..13-bit cosines are set to the spec's 12.
 > `tests/av1_ftx.tcyr` (1,625 assertions); 25 mutants killed (one equivalent inside the 2D lossless path, so the WHT
-> kernel is pinned alone); bench `tests/av1_ftx.bcyr` (the forward ~13% faster than the inverse). Next: the
-> quantiser + the `Qlookup` forward path, then the header / OBU / IVF writers.
+> kernel is pinned alone); bench `tests/av1_ftx.bcyr` (the forward ~13% faster than the inverse).
+>
+> Bite 3 = **the quantiser** (`src/av1_fquant.cyr`, new module, 46): the inverse of 7.12.3 at the decoder's own steps
+> (`get_dc_quant` / `get_ac_quant`, the step-1b matrix weight), libaom's dead-zone B rule set (zbin 84 / 80, round
+> 48, 64 / 64 at qindex 0) in EXACT integer arithmetic, capped where the decoder would clamp. `scripts/refs/quant_ref.py`
+> asserts its properties over every qindex / depth / dqDenom and checks it against libaom's own quantizer compiled from
+> `ref/` (`scripts/refs/quant_libaom.c`): equal wherever libaom's 16-bit reciprocal divides exactly (90,954), libaom
+> only ever rounding UP elsewhere (630, numerators from ~55,000). Lossless blocks pass through end to end exactly.
+> `tests/av1_fquant.tcyr` (473); 21 mutants killed but one equivalent. Next: the sequence / frame header + OBU + IVF
+> writers.
 >
 > **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,

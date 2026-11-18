@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 34 × `src/av1_*.cyr` — **`make conformance` 3974 matched / 0 known-gap / 0 regressed**: every gated frame is BIT-EXACT vs libaom (`aomdec`; its lightfield decoder for tile lists), and libaom's invalid-stream corpus, and real non-conformant encoder output, are refused exactly where libaom refuses them, for the same reason. Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; scalable streams at every operating point; ALL 242 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, large-scale tile, operating points + `drop_obu`, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. No coding tool rejects |
+| **AV1** | decode + encode | dav1d + rav1e | 35 × `src/av1_*.cyr` — **`make conformance` 3974 matched / 0 known-gap / 0 regressed**: every gated frame is BIT-EXACT vs libaom (`aomdec`; its lightfield decoder for tile lists), and libaom's invalid-stream corpus, and real non-conformant encoder output, are refused exactly where libaom refuses them, for the same reason. Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; scalable streams at every operating point; ALL 242 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, large-scale tile, operating points + `drop_obu`, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. No coding tool rejects |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -131,7 +131,8 @@ streams from three encoders, and committed reproducers that run without
 libaom. No coding tool rejects. Beyond it:
 - there is **no encoder** yet: what ships as "encode" is a plan-driven
   bitstream writer. 0.8.6 has begun one; so far it has a forward transform
-  (`src/av1_ftx.cyr`, bit-exact with libaom's).
+  (`src/av1_ftx.cyr`, bit-exact with libaom's) and a quantizer
+  (`src/av1_fquant.cyr`, libaom's dead-zone rules in exact arithmetic).
 
 The honest, checkable breakdown, and why no "% done" is printed, is in
 [`docs/development/roadmap.md`](docs/development/roadmap.md) under

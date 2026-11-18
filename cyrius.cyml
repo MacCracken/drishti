@@ -34,6 +34,7 @@ modules = [
     "src/av1_qm.cyr",
     "src/av1_recon.cyr",
     "src/av1_ftx.cyr",
+    "src/av1_fquant.cyr",
     "src/av1_scan.cyr",
     "src/av1_coeff.cyr",
     "src/av1_coeffcdf.cyr",

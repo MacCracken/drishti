@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.6 bite 3: the quantizer, the inverse of 7.12.3's dequantization
+
+**The encode lane has a quantizer:** `av1_quantize_block` (`src/av1_fquant.cyr`, a new module) turns a block of
+forward-transform coefficients into the levels `Quant[]` that `coeffs()` codes and the decoder dequantizes back. Its
+layout is the decoder's (`tw x th`, stride `tw`).
+
+The steps are the decoder's own:
+- `get_dc_quant` / `get_ac_quant` over `Dc_Qlookup` / `Ac_Qlookup` at the block's qindex plus the plane's deltas
+  (`av1_fquant_set`; 7.12.2);
+- the DC step at (0, 0) and the AC step elsewhere;
+- with a quantizer matrix, the decoder's step-1b `Round2( q * Quantizer_Matrix, 5 )` at each position.
+
+The spec defines only dequantization; the quantizer is the encoder's choice. drishti's is **libaom's dead-zone "B"
+quantizer rule set, in exact integer arithmetic**:
+- A coefficient inside `zbin = Round2( Round2( fz * S, 7 ), log2 dqDenom )` is 0.
+- Above it, the level is `floor( ( |c| + round ) * dqDenom / S )`, with `round = Round2( ( fr * S ) >> 7, log2
+  dqDenom )`.
+- The level is capped at the largest one the decoder neither clamps nor wraps through its `0xFFFFFF` mask.
+- libaom's default factors: `fz` 84, or 80 once `dc_q` reaches 148 / 592 / 2368 (qindex 132 / 132 / 133); `fr` 48;
+  both 64 at qindex 0. `av1_fquant_set_factors` overrides them (64 / 64 rounds to nearest).
+
+At qindex 0 a lossless block passes through exactly: the forward WHT's outputs are 4x its lifting, and the step is 4.
+
+**Verified**, by a new port, `scripts/refs/quant_ref.py` (`Dc_Qlookup` / `Ac_Qlookup` read from the spec markdown):
+- **Properties**, over every qindex, bit depth, dqDenom and DC / AC step (17.9 million values): the dead zone,
+  symmetry, monotonicity, the reconstruction error within the bound the definition implies, the cap, and lossless
+  exactness.
+- **libaom's own quantizer**, compiled from `ref/` by a new C harness (`scripts/refs/quant_libaom.c`:
+  `av1_build_quantizer` + `aom_highbd_quantize_b_helper_c`):
+  - it equals a Python emulation of its reciprocal arithmetic on every value;
+  - it equals drishti **wherever that reciprocal divides exactly**: 90,954 coefficients.
+  - libaom divides through a 16-bit reciprocal (`invert_quant`), which can round a level **up** once the numerator
+    `( |c| + round ) * dqDenom` passes about 55,000 (most often at dqDenom 4). In the other 630 coefficients
+    libaom's level is above the exact one, never below, and within its provable bound. drishti's i64 divides exactly.
+
+**Tests:** `tests/av1_fquant.tcyr`, 473 assertions:
+- 72 coefficient and 57 block known answers (the block ones through the forward transform, every size);
+- the default factors at their crossovers; the steps with plane deltas;
+- the properties re-checked against the decoder's own `av1_dequant_coeff`;
+- a quantizer-matrix block whose every level is the coefficient at the decoder's weighted step;
+- end to end through `av1_reconstruct`: 600 lossless blocks back exactly at 8, 10 and 12 bits, and lossy error
+  falling with qindex at 8x8, 32x32 and 64x64;
+- nearest rounding recovering every level from its own reconstruction; refusals; no allocation per call.
+
+**Mutation testing:** 21 mutants, all killed but one equivalent. No 8-bit `dc_q` is 147, so the 8-bit threshold
+148 -> 147 cannot be seen; 148 -> 149 is killed. One mutant first survived, a gap: no test accepted a factor of exactly
+128. Now one does.
+
+One new module (46).
+
+**Gates:** 46 suites, **34,118** assertions (+473), **7,416** fuzz (3 harnesses); bench, `vet`, `lint`, `fmt-check`,
+`version-check` and `distlib --check` all green (`dist/drishti.cyr` regenerated); all three programs build. `make
+conformance` is unchanged at **3974 matched / 0 known-gap / 0 regressed / 0 skipped**: the decoder is untouched.
+
 ### Added — 0.8.6 bite 2: the forward transform, the transpose of the spec's inverse, bit-exact with libaom's
 
 **The encode lane has a forward transform:** `av1_forward_transform_2d` (`src/av1_ftx.cyr`, a new module) turns a
