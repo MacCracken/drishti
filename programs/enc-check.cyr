@@ -2,8 +2,9 @@
 # the standalone .ivf for make conformance to decode with aomdec, dav1d and drishti.
 #
 # I/O contract (fixed paths, as the other harness programs):
-#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK": FORMAT 0 monochrome, 1 4:2:0, 2 4:2:2,
-#                              3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64)
+#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK SB": FORMAT 0 monochrome, 1 4:2:0, 2 4:2:2,
+#                              3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64,
+#                              15 = 128x128); SB the superblock size, 64 or 128
 #   IN   build/enc-input.yuv   the picture, planar in the `aomdec --rawvideo` layout: Y, then U and V (none for
 #                              monochrome), each its visible rectangle, one byte per sample at 8 bits and two
 #                              little-endian at 10 / 12
@@ -84,14 +85,18 @@ fn main(): i64 {
     if (av1_tables_init() != DR_OK) { ec_puts("SUMMARY oom\n"); return 1; }
     var cbuf = alloc(256);
     var cn = file_read_all("build/enc-input.cfg", cbuf, 255);
-    var cfg = alloc(6 * 8);
-    if ((cn <= 0) || (ec_parse(cbuf, cn, cfg, 6) != 6)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    var cfg = alloc(7 * 8);
+    if ((cn <= 0) || (ec_parse(cbuf, cn, cfg, 7) != 7)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
     var w = load64(cfg);
     var h = load64(cfg + 8);
     var bd = load64(cfg + 16);
     var fmt = load64(cfg + 24);
     var q = load64(cfg + 32);
     var bs = load64(cfg + 40);
+    var sbpx = load64(cfg + 48);
+    if ((sbpx != 64) && (sbpx != 128)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    var sb128 = 0;
+    if (sbpx == 128) { sb128 = 1; }
     var np = 3;
     var subx = 1;
     var suby = 1;
@@ -134,7 +139,7 @@ fn main(): i64 {
     }
     var ilen = 0;
     var recon = 0;
-    var ivf = av1_encode_keyframe_ivf(src, q, bs, &ilen, &recon, &e);
+    var ivf = av1_encode_keyframe_ivf(src, q, bs, sb128, &ilen, &recon, &e);
     if (ivf == 0) { ec_puts("SUMMARY encode-error err="); ec_putn(e); ec_puts("\n"); return 1; }
     if (file_write_all("build/enc-out.ivf", ivf, ilen) < 0) { ec_puts("SUMMARY write-failed\n"); return 1; }
     # read the file back as a decoder would, and decode its one temporal unit

@@ -594,8 +594,10 @@ for c in $REFUSED_CASES; do refused_case "$c"; done
 # bytes, with dav1d agreeing (vs_judge) — the acceptance shape of batch 0.8.6, with no hand-built byte in the stream.
 WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-444-64x64 writer-422-b12-64x64"
 # ---- THE KEYFRAME ENCODER (0.8.6) — src/av1_enc.cyr through programs/enc-check.cyr ----
-# encKIND_WxH_qQ_bB: an ffmpeg picture (mandelbrot; testsrc2 for 4:4:4 8-bit) of W x H in KIND's format, encoded by
-# drishti at qindex Q in blocks of size B (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64). Three checks, all hard:
+# encKIND_WxH_qQ_bB[_s128]: an ffmpeg picture (mandelbrot; testsrc2 for 4:4:4 8-bit) of W x H in KIND's format,
+# encoded by drishti at qindex Q in blocks of size B (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64, 15 = 128x128) at
+# 64x64 superblocks, or 128x128 with _s128 — the probe first proves the stream's use_128x128_superblock is the one the
+# case names (the 128x128 encode lane, 0.8.6). Three checks, all hard:
 #  - drishti-enc-check's own: decoding the .ivf it wrote, drishti outputs exactly the reconstruction the encoder
 #    returned (and, at qindex 0, that reconstruction is the picture);
 #  - vs_judge: drishti's output is aomdec's, and dav1d agrees with aomdec;
@@ -603,11 +605,14 @@ WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-
 # So the stream means, to two decoders drishti had no hand in, exactly the picture the encoder says it coded.
 ENC_CASES="enc420_176x144_q60_b9 enc420ll_176x144_q0_b6 enc420_352x288_q120_b12 enc420_99x61_q30_b3 \
 enc444_160x120_q90_b6 enc422b10_72x40_q80_b3 enc420b10ll_128x96_q0_b9 enc444b12_64x64_q40_b12 encmono_99x61_q200_b12 \
-enc420_17x9_q50_b3"
-enccase() { # name = encKIND_WxH_qQ_bB
-    local n="$1" kind geo qs bs
-    IFS=_ read -r kind geo qs bs <<< "$n"
-    local w="${geo%x*}" h="${geo#*x}" q="${qs#q}" b="${bs#b}" pf bd fmt src="mandelbrot" out
+enc420_17x9_q50_b3 \
+enc420_352x288_q60_b15_s128 enc420ll_200x136_q0_b15_s128 enc444_176x144_q90_b6_s128 enc422b10_264x152_q120_b15_s128 \
+encmono_136x136_q30_b12_s128 enc420b10ll_96x64_q0_b9_s128"
+enccase() { # name = encKIND_WxH_qQ_bB[_s128]
+    local n="$1" kind geo qs bs ss
+    IFS=_ read -r kind geo qs bs ss <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" q="${qs#q}" b="${bs#b}" sb=64 pf bd fmt src="mandelbrot" out sbw=0
+    [ "${ss:-}" = "s128" ] && { sb=128; sbw=1; }
     case "$kind" in
         enc420|enc420ll) pf=yuv420p;     bd=8;  fmt=1 ;;
         enc420b10ll)     pf=yuv420p10le; bd=10; fmt=1 ;;
@@ -622,13 +627,21 @@ enccase() { # name = encKIND_WxH_qQ_bB
     ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v 1 -pix_fmt "$pf" \
         -f rawvideo "$WORK/$n.src.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
     cp "$WORK/$n.src.yuv" build/enc-input.yuv
-    echo "$w $h $bd $fmt $q $b" > build/enc-input.cfg
+    echo "$w $h $bd $fmt $q $b $sb" > build/enc-input.cfg
     out=$(timeout 120 ./build/drishti-enc-check 2>&1)
     if ! echo "$out" | grep -q '^SUMMARY ok'; then
         echo "  $n: REGRESSED (the encoder's own check: $(echo "$out" | tr '\n' ' '))"; fail=$((fail+1)); return
     fi
     cp build/enc-out.ivf "$WORK/$n.ivf"
-    echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); reconstruction = drishti's decode)"
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf
+    local got_sb
+    got_sb=$(./build/drishti-vector-probe 2>/dev/null | sed -n 's/^ *use_128x128_superblock=//p' | head -1)
+    if [ "$got_sb" != "$sbw" ]; then
+        echo "  $n: SETUP FAILED (use_128x128_superblock=${got_sb:-none}, the case names $sbw — it would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); ${sb}x${sb} superblocks; reconstruction = drishti's decode)"
     pass=$((pass+1))
     vs_judge "$n" 1
     if [ "$q" = "0" ]; then

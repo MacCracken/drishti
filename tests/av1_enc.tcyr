@@ -14,6 +14,7 @@
 include "src/main.cyr"
 
 var Ec_Seed = 1;
+var Ec_Sb = 0;        # the superblock size every encode below uses: 0 = 64x64, 1 = 128x128
 fn ec_rnd(): i64 {
     Ec_Seed = ((Ec_Seed * 1103515245) + 12345) & 2147483647;
     return Ec_Seed >> 8;
@@ -81,7 +82,7 @@ fn ec_run(src, q, bs): i64 {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(src, q, bs, &n, &rec, &e);
+    var tu = av1_encode_keyframe(src, q, bs, Ec_Sb, &n, &rec, &e);
     if (tu == 0) { return 0 - 1; }
     Ec_Bytes = n;
     var de = 0;
@@ -197,7 +198,7 @@ fn test_ec_flat() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(src, 40, 12, &n, &rec, &e);
+    var tu = av1_encode_keyframe(src, 40, 12, Ec_Sb, &n, &rec, &e);
     assert_eq(n, 24, "flat 64x64: a 24-byte temporal unit (TD 2 + sequence header 12 + frame OBU 10)");
     # the tile ends the unit: the all-skip DC tile the plan-driven tile writer gives the header writers' streams
     assert_eq(load8(tu + 22), 0x98, "flat: tile byte 0");
@@ -245,7 +246,7 @@ fn ec_grid_check(src, q, bs, want): i64 {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(src, q, bs, &n, &rec, &e);
+    var tu = av1_encode_keyframe(src, q, bs, Ec_Sb, &n, &rec, &e);
     if (tu == 0) { return 0 - 1; }
     var tile = ec_decode_grids(tu, n);
     if (tile == 0) { return 0 - 2; }
@@ -283,7 +284,7 @@ fn test_ec_grids() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(e2, 60, 12, &n, &rec, &e);
+    var tu = av1_encode_keyframe(e2, 60, 12, Ec_Sb, &n, &rec, &e);
     var t2 = ec_decode_grids(tu, n);
     assert(t2 != 0, "72x40 decodes to grids");
     if (t2 != 0) {
@@ -319,12 +320,62 @@ fn test_ec_grids() {
     assert_eq(Ec_SrcErr, 0, "half flat, lossless: the source back");
 }
 
+# 128x128 superblocks: 128x128 blocks, their residual's 64x64 chunks, a 128x128 block overhanging the MI grid, and the
+# superblock size changing the syntax but not the picture
+fn test_ec_sb128() {
+    Ec_Sb = 1;
+    assert_eq(ec_lossless(128, 128, 3, 1, 1, 8, 1, 15), 0, "sb128 lossless 128x128 noise, one 128x128 block");
+    assert_eq(ec_lossless(256, 128, 3, 0, 0, 10, 1, 15), 0, "sb128 lossless 256x128 4:4:4 10-bit, 128x128 blocks");
+    # 200 wide = 50 MI: the second superblock's 128x128 block keeps its half inside (32 + 16 < 50) and overhangs the
+    # MI grid by 14 MI; 136 high = 34 MI: the second superblock row splits down to 8x8 at r = 32
+    assert_eq(ec_lossless(200, 136, 3, 1, 1, 8, 1, 15), 0, "sb128 lossless 200x136, a 128x128 block overhanging");
+    assert_eq(ec_lossless(200, 136, 1, 1, 1, 12, 3, 15), 0, "sb128 lossless 200x136 12-bit monochrome");
+    var src = ec_pic(200, 136, 3, 1, 0, 8, 3, 41);
+    assert_eq(ec_run(src, 60, 15), 0, "sb128 lossy 200x136 4:2:2 in 128x128 blocks: decode == reconstruction");
+    assert_eq(ec_run(src, 255, 15), 0, "sb128 lossy at qindex 255");
+    var big = ec_pic(256, 128, 3, 1, 1, 8, 1, 42);
+    assert_eq(ec_grid_check(big, 60, 15, 15), 0, "sb128: every cell of 256x128 BLOCK_128X128, DC_PRED");
+    assert_eq(Ec_Cells, 2048, "256x128: 64 x 32 MI cells");
+    var t2 = ec_pic(200, 136, 3, 1, 1, 8, 1, 43);
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var tu = av1_encode_keyframe(t2, 60, 15, 1, &n, &rec, &e);
+    var g = ec_decode_grids(tu, n);
+    assert(g != 0, "sb128 200x136 decodes to grids");
+    if (g != 0) {
+        assert_eq(av1_grid_get(g, AV1TILE_MISIZES, 0, 0), 15, "sb128 200x136: superblock (0, 0) is one 128x128 block");
+        assert_eq(av1_grid_get(g, AV1TILE_MISIZES, 0, 49), 15, "sb128 200x136: so is the overhanging one at (0, 32)");
+        assert_eq(av1_grid_get(g, AV1TILE_MISIZES, 33, 49), 3, "sb128 200x136: the bottom-right corner is 8x8");
+    }
+    # the same block size at either superblock size codes the same picture (the tree differs, the leaves do not)
+    var same = ec_pic(150, 90, 3, 1, 1, 8, 3, 44);
+    var bad = 0;
+    var bs = 3;
+    while (bs <= 12) {
+        var n64 = 0;
+        var r64 = 0;
+        var n128 = 0;
+        var r128 = 0;
+        av1_encode_keyframe(same, 80, bs, 0, &n64, &r64, &e);
+        av1_encode_keyframe(same, 80, bs, 1, &n128, &r128, &e);
+        if ((r64 == 0) || (r128 == 0) || (ec_sad(r64, r128) != 0)) { bad = bad + 1; }
+        bs = bs + 3;
+    }
+    assert_eq(bad, 0, "8x8 .. 64x64 blocks: the 64x64- and the 128x128-superblock encodes reconstruct the same");
+    # refusals: 128x128 blocks need 128x128 superblocks; sb128 is a flag
+    assert_eq(av1_encode_keyframe(same, 40, 15, 0, &n, &rec, &e), 0, "128x128 blocks at 64x64 superblocks refused");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    assert_eq(av1_encode_keyframe(same, 40, 12, 2, &n, &rec, &e), 0, "sb128 = 2 refused");
+    Ec_Sb = 0;
+}
+
 fn test_ec_ivf() {
     var src = ec_pic(48, 32, 3, 1, 1, 8, 1, 5);
     var n = 0;
     var rec = 0;
     var e = 0;
-    var ivf = av1_encode_keyframe_ivf(src, 50, 6, &n, &rec, &e);
+    var ivf = av1_encode_keyframe_ivf(src, 50, 6, Ec_Sb, &n, &rec, &e);
     assert(ivf != 0, "the IVF wrapper writes");
     assert_eq(load8(ivf), 68, "D");
     assert_eq(load8(ivf + 1), 75, "K");
@@ -353,36 +404,36 @@ fn test_ec_refusals() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    assert_eq(av1_encode_keyframe(0, 40, 6, &n, &rec, &e), 0, "a null picture refused");
+    assert_eq(av1_encode_keyframe(0, 40, 6, Ec_Sb, &n, &rec, &e), 0, "a null picture refused");
     assert_eq(e, DR_ERR_BOUNDS, "null -> BOUNDS");
-    assert_eq(av1_encode_keyframe(src, 40, 0, &n, &rec, &e), 0, "BLOCK_4X4 refused");
+    assert_eq(av1_encode_keyframe(src, 40, 0, Ec_Sb, &n, &rec, &e), 0, "BLOCK_4X4 refused");
     assert_eq(e, DR_ERR_BOUNDS, "4x4 -> BOUNDS");
-    assert_eq(av1_encode_keyframe(src, 40, 7, &n, &rec, &e), 0, "BLOCK_16X32 (not square) refused");
-    assert_eq(av1_encode_keyframe(src, 40, 15, &n, &rec, &e), 0, "BLOCK_128X128 refused (64x64 superblocks)");
-    assert_eq(av1_encode_keyframe(src, 256, 6, &n, &rec, &e), 0, "base_q_idx 256 refused");
+    assert_eq(av1_encode_keyframe(src, 40, 7, Ec_Sb, &n, &rec, &e), 0, "BLOCK_16X32 (not square) refused");
+    assert_eq(av1_encode_keyframe(src, 40, 15, 0, &n, &rec, &e), 0, "BLOCK_128X128 refused (64x64 superblocks)");
+    assert_eq(av1_encode_keyframe(src, 256, 6, Ec_Sb, &n, &rec, &e), 0, "base_q_idx 256 refused");
     assert_eq(e, DR_ERR_BOUNDS, "256 -> BOUNDS");
-    assert_eq(av1_encode_keyframe(src, 0 - 1, 6, &n, &rec, &e), 0, "base_q_idx -1 refused");
+    assert_eq(av1_encode_keyframe(src, 0 - 1, 6, Ec_Sb, &n, &rec, &e), 0, "base_q_idx -1 refused");
     assert_eq(n, 0, "a refusal reports no bytes");
     assert_eq(rec, 0, "and no reconstruction");
     var s440 = ec_pic(16, 16, 3, 0, 1, 8, 1, 3);
-    assert_eq(av1_encode_keyframe(s440, 40, 6, &n, &rec, &e), 0, "4:4:0 refused (AV1 has no such format)");
+    assert_eq(av1_encode_keyframe(s440, 40, 6, Ec_Sb, &n, &rec, &e), 0, "4:4:0 refused (AV1 has no such format)");
     assert_eq(e, DR_ERR_BOUNDS, "4:4:0 -> BOUNDS");
     # dr_frame_new makes neither a 2-plane nor a 9-bit frame, so those records are edited into a valid one: the
     # encoder's own checks are what refuse them
     var s2 = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
     store64(s2 + DR_FRAME_NUM_PLANES, 2);
     e = DR_OK;
-    assert_eq(av1_encode_keyframe(s2, 40, 6, &n, &rec, &e), 0, "a 2-plane frame record refused");
+    assert_eq(av1_encode_keyframe(s2, 40, 6, Ec_Sb, &n, &rec, &e), 0, "a 2-plane frame record refused");
     assert_eq(e, DR_ERR_BOUNDS, "2 planes -> BOUNDS");
     var s9 = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
     store64(s9 + DR_FRAME_BIT_DEPTH, 9);
     e = DR_OK;
-    assert_eq(av1_encode_keyframe(s9, 40, 6, &n, &rec, &e), 0, "a 9-bit frame record refused");
+    assert_eq(av1_encode_keyframe(s9, 40, 6, Ec_Sb, &n, &rec, &e), 0, "a 9-bit frame record refused");
     assert_eq(e, DR_ERR_BOUNDS, "9-bit -> BOUNDS");
     var wide = ec_pic(4160, 8, 1, 1, 1, 8, 2, 3);
-    assert_eq(av1_encode_keyframe(wide, 40, 12, &n, &rec, &e), 0, "4160 wide (two tile columns) refused");
+    assert_eq(av1_encode_keyframe(wide, 40, 12, Ec_Sb, &n, &rec, &e), 0, "4160 wide (two tile columns) refused");
     assert_eq(e, DR_ERR_UNSUPPORTED, "4160 wide -> UNSUPPORTED");
-    var ivf = av1_encode_keyframe_ivf(src, 300, 6, &n, &rec, &e);
+    var ivf = av1_encode_keyframe_ivf(src, 300, 6, Ec_Sb, &n, &rec, &e);
     assert_eq(ivf, 0, "the IVF wrapper passes a refusal on");
     assert_eq(e, DR_ERR_BOUNDS, "as BOUNDS");
 }
@@ -393,7 +444,7 @@ fn ec_oom_op(q): i64 {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var ivf = av1_encode_keyframe_ivf(Ec_Oom_Src, q, 3, &n, &rec, &e);
+    var ivf = av1_encode_keyframe_ivf(Ec_Oom_Src, q, 3, Ec_Sb, &n, &rec, &e);
     if (ivf == 0) { return e; }
     return DR_OK;
 }
@@ -414,6 +465,15 @@ fn main() {
     test_ec_lossless_sizes();
     test_group("keyframe encoder: lossy — the decoder outputs the encoder's reconstruction");
     test_ec_lossy();
+    test_group("keyframe encoder at 128x128 superblocks: the same lossless, lossy and grid cases");
+    Ec_Sb = 1;
+    test_ec_lossless_formats();
+    test_ec_lossless_sizes();
+    test_ec_lossy();
+    test_ec_grids();
+    Ec_Sb = 0;
+    test_group("keyframe encoder at 128x128 superblocks: 128x128 blocks, overhangs, the same picture");
+    test_ec_sb128();
     test_group("keyframe encoder: a flat picture is all skip");
     test_ec_flat();
     test_group("keyframe encoder: what the decoder reads — block sizes, modes, skips");
@@ -424,6 +484,9 @@ fn main() {
     test_ec_refusals();
     test_group("keyframe encoder: OOM");
     test_ec_oom();
+    Ec_Sb = 1;
+    test_ec_oom();
+    Ec_Sb = 0;
     return assert_summary();
 }
 

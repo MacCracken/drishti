@@ -1888,7 +1888,18 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > decoder's MI grids checked cell by cell). 37 mutants: 30 killed, 7 equivalent under the fixed decisions (listed in
 > the CHANGELOG). Gate: 4472 / 0 / 0 / 0 (+22).
 >
-> Next: the encode lane at 128x128 superblocks (the last 0.8.6 item), then the 0.8.6 cut.
+> Bite 6 = **the encode lane at 128x128 superblocks**. `av1_encode_keyframe(src, q, block_size, sb128, ...)` adds the
+> 128x128 SB loop, `BLOCK_128X128` blocks, the four-unit `clear_cdef` and 4x record storage. The partition tree's W128
+> CDF, the BlockDecoded mask and the 5.11.34 64x64 chunking were already the decoder's code. The plan-driven
+> `av1_encode_tile` ran its sbSize branch for the first time (`tests/av1_tile.tcyr`: a 128x128 block and a split tree,
+> plus 8 LR units at 4 per SB).
+>
+> Six `_s128` cases joined the "keyframe encoder" conformance section, each probe-checked for
+> `use_128x128_superblock` (canary-tested). The 64x64- and 128x128-SB encodes reconstruct the same picture for every
+> block size up to 64x64. 11 mutants: 9 killed, 2 equivalent. Gate: 4486 / 0 / 0 / 0 (+14).
+>
+> **0.8.6's acceptance outcome holds:** a standalone `.ivf` that `aomdec` decodes, at both superblock sizes. Every
+> 0.8.6 roadmap item is done. Next: the 0.8.6 cut (version sync), then 0.8.7.
 >
 > **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,

@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.6 bite 6: the encode lane at 128x128 superblocks — 0.8.6's outcome holds at both sizes
+
+**The encoder codes at 128x128 superblocks.** `av1_encode_keyframe` / `av1_encode_keyframe_ivf` take a new `sb128`
+argument and, with it, `BLOCK_128X128` blocks. Only three things are the encoder's own:
+- the superblock loop (sbSize4 32, the BLOCK_128X128 root);
+- `clear_cdef` over four 64x64 units;
+- record storage four times the size.
+
+The rest is decoder code the encoder already runs:
+- the partition tree's W128 CDF and 8-symbol alphabet (shared with the reader);
+- the BlockDecoded mask;
+- the 64x64 chunking of a 128-wide block's residual (5.11.34), whose order is the order the recorded `coeffs()` are
+  written.
+
+**The plan-driven encode lane ran at 128x128 for the first time.** `av1_tile_set_sb128` had never been called on an
+encode tile, so `av1_encode_tile`'s sbSize branch never executed. It now round trips a 256x128 frame:
+- one 128x128 block, then a SPLIT tree down to 32x32;
+- with read-only and adaptive CDFs;
+- with eight loop-restoration units, four per superblock, each coded by `av1_write_lr` at the 128x128 size and read
+  back with its own coefficients.
+
+**Verified:**
+- **Six 128x128-superblock cases join `make conformance`'s "keyframe encoder" section** (16 cases now). They cover
+  128x128 blocks; a lossless 200x136 whose second 128x128 block overhangs the MI grid by 14 MI; 4:4:4; 10-bit 4:2:2;
+  monochrome; and 10-bit lossless. drishti's decode equals the reconstruction, `aomdec` equals drishti and dav1d
+  agrees, and both lossless cases come back from `aomdec` as the source file.
+- **Each case first proves its stream's `use_128x128_superblock`** is the size it names, through the vector probe. It
+  was canary-tested: a case naming the wrong size fails SETUP.
+- **Tests:** `tests/av1_enc.tcyr` now runs its lossless, lossy, grid and OOM groups at both superblock sizes (163
+  assertions). The 128x128-only cases:
+  - 128x128 blocks in every MI cell, checked by the decoder's grids;
+  - a 128x128 block overhanging the grid, and the 8x8 split at the bottom edge;
+  - for every block size 8x8 to 64x64, the 64x64- and 128x128-superblock encodes reconstruct the same picture: the
+    superblock size changes the tree, not the leaves;
+  - refusals: 128x128 blocks at 64x64 superblocks, and an `sb128` that is not 0 / 1.
+- `tests/av1_tile.tcyr` gains the plan-driven 128x128 round trips (+13).
+
+**Mutation testing:** 11 mutants over the 128x128 code in both encode paths; the canary dies first. 9 are killed.
+Two are equivalent:
+- BlockDecoded cleared at the 64x64 size feeds only above-right / below-left availability, which DC prediction never
+  reads;
+- dropping the `sb128` range check is caught later anyway: the header writer refuses a `use_128x128_superblock` of 2
+  as a one-bit field.
+
+**0.8.6's acceptance outcome now holds:** drishti emits a standalone `.ivf` that `aomdec` decodes, at both
+superblock sizes, for any picture drishti decodes.
+
+**Gates:**
+- `make test`: 48 suites, **34,853** assertions (+81).
+- `make fuzz`: **7,422** assertions.
+- bench, `vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` all green; `dist/drishti.cyr` regenerated.
+- `make conformance`: **4486 matched / 0 known-gap / 0 regressed / 0 skipped**. That is +14: 6 self-checks, 6 decoder
+  comparisons, 2 lossless-source checks.
+
 ### Added — 0.8.6 bite 5: the keyframe encoder — a picture in, a standalone `.ivf` aomdec decodes
 
 **drishti encodes a picture.** `av1_encode_keyframe` (`src/av1_enc.cyr`, a new module) takes a `DrFrame` and returns

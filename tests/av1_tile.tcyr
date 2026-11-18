@@ -117,6 +117,128 @@ fn test_keyframe_roundtrip() {
     keyframe_rt(0);        # adaptive CDFs (frame-wide lockstep)
     return 0;
 }
+# The plan-driven encode lane at 128x128 SUPERBLOCKS (0.8.6): av1_encode_tile's sbSize branch — the 128x128 SB loop,
+# the W128 partition CDF and its 8-symbol alphabet at the root, a whole 128x128 block — never ran before. A 256x128
+# mono frame, two superblocks: SB0 one 128x128 block (TX_64X64); SB1 SPLIT into 64x64 NONE, 64x64 SPLIT into four
+# 32x32, then two 64x64 NONE. All skip DC. lrp != 0 also attaches loop restoration (unit 64: four units per SB).
+fn sb128_plan(pp, pm, pt, mi): i64 {
+    store64(pp + 0, AV1_PARTITION_NONE);      # SB0: 128x128
+    store64(pp + 8, AV1_PARTITION_SPLIT);     # SB1
+    store64(pp + 16, AV1_PARTITION_NONE);     #   64x64 (0)
+    store64(pp + 24, AV1_PARTITION_SPLIT);    #   64x64 (1) -> four 32x32
+    store64(pp + 32, AV1_PARTITION_NONE);
+    store64(pp + 40, AV1_PARTITION_NONE);
+    store64(pp + 48, AV1_PARTITION_NONE);
+    store64(pp + 56, AV1_PARTITION_NONE);
+    store64(pp + 64, AV1_PARTITION_NONE);     #   64x64 (2)
+    store64(pp + 72, AV1_PARTITION_NONE);     #   64x64 (3)
+    # blocks in decode order: 128x128, 64x64, 32x32 x4, 64x64, 64x64
+    var k = 0;
+    while (k < 8) { store64(pm + (k * 8), mi); k = k + 1; }
+    store64(pt + 0, 4);                       # TX_64X64 (Max_Tx_Size_Rect of BLOCK_128X128)
+    store64(pt + 8, 4);
+    k = 2;
+    while (k < 6) { store64(pt + (k * 8), 3); k = k + 1; }   # TX_32X32
+    store64(pt + 48, 4);
+    store64(pt + 56, 4);
+    return 0;
+}
+fn sb128_rt(disable, with_lr): i64 {
+    var base_q = 40;
+    var mi = av1_modeinfo_new();
+    store64(mi + AV1MI_SKIP, 1);
+    store64(mi + AV1MI_YMODE, AV1_DC_PRED);
+    store64(mi + AV1MI_UVMODE, AV1_DC_PRED);
+    var pp = alloc(10 * 8);
+    var pm = alloc(8 * 8);
+    var pt = alloc(8 * 8);
+    sb128_plan(pp, pm, pt, mi);
+    var eoe = alloc(8);
+    var eframe = dr_frame_new(256, 128, 1, 0, 0, 8, 8, eoe);
+    var etile = av1_tile_new(eframe, 64, 32, base_q, 1, 0, 1);
+    av1_tile_grids_new(etile);
+    av1_tile_set_sb128(etile, 1);
+    var elrp = 0;
+    if (with_lr) {
+        elrp = av1_lr_params_new(256, 128, 1, 0, 0, 1);
+        av1_lr_params_set_plane(elrp, 0, AV1_RESTORE_WIENER, 64);
+        var ur = 0;
+        while (ur < 2) {
+            var uc = 0;
+            while (uc < 4) {
+                av1_lr_type_set(elrp, 0, ur, uc, AV1_RESTORE_WIENER);
+                av1_lr_wiener_set(elrp, 0, ur, uc, 0, 3, 0 - 7, 5 + (4 * ur) + uc);
+                av1_lr_wiener_set(elrp, 0, ur, uc, 1, 0 - 2, 5, 20 - (4 * ur) - uc);
+                uc = uc + 1;
+            }
+            ur = ur + 1;
+        }
+        av1_tile_set_lr_params(etile, elrp);
+    }
+    var olen = 0;
+    var out = av1_encode_intra_tile(etile, pp, pm, pt, disable, &olen);
+    assert(olen > 0, "sb128: the plan-driven encode lane writes a tile");
+    var doe = alloc(8);
+    var dframe = dr_frame_new(256, 128, 1, 0, 0, 8, 8, doe);
+    var dtile = av1_tile_new(dframe, 64, 32, base_q, 1, 0, 1);
+    av1_tile_grids_new(dtile);
+    av1_tile_set_sb128(dtile, 1);
+    var dlrp = 0;
+    if (with_lr) {
+        dlrp = av1_lr_params_new(256, 128, 1, 0, 0, 1);
+        av1_lr_params_set_plane(dlrp, 0, AV1_RESTORE_WIENER, 64);
+        av1_tile_set_lr_params(dtile, dlrp);
+    }
+    assert_eq(av1_decode_intra_tile(dtile, out, olen, disable), DR_OK, "sb128: decode_tile reads it");
+    var bad = 0;
+    var r = 0;
+    while (r < 32) {
+        var c = 0;
+        while (c < 64) {
+            var exp = 15;                                   # SB0: BLOCK_128X128
+            if (c >= 32) {
+                exp = 12;                                   # SB1: BLOCK_64X64
+                if ((r < 16) && (c >= 48)) { exp = 9; }     # ... but its second 64x64 is four 32x32
+            }
+            if (av1_grid_get(dtile, AV1TILE_MISIZES, r, c) != exp) { bad = bad + 1; }
+            if (av1_grid_get(dtile, AV1TILE_SKIPS, r, c) != 1) { bad = bad + 1; }
+            var esz = av1_grid_get(etile, AV1TILE_MISIZES, r, c);
+            if (av1_grid_get(dtile, AV1TILE_MISIZES, r, c) != esz) { bad = bad + 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(bad, 0, "sb128: the decoder's MiSizes are the plan's (128x128, 64x64, 32x32), enc == dec grids");
+    var bad2 = 0;
+    var y = 0;
+    while (y < 128) {
+        var x = 0;
+        while (x < 256) { if (dr_frame_get(dframe, 0, x, y) != 128) { bad2 = 1; } x = x + 1; }
+        y = y + 1;
+    }
+    assert_eq(bad2, 0, "sb128: pixels all 128");
+    if (with_lr) {
+        var lbad = 0;
+        var ur2 = 0;
+        while (ur2 < 2) {
+            var uc2 = 0;
+            while (uc2 < 4) {
+                if (av1_lr_wiener_get_one(dlrp, 0, ur2, uc2, 0, 2) != (5 + (4 * ur2) + uc2)) { lbad = lbad + 1; }
+                if (av1_lr_wiener_get_one(dlrp, 0, ur2, uc2, 1, 2) != (20 - (4 * ur2) - uc2)) { lbad = lbad + 1; }
+                uc2 = uc2 + 1;
+            }
+            ur2 = ur2 + 1;
+        }
+        assert_eq(lbad, 0, "sb128: all 8 restoration units (4 per superblock) read back their coefficients");
+    }
+    return 0;
+}
+fn test_sb128_roundtrip() {
+    sb128_rt(1, 0);
+    sb128_rt(0, 0);
+    sb128_rt(0, 1);
+    return 0;
+}
 # read_lr wiring: with Av1LrParams attached, decode_tile reads a WIENER unit per SB
 # (interleaved before decode_partition). 128x64, unit_size 64 -> 2 units; SB0
 # reads unit(0,0), SB1 reads unit(0,1). Proves read_lr fires through decode_tile.
@@ -330,6 +452,7 @@ fn main() {
     test_clear_context();
     test_group("keyframe decode_tile round-trip");
     test_keyframe_roundtrip();
+    test_sb128_roundtrip();
     test_group("read_lr wiring in decode_tile");
     test_lr_tile_wiring();
     test_group("frame-header LR activation end-to-end");

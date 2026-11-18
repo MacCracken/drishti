@@ -1,7 +1,8 @@
 # @public — drishti AV1: the KEYFRAME ENCODER (0.8.6) — a picture in, a temporal unit out.
 #
 # The decisions are fixed, the simplest an AV1 encoder can make and still code any picture: one KEY_FRAME in one tile,
-# every superblock split down to one block size (and SPLIT wherever a larger block would cross the frame edge),
+# at 64x64 or 128x128 superblocks, every superblock split down to one block size (and SPLIT wherever a larger block
+# would cross the frame edge),
 # DC_PRED in every plane, the largest transform the block allows (DCT_DCT; the 4x4 WHT when lossless), and every
 # transform block's levels from the quantizer (src/av1_fquant.cyr) applied to the forward transform (src/av1_ftx.cyr)
 # of the source minus the prediction, at the frame's base_q_idx (0 = lossless). A block whose levels are all 0 is coded
@@ -25,17 +26,21 @@
 # FLAT module (no includes) — wiring in src/main.cyr, last of the AV1 modules: it calls the tile, partition, residual,
 # mode info, coefficient, transform, quantizer, header writer and decoder setup code of every module before it.
 #
-# Scope: 64x64 superblocks (av1_seq_init's choice); the 128x128 encode lane is its own item (roadmap 0.8.6).
+# 128x128 superblocks change the superblock loop, the partition tree's root (its W128 CDF and 8-symbol alphabet), the
+# clear_cdef of four 64x64 units, the BlockDecoded mask and the 64x64 chunking of a 128-wide block's residual
+# (5.11.34) — all but the first three already the decoder's code, which the encoder runs.
 
 enum Av1EncConst {
-    AV1ENC_BLOCK_8X8   = 3;    # the block sizes av1_encode_keyframe takes (BLOCK_8X8 .. BLOCK_64X64, square)
-    AV1ENC_BLOCK_16X16 = 6;
-    AV1ENC_BLOCK_32X32 = 9;
-    AV1ENC_BLOCK_64X64 = 12;
-    AV1ENC_TX_MAX      = 4096; # samples in the largest transform block (64x64)
-    AV1ENC_LV_MAX      = 1024; # Quant[] entries of the largest (32x32 kept of a 64-point transform)
-    # records per block: a 64x64 block of 4x4 lossless transforms in every 4:4:4 plane
-    AV1ENC_REC_CAP     = 768;
+    AV1ENC_BLOCK_8X8     = 3;    # the block sizes av1_encode_keyframe takes (square, BLOCK_8X8 .. the superblock)
+    AV1ENC_BLOCK_16X16   = 6;
+    AV1ENC_BLOCK_32X32   = 9;
+    AV1ENC_BLOCK_64X64   = 12;
+    AV1ENC_BLOCK_128X128 = 15;   # 128x128 superblocks only
+    AV1ENC_TX_MAX        = 4096; # samples in the largest transform block (64x64)
+    AV1ENC_LV_MAX        = 1024; # Quant[] entries of the largest (32x32 kept of a 64-point transform)
+    # records per block: a 64x64 block of 4x4 lossless transforms in every 4:4:4 plane; four times that at 128x128
+    AV1ENC_REC_CAP       = 768;
+    AV1ENC_REC_CAP_128   = 3072;
 }
 
 # the encoder context the tile's AV1TILE_EKEY points to
@@ -49,7 +54,8 @@ enum Av1EncCtx {
     AV1EC_LEVELS  = 64;   # level storage: AV1ENC_REC_CAP * 16 i64 (a block's levels fit: see av1_enc_new)
     AV1EC_LV_USED = 72;   # i64 entries of AV1EC_LEVELS in use for the current block
     AV1EC_LV_CAP  = 80;   # its capacity (i64 entries)
-    AV1EC_SIZE    = 88;
+    AV1EC_REC_CAP = 88;   # records AV1EC_RECS holds
+    AV1EC_SIZE    = 96;
 }
 # one recorded transform block: everything coeffs( ) needs, in the decoder's terms
 enum Av1EncRec {
@@ -68,7 +74,7 @@ enum Av1EncRec {
 }
 
 # The context for coding src under sequence s / frame header fh: a quantizer per plane at base_q_idx with the plane's
-# deltas, the transform scratch, and the record and level storage one block needs. 0 on OOM.
+# deltas, the transform scratch, and the record and level storage one block of the superblock size needs. 0 on OOM.
 fn av1_enc_new(src, s, fh): i64 {
     var ec = dr_alloc(AV1EC_SIZE);
     if (ec == 0) { return 0; }
@@ -85,10 +91,12 @@ fn av1_enc_new(src, s, fh): i64 {
     }
     var resid = dr_alloc(AV1ENC_TX_MAX * 8);
     var coeff = dr_alloc(AV1ENC_TX_MAX * 8);
-    var recs = dr_alloc(AV1ENC_REC_CAP * AV1ER_SIZE);
-    # a 64x64 block keeps at most 64x64 levels per plane (32x32 of a 64-point transform; one per sample otherwise):
-    # 3 * 4096 entries in all, which AV1ENC_REC_CAP * 16 = 12288 is
-    var lv_cap = AV1ENC_REC_CAP * 16;
+    var rec_cap = AV1ENC_REC_CAP;
+    if (av1_seq_use_128x128(s)) { rec_cap = AV1ENC_REC_CAP_128; }
+    var recs = dr_alloc(rec_cap * AV1ER_SIZE);
+    # a block keeps at most one level per sample per plane (32x32 of a 64-point transform; one per sample otherwise):
+    # 3 * 4096 entries for a 64x64 block, 3 * 16384 for a 128x128 — rec_cap * 16 either way
+    var lv_cap = rec_cap * 16;
     var lv = dr_alloc(lv_cap * 8);
     if ((resid == 0) || (coeff == 0) || (recs == 0) || (lv == 0)) { return 0; }
     store64(ec + AV1EC_RESID, resid);
@@ -96,6 +104,7 @@ fn av1_enc_new(src, s, fh): i64 {
     store64(ec + AV1EC_RECS, recs);
     store64(ec + AV1EC_LEVELS, lv);
     store64(ec + AV1EC_LV_CAP, lv_cap);
+    store64(ec + AV1EC_REC_CAP, rec_cap);
     store64(ec + AV1EC_N, 0);
     store64(ec + AV1EC_LV_USED, 0);
     return ec;
@@ -152,7 +161,7 @@ fn av1_enc_tx_levels(tile, ec, plane, tx_sz, start_x, start_y, x4, y4, max_x4, m
     var n = load64(ec + AV1EC_N);
     var nlv = av1_min(w, 32) * av1_min(h, 32);
     var used = load64(ec + AV1EC_LV_USED);
-    if ((n >= AV1ENC_REC_CAP) || ((used + nlv) > load64(ec + AV1EC_LV_CAP))) { return 0 - DR_ERR_BOUNDS; }
+    if ((n >= load64(ec + AV1EC_REC_CAP)) || ((used + nlv) > load64(ec + AV1EC_LV_CAP))) { return 0 - DR_ERR_BOUNDS; }
     var lv = load64(ec + AV1EC_LEVELS) + (used * 8);
     var k = 0;
     while (k < nlv) { store64(lv + (k * 8), load64(quant + (k * 8))); k = k + 1; }
@@ -308,7 +317,8 @@ fn av1_enc_partition(tile, ec, r, c, bsize, target): i64 {
     return e;
 }
 
-# decode_tile (5.11.2) run as an encoder: the contexts it clears, then each superblock's partition.
+# decode_tile (5.11.2) run as an encoder: the contexts it clears, then each superblock's partition (sbSize from the
+# tile, which the decoder's setup gave use_128x128_superblock).
 fn av1_enc_tile(tile, ec, target): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var num_planes = dr_frame_num_planes(frame);
@@ -321,34 +331,47 @@ fn av1_enc_tile(tile, ec, target): i64 {
     av1_clear_above_context(tile, num_planes);
     av1_dctx_tile_reset(av1_tile_dctx(tile));
     var cdef_grid = load64(tile + AV1TILE_CDEFIDX);
+    var use128 = load64(tile + AV1TILE_SB128);
+    var sb4 = AV1_SB4;
+    var sb_bsize = AV1ENC_BLOCK_64X64;
+    if (use128 != 0) {
+        sb4 = AV1_SB4_128;
+        sb_bsize = AV1ENC_BLOCK_128X128;
+    }
     var r = row_start;
     while (r < row_end) {
         av1_clear_left_context(tile, num_planes);
         var c = col_start;
         while (c < col_end) {
             av1_dctx_sb_start(av1_tile_dctx(tile));
-            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, 0); }
-            av1_bd_clear(tile, r, c, AV1_SB4, num_planes);
-            av1_enc_partition(tile, ec, r, c, AV1ENC_BLOCK_64X64, target);
-            c = c + AV1_SB4;
+            if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
+            av1_bd_clear(tile, r, c, sb4, num_planes);
+            av1_enc_partition(tile, ec, r, c, sb_bsize, target);
+            c = c + sb4;
         }
-        r = r + AV1_SB4;
+        r = r + sb4;
     }
     return av1_sym_enc_err(load64(tile + AV1TILE_ENC));
 }
 
 # Encode src (a DrFrame of any format drishti decodes: 1 or 3 planes, 8 / 10 / 12 bits, 4:2:0 / 4:2:2 / 4:4:4, at
-# most 4096 samples wide in one tile) as one shown KEY_FRAME at base_q_idx (0..255; 0 = lossless) in blocks of
-# block_size (BLOCK_8X8, BLOCK_16X16, BLOCK_32X32 or BLOCK_64X64). Returns a temporal unit — temporal delimiter,
-# sequence header OBU, frame OBU — with its byte length at *out_len, and at *out_recon the frame any conforming decoder
-# outputs for it (cropped to src's size). 0 on error, DR_ERR_* at *out_err: BOUNDS for a bad argument, UNSUPPORTED for a
-# frame needing more than one tile, OOM.
-fn av1_encode_keyframe(src, base_q_idx, block_size, out_len, out_recon, out_err): i64 {
+# most 4096 samples wide in one tile) as one shown KEY_FRAME at base_q_idx (0..255; 0 = lossless), at 64x64
+# superblocks (sb128 0) or 128x128 (sb128 1), in blocks of block_size (BLOCK_8X8, BLOCK_16X16, BLOCK_32X32,
+# BLOCK_64X64, and BLOCK_128X128 at 128x128 superblocks). Returns a temporal unit — temporal delimiter, sequence header
+# OBU, frame OBU — with its byte length at *out_len, and at *out_recon the frame any conforming decoder outputs for it
+# (cropped to src's size). 0 on error, DR_ERR_* at *out_err: BOUNDS for a bad argument, UNSUPPORTED for a frame needing
+# more than one tile, OOM.
+fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, out_len, out_recon, out_err): i64 {
     store64(out_len, 0);
     store64(out_recon, 0);
     store64(out_err, DR_OK);
-    if ((src == 0) || ((block_size != AV1ENC_BLOCK_8X8) && (block_size != AV1ENC_BLOCK_16X16)
-        && (block_size != AV1ENC_BLOCK_32X32) && (block_size != AV1ENC_BLOCK_64X64))) {
+    var bs_ok = 0;
+    if ((block_size == AV1ENC_BLOCK_8X8) || (block_size == AV1ENC_BLOCK_16X16)
+      || (block_size == AV1ENC_BLOCK_32X32) || (block_size == AV1ENC_BLOCK_64X64)) {
+        bs_ok = 1;
+    }
+    if ((block_size == AV1ENC_BLOCK_128X128) && (sb128 == 1)) { bs_ok = 1; }
+    if ((src == 0) || (bs_ok == 0) || ((sb128 != 0) && (sb128 != 1))) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
     var np = dr_frame_num_planes(src);
@@ -365,6 +388,7 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, out_len, out_recon, out_err)
     var e = 0;
     var s = av1_seq_init(dr_frame_width(src), dr_frame_height(src), dr_frame_bit_depth(src), mono, subx, suby, &e);
     if (s == 0) { store64(out_err, e); return 0; }
+    av1_seq_set_sb128(s, sb128);
     var fh = av1_fh_init_key(s, base_q_idx, &e);
     if (fh == 0) { store64(out_err, e); return 0; }
     # the decoder's frame and tile
@@ -411,10 +435,10 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, out_len, out_recon, out_err)
 }
 
 # av1_encode_keyframe as a standalone IVF file (DKIF, AV01, src's size, a 30 / 1 timebase, the one frame at pts 0).
-fn av1_encode_keyframe_ivf(src, base_q_idx, block_size, out_len, out_recon, out_err): i64 {
+fn av1_encode_keyframe_ivf(src, base_q_idx, block_size, sb128, out_len, out_recon, out_err): i64 {
     store64(out_len, 0);
     var n = 0;
-    var tu = av1_encode_keyframe(src, base_q_idx, block_size, &n, out_recon, out_err);
+    var tu = av1_encode_keyframe(src, base_q_idx, block_size, sb128, &n, out_recon, out_err);
     if (tu == 0) { return 0; }
     var iw = dr_ivf_writer_init(DR_FOURCC_AV01, dr_frame_width(src), dr_frame_height(src), 30, 1);
     if (iw == 0) { store64(out_err, DR_ERR_OOM); return 0; }

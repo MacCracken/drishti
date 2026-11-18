@@ -8,7 +8,7 @@ repo, codec families as flat modules behind a single distlib bundle.
 
 | Family | Lanes | Replaces | Modules |
 |--------|-------|----------|---------|
-| **AV1** | decode + encode | dav1d + rav1e | 37 × `src/av1_*.cyr` — **`make conformance` 4472 matched / 0 known-gap / 0 regressed**: every gated frame is BIT-EXACT vs libaom (`aomdec`; its lightfield decoder for tile lists), and libaom's invalid-stream corpus, and real non-conformant encoder output, are refused exactly where libaom refuses them, for the same reason. Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; scalable streams at every operating point; ALL 242 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, large-scale tile, operating points + `drop_obu`, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. No coding tool rejects |
+| **AV1** | decode + encode | dav1d + rav1e | 37 × `src/av1_*.cyr` — **`make conformance` 4486 matched / 0 known-gap / 0 regressed**: every gated frame is BIT-EXACT vs libaom (`aomdec`; its lightfield decoder for tile lists), and libaom's invalid-stream corpus, and real non-conformant encoder output, are refused exactly where libaom refuses them, for the same reason. Every profile, bit depth (8/10/12) and chroma format; long GOPs; frame sizes from 1x1 up at 64x64 and 128x128 superblocks; superres; scaled references; scalable streams at every operating point; ALL 242 published libaom vectors; libaom, rav1e and SVT-AV1 streams; committed reproducers. Multi-tile, segmentation, delta-q/lf, palette, intra block copy, quantizer matrices, film grain, large-scale tile, operating points + `drop_obu`, all four warp forms, OBMC, compound/masked modes, the temporal-MV arc. No coding tool rejects |
 | **H.264/AVC** | decode + encode | openh264 | `src/h264_nal.cyr`, `src/h264_ps.cyr` — bitstream/header layer |
 | **H.265/HEVC** | decode only | libde265 | `src/h265_nal.cyr`, `src/h265_ps.cyr` — bitstream/header layer |
 | **VP8/VP9** | decode + encode | libvpx | `src/vpx_bool.cyr`, `src/vp8.cyr`, `src/vp9.cyr` — bitstream/header layer |
@@ -123,7 +123,7 @@ CDFs), the block-decode CDF tables, the intra **mode-info reads**, the
   VP9 uncompressed header
 
 AV1 decodes end-to-end to pixels, **keyframes and inter frames alike**, and
-`make conformance` is **4472 matched / 0 known-gap / 0 regressed** against
+`make conformance` is **4486 matched / 0 known-gap / 0 regressed** against
 `aomdec`, on every frame. The gate covers every profile, bit depth and chroma
 format, long GOPs, frame sizes from 1x1 up, superres, scaled references,
 scalable streams at every operating point, all 242 published libaom vectors,
@@ -131,7 +131,8 @@ streams from three encoders, and committed reproducers that run without
 libaom. No coding tool rejects. Beyond it:
 - the **encoder** is one keyframe so far (0.8.6): `av1_encode_keyframe`
   (`src/av1_enc.cyr`) codes any picture drishti decodes as a key frame at a
-  fixed block size, DC prediction everywhere, over a forward transform
+  fixed block size, at 64x64 or 128x128 superblocks, DC prediction
+  everywhere, over a forward transform
   (`src/av1_ftx.cyr`, bit-exact with libaom's), a quantizer
   (`src/av1_fquant.cyr`) and header writers (`src/av1_hdrw.cyr`). Its
   `.ivf` decodes in `aomdec` and dav1d to exactly drishti's
