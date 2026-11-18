@@ -6,6 +6,29 @@
 
 ## Version
 
+**0.8.6** — cut 2026-11-18, not yet tagged (user's git). **drishti encodes: a picture in, a standalone `.ivf` that
+`aomdec` and dav1d decode to exactly drishti's reconstruction, at both superblock sizes.** The first encode batch.
+Six bites, listed newest first in the CHANGELOG:
+- the encode lane at 128x128 superblocks (the plan-driven tile writer's sbSize branch ran for the first time);
+- the keyframe encoder (`src/av1_enc.cyr`): fixed square blocks, DC_PRED, the largest transform; its reconstruction
+  is the decoder's own code through one hook in `av1_transform_block`; sixteen pictures gated against aomdec / dav1d,
+  lossless ones back to the source;
+- the header, OBU and tile group writers (`src/av1_hdrw.cyr`): a record they accept is its parse, word for word;
+  every sequence and intra frame header of 471 corpus streams rewritten bit-exact;
+- the quantizer (`src/av1_fquant.cyr`, libaom's dead-zone rules in exact arithmetic);
+- the forward transform (`src/av1_ftx.cyr`, bit-exact with libaom's);
+- the streams libaom and dav1d refuse, refused for libaom's reason (header ends 5.3.4 / 5.3.5, the `segment_id`
+  range 6.10.8; carried from 0.8.5).
+
+`drishti_version()` = 8006.
+
+**ALL gates green:** 48 suites with **34,853** suite + **7,422** fuzz assertions (4 fuzz harnesses), bench, vet,
+lint, fmt-check, version-check, `distlib --check`, all five programs build, and `make conformance` at **4486
+matched / 0 known-gap / 0 regressed / 0 skipped** (was 3971). Four new modules (48): `av1_ftx`, `av1_fquant`,
+`av1_hdrw`, `av1_enc`. Decoder changes, all decode-neutral: a reduced still picture records `error_resilient_mode`
+1 (libaom and dav1d do), the `AV1TILE_EKEY` encoder hook, and `av1_frame_tile_setup` split out of
+`av1_frame_dec_tile`. NEXT: 0.8.7 (roadmap).
+
 **0.8.5** — cut 2026-11-16, not yet tagged (user's git). **Decode is conformance-clean, and hardened: all 242
 published libaom vectors decode bit-exact on every frame, and the decode path is fuzzed and fault-injected.** The
 last decode batch. Twelve bites, listed newest first in the CHANGELOG:
@@ -1806,11 +1829,12 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   remuxed from .mkv; the svc vectors at every operating point);
 > - streams from libaom, rav1e and SVT-AV1, and committed reproducers under `tests/repro/` that run without libaom.
 >
-> **NEXT: 0.8.6, "drishti emits a standalone `.ivf` that `aomdec` decodes"** (roadmap table): forward transform,
-> quantiser, sequence / frame header + OBU + IVF writers, a fixed-partition DC intra encoder, the encode lane at
-> 128x128 superblocks. The item carried from 0.8.5 is done (bite 1).
+> **NEXT: 0.8.7, "intra mode decision: drishti picks modes and the output is measurably better than fixed-DC"**
+> (roadmap table): intra mode search over the 13 Y modes + UV + CfL + angle deltas, tx-size and tx-type decision, an
+> RD-driven partition search, and the distortion + rate estimators they need — still `aomdec`-clean. 0.8.6's encoder
+> is the base: its reconstruction is the decoder's code, so every new choice is held to aomdec by the same gate.
 >
-> **0.8.6 progress (bites, uncut):** bite 1 = **the two stream kinds 0.8.5 carried, refused where and why libaom
+> **0.8.6 (cut 2026-11-18), bite by bite:** bite 1 = **the two stream kinds 0.8.5 carried, refused where and why libaom
 > refuses them** (libaom 3.15.3 `--aq-mode=2 --cq-level=0`; SVT-AV1 4.2 / 4.3 with chroma qindex offsets; libaom and
 > dav1d refuse both). Three checks decide them:
 > - NEW, the ends of the headers: 5.3.4 `trailing_bits` after a sequence / frame header OBU, 5.3.5

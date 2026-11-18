@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-18
+
+**drishti encodes.** The first encode batch: a picture in, a standalone `.ivf` out that `aomdec` and dav1d decode to
+exactly the reconstruction drishti returns. Any format drishti decodes works, at 64x64 and at 128x128 superblocks.
+Lossless encodes come back from `aomdec` as the source, byte for byte. Six bites, listed below newest first:
+- **The encoder (bites 5–6):**
+  - `av1_encode_keyframe` / `av1_encode_keyframe_ivf` (`src/av1_enc.cyr`): one key frame at a fixed square block size,
+    DC_PRED everywhere, the largest transform, skip when the levels are zero;
+  - its reconstruction is the decoder's own code on the decoder's data, through one hook in `av1_transform_block`
+    and the decoder's frame and tile setup;
+  - then the 128x128-superblock encode lane, including the plan-driven tile writer's sbSize branch, which had never
+    run.
+- **The header writers (bite 4):** `src/av1_hdrw.cyr` writes all of 5.5, the 5.9.2 intra and shown-existing frame
+  header, and the tile group and frame OBUs. Each is the exact inverse of its parser, and a record it accepts is the
+  record the parser reads back, word for word. Every sequence and intra frame header of 471 corpus streams is
+  rewritten to its exact bits.
+- **The forward transform and the quantizer (bites 2–3):**
+  - `src/av1_ftx.cyr`, the spec's inverse transposed, bit-exact with libaom's own forward transform;
+  - `src/av1_fquant.cyr`, libaom's dead-zone rules in exact arithmetic, equal to libaom's wherever its reciprocal
+    divides exactly.
+- **Carried from 0.8.5 (bite 1):** the streams libaom and dav1d refuse that drishti decoded are now refused at
+  libaom's unit, for libaom's reason. Two checks are new: the ends of the headers (5.3.4 / 5.3.5) and the
+  `segment_id` range (6.10.8).
+
+The arc's limits, from the roadmap: one intra frame, a fixed block size, DC prediction only. Mode decision, inter
+frames and rate control are 0.8.7–0.8.11.
+
+**Gates at the cut:**
+- `make test`: 48 suites, **34,853** assertions.
+- `make fuzz`: **7,422** assertions (4 harnesses).
+- bench, `vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` all green; `dist/drishti.cyr` regenerated
+  (v0.8.6); all five programs build.
+- `make conformance`: **4486 matched / 0 known-gap / 0 regressed / 0 skipped** (was 3971 at 0.8.5).
+- Four new modules (48 in all): `av1_ftx`, `av1_fquant`, `av1_hdrw`, `av1_enc`. Two new programs (`hdr-rewrite`,
+  `enc-check`). `drishti_version()` = 8006.
+
 ### Added — 0.8.6 bite 6: the encode lane at 128x128 superblocks — 0.8.6's outcome holds at both sizes
 
 **The encoder codes at 128x128 superblocks.** `av1_encode_keyframe` / `av1_encode_keyframe_ivf` take a new `sb128`
