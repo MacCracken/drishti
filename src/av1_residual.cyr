@@ -172,7 +172,11 @@ enum Av1TileOff {
     AV1TILE_PALSZUV       = 680;
     AV1TILE_PALPTR        = 688;
     AV1TILE_PALCTX        = 696;
-    AV1TILE_SIZE          = 704;
+    # the KEYFRAME ENCODER's context (src/av1_enc.cyr, 0.8.6), 0 when decoding: with it set, av1_transform_block
+    # takes each transform block's levels from av1_enc_tx_levels (the source quantized against the prediction just
+    # made) instead of coeffs( ), and everything else — prediction, reconstruction, BlockDecoded — stays the decoder's.
+    AV1TILE_EKEY          = 704;
+    AV1TILE_SIZE          = 712;
 }
 fn av1_tile_dctx(tile): i64 {
     if (tile == 0) { return 0; }
@@ -295,6 +299,7 @@ fn av1_tile_new(frame, mi_cols, mi_rows, base_q, enable_ef, reduced_tx, num_plan
     # extended fields default to 0 / empty; the partition-tree caller (bite 6)
     # sets ENC / TX_MODE / ENABLE_FI and allocates the grids via av1_tile_grids_new.
     store64(tile + AV1TILE_ENC, 0);
+    store64(tile + AV1TILE_EKEY, 0);              # decoding (the keyframe encoder sets it on its own tile)
     store64(tile + AV1TILE_TX_MODE, AV1_TX_MODE_SELECT);
     store64(tile + AV1TILE_ENABLE_FI, 0);
     store64(tile + AV1TILE_MISIZES, 0);
@@ -847,13 +852,24 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         var bit_depth = load64(tile + AV1TILE_BIT_DEPTH);
         var qindex = load64(tile + AV1TILE_CUR_QINDEX);   # per-segment qindex (== base_q when unsegmented)
         var quant = load64(tile + AV1TILE_QUANT);
-        var eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
-          load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),
-          av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
-          mi_cols >> subx, mi_rows >> suby, bw, bh,
-          load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
-          load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
-          quant, load64(tile + AV1TILE_OTT));
+        var eob = 0;
+        var ekey = load64(tile + AV1TILE_EKEY);
+        if (ekey != 0) {
+            # the keyframe encoder (src/av1_enc.cyr, a later module): Quant[] and PlaneTxType from quantizing the
+            # source against the prediction above, recorded for its symbol pass; a negative return is an error
+            eob = av1_enc_tx_levels(tile, ekey, plane, tx_sz, start_x, start_y,
+              av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
+              mi_cols >> subx, mi_rows >> suby, bw, bh, load64(blk + AV1BLK_LOSSLESS));
+            if (eob < 0) { return 0 - eob; }
+        } else {
+            eob = av1_coeffs_decode(load64(tile + AV1TILE_SD), load64(tile + AV1TILE_CC),
+              load64(tile + AV1TILE_NCC), plane, tx_sz, load64(tile + AV1TILE_TTX),
+              av1_coeff_ctx_col(tile, start_x, subx), av1_coeff_ctx_row(tile, start_y, suby),
+              mi_cols >> subx, mi_rows >> suby, bw, bh,
+              load64(tile + AV1TILE_ALVL + (plane * 8)), load64(tile + AV1TILE_LLVL + (plane * 8)),
+              load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
+              quant, load64(tile + AV1TILE_OTT));
+        }
         if (eob > 0) {
             # per-plane DC/AC quant deltas (7.12.2) from the frame header the tile carries at
             # SEG_FH (the intra lane's qindex source; AV1TILE_FH is 0 on an intra tile). fh==0

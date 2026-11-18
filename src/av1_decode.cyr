@@ -499,7 +499,11 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
 # lane dispatch of decode_tile (5.11.2 / 7.4), shared by a tile group (av1_frame_dec_group) and a large-scale tile
 # list entry (src/av1_lst.cyr, which passes disable_cdf 1: its tiles never adapt). Returns the decoded tile (its CDF
 # families hold the tile's final state), or 0 with *out_err set.
-fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
+# The tile tn of the frame fdc is decoding, set up as every tile decode sets it up — the header's tx mode, tools,
+# segmentation, lossless mask, superblock size, deltas, shared grids, PrevSegmentIds, window and in-loop filter
+# contexts — ready for its symbols. Shared by av1_frame_dec_tile and the keyframe encoder (src/av1_enc.cyr), whose
+# tile is therefore the decoder's by construction. Returns the tile, or 0 (*out_err set).
+fn av1_frame_tile_setup(fdc, tn, out_err): i64 {
     store64(out_err, DR_OK);
     var seq = load64(fdc + AV1FDEC_SEQ);
     var fh = load64(fdc + AV1FDEC_FH);
@@ -556,6 +560,13 @@ fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
     av1_tile_set_window(tile, col_start, row_start, col_end, row_end);
     var ar = av1_activate_intra_filters(tile, seq, fh, lr_params);
     if (ar != DR_OK) { store64(out_err, ar); return 0; }
+    return tile;
+}
+fn av1_frame_dec_tile(fdc, tn, buf, sz, disable_cdf, out_err): i64 {
+    var tile = av1_frame_tile_setup(fdc, tn, out_err);
+    if (tile == 0) { return 0; }
+    var seq = load64(fdc + AV1FDEC_SEQ);
+    var fh = load64(fdc + AV1FDEC_FH);
     if ((av1_fh_frame_is_intra(fh) == 0) || (av1_fh_allow_intrabc(fh) != 0)) {
         # an INTER frame (0.7.84): needs the DPB + ref state for MC. An allow_intrabc INTRA frame (0.8.4)
         # decodes on this lane too — an intra block copy is an inter block — but reads no reference, so a

@@ -255,6 +255,7 @@ skip_external() { # reason
     for c in $PUBLISHED; do skip_case "$c" "$1"; done
     for c in $WRITER_CASES; do skip_case "$c" "$1"; done
     skip_case "rewrite-published+generated" "$1"
+    for c in $ENC_CASES; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
 finish() {
@@ -344,6 +345,9 @@ cyrius build programs/vector-probe.cyr build/drishti-vector-probe >/dev/null 2>&
 # the header writers' corpus check (programs/hdr-rewrite.cyr, the "header writers" sections)
 cyrius build programs/hdr-rewrite.cyr build/drishti-hdr-rewrite >/dev/null 2>&1 || {
     echo "conformance: hdr-rewrite build FAILED"; exit 1; }
+# the keyframe encoder's check (programs/enc-check.cyr, the "keyframe encoder" section)
+cyrius build programs/enc-check.cyr build/drishti-enc-check >/dev/null 2>&1 || {
+    echo "conformance: enc-check build FAILED"; exit 1; }
 # the streams this run generates are the ones newer than this stamp (the header-writer rewrite reads only those: an
 # .ivf a previous run left in $WORK is never scored)
 mkdir -p "$WORK"
@@ -589,6 +593,53 @@ for c in $REFUSED_CASES; do refused_case "$c"; done
 # all-skip DC tile) at 8-bit 4:2:0, monochrome, 10-bit, 4:4:4 and 12-bit 4:2:2, each decoded by drishti to aomdec's
 # bytes, with dav1d agreeing (vs_judge) — the acceptance shape of batch 0.8.6, with no hand-built byte in the stream.
 WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-444-64x64 writer-422-b12-64x64"
+# ---- THE KEYFRAME ENCODER (0.8.6) — src/av1_enc.cyr through programs/enc-check.cyr ----
+# encKIND_WxH_qQ_bB: an ffmpeg picture (mandelbrot; testsrc2 for 4:4:4 8-bit) of W x H in KIND's format, encoded by
+# drishti at qindex Q in blocks of size B (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64). Three checks, all hard:
+#  - drishti-enc-check's own: decoding the .ivf it wrote, drishti outputs exactly the reconstruction the encoder
+#    returned (and, at qindex 0, that reconstruction is the picture);
+#  - vs_judge: drishti's output is aomdec's, and dav1d agrees with aomdec;
+#  - at qindex 0, aomdec's output IS the source file, byte for byte.
+# So the stream means, to two decoders drishti had no hand in, exactly the picture the encoder says it coded.
+ENC_CASES="enc420_176x144_q60_b9 enc420ll_176x144_q0_b6 enc420_352x288_q120_b12 enc420_99x61_q30_b3 \
+enc444_160x120_q90_b6 enc422b10_72x40_q80_b3 enc420b10ll_128x96_q0_b9 enc444b12_64x64_q40_b12 encmono_99x61_q200_b12 \
+enc420_17x9_q50_b3"
+enccase() { # name = encKIND_WxH_qQ_bB
+    local n="$1" kind geo qs bs
+    IFS=_ read -r kind geo qs bs <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" q="${qs#q}" b="${bs#b}" pf bd fmt src="mandelbrot" out
+    case "$kind" in
+        enc420|enc420ll) pf=yuv420p;     bd=8;  fmt=1 ;;
+        enc420b10ll)     pf=yuv420p10le; bd=10; fmt=1 ;;
+        enc422b10)       pf=yuv422p10le; bd=10; fmt=2 ;;
+        enc444)          pf=yuv444p;     bd=8;  fmt=3; src=testsrc2 ;;
+        enc444b12)       pf=yuv444p12le; bd=12; fmt=3 ;;
+        encmono)         pf=gray;        bd=8;  fmt=0 ;;
+        *) echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.src.yuv" "${WORK:?}/$n.ll.yuv" build/enc-input.yuv build/enc-input.cfg \
+      build/enc-out.ivf
+    ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v 1 -pix_fmt "$pf" \
+        -f rawvideo "$WORK/$n.src.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    cp "$WORK/$n.src.yuv" build/enc-input.yuv
+    echo "$w $h $bd $fmt $q $b" > build/enc-input.cfg
+    out=$(timeout 120 ./build/drishti-enc-check 2>&1)
+    if ! echo "$out" | grep -q '^SUMMARY ok'; then
+        echo "  $n: REGRESSED (the encoder's own check: $(echo "$out" | tr '\n' ' '))"; fail=$((fail+1)); return
+    fi
+    cp build/enc-out.ivf "$WORK/$n.ivf"
+    echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); reconstruction = drishti's decode)"
+    pass=$((pass+1))
+    vs_judge "$n" 1
+    if [ "$q" = "0" ]; then
+        aomdec --rawvideo -o "$WORK/$n.ll.yuv" "$WORK/$n.ivf" >/dev/null 2>&1
+        if [ -s "$WORK/$n.ll.yuv" ] && cmp -s "$WORK/$n.ll.yuv" "$WORK/$n.src.yuv"; then
+            echo "  $n: lossless — aomdec's output is the source, byte for byte"; pass=$((pass+1))
+        else
+            echo "  $n: REGRESSED (lossless: aomdec's output is not the source)"; fail=$((fail+1))
+        fi
+    fi
+}
 hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_inter=0; hdr_refs=0; hdr_streams=0
 hdr_rewrite_case() { # ivf
     local f="$1" n out rc sum
@@ -2500,5 +2551,8 @@ mapfile -t genivf < <(find "$WORK" -maxdepth 1 -name '*.ivf' -newer "$HDR_STAMP"
 hdr_group "generated this run" "${genivf[@]}"
 echo "--- header writers: streams the writers alone build, decoded by drishti = aomdec = dav1d ---"
 writer_streams
+
+echo "--- keyframe encoder: real pictures encoded by drishti, decoded by drishti = aomdec = dav1d ---"
+for c in $ENC_CASES; do enccase "$c"; done
 
 finish

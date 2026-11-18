@@ -1,0 +1,166 @@
+# drishti keyframe-encoder check (0.8.6) — encode a raw picture with av1_encode_keyframe (src/av1_enc.cyr) and write
+# the standalone .ivf for make conformance to decode with aomdec, dav1d and drishti.
+#
+# I/O contract (fixed paths, as the other harness programs):
+#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK": FORMAT 0 monochrome, 1 4:2:0, 2 4:2:2,
+#                              3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64)
+#   IN   build/enc-input.yuv   the picture, planar in the `aomdec --rawvideo` layout: Y, then U and V (none for
+#                              monochrome), each its visible rectangle, one byte per sample at 8 bits and two
+#                              little-endian at 10 / 12
+#   OUT  build/enc-out.ivf     the encoded stream: an IVF file, one temporal unit
+#   stdout: "ENC bytes=<ivf bytes> decode_eq_recon=<1|0> lossless_exact=<1|0|->" and a SUMMARY line.
+#     decode_eq_recon: drishti, decoding the .ivf it wrote (read back with the IVF reader), outputs exactly the
+#       reconstruction the encoder returned — the script then holds that output to aomdec's and dav1d's.
+#     lossless_exact (QINDEX 0 only): the reconstruction is the input picture, sample for sample.
+# Exit 0 when the stream was written and every check printed holds.
+#
+# Build: cyrius build programs/enc-check.cyr build/drishti-enc-check
+
+include "src/main.cyr"
+
+enum EncCheckConst {
+    EC_MAX_INPUT = 134217728;   # 128 MiB of raw samples
+}
+
+fn ec_puts(s): i64 { return print(s, strlen(s)); }
+fn ec_putn(n): i64 {
+    if (n == 0) { return ec_puts("0"); }
+    var d = alloc(24);
+    var i = 0;
+    var v = n;
+    if (v < 0) { ec_puts("-"); v = 0 - v; }
+    while (v > 0) {
+        store8(d + i, 48 + (v % 10));
+        v = v / 10;
+        i = i + 1;
+    }
+    var o = alloc(24);
+    var j = 0;
+    while (j < i) { store8(o + j, load8((d + i - 1) - j)); j = j + 1; }
+    return print(o, i);
+}
+# the first `count` whitespace-separated non-negative decimal integers of buf[0..n) into out[]; how many were read
+fn ec_parse(buf, n, out, count): i64 {
+    var k = 0;
+    var i = 0;
+    while ((i < n) && (k < count)) {
+        var ch = load8(buf + i);
+        if ((ch >= 48) && (ch <= 57)) {
+            var v = 0;
+            while ((i < n) && (load8(buf + i) >= 48) && (load8(buf + i) <= 57) && (v < 100000000)) {
+                v = (v * 10) + (load8(buf + i) - 48);
+                i = i + 1;
+            }
+            store64(out + (k * 8), v);
+            k = k + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return k;
+}
+# every visible sample of every plane equal
+fn ec_same(a, b): i64 {
+    if ((dr_frame_num_planes(a) != dr_frame_num_planes(b)) || (dr_frame_width(a) != dr_frame_width(b))
+      || (dr_frame_height(a) != dr_frame_height(b))) { return 0; }
+    var p = 0;
+    while (p < dr_frame_num_planes(a)) {
+        var y = 0;
+        while (y < dr_frame_plane_height(a, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(a, p)) {
+                if (dr_frame_get(a, p, x, y) != dr_frame_get(b, p, x, y)) { return 0; }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return 1;
+}
+
+fn main(): i64 {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { ec_puts("SUMMARY oom\n"); return 1; }
+    var cbuf = alloc(256);
+    var cn = file_read_all("build/enc-input.cfg", cbuf, 255);
+    var cfg = alloc(6 * 8);
+    if ((cn <= 0) || (ec_parse(cbuf, cn, cfg, 6) != 6)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    var w = load64(cfg);
+    var h = load64(cfg + 8);
+    var bd = load64(cfg + 16);
+    var fmt = load64(cfg + 24);
+    var q = load64(cfg + 32);
+    var bs = load64(cfg + 40);
+    var np = 3;
+    var subx = 1;
+    var suby = 1;
+    if (fmt == 0) { np = 1; }
+    if (fmt == 2) { suby = 0; }
+    if (fmt == 3) { subx = 0; suby = 0; }
+    if ((fmt > 3) || (w < 1) || (h < 1) || (w > 16384) || (h > 16384)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    var e = 0;
+    var src = dr_frame_new(w, h, np, subx, suby, bd, 8, &e);
+    if (src == 0) { ec_puts("SUMMARY bad-format\n"); return 1; }
+    var bps = 1;
+    if (bd > 8) { bps = 2; }
+    var buf = alloc(EC_MAX_INPUT);
+    var n = file_read_all("build/enc-input.yuv", buf, EC_MAX_INPUT);
+    var need = 0;
+    var p = 0;
+    while (p < np) {
+        need = need + (dr_frame_plane_width(src, p) * dr_frame_plane_height(src, p) * bps);
+        p = p + 1;
+    }
+    if (n != need) { ec_puts("SUMMARY bad-input-size\n"); return 1; }
+    var off = 0;
+    var maxv = (1 << bd) - 1;
+    p = 0;
+    while (p < np) {
+        var y = 0;
+        while (y < dr_frame_plane_height(src, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(src, p)) {
+                var v = load8(buf + off);
+                if (bps == 2) { v = v | (load8(buf + off + 1) << 8); }
+                if (v > maxv) { ec_puts("SUMMARY sample-out-of-range\n"); return 1; }
+                dr_frame_set(src, p, x, y, v);
+                off = off + bps;
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    var ilen = 0;
+    var recon = 0;
+    var ivf = av1_encode_keyframe_ivf(src, q, bs, &ilen, &recon, &e);
+    if (ivf == 0) { ec_puts("SUMMARY encode-error err="); ec_putn(e); ec_puts("\n"); return 1; }
+    if (file_write_all("build/enc-out.ivf", ivf, ilen) < 0) { ec_puts("SUMMARY write-failed\n"); return 1; }
+    # read the file back as a decoder would, and decode its one temporal unit
+    var same = 0;
+    var r = dr_ivf_reader_init(ivf, ilen, &e);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    if ((r != 0) && (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK)) {
+        var de = 0;
+        var out = av1_decode_obus(pp, ps, &de);
+        if ((out != 0) && (de == DR_OK)) { same = ec_same(out, recon); }
+    }
+    var exact = 0 - 1;
+    if (q == 0) { exact = ec_same(recon, src); }
+    ec_puts("ENC bytes=");
+    ec_putn(ilen);
+    ec_puts(" decode_eq_recon=");
+    ec_putn(same);
+    ec_puts(" lossless_exact=");
+    if (exact < 0) { ec_puts("-"); } else { ec_putn(exact); }
+    ec_puts("\n");
+    if ((same == 1) && (exact != 0)) { ec_puts("SUMMARY ok\n"); return 0; }
+    ec_puts("SUMMARY check-failed\n");
+    return 1;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

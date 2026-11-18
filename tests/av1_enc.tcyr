@@ -1,0 +1,431 @@
+# tests/av1_enc.tcyr — the keyframe encoder (src/av1_enc.cyr): a picture in, a temporal unit out.
+#
+# The evidence the encoder works is the DECODER reading what it wrote, and the decoder here is not on trust: it is
+# gated bit-exact against libaom on the whole corpus (make conformance), which also decodes this encoder's streams with
+# aomdec and dav1d and requires drishti's output. Here:
+#   * LOSSLESS (base_q_idx 0) must give the source back, sample for sample, through av1_decode_obus — in every format,
+#     bit depth and block size, at sizes that are not multiples of anything. That holds whatever the prediction is
+#     (the residual absorbs it), so it pins the forward transform, the quantizer, the coefficient coding and the
+#     symbol coder end to end.
+#   * LOSSY: the decoder's output must be exactly the reconstruction the encoder returns, and the error must fall as
+#     the quantizer gets finer.
+#   * a flat picture codes every block skip; the refusals; the IVF wrapper; OOM.
+# Pictures are seeded LCG noise, gradients and a flat field (hw_* builders below), so nothing here is a fixture.
+include "src/main.cyr"
+
+var Ec_Seed = 1;
+fn ec_rnd(): i64 {
+    Ec_Seed = ((Ec_Seed * 1103515245) + 12345) & 2147483647;
+    return Ec_Seed >> 8;
+}
+# a w x h picture: kind 0 = a gradient with plane offsets, 1 = LCG noise, 2 = flat mid grey, 3 = a smooth blob
+fn ec_pic(w, h, np, subx, suby, bd, kind, seed): i64 {
+    Ec_Seed = seed;
+    var e = 0;
+    var f = dr_frame_new(w, h, np, subx, suby, bd, 8, &e);
+    if (f == 0) { return 0; }
+    var maxv = (1 << bd) - 1;
+    var p = 0;
+    while (p < np) {
+        var y = 0;
+        while (y < dr_frame_plane_height(f, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(f, p)) {
+                var v = 1 << (bd - 1);
+                if (kind == 0) { v = ((x * 3) + (y * 5) + (p * 40)) % (maxv + 1); }
+                if (kind == 1) { v = ec_rnd() % (maxv + 1); }
+                if (kind == 3) {
+                    var dx = x - 20;
+                    var dy = y - 12;
+                    v = ((maxv * 3) / 4) - ((((dx * dx) + (dy * dy)) * (maxv + 1)) >> 11) + (p * 8);
+                    if (v < 0) { v = 0; }
+                    if (v > maxv) { v = maxv; }
+                }
+                dr_frame_set(f, p, x, y, v);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return f;
+}
+# sum of |a - b| over every visible sample (-1 when the frames' shapes differ)
+fn ec_sad(a, b): i64 {
+    if ((dr_frame_num_planes(a) != dr_frame_num_planes(b)) || (dr_frame_width(a) != dr_frame_width(b))
+      || (dr_frame_height(a) != dr_frame_height(b))) { return 0 - 1; }
+    var n = 0;
+    var p = 0;
+    while (p < dr_frame_num_planes(a)) {
+        var y = 0;
+        while (y < dr_frame_plane_height(a, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(a, p)) {
+                var d = dr_frame_get(a, p, x, y) - dr_frame_get(b, p, x, y);
+                if (d < 0) { d = 0 - d; }
+                n = n + d;
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return n;
+}
+
+var Ec_Bytes = 0;     # the last ec_run's temporal unit length
+var Ec_SrcErr = 0;    # the last ec_run's sum |reconstruction - source|
+# encode src, decode the temporal unit with av1_decode_obus: 0 when the decoder's output IS the encoder's
+# reconstruction, else a negative step (-1 encode, -2 decode, -3 output != reconstruction)
+fn ec_run(src, q, bs): i64 {
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var tu = av1_encode_keyframe(src, q, bs, &n, &rec, &e);
+    if (tu == 0) { return 0 - 1; }
+    Ec_Bytes = n;
+    var de = 0;
+    var out = av1_decode_obus(tu, n, &de);
+    if ((out == 0) || (de != DR_OK)) { return 0 - 2; }
+    if (ec_sad(out, rec) != 0) { return 0 - 3; }
+    Ec_SrcErr = ec_sad(rec, src);
+    return 0;
+}
+# the lossless case: 0 when the decoder's output is the source itself
+fn ec_lossless(w, h, np, subx, suby, bd, kind, bs): i64 {
+    var src = ec_pic(w, h, np, subx, suby, bd, kind, (w * 131) + h);
+    if (src == 0) { return 0 - 9; }
+    var r = ec_run(src, 0, bs);
+    if (r != 0) { return r; }
+    return Ec_SrcErr;
+}
+
+fn test_ec_lossless_formats() {
+    assert_eq(ec_lossless(64, 64, 3, 1, 1, 8, 1, 12), 0, "lossless 64x64 4:2:0 8-bit noise, 64x64 blocks");
+    assert_eq(ec_lossless(64, 64, 3, 1, 1, 8, 1, 9), 0, "lossless 32x32 blocks");
+    assert_eq(ec_lossless(64, 64, 3, 1, 1, 8, 1, 6), 0, "lossless 16x16 blocks");
+    assert_eq(ec_lossless(64, 64, 3, 1, 1, 8, 1, 3), 0, "lossless 8x8 blocks");
+    assert_eq(ec_lossless(64, 64, 3, 1, 1, 10, 1, 9), 0, "lossless 10-bit 4:2:0");
+    assert_eq(ec_lossless(64, 64, 3, 1, 1, 12, 1, 9), 0, "lossless 12-bit 4:2:0");
+    assert_eq(ec_lossless(64, 64, 3, 1, 0, 8, 1, 6), 0, "lossless 4:2:2");
+    assert_eq(ec_lossless(64, 64, 3, 1, 0, 12, 1, 6), 0, "lossless 12-bit 4:2:2");
+    assert_eq(ec_lossless(64, 64, 3, 0, 0, 8, 1, 12), 0, "lossless 4:4:4");
+    assert_eq(ec_lossless(64, 64, 3, 0, 0, 10, 1, 6), 0, "lossless 10-bit 4:4:4");
+    assert_eq(ec_lossless(64, 64, 1, 1, 1, 8, 1, 9), 0, "lossless monochrome");
+    assert_eq(ec_lossless(64, 64, 1, 1, 1, 12, 0, 12), 0, "lossless 12-bit monochrome gradient");
+    assert_eq(ec_lossless(40, 24, 1, 0, 0, 8, 1, 6), 0, "lossless monochrome whose frame says 4:4:4 (one plane)");
+}
+fn test_ec_lossless_sizes() {
+    # sizes that cross superblocks, end mid-block and mid-MI, and the smallest
+    assert_eq(ec_lossless(1, 1, 3, 1, 1, 8, 1, 3), 0, "lossless 1x1");
+    assert_eq(ec_lossless(2, 3, 3, 1, 1, 8, 1, 3), 0, "lossless 2x3");
+    assert_eq(ec_lossless(33, 17, 3, 1, 1, 10, 1, 3), 0, "lossless 33x17 10-bit");
+    assert_eq(ec_lossless(72, 40, 3, 1, 1, 8, 0, 12), 0, "lossless 72x40 in 64x64 blocks (edge SPLITs)");
+    assert_eq(ec_lossless(130, 66, 3, 1, 1, 8, 1, 9), 0, "lossless 130x66 (a third superblock column of 2)");
+    assert_eq(ec_lossless(127, 129, 3, 1, 0, 8, 3, 6), 0, "lossless 127x129 4:2:2");
+    assert_eq(ec_lossless(65, 9, 3, 0, 0, 8, 1, 12), 0, "lossless 65x9 4:4:4");
+    assert_eq(ec_lossless(9, 65, 1, 1, 1, 10, 1, 12), 0, "lossless 9x65 monochrome");
+    assert_eq(ec_lossless(200, 120, 3, 1, 1, 8, 3, 3), 0, "lossless 200x120 blob in 8x8 blocks");
+    # 100 wide = 26 MI: the second superblock's 64x64 block keeps its half inside (16 + 8 < 26) and so covers columns
+    # 26..31 past MiCols — its transform blocks overhang the MI grid, where the skip context stops at the edge
+    assert_eq(ec_lossless(100, 100, 3, 1, 1, 8, 1, 12), 0, "lossless 100x100, 64x64 blocks overhanging the MI grid");
+    assert_eq(ec_lossless(100, 100, 3, 0, 0, 10, 1, 9), 0, "lossless 100x100 4:4:4 10-bit, 32x32 blocks");
+}
+
+fn test_ec_lossy() {
+    # every (format, block size, qindex) case: the decoder's output is the encoder's reconstruction
+    var bad = 0;
+    var cases = 0;
+    var bss = alloc(4 * 8);
+    store64(bss, 3); store64(bss + 8, 6); store64(bss + 16, 9); store64(bss + 24, 12);
+    var f = 0;
+    while (f < 4) {
+        var np = 3;
+        var subx = 1;
+        var suby = 1;
+        var bd = 8;
+        if (f == 1) { suby = 0; bd = 10; }
+        if (f == 2) { subx = 0; suby = 0; bd = 12; }
+        if (f == 3) { np = 1; }
+        var src = ec_pic(97, 71, np, subx, suby, bd, 3, 7 + f);
+        var b = 0;
+        while (b < 4) {
+            var q = 1;
+            while (q <= 255) {
+                if (ec_run(src, q, load64(bss + (b * 8))) != 0) { bad = bad + 1; }
+                cases = cases + 1;
+                q = q + 127;
+            }
+            b = b + 1;
+        }
+        f = f + 1;
+    }
+    assert_eq(cases, 48, "48 lossy cases (4 formats x 4 block sizes x qindex 1 / 128 / 255)");
+    var over = ec_pic(100, 100, 3, 1, 1, 8, 1, 31);
+    if (ec_run(over, 60, 12) != 0) { bad = bad + 1; }
+    if (ec_run(over, 200, 12) != 0) { bad = bad + 1; }
+    assert_eq(bad, 0, "every lossy case: the decoder outputs exactly the encoder's reconstruction");
+    # the error falls as the quantizer gets finer, on one picture
+    var pic = ec_pic(96, 64, 3, 1, 1, 8, 3, 99);
+    var prev = 0 - 1;
+    var mono = 1;
+    var qq = 255;
+    var first = 0;
+    while (qq >= 0) {
+        ec_run(pic, qq, 9);
+        if ((prev >= 0) && (Ec_SrcErr > prev)) { mono = 0; }
+        if (qq == 255) { first = Ec_SrcErr; }
+        prev = Ec_SrcErr;
+        qq = qq - 51;
+    }
+    assert_eq(mono, 1, "the reconstruction error never grows as qindex falls 255 -> 0");
+    assert(first > 0, "qindex 255 loses something");
+    assert_eq(prev, 0, "qindex 0 loses nothing");
+    # a coarse quantizer spends fewer bytes
+    ec_run(pic, 20, 9);
+    var fine = Ec_Bytes;
+    ec_run(pic, 200, 9);
+    assert(Ec_Bytes < fine, "qindex 200 codes fewer bytes than qindex 20");
+}
+
+fn test_ec_flat() {
+    # a flat mid-grey picture predicts exactly (DC of nothing is 1 << (BitDepth - 1)): every block skip, every
+    # sample back, and the frame OBU's tile is the 2 bytes of an all-skip 64x64 tile
+    var src = ec_pic(64, 64, 3, 1, 1, 8, 2, 1);
+    assert_eq(ec_run(src, 40, 12), 0, "flat: decode == reconstruction");
+    assert_eq(Ec_SrcErr, 0, "flat: every sample back at qindex 40");
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var tu = av1_encode_keyframe(src, 40, 12, &n, &rec, &e);
+    assert_eq(n, 24, "flat 64x64: a 24-byte temporal unit (TD 2 + sequence header 12 + frame OBU 10)");
+    # the tile ends the unit: the all-skip DC tile the plan-driven tile writer gives the header writers' streams
+    assert_eq(load8(tu + 22), 0x98, "flat: tile byte 0");
+    assert_eq(load8(tu + 23), 0x20, "flat: tile byte 1");
+    # the same flat picture in 8x8 blocks still costs little, and a 10-bit one is flat at 512
+    var src10 = ec_pic(64, 64, 3, 1, 1, 10, 2, 1);
+    assert_eq(ec_run(src10, 100, 3), 0, "flat 10-bit in 8x8 blocks: decode == reconstruction");
+    assert_eq(Ec_SrcErr, 0, "flat 10-bit: every sample back");
+    var flat_bytes = Ec_Bytes;
+    var noise10 = ec_pic(64, 64, 3, 1, 1, 10, 1, 1);
+    ec_run(noise10, 100, 3);
+    assert((flat_bytes * 20) < Ec_Bytes, "flat in 8x8 blocks: under a twentieth of noise's bytes (skip blocks)");
+}
+
+# decode a temporal unit with the decoder's own frame pieces and return the frame's grid tile (its MiSizes / YModes /
+# Skips), 0 on failure — what the decoder concluded about every block
+fn ec_decode_grids(tu, n): i64 {
+    var it = av1_obu_iter_init(tu, n);
+    var t = 0;
+    var off = 0;
+    var sz = 0;
+    var seq = 0;
+    var tile = 0;
+    while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+        var e = 0;
+        if (t == AV1_OBU_SEQUENCE_HEADER) { seq = av1_seq_parse(tu + off, sz, &e); }
+        if ((t == AV1_OBU_FRAME) && (seq != 0)) {
+            var fh = av1_frame_parse_uncompressed_header(seq, av1_ref_state_new(), 0, 0, tu + off, sz, &e);
+            if (fh == 0) { return 0; }
+            var hb = (av1_fh_bits_consumed(fh) + 7) >> 3;
+            var fdc = av1_frame_dec_new(seq, fh, &e);
+            if (fdc == 0) { return 0; }
+            if (av1_frame_dec_group(fdc, tu + off + hb, sz - hb, &e) < 1) { return 0; }
+            tile = av1_frame_dec_tile0(fdc);
+        }
+    }
+    return tile;
+}
+# the decoder's view of an encode: every MI cell's block size, mode and skip. Counts the cells (r, c) of an
+# mi_rows x mi_cols frame whose MiSize is not `want` (want < 0: any size), whose YMode is not DC_PRED, and those
+# coded skip (Ec_Skips).
+var Ec_Skips = 0;
+var Ec_Cells = 0;
+fn ec_grid_check(src, q, bs, want): i64 {
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var tu = av1_encode_keyframe(src, q, bs, &n, &rec, &e);
+    if (tu == 0) { return 0 - 1; }
+    var tile = ec_decode_grids(tu, n);
+    if (tile == 0) { return 0 - 2; }
+    var rows = load64(tile + AV1TILE_FMI_ROWS);
+    var cols = load64(tile + AV1TILE_FMI_COLS);
+    var bad = 0;
+    Ec_Skips = 0;
+    Ec_Cells = 0;
+    var r = 0;
+    while (r < rows) {
+        var c = 0;
+        while (c < cols) {
+            if ((want >= 0) && (av1_grid_get(tile, AV1TILE_MISIZES, r, c) != want)) { bad = bad + 1; }
+            if (av1_grid_get(tile, AV1TILE_YMODES, r, c) != AV1_DC_PRED) { bad = bad + 1; }
+            if (av1_grid_get(tile, AV1TILE_SKIPS, r, c) != 0) { Ec_Skips = Ec_Skips + 1; }
+            Ec_Cells = Ec_Cells + 1;
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return bad;
+}
+fn test_ec_grids() {
+    # the partition the decoder reads is the one asked for: every MI cell of a 128x64 frame in a block of that size
+    var src = ec_pic(128, 64, 3, 1, 1, 8, 1, 21);
+    assert_eq(ec_grid_check(src, 60, 3, 3), 0, "8x8 blocks: every cell BLOCK_8X8, DC_PRED");
+    assert_eq(ec_grid_check(src, 60, 6, 6), 0, "16x16 blocks: every cell BLOCK_16X16");
+    assert_eq(ec_grid_check(src, 60, 9, 9), 0, "32x32 blocks: every cell BLOCK_32X32");
+    assert_eq(ec_grid_check(src, 60, 12, 12), 0, "64x64 blocks: every cell BLOCK_64X64");
+    assert_eq(Ec_Cells, 512, "128x64: 32 x 16 MI cells");
+    assert_eq(Ec_Skips, 0, "noise: no block skipped");
+    # at a frame edge a block that would cross it is split: 72x40 in 64x64 blocks has 64x64 only at (0, 0)
+    var e2 = ec_pic(72, 40, 3, 1, 1, 8, 1, 22);
+    assert_eq(ec_grid_check(e2, 60, 12, 0 - 1), 0, "72x40: every cell DC_PRED");
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var tu = av1_encode_keyframe(e2, 60, 12, &n, &rec, &e);
+    var t2 = ec_decode_grids(tu, n);
+    assert(t2 != 0, "72x40 decodes to grids");
+    if (t2 != 0) {
+        # 40 rows = 10 MI: the 64x64 at (0, 0) keeps its half inside (0 + 8 < 10), so it stays whole
+        assert_eq(av1_grid_get(t2, AV1TILE_MISIZES, 0, 0), 12, "72x40: the first superblock is one 64x64 block");
+        # column 16 (luma 64): the second superblock's 64x64, 32x32 and 16x16 all cross the right edge (MiCols 18):
+        # split to 8x8
+        assert_eq(av1_grid_get(t2, AV1TILE_MISIZES, 0, 16), 3, "72x40: the right edge is 8x8");
+        assert_eq(av1_grid_get(t2, AV1TILE_MISIZES, 9, 17), 3, "72x40: the bottom-right corner is 8x8");
+    }
+    # a flat picture is all skip; a half-flat, half-noise one has both, side by side
+    var flat = ec_pic(128, 64, 3, 1, 1, 8, 2, 1);
+    assert_eq(ec_grid_check(flat, 60, 6, 6), 0, "flat: every cell 16x16 DC_PRED");
+    assert_eq(Ec_Skips, Ec_Cells, "flat: every block coded skip");
+    var half = ec_pic(128, 64, 3, 1, 1, 8, 1, 23);
+    var hy = 0;
+    while (hy < 64) {
+        var hx = 0;
+        while (hx < 64) { dr_frame_set(half, 0, hx, hy, 128); hx = hx + 1; }
+        hy = hy + 1;
+    }
+    var py = 0;
+    while (py < 32) {
+        var px = 0;
+        while (px < 32) { dr_frame_set(half, 1, px, py, 128); dr_frame_set(half, 2, px, py, 128); px = px + 1; }
+        py = py + 1;
+    }
+    assert_eq(ec_grid_check(half, 60, 6, 6), 0, "half flat: every cell 16x16 DC_PRED");
+    assert(Ec_Skips > 0, "half flat: some blocks skip");
+    assert(Ec_Skips < Ec_Cells, "half flat: some do not");
+    assert_eq(ec_run(half, 60, 6), 0, "half flat: decode == reconstruction (skip next to coded blocks)");
+    assert_eq(ec_run(half, 0, 6), 0, "half flat, lossless: decode == reconstruction");
+    assert_eq(Ec_SrcErr, 0, "half flat, lossless: the source back");
+}
+
+fn test_ec_ivf() {
+    var src = ec_pic(48, 32, 3, 1, 1, 8, 1, 5);
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var ivf = av1_encode_keyframe_ivf(src, 50, 6, &n, &rec, &e);
+    assert(ivf != 0, "the IVF wrapper writes");
+    assert_eq(load8(ivf), 68, "D");
+    assert_eq(load8(ivf + 1), 75, "K");
+    assert_eq(load8(ivf + 2), 73, "I");
+    assert_eq(load8(ivf + 3), 70, "F");
+    assert_eq(load8(ivf + 8) | (load8(ivf + 9) << 8) | (load8(ivf + 10) << 16) | (load8(ivf + 11) << 24),
+      DR_FOURCC_AV01, "fourcc AV01");
+    assert_eq(load8(ivf + 12) | (load8(ivf + 13) << 8), 48, "width 48");
+    assert_eq(load8(ivf + 14) | (load8(ivf + 15) << 8), 32, "height 32");
+    var r = dr_ivf_reader_init(ivf, n, &e);
+    assert(r != 0, "the IVF reader opens it");
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    assert_eq(dr_ivf_next_frame(r, &pp, &ps, &pt), DR_OK, "one frame");
+    assert_eq(pt, 0, "at pts 0");
+    var de = 0;
+    var out = av1_decode_obus(pp, ps, &de);
+    assert(out != 0, "its temporal unit decodes");
+    assert_eq(ec_sad(out, rec), 0, "to the reconstruction");
+    assert(dr_ivf_next_frame(r, &pp, &ps, &pt) != DR_OK, "and there is no second frame");
+}
+
+fn test_ec_refusals() {
+    var src = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    assert_eq(av1_encode_keyframe(0, 40, 6, &n, &rec, &e), 0, "a null picture refused");
+    assert_eq(e, DR_ERR_BOUNDS, "null -> BOUNDS");
+    assert_eq(av1_encode_keyframe(src, 40, 0, &n, &rec, &e), 0, "BLOCK_4X4 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "4x4 -> BOUNDS");
+    assert_eq(av1_encode_keyframe(src, 40, 7, &n, &rec, &e), 0, "BLOCK_16X32 (not square) refused");
+    assert_eq(av1_encode_keyframe(src, 40, 15, &n, &rec, &e), 0, "BLOCK_128X128 refused (64x64 superblocks)");
+    assert_eq(av1_encode_keyframe(src, 256, 6, &n, &rec, &e), 0, "base_q_idx 256 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "256 -> BOUNDS");
+    assert_eq(av1_encode_keyframe(src, 0 - 1, 6, &n, &rec, &e), 0, "base_q_idx -1 refused");
+    assert_eq(n, 0, "a refusal reports no bytes");
+    assert_eq(rec, 0, "and no reconstruction");
+    var s440 = ec_pic(16, 16, 3, 0, 1, 8, 1, 3);
+    assert_eq(av1_encode_keyframe(s440, 40, 6, &n, &rec, &e), 0, "4:4:0 refused (AV1 has no such format)");
+    assert_eq(e, DR_ERR_BOUNDS, "4:4:0 -> BOUNDS");
+    # dr_frame_new makes neither a 2-plane nor a 9-bit frame, so those records are edited into a valid one: the
+    # encoder's own checks are what refuse them
+    var s2 = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
+    store64(s2 + DR_FRAME_NUM_PLANES, 2);
+    e = DR_OK;
+    assert_eq(av1_encode_keyframe(s2, 40, 6, &n, &rec, &e), 0, "a 2-plane frame record refused");
+    assert_eq(e, DR_ERR_BOUNDS, "2 planes -> BOUNDS");
+    var s9 = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
+    store64(s9 + DR_FRAME_BIT_DEPTH, 9);
+    e = DR_OK;
+    assert_eq(av1_encode_keyframe(s9, 40, 6, &n, &rec, &e), 0, "a 9-bit frame record refused");
+    assert_eq(e, DR_ERR_BOUNDS, "9-bit -> BOUNDS");
+    var wide = ec_pic(4160, 8, 1, 1, 1, 8, 2, 3);
+    assert_eq(av1_encode_keyframe(wide, 40, 12, &n, &rec, &e), 0, "4160 wide (two tile columns) refused");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "4160 wide -> UNSUPPORTED");
+    var ivf = av1_encode_keyframe_ivf(src, 300, 6, &n, &rec, &e);
+    assert_eq(ivf, 0, "the IVF wrapper passes a refusal on");
+    assert_eq(e, DR_ERR_BOUNDS, "as BOUNDS");
+}
+
+# every allocation the encoder makes, failed in turn, is reported as DR_ERR_OOM
+var Ec_Oom_Src = 0;
+fn ec_oom_op(q): i64 {
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var ivf = av1_encode_keyframe_ivf(Ec_Oom_Src, q, 3, &n, &rec, &e);
+    if (ivf == 0) { return e; }
+    return DR_OK;
+}
+fn test_ec_oom() {
+    Ec_Oom_Src = ec_pic(24, 16, 3, 1, 1, 8, 1, 11);
+    var n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&ec_oom_op, 60, &n), 0, "OOM sweep: a lossy 24x16 encode");
+    assert(n > 20, "the sweep failed more than twenty allocations");
+    assert_eq(dr_alloc_sweep(&ec_oom_op, 0, &n), 0, "OOM sweep: the same encode lossless");
+}
+
+fn main() {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { return 1; }
+    test_group("keyframe encoder: lossless gives the source back — formats and bit depths");
+    test_ec_lossless_formats();
+    test_group("keyframe encoder: lossless gives the source back — sizes");
+    test_ec_lossless_sizes();
+    test_group("keyframe encoder: lossy — the decoder outputs the encoder's reconstruction");
+    test_ec_lossy();
+    test_group("keyframe encoder: a flat picture is all skip");
+    test_ec_flat();
+    test_group("keyframe encoder: what the decoder reads — block sizes, modes, skips");
+    test_ec_grids();
+    test_group("keyframe encoder: the IVF file");
+    test_ec_ivf();
+    test_group("keyframe encoder: refusals");
+    test_ec_refusals();
+    test_group("keyframe encoder: OOM");
+    test_ec_oom();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

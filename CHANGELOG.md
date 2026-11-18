@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.6 bite 5: the keyframe encoder — a picture in, a standalone `.ivf` aomdec decodes
+
+**drishti encodes a picture.** `av1_encode_keyframe` (`src/av1_enc.cyr`, a new module) takes a `DrFrame` and returns
+a temporal unit: a temporal delimiter, a sequence header OBU and a frame OBU. Alongside it comes the reconstruction,
+the exact picture a decoder outputs. `av1_encode_keyframe_ivf` wraps it as a standalone IVF file. Any format drishti
+decodes is accepted: 1 or 3 planes; 8, 10 or 12 bits; 4:2:0, 4:2:2 or 4:4:4.
+
+The decisions are fixed, the simplest that still code any picture:
+- one KEY_FRAME in one tile at 64x64 superblocks;
+- every superblock split down to one block size (8x8, 16x16, 32x32 or 64x64), and SPLIT wherever a larger block's
+  half would leave the frame;
+- DC_PRED in every plane, with the largest transform the block allows (DCT_DCT; the 4x4 WHT when lossless);
+- every transform block's levels from the bite-3 quantizer over the bite-2 forward transform of source minus
+  prediction, at the frame's `base_q_idx` (0 = lossless);
+- a block whose levels are all zero is coded skip.
+
+**The reconstruction is the decoder's own, by construction:**
+- One hook in `av1_transform_block`: when the tile carries an encoder context (`AV1TILE_EKEY`, a new tile field), each
+  transform block's levels come from `av1_enc_tx_levels` instead of `coeffs()`. That function quantizes the source
+  against the prediction the decoder code has just made.
+- The encoder runs the decoder's own `av1_residual` as its residual pass. Prediction, dequantization, the inverse
+  transform, BlockDecoded and the loop-filter tx sizes are therefore the decoder's code on the decoder's data.
+- The frame and tile come from the decoder's setup: `av1_frame_dec_new`, and `av1_frame_tile_setup`, split out of
+  `av1_frame_dec_tile` so both lanes share it. `av1_frame_dec_finish` ends the frame.
+- Each block is coded in two passes. The residual pass records each transform block's levels and context position.
+  The symbol pass then writes the mode info (skip decided by the levels), the tx size and each `coeffs()` in that
+  order, which is the order the decoder reads them.
+
+**Verified against two decoders drishti had no hand in.** A new "keyframe encoder" section of `make conformance`
+(through the new `programs/enc-check.cyr`) encodes ten ffmpeg pictures. They cover every format, 8 / 10 / 12 bits,
+all four block sizes, qindex 0 to 200 and sizes down to 17x9. Each case must pass three checks:
+- drishti, decoding the `.ivf` it wrote, outputs exactly the encoder's reconstruction;
+- `aomdec` outputs exactly drishti's decode, and dav1d agrees with `aomdec`;
+- at qindex 0, `aomdec`'s output is the source file, byte for byte.
+
+**Canary-tested:** a DC-prediction rounding bug planted in the code both lanes share left every in-process check
+green. The lossless residual even absorbed it and still came back "exact". `aomdec` caught it in 11 of the 12 checks
+it makes, both lossless-source comparisons included. That is why the section exists. Measured on a 176x144
+mandelbrot: PSNR 48.9 dB at qindex 20 down to 24.6 at 255, and 10,466 bytes down to 216.
+
+**Tests:** `tests/av1_enc.tcyr`, 95 assertions, each a whole encode:
+- **Lossless gives the source back** through `av1_decode_obus`: every format, 8 / 10 / 12 bits, every block size,
+  sizes 1x1 to 200x120. Among them are frames ending mid-block and mid-MI, and a 100x100 whose 64x64 blocks overhang
+  the MI grid.
+- **Lossy:** 50 cases across four formats, four block sizes and qindex 1 / 128 / 255. In each the decoder outputs
+  exactly the encoder's reconstruction, the error never grows as the qindex falls, and a coarse quantizer spends fewer
+  bytes.
+- **What the decoder reads:** the stream decoded with the decoder's own frame pieces, then its MiSizes / YModes /
+  Skips grids checked cell by cell. Every cell has the block size asked for and DC_PRED; edge blocks are split to
+  8x8; a flat picture is all skip; a half-flat one mixes skip and coded blocks side by side.
+- a flat 64x64 is a 24-byte temporal unit whose tile is the all-skip tile of the plan-driven writer;
+- the IVF file, the refusals (null, a non-square or 4x4 or 128x128 block, qindex 256 / -1, 4:4:0, 2 planes, 9 bits,
+  a frame needing two tile columns), and the OOM sweep.
+
+**Mutation testing:** 37 mutants over the encoder and the decoder hook; the canary dies first. 30 are killed. Two
+first survived as test gaps, now closed:
+- nothing overhung the MI grid, where the skip context stops at the edge;
+- the 2-plane and 9-bit refusal tests never reached the encoder, because `dr_frame_new` refuses both. Those frames
+  are now edited into a valid record.
+
+The 7 left are equivalent under the fixed decisions:
+- every mode is DC and every block a uniform square, so swapped neighbour modes and tx-depth neighbours change
+  nothing;
+- the left coefficient contexts are indexed by absolute row, so clearing them at a superblock row's start is a no-op
+  in one tile;
+- the tx type is always DCT_DCT;
+- no block is 4 rows tall, so the chroma above-availability fallback never runs;
+- a lossless frame codes and filters no tx size;
+- the hook's error return is unreachable (it allocates nothing).
+
+They become live mutants as the encoder grows choices.
+
+**Decoder changes, decode-neutral:**
+- the `AV1TILE_EKEY` field and its branch in `av1_transform_block`;
+- the `av1_frame_tile_setup` split.
+
+`make conformance` holds every decode case where it was.
+
+One new module (48), one new program (`programs/enc-check.cyr`; five programs).
+
+**Gates:**
+- `make test`: 48 suites, **34,772** assertions (+97).
+- `make fuzz`: **7,422** assertions.
+- bench, `vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` all green; `dist/drishti.cyr` regenerated.
+- `make conformance`: **4472 matched / 0 known-gap / 0 regressed / 0 skipped**. That is +22: 10 encoder self-checks,
+  10 decoder comparisons, 2 lossless-source checks.
+
 ### Added — 0.8.6 bite 4: the header, OBU and tile group writers — nothing in a stream is hand-built
 
 **The encode lane writes its own headers.** `src/av1_hdrw.cyr` (a new module) is the exact inverse of the two header

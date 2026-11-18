@@ -1867,7 +1867,28 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > Decoder change, decode-neutral: a reduced still picture records `error_resilient_mode` 1, as libaom and dav1d do.
 > Gate: 4450 / 0 / 0 / 0 (+476: the header-writer sections). New program `programs/hdr-rewrite.cyr`.
 >
-> Next: the fixed-partition DC intra encoder (real content), then the encode lane at 128x128 superblocks.
+> Bite 5 = **the keyframe encoder** (`src/av1_enc.cyr`, new module, 48): `av1_encode_keyframe(src, base_q_idx,
+> block_size, ...)` returns a temporal unit (TD + sequence header OBU + frame OBU) and the reconstruction;
+> `av1_encode_keyframe_ivf` wraps it as an `.ivf`. The decisions are fixed: one key frame in one tile at 64x64 SB, a
+> fixed square block size (SPLIT at edges), DC_PRED everywhere, the largest transform, the bite-2/3 transform and
+> quantizer, and skip when the levels are all zero.
+>
+> THE RECONSTRUCTION IS THE DECODER'S OWN: `AV1TILE_EKEY` makes `av1_transform_block` take its levels from
+> `av1_enc_tx_levels` rather than `coeffs()`; the encoder runs the decoder's `av1_residual`, and gets its frame and tile
+> from the decoder's setup (`av1_frame_dec_new`; `av1_frame_tile_setup`, split out of `av1_frame_dec_tile`). Each block
+> takes two passes: a residual pass that records levels, then a symbol pass.
+>
+> Evidence:
+> - a "keyframe encoder" section of `make conformance` (`programs/enc-check.cyr`) encodes ten ffmpeg pictures in
+>   every format and depth; drishti's decode == the reconstruction, aomdec == drishti, dav1d == aomdec, and lossless
+>   aomdec output == the source file;
+> - canary-tested with a DC rounding bug shared by both lanes: green in-process, red at aomdec.
+>
+> `tests/av1_enc.tcyr` (95 whole encodes: lossless gives the source back, lossy decode == reconstruction, the
+> decoder's MI grids checked cell by cell). 37 mutants: 30 killed, 7 equivalent under the fixed decisions (listed in
+> the CHANGELOG). Gate: 4472 / 0 / 0 / 0 (+22).
+>
+> Next: the encode lane at 128x128 superblocks (the last 0.8.6 item), then the 0.8.6 cut.
 >
 > **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,

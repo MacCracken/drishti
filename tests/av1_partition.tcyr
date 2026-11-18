@@ -671,7 +671,9 @@ fn test_block_setup_kat() {
     assert_eq(load64(t0 + AV1TILE_LOSSLESS_MASK), 255, "default mask, base_q 0: every segment lossless");
     assert_eq(AV1TILE_CUR_TXQ + 8, AV1TILE_SEGCTX, "CUR_TXQ is followed by SEGCTX (0.8.2)");
     assert_eq(AV1TILE_SEGCTX + 8, AV1TILE_PALSZY, "SEGCTX is followed by the palette grids (0.8.2)");
-    assert_eq(AV1TILE_PALCTX + 8, AV1TILE_SIZE, "PALCTX is the last field");
+    assert_eq(AV1TILE_PALCTX + 8, AV1TILE_EKEY, "PALCTX is followed by the keyframe encoder's context (0.8.6)");
+    assert_eq(AV1TILE_EKEY + 8, AV1TILE_SIZE, "EKEY is the last field");
+    assert_eq(load64(t0 + AV1TILE_EKEY), 0, "a new tile decodes (no encoder context)");
     return 0;
 }
 # THE INTRA-KEYFRAME LOSSLESS WITNESS: an 8x8 skip block in a LOSSLESS segment of a LOSSY frame (base_q 40;
