@@ -322,6 +322,65 @@ fn lst_repro_list1(stale): i64 {
     }
     return out;
 }
+# The camera frame header (7.3, unit 5 of the reproducer: a temporal delimiter and a header-only OBU_FRAME) ends in
+# byte_alignment( ) (5.10) on the camera path too.
+# The 4 anchors are decoded, then unit 5 with bit q of that OBU's payload set (q < 0: none). Returns the decode error of
+# unit 5; *out_bits gets where the camera header's syntax ends, parsed against the decoder's state before unit 5.
+fn lst_camera_err(q, out_bits): i64 {
+    var buf = alloc(32768);   # bytes; the reproducer is 16115
+    var n = file_read_all("tests/repro/lst-256x256.ivf", buf, 32768);
+    if (n <= 0) { return 0 - 1; }
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, n, &e);
+    if (r == 0) { return 0 - 1; }
+    var dec = av1_decoder_new(0);
+    var k = 0;
+    while (k < 5) {
+        var pp = 0;
+        var ps = 0;
+        var pt = 0;
+        if (dr_ivf_next_frame(r, &pp, &ps, &pt) != DR_OK) { return 0 - 1; }
+        k = k + 1;
+        var unit = pp;
+        if (k == 5) {
+            # the unit's OBU_FRAME, found by the OBU walk (its obu_size is a 2-byte leb128 here)
+            var it = av1_obu_iter_init(pp, ps);
+            var ot = 0;
+            var oo = 0;
+            var os = 0;
+            var fo = 0 - 1;
+            var fs = 0;
+            while (av1_obu_next(it, &ot, &oo, &os) == DR_OK) {
+                if (ot == AV1_OBU_FRAME) { fo = oo; fs = os; }
+            }
+            if (fo < 0) { return 0 - 1; }
+            var pe = 0;
+            var cfh = av1_frame_parse_uncompressed_header(load64(dec + AV1DEC_SEQ), load64(dec + AV1DEC_REFS), 0, 0,
+              pp + fo, fs, &pe);
+            if ((cfh == 0) || (pe != DR_OK)) { return 0 - 1; }
+            store64(out_bits, av1_fh_bits_consumed(cfh));
+            unit = alloc(ps);
+            memcpy(unit, pp, ps);
+            if (q >= 0) { store8(unit + fo + (q >> 3), load8(unit + fo + (q >> 3)) | (128 >> (q & 7))); }
+        }
+        var derr = 0;
+        av1_decoder_decode(dec, unit, ps, &derr);
+        if (k == 5) { return derr; }
+        if (derr != DR_OK) { return 0 - 1; }
+        av1_decoder_set_anchor(dec, k - 1, av1_decoder_last_decoded(dec));
+        if (k == 4) { av1_decoder_set_large_scale_tile(dec, 1); }
+    }
+    return 0 - 1;
+}
+fn test_lst_camera_alignment() {
+    var bits = 0;
+    assert_eq(lst_camera_err(0 - 1, &bits), DR_OK, "the camera header decodes as committed");
+    assert_eq((bits & 7) != 0, 1, "its syntax ends mid-byte, so byte_alignment has zero bits to check");
+    var b2 = 0;
+    assert_eq(lst_camera_err(bits, &b2), AV1_ERR_BAD_TRAILING, "the first zero_bit after the camera header set");
+    assert_eq(lst_camera_err(bits | 7, &b2), AV1_ERR_BAD_TRAILING, "the last zero_bit set");
+    return 0;
+}
 # 1 when frames a and b have the same shape and every sample of every plane is equal
 fn lst_frames_equal(a, b): i64 {
     if ((dr_frame_width(a) != dr_frame_width(b)) || (dr_frame_height(a) != dr_frame_height(b))) { return 0; }
@@ -413,6 +472,7 @@ fn main() {
     test_lst_dispatch();
     test_group("the scratch reference slot (7.3.1)");
     test_lst_scratch_slot();
+    test_lst_camera_alignment();
     return assert_summary();
 }
 

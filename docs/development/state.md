@@ -1808,8 +1808,24 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >
 > **NEXT: 0.8.6, "drishti emits a standalone `.ivf` that `aomdec` decodes"** (roadmap table): forward transform,
 > quantiser, sequence / frame header + OBU + IVF writers, a fixed-partition DC intra encoder, the encode lane at
-> 128x128 superblocks; plus, carried from 0.8.5, the two kinds of stream libaom and dav1d refuse that drishti
-> decodes (libaom `--aq-mode=2 --cq-level=0`; SVT-AV1 `--enable-qm 1` with chroma qindex offsets).
+> 128x128 superblocks. The item carried from 0.8.5 is done (bite 1).
+>
+> **0.8.6 progress (bites, uncut):** bite 1 = **the two stream kinds 0.8.5 carried, refused where and why libaom
+> refuses them** (libaom 3.15.3 `--aq-mode=2 --cq-level=0`; SVT-AV1 4.2 / 4.3 with chroma qindex offsets; libaom and
+> dav1d refuse both). Three checks decide them:
+> - NEW, the ends of the headers: 5.3.4 `trailing_bits` after a sequence / frame header OBU, 5.3.5
+>   `byte_alignment` after a frame OBU's header and a tile group's header. drishti never looked at those bits. The
+>   SVT-AV1 frame headers fail them (aomdec: "byte_alignment() is not all 0 bits"); `AV1_ERR_BAD_TRAILING` = 13.
+> - NEW, 6.10.8's `segment_id` range, which drishti used to CLAMP (libaom refuses: "Corrupted segment_ids"; dav1d
+>   uses segment 0); `AV1_ERR_BAD_SEGMENT_ID` = 14.
+> - Since 0.8.5 bite 4, the tile exit process (aomdec: "Failed to decode tile data"), which already refused the
+>   other `--aq-mode=2` encodes.
+>
+> A 90-stream sweep matched `aomdec` unit for unit, in verdict and reason. A new "refused streams" section of
+> `make conformance` gates three committed reproducers (`tests/repro/refused/`) by their error code; it was
+> canary-tested. All 28 mutants were killed. Every hand-built test header lacked its trailing bits, and now gets them
+> from the new `av1_obu_write_trailing_bits`. Gate: 3974 matched / 0 / 0 / 0. ENVIRONMENT: SVT-AV1 was upgraded to
+> 4.3.0 on 2026-11-17; 4.2.0 is in the pacman cache. Next: the encoder (forward transform, quantiser, header writers).
 >
 > **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,

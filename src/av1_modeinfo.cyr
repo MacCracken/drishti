@@ -268,8 +268,13 @@ fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): 
     return 0;
 }
 # read_segment_id (5.11.11) — the spatial map read. `skip` short-circuits to pred (no symbol); else
-# read @@segment_id from Segment_Id_Cdf[ctx], map via neg_deinterleave, clamp to [0, LastActiveSegId]
-# (a hostile stream cannot drive an OOB segment index — trust no input byte).
+# read @@segment_id from Segment_Id_Cdf[ctx] and map it via neg_deinterleave. 6.10.8: "It is a requirement of
+# bitstream conformance that the postprocessed value of segment_id ... is in the range 0 to LastActiveSegId": a value
+# outside it latches AV1_ERR_BAD_SEGMENT_ID and reads segment 0 (an in-range index, so nothing downstream overruns).
+# libaom refuses it the same way ("Corrupted segment_ids", decodemv.c read_segment_id); dav1d substitutes segment 0
+# and decodes on. Before 0.8.6 drishti CLAMPED it into range (a value no reference decoder uses) and decoded on, so
+# libaom 3.15.3's own --aq-mode=2 --cq-level=0 encodes, whose segment_ids run past LastActiveSegId, were caught only
+# at the tile's exit process, if at all.
 # {pred, ctx} live in one persistent 2-entry scratch (0.8.5): it was allocated per block — arena growth per
 # block (the 0.7.60 lesson) and an unchecked OOM site. av1_tables_init builds it; a failed build latches
 # DR_ERR_OOM on the coder and reads segment 0 (an in-range index, so nothing downstream overruns).
@@ -288,9 +293,14 @@ fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, a
     var last = av1_fh_last_active_seg_id(fh);
     var coded = av1_sym_read_symbol(sd, av1_ncdf_segment_id(ncc, load64(pc + 8)), AV1_MAX_SEGMENTS);
     var seg = av1_neg_deinterleave(coded, pred, last + 1);
-    return av1_clip3(0, last, seg);
+    if ((seg < 0) || (seg > last)) {
+        av1_sym_dec_fail(sd, AV1_ERR_BAD_SEGMENT_ID);
+        return 0;
+    }
+    return seg;
 }
-# write_segment_id — the encode mirror. Same pred/ctx; !skip writes neg_interleave(segment_id). A SKIP
+# write_segment_id — the encode mirror. Same pred/ctx; !skip writes neg_interleave(segment_id), for a segment_id in
+# 0..LastActiveSegId only (DR_ERR_BOUNDS otherwise: 6.10.8 makes anything else non-conformant). A SKIP
 # block writes NO symbol: the decoder DERIVES segment_id = pred (5.11.11 skip branch), so a plan whose skip
 # block claims a segment != pred is UNREPRESENTABLE — it would stamp a different value into the shared
 # SegmentIds map than decode derives, desyncing every later block's spatial prediction. Surface it as
@@ -305,6 +315,7 @@ fn av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u,
         return DR_OK;
     }
     var last = av1_fh_last_active_seg_id(fh);
+    if ((segment_id < 0) || (segment_id > last)) { return DR_ERR_BOUNDS; }   # 6.10.8: the decoder refuses it
     var coded = av1_neg_interleave(segment_id, pred, last + 1);
     av1_sym_encode_symbol(enc, av1_ncdf_segment_id(ncc, load64(pc + 8)), AV1_MAX_SEGMENTS, coded);
     return DR_OK;

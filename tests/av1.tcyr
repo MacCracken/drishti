@@ -751,6 +751,110 @@ fn test_av1_seq_reject() {
 }
 
 # ================================================================
+# The ends of a header — trailing_bits( ) (5.3.4) and byte_alignment( )
+# (5.3.5). Bit positions count from 0 = the MSB of byte 0.
+# ================================================================
+
+# One trailing_bits case over the bytes b0 b1 b2 (the first n used), the syntax ending at bit pos.
+fn tb_case(b0, b1, b2, n, pos, want, msg): i64 {
+    var b = alloc(4);
+    store8(b, b0); store8(b + 1, b1); store8(b + 2, b2);
+    assert_eq(av1_obu_trailing_bits_ok(b, n, pos), want, msg);
+    return 0;
+}
+fn test_av1_obu_trailing_bits() {
+    # the shortest pattern at each phase of the byte
+    tb_case(0x80, 0, 0, 1, 0, 1, "1000 0000 @0: one bit, seven zeros");
+    tb_case(0x01, 0, 0, 1, 7, 1, "0000 0001 @7: one bit, no zero bits");
+    tb_case(0x04, 0, 0, 1, 5, 1, "0000 0100 @5: one bit, two zeros");
+    # trailing_one_bit must be a 1 (6.2.4)
+    tb_case(0x40, 0, 0, 1, 0, 0, "0100 0000 @0: trailing_one_bit is 0");
+    tb_case(0x00, 0, 0, 1, 3, 0, "0000 0000 @3: no one bit at all");
+    # every trailing_zero_bit inside the byte must be 0: a 1 just after it, and one at the byte's last bit
+    tb_case(0x0C, 0, 0, 1, 4, 0, "0000 1100 @4: the bit after the one bit is a 1");
+    tb_case(0x0C, 0, 0, 1, 5, 1, "0000 1100 @5: one bit at 5, zeros at 6 and 7");
+    tb_case(0x81, 0, 0, 1, 0, 0, "1000 0001 @0: bit 7 (the last zero bit) is a 1");
+    # then whole zero bytes to the end of the OBU (optional padding, 6.2.4)
+    tb_case(0x80, 0x00, 0x00, 3, 0, 1, "0x80 00 00: two padding bytes, all zero");
+    tb_case(0x80, 0x00, 0x01, 3, 0, 0, "0x80 00 01: the LAST padding byte has its low bit set");
+    tb_case(0x80, 0x10, 0x00, 3, 0, 0, "0x80 10 00: the FIRST padding byte is non-zero");
+    tb_case(0xFF, 0x80, 0x00, 3, 8, 1, "syntax filled byte 0: the one bit opens byte 1");
+    # nbBits = size * 8 - pos must be > 0 (6.2.4): no room for the one bit, or a position past the payload
+    tb_case(0xFF, 0, 0, 1, 8, 0, "pos == size * 8: nbBits 0");
+    tb_case(0xFF, 0x80, 0, 1, 8, 0, "pos == size * 8 even with a 0x80 beyond the payload");
+    tb_case(0x80, 0, 0, 1, 9, 0, "pos past the payload");
+    tb_case(0x80, 0, 0, 1, 0 - 1, 0, "a negative position");
+    # a header-only OBU (obu_size 0) carries no trailing bits (5.3.1: obu_size > 0)
+    tb_case(0x00, 0, 0, 0, 0, 1, "size 0: nothing to check");
+    return 0;
+}
+# One byte_alignment case over the bytes b0 b1 (the first n used), alignment starting at bit pos.
+fn ba_case(b0, b1, n, pos, want, msg): i64 {
+    var b = alloc(4);
+    store8(b, b0); store8(b + 1, b1);
+    assert_eq(av1_obu_byte_alignment_ok(b, n, pos), want, msg);
+    return 0;
+}
+fn test_av1_obu_byte_alignment() {
+    ba_case(0x00, 0, 1, 3, 1, "0000 0000 @3: five zero bits");
+    ba_case(0x10, 0, 1, 3, 0, "0001 0000 @3: the first zero bit is a 1");
+    ba_case(0x10, 0, 1, 4, 1, "0001 0000 @4: the 1 is syntax, the four zero bits are 0");
+    ba_case(0x01, 0, 1, 1, 0, "0000 0001 @1: the last zero bit (bit 7) is a 1");
+    ba_case(0xFE, 0, 1, 7, 1, "1111 1110 @7: one zero bit, a 0");
+    # already aligned: there are no zero bits, whatever the next byte holds
+    ba_case(0xFF, 0xFF, 2, 0, 1, "@0: aligned, nothing read");
+    ba_case(0xFF, 0xFF, 2, 8, 1, "@8: aligned, nothing read");
+    ba_case(0xFF, 0, 1, 8, 1, "@8 == size * 8: aligned at the end");
+    # outside the buffer
+    ba_case(0x00, 0, 1, 9, 0, "pos past the payload");
+    ba_case(0x00, 0, 1, 0 - 1, 0, "a negative position");
+    return 0;
+}
+# av1_obu_write_trailing_bits writes the shortest pattern from any phase, and the checker accepts exactly it.
+fn test_av1_obu_write_trailing_bits() {
+    var pos = 0;
+    while (pos < 17) {
+        var bw = dr_bw_init(8);
+        var i = 0;
+        while (i < pos) { dr_bw_put_bit(bw, 1); i = i + 1; }   # the syntax: all ones, so no zero is mistaken for it
+        assert_eq(av1_obu_write_trailing_bits(bw), DR_OK, "trailing bits written");
+        var n = dr_bw_flush(bw);
+        assert_eq(n, (pos / 8) + 1, "pattern ends in the byte the one bit starts");
+        assert_eq(av1_obu_trailing_bits_ok(dr_bw_buf(bw), n, pos), 1, "the written pattern is accepted at its pos");
+        pos = pos + 1;
+    }
+    # exact bytes: 101 + trailing = 1011 0000; 8 syntax bits + trailing = a whole 0x80 byte
+    var bw2 = dr_bw_init(8);
+    dr_bw_put_bits(bw2, 5, 3);
+    av1_obu_write_trailing_bits(bw2);
+    assert_eq(dr_bw_flush(bw2), 1, "3 bits + trailing: 1 byte");
+    assert_eq(load8(dr_bw_buf(bw2)), 0xB0, "101 + 1 0000 = 0xB0");
+    var bw3 = dr_bw_init(8);
+    dr_bw_put_bits(bw3, 0xFF, 8);
+    av1_obu_write_trailing_bits(bw3);
+    assert_eq(dr_bw_flush(bw3), 2, "8 bits + trailing: 2 bytes");
+    assert_eq(load8(dr_bw_buf(bw3) + 1), 0x80, "a byte-aligned end takes a whole 0x80 byte");
+    return 0;
+}
+# The sequence parse records where sequence_header_obu( ) ended (the walks' trailing-bits position).
+fn test_av1_seq_bits_consumed() {
+    var len = 0;
+    var b = fx_av1_seq_reduced_64(&len);
+    var e = 0;
+    var s = av1_seq_parse(b, len, &e);
+    assert_eq(e, DR_OK, "fixture parses");
+    assert_eq(av1_seq_bits_consumed(s), 44, "the reduced fixture's syntax is 44 bits");
+    # that literal is a bare sequence_header_obu( ): bit 44 is pad, not trailing_one_bit, so as an OBU payload it
+    # fails 5.3.4; with byte 5 = 0000 1000 (bit 44 = 1) it is a conformant payload.
+    assert_eq(av1_obu_trailing_bits_ok(b, len, 44), 0, "the bare literal has no trailing bits");
+    store8(b + 5, 0x08);
+    assert_eq(av1_obu_trailing_bits_ok(b, len, 44), 1, "byte 5 = 0x08: trailing_one_bit at 44, then zeros");
+    var s2 = av1_seq_parse(b, len, &e);
+    assert_eq(av1_seq_bits_consumed(s2), 44, "the trailing bits are not part of the syntax");
+    return 0;
+}
+
+# ================================================================
 # Integration — OBU walk feeding the sequence-header parser, with the
 # stream assembled by the encode-seed writer
 # ================================================================
@@ -819,6 +923,11 @@ fn main() {
     test_av1_seq_mono();
     test_av1_seq_profile1_srgb();
     test_av1_seq_reject();
+    test_group("av1 header ends (5.3.4 trailing_bits, 5.3.5 byte_alignment)");
+    test_av1_obu_trailing_bits();
+    test_av1_obu_byte_alignment();
+    test_av1_obu_write_trailing_bits();
+    test_av1_seq_bits_consumed();
     test_group("av1 integration");
     test_av1_obu_seq_integration();
     return assert_summary();

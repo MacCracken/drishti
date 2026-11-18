@@ -4,6 +4,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 0.8.6 bite 1: the two stream kinds 0.8.5 carried, refused where and why libaom refuses them
+
+**drishti now refuses both stream kinds that 0.8.5 carried, at the same unit and for the same reason as libaom, and
+accepts the rest bit-exact.** The two kinds are libaom 3.15.3 `--aq-mode=2 --cq-level=0` encodes and SVT-AV1 streams
+with chroma qindex offsets (`--chroma-u-ac-qindex-offset 20 --chroma-v-ac-qindex-offset -30`). Both are non-conformant
+encoder output: libaom 3.14.1 and 3.15.3 refuse them, and so does dav1d 1.5.4. Three checks decide them, two of them
+new:
+- **The ends of the headers** (new). 5.3.1 ends a sequence header or frame header OBU with `trailing_bits()` (a 1,
+  then zeros to the end of the OBU; 5.3.4, 6.2.4). A frame OBU's header (5.10), and a tile group's own header
+  (5.11.1), end in `byte_alignment()` instead, whose zero bits "shall be equal to 0" (5.3.5, 6.2.5). drishti looked
+  at none of these bits: it skipped to the byte boundary. The SVT-AV1 streams' frame header ends where the bits after
+  it say it cannot, and aomdec refuses them with "byte_alignment() is not all 0 bits". drishti decoded their tile
+  data from the misaligned offset, and was saved, when it was, only by the tile's exit process. Both OBU walks and
+  the large-scale tile camera path now check, through `av1_obu_trailing_bits_ok` / `av1_obu_byte_alignment_ok`
+  (`src/av1_obu.cyr`), and refuse with the new **`AV1_ERR_BAD_TRAILING` (13)**. `av1_seq_parse` now records where
+  its syntax ends (`av1_seq_bits_consumed`), as the frame header always did.
+- **The `segment_id` range** (new). 6.10.8: "It is a requirement of bitstream conformance that the postprocessed
+  value of segment_id ... is in the range 0 to LastActiveSegId". libaom refuses a value outside it ("Corrupted
+  segment_ids"); dav1d substitutes segment 0. drishti **clamped** it into range, a value neither reference uses, and
+  decoded on. Some `--aq-mode=2` encodes code exactly such a value. `av1_read_segment_id` now refuses it with the new
+  **`AV1_ERR_BAD_SEGMENT_ID` (14)**, reading segment 0, and `av1_write_segment_id` refuses to code one
+  (`DR_ERR_BOUNDS`).
+- **The tile's 8.2.4 exit process** (since 0.8.5 bite 4). The other `--aq-mode=2` encodes end a tile with ~1 KB of
+  non-zero data after the trailing bit. aomdec says "Failed to decode tile data", and dav1d's strict mode (its CLI
+  default) refuses the same way. drishti has refused them since bite 4, with `AV1_ERR_BAD_FRAME`, which is why the
+  item looked open at the 0.8.5 cut: nobody re-ran it after bite 4.
+
+How it was found: the symbol sequence of a refused tile, logged from drishti and from the instrumented libaom in
+`ref/`, is identical (15,030 symbols with equal CDF state). Then both decoders' exit checks were probed (libaom: 842
+bytes left after the marker, 839 of them non-zero; drishti: the same bits). dav1d with `--strict 0` decodes the
+stream, which locates its refusal. SVT-AV1 4.2.0, the version 0.8.4 found the stream with, was recovered from the
+package cache, because the installed encoder became 4.3.0 the same day. The SVT-AV1 streams' frame headers misparse
+identically in every decoder: the sequence header says `separate_uv_delta_q = 1`, and every decoder then reads
+`diff_uv_delta = 0` and nonsense chroma deltas. Where SVT-AV1's writer departs from the syntax is the encoder's
+defect, and is not chased here.
+
+**Verified:**
+- A 90-stream scratch sweep matched `aomdec` on every unit, in verdict and in the check named. It covered both kinds
+  over six sizes and 1 and 4 frames: libaom at both superblock sizes and two speeds, SVT-AV1 4.2.0 and 4.3.0 with
+  and without quantizer matrices. 34 `byte_alignment` refusals gave err=13, 28 tile-data refusals err=12, 12
+  "Corrupted segment_ids" err=14, and all 16 streams libaom accepts decode bit-exact. Six more encodes crashed
+  libaom's own `aomenc`.
+- **Three committed reproducers**, gated by their error code in a new `make conformance` section, "refused streams"
+  (`tests/repro/refused/`, outside the memory-bound glob; one `.expect` line per unit, an md5 or `err=N`):
+  `svt-uvoff-64x64` (970 bytes, err=13), `aq2-segid-96x64` (err=14) and `aq2-tile-96x64` (err=12). A canary showed
+  the code is what makes each decisive. A harness without the segment check fails `aq2-segid` with "err=12, want
+  err=14", one without the header ends fails `svt-uvoff` with "err=12, want err=13", and a missing `.expect` fails.
+- **Mutation testing:** 28 mutants, all killed. They cover every requirement in the two predicates (the one bit,
+  the in-byte zeros, the padding bytes, nbBits > 0, the header-only OBU, an aligned end), the writer, the recorded
+  position, the FRAME-vs-header branch, all nine call sites across the two walks and the camera path (each killed
+  by its own walk's test), the code, and the segment check (both ways out of range, the top segment, the value
+  returned, the writer's mirror).
+- The fixtures were non-conformant: every test header builder in four suites and the decode fuzz harness ended a
+  sequence or frame header OBU with no trailing bits. They now call the new encode-side `av1_obu_write_trailing_bits`
+  (5.3.4's inverse, for the coming header writers). `frame_build_fh` splits into the header OBU form and the frame
+  OBU form, so each test keeps exercising what it was written for.
+
+`make conformance` is **3974 matched / 0 known-gap / 0 regressed / 0 skipped** (was 3971: the three refused
+reproducers). No conformant stream is refused: the run with the header ends alone also gave 3971 / 0 / 0 / 0, with
+every SVT-AV1 case encoded by 4.3.0.
+
+**Gates:** 44 suites, **32,016** assertions (+134), **7,416** fuzz (3 harnesses); bench, `vet`, `lint`, `fmt-check`,
+`version-check` and `distlib --check` all green (`dist/drishti.cyr` regenerated); all three programs build. No new
+module (44).
+
 ## [0.8.5] - 2026-11-16
 
 **Decode is conformance-clean, and hardened.** All 242 published libaom conformance vectors decode bit-exact on every

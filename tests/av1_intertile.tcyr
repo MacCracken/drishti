@@ -450,6 +450,7 @@ fn its_build_seq(out_len): i64 {
     dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0    f(1)
     dr_bw_put_bit(bw, 0);            # color_range = 0                       f(1)
     dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0         f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -496,6 +497,7 @@ fn its_build_seq_oh(out_len): i64 {
     dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0    f(1)
     dr_bw_put_bit(bw, 0);            # color_range = 0                       f(1)
     dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0         f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -522,6 +524,7 @@ fn its_build_key_fh_oh(order_hint, out_len): i64 {
     dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0         f(1)
     dr_bw_put_bit(bw, 1);            # tx_mode_select = 1                    f(1)
     dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -573,6 +576,7 @@ fn its_build_inter_fh_oh(order_hint, tx_sel, out_len): i64 {
     dr_bw_put_bit(bw, 0);            # is_global[BWDREF] = 0                 f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF2] = 0                f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF] = 0                 f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -606,6 +610,7 @@ fn its_build_key_fh(out_len): i64 {
     #                                  reference_mode/skip_mode/warp: intra -> none
     dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0                    f(1)
     #                                  global motion: intra -> no bits
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -661,6 +666,7 @@ fn its_build_inter_fh(tx_sel, out_len): i64 {
     dr_bw_put_bit(bw, 0);            # is_global[BWDREF] = 0                 f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF2] = 0                f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF] = 0                 f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -941,6 +947,7 @@ fn its_build_content_fh_oh(order_hint, refresh, idx0, out_len): i64 {
     dr_bw_put_bit(bw, 0);            # is_global[BWDREF]                     f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF2]                    f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF]                     f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -994,6 +1001,7 @@ fn its_build_compound_fh_oh(order_hint, out_len): i64 {
     dr_bw_put_bit(bw, 0);            # is_global[BWDREF]                     f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF2]                    f(1)
     dr_bw_put_bit(bw, 0);            # is_global[ALTREF]                     f(1)
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): the OBU payload's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }

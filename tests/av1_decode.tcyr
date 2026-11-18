@@ -897,7 +897,7 @@ fn test_obus_frame_obu_empty_tg() {
     var slen = 0;
     var seq = frame_build_seq(&slen);
     var flen = 0;
-    var fh = frame_build_fh(&flen);
+    var fh = frame_build_fh_frame(&flen);
     var oe = alloc(8);
     var bw = dr_bw_init(64);
     obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
@@ -934,6 +934,7 @@ fn frame_build_seq(out_len): i64 {
     dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
     dr_bw_put_bit(bw, 0);            # color_range = 0 (mono path returns here)
     dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): 1 then 0s to the byte boundary
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -943,6 +944,20 @@ fn frame_build_seq(out_len): i64 {
 # at 128-wide (sb_cols=2 -> max_log2_tile_cols=1); mono omits the DeltaQU* bits.
 fn frame_build_fh(out_len): i64 {
     var bw = dr_bw_init(16);
+    frame_put_fh(bw);
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): a frame header OBU's end
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# The same header at the head of a frame OBU (5.10): it ends in byte_alignment( ), zero bits only (dr_bw_flush).
+fn frame_build_fh_frame(out_len): i64 {
+    var bw = dr_bw_init(16);
+    frame_put_fh(bw);
+    store64(out_len, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# frame_build_fh's uncompressed_header( ) syntax, into bw.
+fn frame_put_fh(bw): i64 {
     dr_bw_put_bit(bw, 1);            # disable_cdf_update = 1
     dr_bw_put_bit(bw, 0);            # allow_screen_content_tools = 0
     dr_bw_put_bit(bw, 0);            # render_and_frame_size_different = 0
@@ -959,8 +974,7 @@ fn frame_build_fh(out_len): i64 {
     dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0
     dr_bw_put_bit(bw, 1);            # tx_mode_select = 1 -> TX_MODE_SELECT
     dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0
-    store64(out_len, dr_bw_flush(bw));
-    return dr_bw_buf(bw);
+    return 0;
 }
 # frame_build_seq for a 256x64 mono frame (max_frame_width_minus_1 = 255 -> width 256,
 # MiCols 64), otherwise identical to frame_build_seq. sb_cols = 4 -> max_log2_tile_cols
@@ -986,6 +1000,7 @@ fn frame_build_seq_2tile(out_len): i64 {
     dr_bw_put_bit(bw, 0);            # color_description_present_flag = 0
     dr_bw_put_bit(bw, 0);            # color_range = 0 (mono path returns here)
     dr_bw_put_bit(bw, 0);            # film_grain_params_present = 0
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): 1 then 0s to the byte boundary
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -1014,6 +1029,7 @@ fn frame_build_fh_2tile(out_len): i64 {
     dr_bw_put_bit(bw, 0);            # loop_filter_delta_enabled = 0
     dr_bw_put_bit(bw, 1);            # tx_mode_select = 1 -> TX_MODE_SELECT
     dr_bw_put_bit(bw, 0);            # reduced_tx_set = 0
+    av1_obu_write_trailing_bits(bw); # trailing_bits( ) (5.3.4): a frame header OBU's end
     store64(out_len, dr_bw_flush(bw));
     return dr_bw_buf(bw);
 }
@@ -1055,6 +1071,136 @@ fn test_obus_multigroup() {
         y = y + 1;
     }
     assert_eq(bad, 0, "2-tile-group OBU frame all flat-128 (av1_decode_obus accumulates)");
+    return 0;
+}
+
+# ---- the ends of the headers: trailing_bits( ) (5.3.4) and byte_alignment( ) (5.3.5) -> AV1_ERR_BAD_TRAILING ----
+# Every stream below decoded to a frame before 0.8.6: the walk read each header and skipped straight to the byte
+# boundary, whatever the bits there held. A copy of payload p[0..n) with one extra byte v, or with bit q (0 = MSB of
+# byte 0) set / cleared.
+fn obus_pad(p, n, v): i64 {
+    var c = alloc(n + 1);
+    memcpy(c, p, n);
+    store8(c + n, v);
+    return c;
+}
+fn obus_bit(p, n, q, val): i64 {
+    var c = alloc(n);
+    memcpy(c, p, n);
+    var m = 128 >> (q & 7);
+    var b = load8(c + (q >> 3)) & (255 - m);
+    if (val) { b = b | m; }
+    store8(c + (q >> 3), b);
+    return c;
+}
+# TD + SEQ + FRAME_HEADER + TILE_GROUP with the given seq / fh payloads, through av1_decode_obus: the error, or -1 for
+# no error and no frame.
+fn obus_e2e_err(seq, slen, fh, flen): i64 {
+    var tlen = 0;
+    var tile = frame_enc_keyframe(&tlen);
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME_HEADER, fh, flen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, tile, tlen);
+    var n = dr_bw_flush(bw);
+    var oe = alloc(8);
+    var f = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    if ((load64(oe) == DR_OK) && (f == 0)) { return 0 - 1; }
+    return load64(oe);
+}
+# TD + SEQ + FRAME(fh_frame ++ tile) through av1_decode_obus, with bit q of the frame OBU payload set (q < 0: none).
+fn obus_frame_err(q): i64 {
+    var tlen = 0;
+    var tile = frame_enc_keyframe(&tlen);
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var flen = 0;
+    var fh = frame_build_fh_frame(&flen);
+    var pbw = dr_bw_init(256);
+    obus_append(pbw, fh, flen);
+    obus_append(pbw, tile, tlen);
+    var plen = dr_bw_flush(pbw);
+    var pay = dr_bw_buf(pbw);
+    if (q >= 0) { pay = obus_bit(pay, plen, q, 1); }
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME, pay, plen);
+    var n = dr_bw_flush(bw);
+    var oe = alloc(8);
+    var f = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    if ((load64(oe) == DR_OK) && (f == 0)) { return 0 - 1; }
+    return load64(oe);
+}
+fn test_obus_header_ends() {
+    var slen = 0;
+    var seq = frame_build_seq(&slen);
+    var flen = 0;
+    var fh = frame_build_fh(&flen);
+    # where each syntax ends, from the parsers themselves (and pinned: the fixtures are 61 and 35 bits)
+    var se = 0;
+    var s = av1_seq_parse(seq, slen, &se);
+    var sbits = av1_seq_bits_consumed(s);
+    assert_eq(sbits, 61, "frame_build_seq: 61 bits of syntax, trailing_one_bit at 61");
+    var fe = 0;
+    var ph = av1_frame_parse_uncompressed_header(s, av1_ref_state_new(), 0, 0, fh, flen, &fe);
+    var fbits = av1_fh_bits_consumed(ph);
+    assert_eq(fbits, 35, "frame_build_fh: 35 bits of syntax, trailing_one_bit at 35");
+    assert_eq(obus_e2e_err(seq, slen, fh, flen), DR_OK, "control: both headers end correctly");
+    # sequence header OBU (5.3.1 -> trailing_bits)
+    assert_eq(obus_e2e_err(obus_bit(seq, slen, sbits, 0), slen, fh, flen), AV1_ERR_BAD_TRAILING,
+      "seq: trailing_one_bit cleared");
+    assert_eq(obus_e2e_err(obus_bit(seq, slen, 63, 1), slen, fh, flen), AV1_ERR_BAD_TRAILING,
+      "seq: the last trailing_zero_bit (63) set");
+    assert_eq(obus_e2e_err(obus_pad(seq, slen, 0), slen + 1, fh, flen), DR_OK, "seq: a zero padding byte is legal");
+    assert_eq(obus_e2e_err(obus_pad(seq, slen, 1), slen + 1, fh, flen), AV1_ERR_BAD_TRAILING,
+      "seq: a non-zero padding byte");
+    # frame header OBU (5.3.1 -> trailing_bits)
+    assert_eq(obus_e2e_err(seq, slen, obus_bit(fh, flen, fbits, 0), flen), AV1_ERR_BAD_TRAILING,
+      "fh: trailing_one_bit cleared");
+    assert_eq(obus_e2e_err(seq, slen, obus_bit(fh, flen, 39, 1), flen), AV1_ERR_BAD_TRAILING,
+      "fh: the last trailing_zero_bit (39) set");
+    assert_eq(obus_e2e_err(seq, slen, obus_pad(fh, flen, 0), flen + 1), DR_OK, "fh: a zero padding byte is legal");
+    assert_eq(obus_e2e_err(seq, slen, obus_pad(fh, flen, 64), flen + 1), AV1_ERR_BAD_TRAILING,
+      "fh: a non-zero padding byte");
+    # frame OBU (5.10 -> byte_alignment after the same 35-bit header: zero bits 35..39)
+    assert_eq(obus_frame_err(0 - 1), DR_OK, "frame OBU control decodes");
+    assert_eq(obus_frame_err(35), AV1_ERR_BAD_TRAILING, "frame OBU: the first zero_bit (35) set");
+    assert_eq(obus_frame_err(39), AV1_ERR_BAD_TRAILING, "frame OBU: the last zero_bit (39) set");
+    assert_eq(obus_frame_err(34), DR_OK, "frame OBU: bit 34 is syntax (reduced_tx_set), not alignment");
+    return 0;
+}
+# tile_group_obu (5.11.1): byte_alignment( ) after tile_start_and_end_present_flag + tg_start + tg_end (3 bits here).
+fn obus_tg_err(h0, h1): i64 {
+    var slen = 0;
+    var seq = frame_build_seq_2tile(&slen);
+    var flen = 0;
+    var fh = frame_build_fh_2tile(&flen);
+    var tlen = 0;
+    var tb = frame_enc_keyframe(&tlen);
+    var g0 = alloc(1 + tlen);
+    store8(g0, h0);
+    memcpy(g0 + 1, tb, tlen);
+    var g1 = alloc(1 + tlen);
+    store8(g1, h1);
+    memcpy(g1 + 1, tb, tlen);
+    var bw = dr_bw_init(256);
+    obus_wrap(bw, AV1_OBU_TEMPORAL_DELIMITER, 0, 0);
+    obus_wrap(bw, AV1_OBU_SEQUENCE_HEADER, seq, slen);
+    obus_wrap(bw, AV1_OBU_FRAME_HEADER, fh, flen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, g0, 1 + tlen);
+    obus_wrap(bw, AV1_OBU_TILE_GROUP, g1, 1 + tlen);
+    var n = dr_bw_flush(bw);
+    var oe = alloc(8);
+    var f = av1_decode_obus(dr_bw_buf(bw), n, oe);
+    if ((load64(oe) == DR_OK) && (f == 0)) { return 0 - 1; }
+    return load64(oe);
+}
+fn test_obus_tile_group_alignment() {
+    assert_eq(obus_tg_err(0x80, 0xE0), DR_OK, "control: 100 00000 / 111 00000");
+    assert_eq(obus_tg_err(0x90, 0xE0), AV1_ERR_BAD_TRAILING, "group 0: 100 10000, the first zero_bit set");
+    assert_eq(obus_tg_err(0x80, 0xE1), AV1_ERR_BAD_TRAILING, "group 1: 111 00001, the last zero_bit set");
     return 0;
 }
 # Header-construction sanity: the custom seq + fh parse to exactly the fields the
@@ -1124,7 +1270,7 @@ fn test_obus_frame_obu() {
     var slen = 0;
     var seq = frame_build_seq(&slen);
     var flen = 0;
-    var fh = frame_build_fh(&flen);
+    var fh = frame_build_fh_frame(&flen);
     # FRAME OBU payload = frame-header bytes (byte-aligned) ++ tile-group bytes.
     var fpay_bw = dr_bw_init(256);
     obus_append(fpay_bw, fh, flen);
@@ -2089,6 +2235,8 @@ fn main() {
     test_obus_end_to_end();
     test_obus_frame_obu();
     test_obus_multigroup();
+    test_obus_header_ends();
+    test_obus_tile_group_alignment();
     test_obus_forbidden_bit();
     test_obus_bad_seq_payload();
     test_obus_metadata_padding_skipped();

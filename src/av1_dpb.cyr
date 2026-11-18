@@ -472,6 +472,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var nseq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var send = av1_seq_header_end(nseq, buf + ooff, osize);   # trailing_bits( ) (5.3.1)
+            if (send != DR_OK) { return av1_decoder_fail(dec, send, out_err); }
             # the decoder's own copy: the parse is arena memory, and the sequence outlives every frame
             nseq = av1_decoder_own_copy(dec, AV1DEC_SEQBUF, nseq, AV1_SEQ_SIZE);
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
@@ -491,6 +493,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var cfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &cerr);
             if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
             if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var cend = av1_frame_header_end(otype, cfh, buf + ooff, osize);
+            if (cend != DR_OK) { return av1_decoder_fail(dec, cend, out_err); }
             if (av1_decoder_over_limit(dec, cfh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             # the decoder's own copy: every tile list after it is a frame start, which rewinds the arena
             cfh = av1_decoder_own_copy(dec, AV1DEC_CAMBUF, cfh, AV1FH_SIZE);
@@ -520,6 +524,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var nfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { return av1_decoder_fail(dec, ferr, out_err); }
             if (nfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var fend = av1_frame_header_end(otype, nfh, buf + ooff, osize);   # trailing_bits( ) (5.3.1)
+            if (fend != DR_OK) { return av1_decoder_fail(dec, fend, out_err); }
             if (av1_decoder_over_limit(dec, nfh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             store64(dec + AV1DEC_FH, nfh);
             store64(dec + AV1DEC_FDC, 0);   # a new frame begins; any prior context is retired
@@ -542,6 +548,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var ffh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &frr);
             if (frr != DR_OK) { return av1_decoder_fail(dec, frr, out_err); }
             if (ffh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var ffend = av1_frame_header_end(otype, ffh, buf + ooff, osize);   # byte_alignment( ) (5.10)
+            if (ffend != DR_OK) { return av1_decoder_fail(dec, ffend, out_err); }
             if (av1_decoder_over_limit(dec, ffh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
             if (hbytes > osize) { return av1_decoder_fail(dec, DR_ERR_TRUNCATED, out_err); }

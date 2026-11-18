@@ -177,6 +177,59 @@ fn av1_obu_in_operating_point(op_idc, otype, ext, tid, sid): i64 {
     return 1;
 }
 
+# ================================================================
+# The ends of a header: trailing_bits( ) (5.3.4) and byte_alignment( ) (5.3.5)
+# ================================================================
+# open_bitstream_unit (5.3.1) ends every OBU but a tile group, a tile list or a frame with
+# trailing_bits( obu_size * 8 - payloadBits ); frame_obu (5.10) and tile_group_obu (5.11.1) byte-align after their
+# headers instead. Their semantics are bitstream requirements: trailing_one_bit "shall be equal to 1", with nbBits
+# "greater than zero" when it is read (6.2.4); every trailing_zero_bit and every zero_bit "shall be equal to 0"
+# (6.2.4, 6.2.5). They are how a misparsed header shows itself: 6.2.1's note lets a decoder "detect an error if the end
+# of the parsed data is not directly followed by the correct trailing bits pattern". libaom checks every OBU it parses
+# (`av1_check_trailing_bits` + the zero-padding loop of `aom_decode_frame_from_obus`, and `byte_alignment` in obu.c);
+# dav1d checks the trailing bits of its sequence and frame headers in its default strict mode (`check_trailing_bits`)
+# but byte-aligns without looking. Before 0.8.6 drishti looked at neither, so a header that ended in the wrong place —
+# SVT-AV1 4.2 / 4.3 streams with chroma qindex offsets, whose header libaom refuses as "byte_alignment() is not all 0
+# bits" — decoded its tile data from the wrong offset and was caught, if at all, only by the tile's exit process.
+
+# The bit at bit position p of buf (MSB first). The caller keeps p inside the buffer.
+fn av1_obu_buf_bit(buf, p): i64 {
+    return (load8(buf + (p >> 3)) >> (7 - (p & 7))) & 1;
+}
+
+# trailing_bits( size * 8 - pos ) (5.3.4) over an OBU payload buf[0..size) whose syntax ended at bit position pos
+# (payloadBits): 1 when trailing_one_bit is a 1 at pos and every bit after it is a 0, 0 otherwise. nbBits must be > 0
+# (6.2.4), so a payload that ends exactly at size * 8 — or past it — fails. A header-only OBU (size 0) carries no
+# trailing bits: 5.3.1 reads them only when obu_size > 0.
+fn av1_obu_trailing_bits_ok(buf, size, pos): i64 {
+    if (size <= 0) { return 1; }
+    var end = size * 8;
+    if ((pos < 0) || (pos >= end)) { return 0; }
+    if (av1_obu_buf_bit(buf, pos) != 1) { return 0; }       # trailing_one_bit
+    var p = pos + 1;
+    while ((p < end) && ((p & 7) != 0)) {                   # trailing_zero_bit, to the byte boundary
+        if (av1_obu_buf_bit(buf, p) != 0) { return 0; }
+        p = p + 1;
+    }
+    while (p < end) {                                       # then whole zero bytes to the end of the OBU
+        if (load8(buf + (p >> 3)) != 0) { return 0; }
+        p = p + 8;
+    }
+    return 1;
+}
+
+# byte_alignment( ) (5.3.5) at bit position pos of buf[0..size): 1 when every zero_bit from pos up to the next byte
+# boundary is a 0 (none when pos is already aligned), 0 otherwise — or when pos lies outside the buffer.
+fn av1_obu_byte_alignment_ok(buf, size, pos): i64 {
+    if ((pos < 0) || (pos > (size * 8))) { return 0; }
+    var p = pos;
+    while ((p & 7) != 0) {
+        if (av1_obu_buf_bit(buf, p) != 0) { return 0; }      # zero_bit
+        p = p + 1;
+    }
+    return 1;
+}
+
 # obu_type -> printable cstring (never null). Table from spec 6.2.2.
 fn av1_obu_type_name(type): i64 {
     if (type == AV1_OBU_SEQUENCE_HEADER)        { return "sequence_header"; }
@@ -320,6 +373,18 @@ fn av1_obu_write_header(bw, type, ext, tid, sid, has_size, size): i64 {
         # 5.3.1 obu_size leb128() — writer is byte-aligned here.
         var rc = dr_leb128_write(bw, size);
         if (rc != DR_OK) { return rc; }
+    }
+    return dr_bw_err(bw);
+}
+
+# trailing_bits( ) (5.3.4), the encode-lane inverse: trailing_one_bit, then trailing_zero_bit up to the next byte
+# boundary — the shortest pattern 6.2.4 allows, ending the payload of a sequence header or frame header OBU (5.3.1).
+# A frame header inside a frame OBU takes byte_alignment( ) instead (5.10): zero bits only, which dr_bw_flush writes.
+# Returns DR_OK / the writer's sticky error.
+fn av1_obu_write_trailing_bits(bw): i64 {
+    dr_bw_put_bit(bw, 1);                       # trailing_one_bit
+    while ((dr_bw_bit_pos(bw) & 7) != 0) {
+        dr_bw_put_bit(bw, 0);                   # trailing_zero_bit
     }
     return dr_bw_err(bw);
 }

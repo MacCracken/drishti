@@ -295,6 +295,11 @@ fn av1_tile_group_parse(tg, buf, sz, fh, out_err): i64 {
         tg_start = dr_br_read_bits(br, tilebits);
         tg_end = dr_br_read_bits(br, tilebits);
     }
+    if (dr_br_err(br) != DR_OK) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+    # byte_alignment( ) (5.11.1): its zero bits are a requirement (6.2.5), checked as libaom checks them
+    if (av1_obu_byte_alignment_ok(buf, sz, dr_br_bit_pos(br)) == 0) {
+        store64(out_err, AV1_ERR_BAD_TRAILING); return 0;
+    }
     dr_br_byte_align(br);
     if (dr_br_err(br) != DR_OK) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
     # validate the group range (trust no input)
@@ -706,6 +711,30 @@ fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
 }
 
 # ================================================================
+# The header ends, for both OBU walks (av1_decode_obus here, av1_decoder_decode in src/av1_dpb.cyr). A sequence header
+# OBU and a frame header OBU end in trailing_bits( ) (5.3.1); the frame header inside a frame OBU ends in
+# byte_alignment( ) (5.10), the tile group's own header after it. buf[0..size) is the OBU payload the header was
+# parsed from. Each returns DR_OK, or AV1_ERR_BAD_TRAILING when the bits after the header are not the pattern the spec
+# requires (src/av1_obu.cyr, av1_obu_trailing_bits_ok) — a code of its own, so a header that ended in the wrong place
+# is told apart from tile data the exit process refuses (AV1_ERR_BAD_FRAME, 8.2.4).
+# ================================================================
+fn av1_seq_header_end(seq, buf, size): i64 {
+    if (av1_obu_trailing_bits_ok(buf, size, av1_seq_bits_consumed(seq)) == 0) { return AV1_ERR_BAD_TRAILING; }
+    return DR_OK;
+}
+# otype is the OBU the frame header came in: AV1_OBU_FRAME byte-aligns; any other (a frame header OBU) has trailing
+# bits.
+fn av1_frame_header_end(otype, fh, buf, size): i64 {
+    var pos = av1_fh_bits_consumed(fh);
+    if (otype == AV1_OBU_FRAME) {
+        if (av1_obu_byte_alignment_ok(buf, size, pos) == 0) { return AV1_ERR_BAD_TRAILING; }
+        return DR_OK;
+    }
+    if (av1_obu_trailing_bits_ok(buf, size, pos) == 0) { return AV1_ERR_BAD_TRAILING; }
+    return DR_OK;
+}
+
+# ================================================================
 # av1_decode_obus — walk an AV1 OBU stream buf[0..sz) and decode the first coded
 # frame to pixels (writes *out_err). This closes the raw-bitstream -> pixels loop:
 # it iterates OBUs (av1_obu_next) and dispatches by type —
@@ -758,6 +787,8 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
             seq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { store64(out_err, serr); return 0; }
             if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var send = av1_seq_header_end(seq, buf + ooff, osize);
+            if (send != DR_OK) { store64(out_err, send); return 0; }
             opidc = av1_seq_op_idc(seq, 0);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
@@ -768,6 +799,8 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
               av1_obu_sid(o), buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
             if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var fend = av1_frame_header_end(otype, fh, buf + ooff, osize);
+            if (fend != DR_OK) { store64(out_err, fend); return 0; }
         }
         # combined FRAME OBU (spec 5.10 frame_obu): frame_header_obu() then
         # byte_alignment() then tile_group_obu(). Parse the fh, split at the
@@ -781,6 +814,8 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
               av1_obu_sid(of), buf + ooff, osize, &frr);
             if (frr != DR_OK) { store64(out_err, frr); return 0; }
             if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var ffend = av1_frame_header_end(otype, ffh, buf + ooff, osize);   # byte_alignment( ) (5.10)
+            if (ffend != DR_OK) { store64(out_err, ffend); return 0; }
             # headerBytes = ceil(bits_consumed / 8): the byte_alignment() after the
             # frame_header rounds the pre-alignment bit position UP to the next byte
             # boundary. (bits + 7) >> 3 is that ceiling — NOT (bits >> 3) + 1, which

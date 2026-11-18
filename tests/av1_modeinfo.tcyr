@@ -768,22 +768,50 @@ fn test_read_segment_id_rt() {
     return 0;
 }
 
-# trust no input byte: a hostile stream coding an out-of-range segment symbol must be CLAMPED to
-# [0, LastActiveSegId] — never an OOB segment index. neg_deinterleave can return a NEGATIVE value in
-# the ref>=max-1 branch; read_segment_id's clip3 is the guard.
-fn test_read_segment_id_hostile_clamp() {
-    var fh = seg_fh_last(1);   # LastActiveSegId 1 -> valid {0,1}, max 2
+# 6.10.8: the postprocessed segment_id must lie in 0..LastActiveSegId. A stream coding one outside it is refused with
+# AV1_ERR_BAD_SEGMENT_ID (sticky on the coder; the read returns segment 0, an in-range index), as libaom refuses it.
+# Before 0.8.6 it was CLAMPED into range and decoded on. Both ways out: neg_deinterleave goes NEGATIVE in its
+# ref >= max-1 branch, and past LastActiveSegId when pred is 0 (it returns the coded value itself).
+fn seg_hostile(last, above, sym): i64 {
+    var fh = seg_fh_last(last);
     var g = alloc(16 * 8);
     memset(g, 0, 16 * 8);
-    store64(g + ((0 * 4 + 1) * 8), 1);   # above neighbour 1 -> pred 1 (ref >= max-1 branch)
+    var au = 0;
+    if (above >= 0) { store64(g + ((0 * 4 + 1) * 8), above); au = 1; }
     var enc = av1_sym_enc_init(64, 1);
-    av1_sym_encode_symbol(enc, av1_ncdf_segment_id(av1_noncoeff_cdf_blob(), 0), AV1_MAX_SEGMENTS, 7);
+    av1_sym_encode_symbol(enc, av1_ncdf_segment_id(av1_noncoeff_cdf_blob(), 0), AV1_MAX_SEGMENTS, sym);
     var olen = 0;
     var out = av1_sym_enc_finish(enc, &olen);
     var sd = av1_sym_dec_init(out, olen, 1);
-    var got = av1_read_segment_id(sd, av1_noncoeff_cdf_blob(), fh, g, 4, 1, 1, 1, 0, 0);
-    assert_eq(got >= 0, 1, "hostile segment symbol: clamped >= 0");
-    assert_eq(got <= 1, 1, "hostile segment symbol: clamped <= LastActiveSegId (no OOB)");
+    var got = av1_read_segment_id(sd, av1_noncoeff_cdf_blob(), fh, g, 4, 1, 1, au, 0, 0);
+    var e = av1_sym_dec_err(sd);
+    if (e != DR_OK) {
+        assert_eq(got, 0, "a refused segment_id reads as segment 0");
+        return e;
+    }
+    return 100 + got;   # accepted: 100 + the segment
+}
+fn test_read_segment_id_out_of_range() {
+    # LastActiveSegId 1 (max 2), above = 1 -> pred 1, the ref >= max-1 branch: (max - diff) - 1
+    assert_eq(seg_hostile(1, 1, 0), 101, "pred 1, coded 0 -> segment 1: in range");
+    assert_eq(seg_hostile(1, 1, 1), 100, "pred 1, coded 1 -> segment 0: in range");
+    assert_eq(seg_hostile(1, 1, 2), AV1_ERR_BAD_SEGMENT_ID, "pred 1, coded 2 -> -1: refused (negative)");
+    assert_eq(seg_hostile(1, 1, 7), AV1_ERR_BAD_SEGMENT_ID, "pred 1, coded 7 -> -6: refused (negative)");
+    # no neighbours -> pred 0: the coded value itself
+    assert_eq(seg_hostile(1, 0 - 1, 1), 101, "pred 0, coded 1 = LastActiveSegId: in range");
+    assert_eq(seg_hostile(1, 0 - 1, 2), AV1_ERR_BAD_SEGMENT_ID, "pred 0, coded 2 > LastActiveSegId: refused");
+    assert_eq(seg_hostile(4, 0 - 1, 4), 104, "LastActiveSegId 4, coded 4: in range");
+    assert_eq(seg_hostile(4, 0 - 1, 5), AV1_ERR_BAD_SEGMENT_ID, "LastActiveSegId 4, coded 5: refused");
+    assert_eq(seg_hostile(7, 0 - 1, 7), 107, "LastActiveSegId 7: every coded value is in range");
+    # the write lane refuses a plan it could only code as a non-conformant segment_id
+    var fh = seg_fh_last(1);
+    var g = alloc(16 * 8);
+    memset(g, 0, 16 * 8);
+    var enc = av1_sym_enc_init(64, 1);
+    var blob = av1_noncoeff_cdf_blob();
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 0, 1), DR_OK, "write segment 1 <= last: ok");
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 0, 2), DR_ERR_BOUNDS, "write segment 2 > last");
+    assert_eq(av1_write_segment_id(enc, blob, fh, g, 4, 1, 1, 0, 0, 0, 0 - 1), DR_ERR_BOUNDS, "write segment -1");
     return 0;
 }
 
@@ -1256,7 +1284,7 @@ fn main() {
     test_neg_interleave_inverse();
     test_segid_pred_ctx();
     test_read_segment_id_rt();
-    test_read_segment_id_hostile_clamp();
+    test_read_segment_id_out_of_range();
     test_get_segment_id();
     test_segpred_ctx_store();
     test_inter_segment_id_temporal_rt();

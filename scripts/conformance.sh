@@ -517,6 +517,57 @@ repro_svc() { # name
 repro_svc svc-l2t3-128x96
 repro_svc svc-l2t3-layers-96x64
 
+# ---- REFUSED STREAMS (0.8.6): real encoder output that libaom AND dav1d refuse (no libaom needed) ----
+# Each tests/repro/refused/<name>.ivf has a <name>.expect with one line per unit: a 32-hex md5 (the unit shows that
+# frame, aomdec's) or err=N (drishti refuses the unit with exactly that code, latched for every unit after it). The CODE
+# is what makes a case decisive: each is the check libaom names when it refuses the unit, so another check that happens
+# to refuse the same unit later fails the case. They live in a subdirectory because the memory-bound section replays
+# every tests/repro/*.ivf, which a latched refusal cannot pass. Provenance (aomdec 3.15.3; dav1d 1.5.4 refuses each too):
+#  - svt-uvoff-64x64: SVT-AV1 4.2.0 `--preset 8 --chroma-u-ac-qindex-offset 20 --chroma-v-ac-qindex-offset -30
+#    --keyint 32 -n 1`, mandelbrot + noise. Its frame header does not end where the bits after it say: aomdec
+#    "byte_alignment() is not all 0 bits" -> err=13 (AV1_ERR_BAD_TRAILING, 5.3.5 / 6.2.5). Before 0.8.6 drishti decoded
+#    the tile from the misaligned offset and was saved only by the exit process.
+#  - aq2-segid-96x64: libaom 3.15.3 `--sb-size=64 --cpu-used=8 --end-usage=q --cq-level=0 --aq-mode=2 --deltaq-mode=0
+#    --enable-restoration=0 --enable-palette=0 --enable-intrabc=0 --limit=1 --lag-in-frames=0`, mandelbrot. A block's
+#    segment_id runs past LastActiveSegId: aomdec "Corrupted segment_ids" -> err=14 (AV1_ERR_BAD_SEGMENT_ID, 6.10.8).
+#    Before 0.8.6 drishti clamped it and decoded on.
+#  - aq2-tile-96x64: the same libaom settings at --sb-size=128. Its tile's symbol data ends with ~1.1 KB of non-zero
+#    data after the trailing bit: aomdec "Failed to decode tile data" -> err=12 (AV1_ERR_BAD_FRAME, the 8.2.4 exit
+#    process, enforced since 0.8.5 bite 4; dav1d refuses it in its default strict mode).
+REFUSED_CASES="svt-uvoff-64x64 aq2-segid-96x64 aq2-tile-96x64"
+refused_case() { # name
+    local n="$1" ivf="tests/repro/refused/$1.ivf" exf="tests/repro/refused/$1.expect" log nu k w got line
+    if [ ! -f "$ivf" ] || [ ! -f "$exf" ]; then
+        echo "  refused $n: FIXTURE MISSING ($ivf / $exf)"; fail=$((fail+1)); return
+    fi
+    mkdir -p "$WORK"
+    log="$WORK/refused-$n.log"
+    run_drishti "$ivf" "$log" || { echo "  refused $n: SETUP FAILED (copy)"; fail=$((fail+1)); return; }
+    local want=(); mapfile -t want < <(grep . "$exf")
+    nu=$(grep -c '^frame [0-9]' "$log")
+    if [ "$nu" -ne "${#want[@]}" ]; then
+        echo "  refused $n: REGRESSED (drishti walked $nu units; the .expect lists ${#want[@]})"; fail=$((fail+1)); return
+    fi
+    line="  refused $n:"
+    k=1
+    while [ "$k" -le "$nu" ]; do
+        w="${want[$((k-1))]}"
+        if [ "${w#err=}" != "$w" ]; then
+            got=$(grep "^frame $k " "$log" | grep -o 'err=[0-9]*')
+            if [ "$got" = "$w" ]; then line="$line u$k=$w"; pass=$((pass+1))
+            else line="$line u$k=REGRESSED(${got:-decoded}, want $w)"; fail=$((fail+1)); fi
+        else
+            got=$(md5sum "build/conformance-out-$k.yuv" 2>/dev/null | cut -d' ' -f1)
+            if [ -n "$got" ] && [ "$got" = "$w" ]; then line="$line u$k=OK"; pass=$((pass+1))
+            else line="$line u$k=REGRESSED"; fail=$((fail+1)); fi
+        fi
+        k=$((k+1))
+    done
+    echo "$line"
+}
+echo "--- refused streams: what libaom and dav1d refuse, refused for the same reason (no libaom needed) ---"
+for c in $REFUSED_CASES; do refused_case "$c"; done
+
 # ---- OOM FAULT INJECTION (0.8.5) — scripts/oom-sweep.sh, over the committed reproducers (no libaom needed) ----
 # Every allocation in src/ goes through dr_alloc, and the harness's build/conformance-input.oom = k makes the k-th one
 # fail, once. Every such run must stop with DR_ERR_OOM and nothing else: not a crash or hang, not a decoded unit that

@@ -1963,6 +1963,59 @@ fn av1_obu_in_operating_point(op_idc, otype, ext, tid, sid): i64 {
     return 1;
 }
 
+# ================================================================
+# The ends of a header: trailing_bits( ) (5.3.4) and byte_alignment( ) (5.3.5)
+# ================================================================
+# open_bitstream_unit (5.3.1) ends every OBU but a tile group, a tile list or a frame with
+# trailing_bits( obu_size * 8 - payloadBits ); frame_obu (5.10) and tile_group_obu (5.11.1) byte-align after their
+# headers instead. Their semantics are bitstream requirements: trailing_one_bit "shall be equal to 1", with nbBits
+# "greater than zero" when it is read (6.2.4); every trailing_zero_bit and every zero_bit "shall be equal to 0"
+# (6.2.4, 6.2.5). They are how a misparsed header shows itself: 6.2.1's note lets a decoder "detect an error if the end
+# of the parsed data is not directly followed by the correct trailing bits pattern". libaom checks every OBU it parses
+# (`av1_check_trailing_bits` + the zero-padding loop of `aom_decode_frame_from_obus`, and `byte_alignment` in obu.c);
+# dav1d checks the trailing bits of its sequence and frame headers in its default strict mode (`check_trailing_bits`)
+# but byte-aligns without looking. Before 0.8.6 drishti looked at neither, so a header that ended in the wrong place —
+# SVT-AV1 4.2 / 4.3 streams with chroma qindex offsets, whose header libaom refuses as "byte_alignment() is not all 0
+# bits" — decoded its tile data from the wrong offset and was caught, if at all, only by the tile's exit process.
+
+# The bit at bit position p of buf (MSB first). The caller keeps p inside the buffer.
+fn av1_obu_buf_bit(buf, p): i64 {
+    return (load8(buf + (p >> 3)) >> (7 - (p & 7))) & 1;
+}
+
+# trailing_bits( size * 8 - pos ) (5.3.4) over an OBU payload buf[0..size) whose syntax ended at bit position pos
+# (payloadBits): 1 when trailing_one_bit is a 1 at pos and every bit after it is a 0, 0 otherwise. nbBits must be > 0
+# (6.2.4), so a payload that ends exactly at size * 8 — or past it — fails. A header-only OBU (size 0) carries no
+# trailing bits: 5.3.1 reads them only when obu_size > 0.
+fn av1_obu_trailing_bits_ok(buf, size, pos): i64 {
+    if (size <= 0) { return 1; }
+    var end = size * 8;
+    if ((pos < 0) || (pos >= end)) { return 0; }
+    if (av1_obu_buf_bit(buf, pos) != 1) { return 0; }       # trailing_one_bit
+    var p = pos + 1;
+    while ((p < end) && ((p & 7) != 0)) {                   # trailing_zero_bit, to the byte boundary
+        if (av1_obu_buf_bit(buf, p) != 0) { return 0; }
+        p = p + 1;
+    }
+    while (p < end) {                                       # then whole zero bytes to the end of the OBU
+        if (load8(buf + (p >> 3)) != 0) { return 0; }
+        p = p + 8;
+    }
+    return 1;
+}
+
+# byte_alignment( ) (5.3.5) at bit position pos of buf[0..size): 1 when every zero_bit from pos up to the next byte
+# boundary is a 0 (none when pos is already aligned), 0 otherwise — or when pos lies outside the buffer.
+fn av1_obu_byte_alignment_ok(buf, size, pos): i64 {
+    if ((pos < 0) || (pos > (size * 8))) { return 0; }
+    var p = pos;
+    while ((p & 7) != 0) {
+        if (av1_obu_buf_bit(buf, p) != 0) { return 0; }      # zero_bit
+        p = p + 1;
+    }
+    return 1;
+}
+
 # obu_type -> printable cstring (never null). Table from spec 6.2.2.
 fn av1_obu_type_name(type): i64 {
     if (type == AV1_OBU_SEQUENCE_HEADER)        { return "sequence_header"; }
@@ -2110,6 +2163,18 @@ fn av1_obu_write_header(bw, type, ext, tid, sid, has_size, size): i64 {
     return dr_bw_err(bw);
 }
 
+# trailing_bits( ) (5.3.4), the encode-lane inverse: trailing_one_bit, then trailing_zero_bit up to the next byte
+# boundary — the shortest pattern 6.2.4 allows, ending the payload of a sequence header or frame header OBU (5.3.1).
+# A frame header inside a frame OBU takes byte_alignment( ) instead (5.10): zero bits only, which dr_bw_flush writes.
+# Returns DR_OK / the writer's sticky error.
+fn av1_obu_write_trailing_bits(bw): i64 {
+    dr_bw_put_bit(bw, 1);                       # trailing_one_bit
+    while ((dr_bw_bit_pos(bw) & 7) != 0) {
+        dr_bw_put_bit(bw, 0);                   # trailing_zero_bit
+    }
+    return dr_bw_err(bw);
+}
+
 # --- av1_seq.cyr ---
 
 # @public — drishti AV1: sequence_header_obu parse — the stream-level
@@ -2155,6 +2220,8 @@ enum Av1ErrCode {
     AV1_ERR_BAD_PROFILE = 10;   # seq_profile 3..7 — reserved per 6.4.1
     AV1_ERR_BAD_SEQ     = 11;   # sequence-header conformance violation
     AV1_ERR_BAD_FRAME   = 12;   # frame-header conformance violation (5.9)
+    AV1_ERR_BAD_TRAILING = 13;  # a header's end breaks 5.3.4 trailing_bits / 5.3.5 byte_alignment (src/av1_obu.cyr)
+    AV1_ERR_BAD_SEGMENT_ID = 14;  # a read segment_id outside 0..LastActiveSegId (6.10.8; src/av1_modeinfo.cyr)
 }
 
 # Av1Seq field byte offsets. Offsets 0..48 are the 0.7.0 layout (kept
@@ -2202,6 +2269,7 @@ enum Av1SeqOff {
     AV1_SEQ_ENABLE_DUAL_FILTER   = 312;
     AV1_SEQ_ENABLE_JNT_COMP      = 320;
     AV1_SEQ_MATRIX_COEFF         = 328;  # matrix_coefficients (6.4.2; MC_UNSPECIFIED 2 when not described)
+    AV1_SEQ_BITS_CONSUMED        = 336;  # reader bit position at the end of sequence_header_obu (payloadBits, 5.3.1)
     AV1_SEQ_OP_IDC               = 384;  # operating_point_idc[32]     -> 640
     AV1_SEQ_OP_DM                = 640;  # dm_present_for_this_op[32]   -> 896
     AV1_SEQ_SIZE                 = 896;
@@ -2353,8 +2421,11 @@ fn av1_color_config_parse(br, profile, s): i64 {
 #   AV1_ERR_BAD_SEQ     — reduced_still_picture_header without
 #                         still_picture (6.4.1)
 #   DR_ERR_OOM          — allocation failure
-# Trailing bits (5.3.4) after film_grain_params_present are not
-# inspected. On any fault the (arena) record is abandoned and 0 returned.
+# The parse stops at the end of sequence_header_obu( ) and records that
+# bit position (av1_seq_bits_consumed); the trailing bits (5.3.4) after
+# it belong to open_bitstream_unit, so the OBU walks check them
+# (av1_obu_trailing_bits_ok). On any fault the (arena) record is
+# abandoned and 0 returned.
 fn av1_seq_parse(buf, len, out_err): i64 {
     store64(out_err, DR_OK);
     if (len < 0) {
@@ -2537,6 +2608,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
         store64(out_err, dr_br_err(br));
         return 0;
     }
+    store64(s + AV1_SEQ_BITS_CONSUMED, dr_br_bit_pos(br));
     return s;
 }
 
@@ -2550,6 +2622,7 @@ fn av1_seq_height(s): i64 { return load64(s + AV1_SEQ_HEIGHT); }
 fn av1_seq_bitdepth(s): i64 { return load64(s + AV1_SEQ_BITDEPTH); }
 fn av1_seq_mono(s): i64 { return load64(s + AV1_SEQ_MONO); }
 fn av1_seq_matrix_coefficients(s): i64 { return load64(s + AV1_SEQ_MATRIX_COEFF); }
+fn av1_seq_bits_consumed(s): i64 { return load64(s + AV1_SEQ_BITS_CONSUMED); }
 fn av1_seq_still(s): i64 { return load64(s + AV1_SEQ_STILL); }
 fn av1_seq_reduced(s): i64 { return load64(s + AV1_SEQ_REDUCED); }
 
@@ -12574,8 +12647,13 @@ fn av1_segid_pred_ctx(segids, fmi_cols, mi_row, mi_col, avail_u, avail_l, out): 
     return 0;
 }
 # read_segment_id (5.11.11) — the spatial map read. `skip` short-circuits to pred (no symbol); else
-# read @@segment_id from Segment_Id_Cdf[ctx], map via neg_deinterleave, clamp to [0, LastActiveSegId]
-# (a hostile stream cannot drive an OOB segment index — trust no input byte).
+# read @@segment_id from Segment_Id_Cdf[ctx] and map it via neg_deinterleave. 6.10.8: "It is a requirement of
+# bitstream conformance that the postprocessed value of segment_id ... is in the range 0 to LastActiveSegId": a value
+# outside it latches AV1_ERR_BAD_SEGMENT_ID and reads segment 0 (an in-range index, so nothing downstream overruns).
+# libaom refuses it the same way ("Corrupted segment_ids", decodemv.c read_segment_id); dav1d substitutes segment 0
+# and decodes on. Before 0.8.6 drishti CLAMPED it into range (a value no reference decoder uses) and decoded on, so
+# libaom 3.15.3's own --aq-mode=2 --cq-level=0 encodes, whose segment_ids run past LastActiveSegId, were caught only
+# at the tile's exit process, if at all.
 # {pred, ctx} live in one persistent 2-entry scratch (0.8.5): it was allocated per block — arena growth per
 # block (the 0.7.60 lesson) and an unchecked OOM site. av1_tables_init builds it; a failed build latches
 # DR_ERR_OOM on the coder and reads segment 0 (an in-range index, so nothing downstream overruns).
@@ -12594,9 +12672,14 @@ fn av1_read_segment_id(sd, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u, a
     var last = av1_fh_last_active_seg_id(fh);
     var coded = av1_sym_read_symbol(sd, av1_ncdf_segment_id(ncc, load64(pc + 8)), AV1_MAX_SEGMENTS);
     var seg = av1_neg_deinterleave(coded, pred, last + 1);
-    return av1_clip3(0, last, seg);
+    if ((seg < 0) || (seg > last)) {
+        av1_sym_dec_fail(sd, AV1_ERR_BAD_SEGMENT_ID);
+        return 0;
+    }
+    return seg;
 }
-# write_segment_id — the encode mirror. Same pred/ctx; !skip writes neg_interleave(segment_id). A SKIP
+# write_segment_id — the encode mirror. Same pred/ctx; !skip writes neg_interleave(segment_id), for a segment_id in
+# 0..LastActiveSegId only (DR_ERR_BOUNDS otherwise: 6.10.8 makes anything else non-conformant). A SKIP
 # block writes NO symbol: the decoder DERIVES segment_id = pred (5.11.11 skip branch), so a plan whose skip
 # block claims a segment != pred is UNREPRESENTABLE — it would stamp a different value into the shared
 # SegmentIds map than decode derives, desyncing every later block's spatial prediction. Surface it as
@@ -12611,6 +12694,7 @@ fn av1_write_segment_id(enc, ncc, fh, segids, fmi_cols, mi_row, mi_col, avail_u,
         return DR_OK;
     }
     var last = av1_fh_last_active_seg_id(fh);
+    if ((segment_id < 0) || (segment_id > last)) { return DR_ERR_BOUNDS; }   # 6.10.8: the decoder refuses it
     var coded = av1_neg_interleave(segment_id, pred, last + 1);
     av1_sym_encode_symbol(enc, av1_ncdf_segment_id(ncc, load64(pc + 8)), AV1_MAX_SEGMENTS, coded);
     return DR_OK;
@@ -26769,6 +26853,11 @@ fn av1_tile_group_parse(tg, buf, sz, fh, out_err): i64 {
         tg_start = dr_br_read_bits(br, tilebits);
         tg_end = dr_br_read_bits(br, tilebits);
     }
+    if (dr_br_err(br) != DR_OK) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
+    # byte_alignment( ) (5.11.1): its zero bits are a requirement (6.2.5), checked as libaom checks them
+    if (av1_obu_byte_alignment_ok(buf, sz, dr_br_bit_pos(br)) == 0) {
+        store64(out_err, AV1_ERR_BAD_TRAILING); return 0;
+    }
     dr_br_byte_align(br);
     if (dr_br_err(br) != DR_OK) { store64(out_err, DR_ERR_TRUNCATED); return 0; }
     # validate the group range (trust no input)
@@ -27180,6 +27269,30 @@ fn av1_decode_frame_ref(seq, fh, dpb, refs, buf, sz, out_err): i64 {
 }
 
 # ================================================================
+# The header ends, for both OBU walks (av1_decode_obus here, av1_decoder_decode in src/av1_dpb.cyr). A sequence header
+# OBU and a frame header OBU end in trailing_bits( ) (5.3.1); the frame header inside a frame OBU ends in
+# byte_alignment( ) (5.10), the tile group's own header after it. buf[0..size) is the OBU payload the header was
+# parsed from. Each returns DR_OK, or AV1_ERR_BAD_TRAILING when the bits after the header are not the pattern the spec
+# requires (src/av1_obu.cyr, av1_obu_trailing_bits_ok) — a code of its own, so a header that ended in the wrong place
+# is told apart from tile data the exit process refuses (AV1_ERR_BAD_FRAME, 8.2.4).
+# ================================================================
+fn av1_seq_header_end(seq, buf, size): i64 {
+    if (av1_obu_trailing_bits_ok(buf, size, av1_seq_bits_consumed(seq)) == 0) { return AV1_ERR_BAD_TRAILING; }
+    return DR_OK;
+}
+# otype is the OBU the frame header came in: AV1_OBU_FRAME byte-aligns; any other (a frame header OBU) has trailing
+# bits.
+fn av1_frame_header_end(otype, fh, buf, size): i64 {
+    var pos = av1_fh_bits_consumed(fh);
+    if (otype == AV1_OBU_FRAME) {
+        if (av1_obu_byte_alignment_ok(buf, size, pos) == 0) { return AV1_ERR_BAD_TRAILING; }
+        return DR_OK;
+    }
+    if (av1_obu_trailing_bits_ok(buf, size, pos) == 0) { return AV1_ERR_BAD_TRAILING; }
+    return DR_OK;
+}
+
+# ================================================================
 # av1_decode_obus — walk an AV1 OBU stream buf[0..sz) and decode the first coded
 # frame to pixels (writes *out_err). This closes the raw-bitstream -> pixels loop:
 # it iterates OBUs (av1_obu_next) and dispatches by type —
@@ -27232,6 +27345,8 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
             seq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { store64(out_err, serr); return 0; }
             if (seq == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var send = av1_seq_header_end(seq, buf + ooff, osize);
+            if (send != DR_OK) { store64(out_err, send); return 0; }
             opidc = av1_seq_op_idc(seq, 0);
         }
         if (otype == AV1_OBU_FRAME_HEADER) {
@@ -27242,6 +27357,8 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
               av1_obu_sid(o), buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { store64(out_err, ferr); return 0; }
             if (fh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var fend = av1_frame_header_end(otype, fh, buf + ooff, osize);
+            if (fend != DR_OK) { store64(out_err, fend); return 0; }
         }
         # combined FRAME OBU (spec 5.10 frame_obu): frame_header_obu() then
         # byte_alignment() then tile_group_obu(). Parse the fh, split at the
@@ -27255,6 +27372,8 @@ fn av1_decode_obus(buf, sz, out_err): i64 {
               av1_obu_sid(of), buf + ooff, osize, &frr);
             if (frr != DR_OK) { store64(out_err, frr); return 0; }
             if (ffh == 0) { store64(out_err, DR_ERR_BAD_HEADER); return 0; }
+            var ffend = av1_frame_header_end(otype, ffh, buf + ooff, osize);   # byte_alignment( ) (5.10)
+            if (ffend != DR_OK) { store64(out_err, ffend); return 0; }
             # headerBytes = ceil(bits_consumed / 8): the byte_alignment() after the
             # frame_header rounds the pre-alignment bit position UP to the next byte
             # boundary. (bits + 7) >> 3 is that ceiling — NOT (bits >> 3) + 1, which
@@ -27765,6 +27884,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var nseq = av1_seq_parse(buf + ooff, osize, &serr);
             if (serr != DR_OK) { return av1_decoder_fail(dec, serr, out_err); }
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var send = av1_seq_header_end(nseq, buf + ooff, osize);   # trailing_bits( ) (5.3.1)
+            if (send != DR_OK) { return av1_decoder_fail(dec, send, out_err); }
             # the decoder's own copy: the parse is arena memory, and the sequence outlives every frame
             nseq = av1_decoder_own_copy(dec, AV1DEC_SEQBUF, nseq, AV1_SEQ_SIZE);
             if (nseq == 0) { return av1_decoder_fail(dec, DR_ERR_OOM, out_err); }
@@ -27784,6 +27905,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var cfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &cerr);
             if (cerr != DR_OK) { return av1_decoder_fail(dec, cerr, out_err); }
             if (cfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var cend = av1_frame_header_end(otype, cfh, buf + ooff, osize);
+            if (cend != DR_OK) { return av1_decoder_fail(dec, cend, out_err); }
             if (av1_decoder_over_limit(dec, cfh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             # the decoder's own copy: every tile list after it is a frame start, which rewinds the arena
             cfh = av1_decoder_own_copy(dec, AV1DEC_CAMBUF, cfh, AV1FH_SIZE);
@@ -27813,6 +27936,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var nfh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &ferr);
             if (ferr != DR_OK) { return av1_decoder_fail(dec, ferr, out_err); }
             if (nfh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var fend = av1_frame_header_end(otype, nfh, buf + ooff, osize);   # trailing_bits( ) (5.3.1)
+            if (fend != DR_OK) { return av1_decoder_fail(dec, fend, out_err); }
             if (av1_decoder_over_limit(dec, nfh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             store64(dec + AV1DEC_FH, nfh);
             store64(dec + AV1DEC_FDC, 0);   # a new frame begins; any prior context is retired
@@ -27835,6 +27960,8 @@ fn av1_decoder_decode_in(dec, buf, sz, out_err): i64 {
             var ffh = av1_frame_parse_uncompressed_header(seq, refs, otid, osid, buf + ooff, osize, &frr);
             if (frr != DR_OK) { return av1_decoder_fail(dec, frr, out_err); }
             if (ffh == 0) { return av1_decoder_fail(dec, DR_ERR_BAD_HEADER, out_err); }
+            var ffend = av1_frame_header_end(otype, ffh, buf + ooff, osize);   # byte_alignment( ) (5.10)
+            if (ffend != DR_OK) { return av1_decoder_fail(dec, ffend, out_err); }
             if (av1_decoder_over_limit(dec, ffh) != 0) { return av1_decoder_fail(dec, DR_ERR_OVERSIZE, out_err); }
             var hbytes = (av1_fh_bits_consumed(ffh) + 7) >> 3;
             if (hbytes > osize) { return av1_decoder_fail(dec, DR_ERR_TRUNCATED, out_err); }

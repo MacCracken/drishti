@@ -41,6 +41,8 @@ enum Av1ErrCode {
     AV1_ERR_BAD_PROFILE = 10;   # seq_profile 3..7 — reserved per 6.4.1
     AV1_ERR_BAD_SEQ     = 11;   # sequence-header conformance violation
     AV1_ERR_BAD_FRAME   = 12;   # frame-header conformance violation (5.9)
+    AV1_ERR_BAD_TRAILING = 13;  # a header's end breaks 5.3.4 trailing_bits / 5.3.5 byte_alignment (src/av1_obu.cyr)
+    AV1_ERR_BAD_SEGMENT_ID = 14;  # a read segment_id outside 0..LastActiveSegId (6.10.8; src/av1_modeinfo.cyr)
 }
 
 # Av1Seq field byte offsets. Offsets 0..48 are the 0.7.0 layout (kept
@@ -88,6 +90,7 @@ enum Av1SeqOff {
     AV1_SEQ_ENABLE_DUAL_FILTER   = 312;
     AV1_SEQ_ENABLE_JNT_COMP      = 320;
     AV1_SEQ_MATRIX_COEFF         = 328;  # matrix_coefficients (6.4.2; MC_UNSPECIFIED 2 when not described)
+    AV1_SEQ_BITS_CONSUMED        = 336;  # reader bit position at the end of sequence_header_obu (payloadBits, 5.3.1)
     AV1_SEQ_OP_IDC               = 384;  # operating_point_idc[32]     -> 640
     AV1_SEQ_OP_DM                = 640;  # dm_present_for_this_op[32]   -> 896
     AV1_SEQ_SIZE                 = 896;
@@ -239,8 +242,11 @@ fn av1_color_config_parse(br, profile, s): i64 {
 #   AV1_ERR_BAD_SEQ     — reduced_still_picture_header without
 #                         still_picture (6.4.1)
 #   DR_ERR_OOM          — allocation failure
-# Trailing bits (5.3.4) after film_grain_params_present are not
-# inspected. On any fault the (arena) record is abandoned and 0 returned.
+# The parse stops at the end of sequence_header_obu( ) and records that
+# bit position (av1_seq_bits_consumed); the trailing bits (5.3.4) after
+# it belong to open_bitstream_unit, so the OBU walks check them
+# (av1_obu_trailing_bits_ok). On any fault the (arena) record is
+# abandoned and 0 returned.
 fn av1_seq_parse(buf, len, out_err): i64 {
     store64(out_err, DR_OK);
     if (len < 0) {
@@ -423,6 +429,7 @@ fn av1_seq_parse(buf, len, out_err): i64 {
         store64(out_err, dr_br_err(br));
         return 0;
     }
+    store64(s + AV1_SEQ_BITS_CONSUMED, dr_br_bit_pos(br));
     return s;
 }
 
@@ -436,6 +443,7 @@ fn av1_seq_height(s): i64 { return load64(s + AV1_SEQ_HEIGHT); }
 fn av1_seq_bitdepth(s): i64 { return load64(s + AV1_SEQ_BITDEPTH); }
 fn av1_seq_mono(s): i64 { return load64(s + AV1_SEQ_MONO); }
 fn av1_seq_matrix_coefficients(s): i64 { return load64(s + AV1_SEQ_MATRIX_COEFF); }
+fn av1_seq_bits_consumed(s): i64 { return load64(s + AV1_SEQ_BITS_CONSUMED); }
 fn av1_seq_still(s): i64 { return load64(s + AV1_SEQ_STILL); }
 fn av1_seq_reduced(s): i64 { return load64(s + AV1_SEQ_REDUCED); }
 
