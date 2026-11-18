@@ -525,7 +525,7 @@ repro_svc svc-l2t3-layers-96x64
 # every tests/repro/*.ivf, which a latched refusal cannot pass. Provenance (aomdec 3.15.3; dav1d 1.5.4 refuses each too):
 #  - svt-uvoff-64x64: SVT-AV1 4.2.0 `--preset 8 --chroma-u-ac-qindex-offset 20 --chroma-v-ac-qindex-offset -30
 #    --keyint 32 -n 1`, mandelbrot + noise. Its frame header does not end where the bits after it say: aomdec
-#    "byte_alignment() is not all 0 bits" -> err=13 (AV1_ERR_BAD_TRAILING, 5.3.5 / 6.2.5). Before 0.8.6 drishti decoded
+#    "byte_alignment() is not all 0 bits" -> err=15 (AV1_ERR_BAD_TRAILING, 5.3.5 / 6.2.5). Before 0.8.6 drishti decoded
 #    the tile from the misaligned offset and was saved only by the exit process.
 #  - aq2-segid-96x64: libaom 3.15.3 `--sb-size=64 --cpu-used=8 --end-usage=q --cq-level=0 --aq-mode=2 --deltaq-mode=0
 #    --enable-restoration=0 --enable-palette=0 --enable-intrabc=0 --limit=1 --lag-in-frames=0`, mandelbrot. A block's

@@ -836,6 +836,36 @@ fn test_av1_obu_write_trailing_bits() {
     assert_eq(load8(dr_bw_buf(bw3) + 1), 0x80, "a byte-aligned end takes a whole 0x80 byte");
     return 0;
 }
+# Every AV1 family error code is minted in its own module, so nothing stops two modules picking the same value: 0.8.6
+# bite 1 gave AV1_ERR_BAD_TRAILING the 13 av1_itx.cyr already used for AV1_ERR_BAD_TX. Each must be in the AV1 band
+# (src/drishti.cyr: 10..29) and no two may be equal, or a caller cannot tell which check refused it.
+fn test_av1_err_codes_distinct() {
+    var c = alloc(6 * 8);
+    store64(c + 0, AV1_ERR_BAD_PROFILE);
+    store64(c + 8, AV1_ERR_BAD_SEQ);
+    store64(c + 16, AV1_ERR_BAD_FRAME);
+    store64(c + 24, AV1_ERR_BAD_TX);
+    store64(c + 32, AV1_ERR_BAD_TRAILING);
+    store64(c + 40, AV1_ERR_BAD_SEGMENT_ID);
+    var i = 0;
+    var dup = 0;
+    var out = 0;
+    while (i < 6) {
+        var v = load64(c + (i * 8));
+        if ((v < 10) || (v > 29)) { out = out + 1; }
+        var j = i + 1;
+        while (j < 6) {
+            if (load64(c + (j * 8)) == v) { dup = dup + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(out, 0, "every AV1 error code is in the AV1 band 10..29");
+    assert_eq(dup, 0, "no two AV1 error codes share a value");
+    assert_eq(AV1_ERR_BAD_TRAILING, 15, "AV1_ERR_BAD_TRAILING is 15 (the refused-stream gate expects err=15)");
+    assert_eq(AV1_ERR_BAD_SEGMENT_ID, 14, "AV1_ERR_BAD_SEGMENT_ID is 14 (the refused-stream gate expects err=14)");
+    return 0;
+}
 # The sequence parse records where sequence_header_obu( ) ended (the walks' trailing-bits position).
 fn test_av1_seq_bits_consumed() {
     var len = 0;
@@ -928,6 +958,7 @@ fn main() {
     test_av1_obu_byte_alignment();
     test_av1_obu_write_trailing_bits();
     test_av1_seq_bits_consumed();
+    test_av1_err_codes_distinct();
     test_group("av1 integration");
     test_av1_obu_seq_integration();
     return assert_summary();

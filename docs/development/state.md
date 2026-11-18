@@ -1815,7 +1815,7 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > dav1d refuse both). Three checks decide them:
 > - NEW, the ends of the headers: 5.3.4 `trailing_bits` after a sequence / frame header OBU, 5.3.5
 >   `byte_alignment` after a frame OBU's header and a tile group's header. drishti never looked at those bits. The
->   SVT-AV1 frame headers fail them (aomdec: "byte_alignment() is not all 0 bits"); `AV1_ERR_BAD_TRAILING` = 13.
+>   SVT-AV1 frame headers fail them (aomdec: "byte_alignment() is not all 0 bits"); `AV1_ERR_BAD_TRAILING` = 15.
 > - NEW, 6.10.8's `segment_id` range, which drishti used to CLAMP (libaom refuses: "Corrupted segment_ids"; dav1d
 >   uses segment 0); `AV1_ERR_BAD_SEGMENT_ID` = 14.
 > - Since 0.8.5 bite 4, the tile exit process (aomdec: "Failed to decode tile data"), which already refused the
@@ -1825,7 +1825,18 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > `make conformance` gates three committed reproducers (`tests/repro/refused/`) by their error code; it was
 > canary-tested. All 28 mutants were killed. Every hand-built test header lacked its trailing bits, and now gets them
 > from the new `av1_obu_write_trailing_bits`. Gate: 3974 matched / 0 / 0 / 0. ENVIRONMENT: SVT-AV1 was upgraded to
-> 4.3.0 on 2026-11-17; 4.2.0 is in the pacman cache. Next: the encoder (forward transform, quantiser, header writers).
+> 4.3.0 on 2026-11-17; 4.2.0 is in the pacman cache. Bite 1 also gave `AV1_ERR_BAD_TRAILING` the value 13, already
+> `AV1_ERR_BAD_TX`'s (src/av1_itx.cyr); found in bite 2, it is 15, and a test now asserts the AV1 codes distinct.
+>
+> Bite 2 = **the forward transform** (`src/av1_ftx.cyr`, new module, 45): the TRANSPOSE of the spec's inverse at the
+> spec's own constants (7.13.2.3 / .7 / .8 steps reversed and transposed, ADST4 as `Round2( M^T T, 12 )`, the WHT by
+> its exact inverse lifting), with the 2D undoing 7.13.3 + the 7.12.3 flips and libaom's placement of the 2D scale.
+> `scripts/refs/fwd_txfm_ref.py` proves every 1D forward the exact transpose of the inverse and checks it BIT-EXACT
+> against libaom's own forward transform compiled from `ref/` (`scripts/refs/fwd_txfm_libaom.c`), on every kernel,
+> all 193 legal (size, type) pairs and the lossless WHT, once libaom's 10..13-bit cosines are set to the spec's 12.
+> `tests/av1_ftx.tcyr` (1,625 assertions); 25 mutants killed (one equivalent inside the 2D lossless path, so the WHT
+> kernel is pinned alone); bench `tests/av1_ftx.bcyr` (the forward ~13% faster than the inverse). Next: the
+> quantiser + the `Qlookup` forward path, then the header / OBU / IVF writers.
 >
 > **0.8.5 (cut 2026-11-16), bite by bite:** bite 1 = **the FULL published corpus gated** — all 242 vectors of libaom's
 > `test_vectors.cc`, every frame bit-exact with NO decoder change (217 newly gated: every quantizer and size vector,

@@ -1,0 +1,472 @@
+# @public — drishti AV1: the FORWARD transform (the encode lane's half of 7.13). Turns a spatial residual block into
+# the transform coefficients the spec's inverse transform (7.13.3) and reconstruct process (7.12.3) take back to it:
+# forward DCT (4..64), ADST (4/8/16), identity (4..32) and the lossless Walsh-Hadamard, with the 2D driver.
+#
+# FLAT module (no includes) — wiring in src/main.cyr, after src/av1_recon.cyr: it reuses src/av1_itx.cyr's tables,
+# cos128, the butterfly B (av1_itx_b), the identity scalings and AV1_ERR_BAD_TX, and src/av1_recon.cyr's FLIPADST flip
+# rules. Pure integer maths on caller-provided i64 arrays.
+#
+# The spec defines only the inverse transform; the forward one is the encoder's choice, and the decoder never sees it.
+# drishti's is the TRANSPOSE of the spec's inverse, at the spec's own constants (scripts/refs/fwd_txfm_ref.py derives
+# it and checks every claim below):
+#   - the inverse DCT (7.13.2.3) and ADST8 / ADST16 (7.13.2.7 / .8) are a permutation, then butterflies B and
+#     Hadamards H (7.13.2.1), then (ADST) an output permutation. Their transpose is the transposed operations in
+#     REVERSE order: B( a, b, angle, 0 ) becomes B( a, b, -angle, 0 ); B( a, b, angle, 1 ) and H are symmetric
+#     matrices, their own transposes (H without the inverse's clamp, a bound on decoded data); a permutation
+#     T[ i ] = s(i) * copyT[ p(i) ] becomes T[ p(i) ] = s(i) * copyT[ i ]. Each transposed B rounds as the inverse's
+#     does;
+#   - ADST4 (7.13.2.6) is x = M * T, then Round2( x, 12 ): its transpose is Round2( M^T * T, 12 );
+#   - the identity transforms (7.13.2.11-14) are scalings, their own transposes;
+#   - the lossless Walsh-Hadamard (7.13.2.10) is an exact integer lifting, so its forward is its exact INVERSE (the
+#     steps undone in reverse): a lossless block round-trips bit for bit.
+# Every 1D transform of length N has gain^2 = N / 2, so the 2D forward has total scale 2 ^ ( rowShift + 6 - log2W -
+# log2H ) against 7.13.3's rowShift + 4. Where that power of two is applied is libaom's choice (av1_fwd_txfm_shift_ls:
+# up before the columns, down after them and after the rows), kept for precision and comparability.
+#
+# Cross-checked against libaom's own forward transform (av1/encoder/av1_fwd_txfm1d.c, av1_fwd_txfm2d.c,
+# hybrid_fwd_txfm.c av1_fwht4x4_c), compiled from ref/ by scripts/refs/fwd_txfm_libaom.c: bit-exact on every 1D kernel,
+# every legal (size, type) pair and the lossless WHT once libaom's cosine precision is set to the spec's 12 bits.
+# libaom itself uses 10 to 13 bits by size, for int32 headroom; drishti computes in i64, so the spec's 12-bit
+# Cos128_Lookup serves everywhere (and its 64-point rows are more precise than libaom's 10-bit ones). At 8 bits the
+# unquantized round trip is within 1 (2 at 16x32 / 32x16) either way. rav1e's forward transforms are Daala lifting
+# designs, a different family, so they are not comparable bit for bit.
+#
+# Arrays are flat i64, row-major: element (i, j) at index i * w + j. The residual is the spatial one (source minus
+# prediction), un-flipped: the forward applies 7.12.3's FLIPADST flips itself. The coefficients are the spec's
+# Dequant layout (i the vertical frequency), and a 64-point dimension keeps only its lowest 32 (7.13.3 reads nothing
+# beyond): coefficients with i or j >= 32 are 0. Note libaom stores its coefficients TRANSPOSED (out[ j * h + i ]).
+
+# libaom's placement of the 2D scale (shift[ 0 ], -shift[ 1 ], -shift[ 2 ] of av1_fwd_txfm_shift_ls), per TxSize: the
+# columns' input is multiplied by 2 ^ up, the column outputs rounded down by mid bits, the row outputs by low bits.
+# up - mid - low = rowShift + 6 - log2W - log2H for every size (scripts/refs/fwd_txfm_ref.py asserts it).
+var Av1_FTx_Shift = 0;   # 57 i64: up[19], mid[19], low[19]
+fn av1_ftx_shift_table(): i64 {
+    if (Av1_FTx_Shift != 0) { return Av1_FTx_Shift; }
+    var t = dr_alloc_keep(57 * 8);
+    if (t == 0) { return 0; }
+    av1_itx_fill19(t, 2, 2, 2, 2, 0, 2, 2, 2, 2, 2, 2, 0, 2, 2, 2, 2, 2, 0, 2);
+    av1_itx_fill19(t + (19 * 8), 0, 1, 2, 4, 2, 1, 1, 2, 2, 4, 4, 2, 4, 1, 1, 2, 2, 2, 4);
+    av1_itx_fill19(t + (38 * 8), 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0);
+    Av1_FTx_Shift = t;
+    return t;
+}
+
+# The 1D transforms' working arrays: T[64] and its permutation copy[64], allocated once (never per call: per-call
+# scratch is arena growth, the 0.7.60 lesson).
+var Av1_FTx_Scratch = 0;   # 128 i64
+fn av1_ftx_scratch(): i64 {
+    if (Av1_FTx_Scratch != 0) { return Av1_FTx_Scratch; }
+    Av1_FTx_Scratch = dr_alloc_keep(128 * 8);
+    return Av1_FTx_Scratch;
+}
+
+# H( a, b, flip ) of 7.13.2.1 without the clamp: its own transpose.
+fn av1_ftx_h(T, a, b, flip): i64 {
+    var pa = a;
+    var pb = b;
+    if (flip) { pa = b; pb = a; }
+    var x = load64(T + (pa * 8));
+    var y = load64(T + (pb * 8));
+    store64(T + (pa * 8), x + y);
+    store64(T + (pb * 8), x - y);
+    return 0;
+}
+
+# The transpose of B( a, b, angle, flip ): B( a, b, -angle, 0 ) for flip 0, B itself for flip 1.
+fn av1_ftx_b(T, a, b, angle, flip): i64 {
+    if (flip) { return av1_itx_b(T, a, b, angle, 1); }
+    return av1_itx_b(T, a, b, 0 - angle, 0);
+}
+
+# ================================================================
+# Forward DCT — 7.13.2.3's steps 31 down to 2, each transposed, then 7.13.2.2's permutation (brev is an involution,
+# so the permutation is its own transpose). Step numbers are the spec's.
+# ================================================================
+fn av1_ftx_dct(T, n, copy): i64 {
+    var i = 0;
+    var j = 0;
+    if (n == 6) { i = 0; while (i <= 31) { av1_ftx_h(T, i, 63 - i, 0); i = i + 1; } }                   # 31
+    if (n == 6) { i = 0; while (i <= 7) { av1_ftx_b(T, 55 - i, 40 + i, 32, 1); i = i + 1; } }            # 30
+    if (n >= 5) { i = 0; while (i <= 15) { av1_ftx_h(T, i, 31 - i, 0); i = i + 1; } }                   # 29
+    if (n == 6) {                                                                                        # 28
+        i = 0;
+        while (i <= 7) {
+            av1_ftx_h(T, 48 + i, 63 - i, 1);
+            av1_ftx_h(T, 32 + i, 47 - i, 0);
+            i = i + 1;
+        }
+    }
+    if (n >= 5) { i = 0; while (i <= 3) { av1_ftx_b(T, 27 - i, 20 + i, 32, 1); i = i + 1; } }            # 27
+    if (n >= 4) { i = 0; while (i <= 7) { av1_ftx_h(T, i, 15 - i, 0); i = i + 1; } }                    # 26
+    if (n == 6) {                                                                                        # 25
+        i = 0;
+        while (i <= 7) {
+            var ang = 48;
+            if (i >= 4) { ang = 112; }
+            av1_ftx_b(T, 59 - i, 36 + i, ang, 1);
+            i = i + 1;
+        }
+    }
+    if (n >= 5) {                                                                                        # 24
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 3) { av1_ftx_h(T, 16 + (i * 8) + j, 23 + (i * 8) - j, i); j = j + 1; }
+            i = i + 1;
+        }
+    }
+    if (n >= 4) { i = 0; while (i <= 1) { av1_ftx_b(T, 13 - i, 10 + i, 32, 1); i = i + 1; } }           # 23
+    if (n >= 3) { i = 0; while (i <= 3) { av1_ftx_h(T, i, 7 - i, 0); i = i + 1; } }                     # 22
+    if (n == 6) {                                                                                        # 21
+        i = 0;
+        while (i <= 3) {
+            j = 0;
+            while (j <= 3) { av1_ftx_h(T, 32 + (8 * i) + j, 39 + (8 * i) - j, i & 1); j = j + 1; }
+            i = i + 1;
+        }
+    }
+    if (n >= 5) { i = 0; while (i <= 3) { av1_ftx_b(T, 29 - i, 18 + i, 48 + ((i >> 1) * 64), 1); i = i + 1; } }  # 20
+    if (n >= 4) {                                                                                        # 19
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 1) { av1_ftx_h(T, 8 + (4 * i) + j, 11 + (4 * i) - j, i); j = j + 1; }
+            i = i + 1;
+        }
+    }
+    if (n >= 3) { av1_ftx_b(T, 6, 5, 32, 1); }                                                          # 18
+    i = 0; while (i <= 1) { av1_ftx_h(T, i, 3 - i, 0); i = i + 1; }                                     # 17
+    if (n == 6) {                                                                                        # 16
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 3) {
+                av1_ftx_b(T, 61 - (i * 8) - j, 34 + (i * 8) + j, 56 - (i * 32) + ((j >> 1) * 64), 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n >= 5) {                                                                                        # 15
+        i = 0;
+        while (i <= 3) {
+            j = 0;
+            while (j <= 1) { av1_ftx_h(T, 16 + (4 * i) + j, 19 + (4 * i) - j, i & 1); j = j + 1; }
+            i = i + 1;
+        }
+    }
+    if (n >= 4) { i = 0; while (i <= 1) { av1_ftx_b(T, 14 - i, 9 + i, 48 + (64 * i), 1); i = i + 1; } }  # 14
+    if (n >= 3) { i = 0; while (i <= 1) { av1_ftx_h(T, 4 + (2 * i), 5 + (2 * i), i); i = i + 1; } }      # 13
+    i = 0; while (i <= 1) { av1_ftx_b(T, 2 * i, (2 * i) + 1, 32 + (16 * i), 1 - i); i = i + 1; }        # 12
+    if (n == 6) {                                                                                        # 11
+        i = 0;
+        while (i <= 7) {
+            j = 0;
+            while (j <= 1) { av1_ftx_h(T, 32 + (i * 4) + j, 35 + (i * 4) - j, i & 1); j = j + 1; }
+            i = i + 1;
+        }
+    }
+    if (n >= 5) {                                                                                        # 10
+        i = 0;
+        while (i <= 1) {
+            j = 0;
+            while (j <= 1) {
+                av1_ftx_b(T, 30 - (4 * i) - j, 17 + (4 * i) + j, 24 + (j << 6) + ((1 - i) << 5), 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n >= 4) { i = 0; while (i <= 3) { av1_ftx_h(T, 8 + (2 * i), 9 + (2 * i), i & 1); i = i + 1; } }  # 9
+    if (n >= 3) { i = 0; while (i <= 1) { av1_ftx_b(T, 4 + i, 7 - i, 56 - (32 * i), 0); i = i + 1; } }   # 8
+    if (n == 6) {                                                                                        # 7
+        i = 0;
+        while (i <= 3) {
+            j = 0;
+            while (j <= 1) {
+                av1_ftx_b(T, 62 - (i * 4) - j, 33 + (i * 4) + j, 60 - (16 * av1_brev(2, i)) + (64 * j), 1);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if (n >= 5) { i = 0; while (i <= 7) { av1_ftx_h(T, 16 + (2 * i), 17 + (2 * i), i & 1); i = i + 1; } }  # 6
+    if (n >= 4) {                                                                                        # 5
+        i = 0;
+        while (i <= 3) { av1_ftx_b(T, 8 + i, 15 - i, 12 + (av1_brev(2, 3 - i) << 4), 0); i = i + 1; }
+    }
+    if (n == 6) { i = 0; while (i <= 15) { av1_ftx_h(T, 32 + (i * 2), 33 + (i * 2), i & 1); i = i + 1; } }  # 4
+    if (n >= 5) {                                                                                        # 3
+        i = 0;
+        while (i <= 7) { av1_ftx_b(T, 16 + i, 31 - i, 6 + (av1_brev(3, 7 - i) << 3), 0); i = i + 1; }
+    }
+    if (n == 6) {                                                                                        # 2
+        i = 0;
+        while (i <= 15) { av1_ftx_b(T, 32 + i, 63 - i, 63 - (4 * av1_brev(4, i)), 0); i = i + 1; }
+    }
+    var len = 1 << n;                                                                                    # 7.13.2.2
+    memcpy(copy, T, len * 8);
+    i = 0;
+    while (i < len) {
+        store64(T + (av1_brev(n, i) * 8), load64(copy + (i * 8)));
+        i = i + 1;
+    }
+    return DR_OK;
+}
+
+# ================================================================
+# Forward ADST — ADST4's transpose (7.13.2.6), and ADST8 / ADST16 (7.13.2.7 / .8): 7.13.2.5's output permutation
+# transposed, the steps reversed and transposed (every B there has flip 1, so each is its own transpose), then
+# 7.13.2.4's input permutation transposed.
+# ================================================================
+# 7.13.2.6 is x = M * T before its Round2( , 12 ), where (SINPI_k_9 = S1..S4, and S1 + S2 = S4):
+#   M = [ S1  S3  S4  S2 ;  S2  S3 -S1 -S4 ;  S3  0 -S3  S3 ;  S4 -S3  S2 -S1 ]
+# so the forward is Round2( M^T * T, 12 ).
+fn av1_ftx_adst4(T): i64 {
+    var t0 = load64(T + 0);
+    var t1 = load64(T + 8);
+    var t2 = load64(T + 16);
+    var t3 = load64(T + 24);
+    var x0 = (AV1_SINPI_1_9 * t0) + (AV1_SINPI_2_9 * t1) + (AV1_SINPI_3_9 * t2) + (AV1_SINPI_4_9 * t3);
+    var x1 = AV1_SINPI_3_9 * ((t0 + t1) - t3);
+    var x2 = (AV1_SINPI_4_9 * t0) - (AV1_SINPI_1_9 * t1) - (AV1_SINPI_3_9 * t2) + (AV1_SINPI_2_9 * t3);
+    var x3 = (AV1_SINPI_2_9 * t0) - (AV1_SINPI_4_9 * t1) + (AV1_SINPI_3_9 * t2) - (AV1_SINPI_1_9 * t3);
+    store64(T + 0, av1_round2(x0, 12));
+    store64(T + 8, av1_round2(x1, 12));
+    store64(T + 16, av1_round2(x2, 12));
+    store64(T + 24, av1_round2(x3, 12));
+    return DR_OK;
+}
+
+# 7.13.2.5 transposed: T[ idx ] = ( i & 1 ) ? -copyT[ i ] : copyT[ i ].
+fn av1_ftx_adst_out_t(T, n, copy): i64 {
+    var n0 = 1 << n;
+    memcpy(copy, T, n0 * 8);
+    var i = 0;
+    while (i < n0) {
+        var a = (i >> 3) & 1;
+        var b = ((i >> 2) & 1) ^ ((i >> 3) & 1);
+        var c = ((i >> 1) & 1) ^ ((i >> 2) & 1);
+        var d = (i & 1) ^ ((i >> 1) & 1);
+        var idx = ((d << 3) | (c << 2) | (b << 1) | a) >> (4 - n);
+        var v = load64(copy + (i * 8));
+        if (i & 1) { v = 0 - v; }
+        store64(T + (idx * 8), v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 7.13.2.4 transposed: T[ idx ] = copyT[ i ], idx = ( i & 1 ) ? ( i - 1 ) : ( n0 - i - 1 ).
+fn av1_ftx_adst_in_t(T, n, copy): i64 {
+    var n0 = 1 << n;
+    memcpy(copy, T, n0 * 8);
+    var i = 0;
+    while (i < n0) {
+        var idx = (n0 - i) - 1;
+        if (i & 1) { idx = i - 1; }
+        store64(T + (idx * 8), load64(copy + (i * 8)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn av1_ftx_adst8(T, copy): i64 {
+    av1_ftx_adst_out_t(T, 3, copy);
+    var i = 0;
+    var j = 0;
+    i = 0; while (i <= 1) { av1_ftx_b(T, 2 + (4 * i), 3 + (4 * i), 32, 1); i = i + 1; }                 # 6
+    i = 0;                                                                                               # 5
+    while (i <= 1) {
+        j = 0;
+        while (j <= 1) { av1_ftx_h(T, (4 * j) + i, 2 + (4 * j) + i, 0); j = j + 1; }
+        i = i + 1;
+    }
+    i = 0; while (i <= 1) { av1_ftx_b(T, 4 + (3 * i), 5 + i, 48 - (32 * i), 1); i = i + 1; }            # 4
+    i = 0; while (i <= 3) { av1_ftx_h(T, i, 4 + i, 0); i = i + 1; }                                     # 3
+    i = 0; while (i <= 3) { av1_ftx_b(T, 2 * i, (2 * i) + 1, 60 - (16 * i), 1); i = i + 1; }            # 2
+    av1_ftx_adst_in_t(T, 3, copy);
+    return DR_OK;
+}
+
+fn av1_ftx_adst16(T, copy): i64 {
+    av1_ftx_adst_out_t(T, 4, copy);
+    var i = 0;
+    var j = 0;
+    i = 0; while (i <= 3) { av1_ftx_b(T, 2 + (4 * i), 3 + (4 * i), 32, 1); i = i + 1; }                 # 8
+    i = 0;                                                                                               # 7
+    while (i <= 1) {
+        j = 0;
+        while (j <= 3) { av1_ftx_h(T, (4 * j) + i, 2 + (4 * j) + i, 0); j = j + 1; }
+        i = i + 1;
+    }
+    i = 0;                                                                                               # 6
+    while (i <= 1) {
+        j = 0;
+        while (j <= 1) { av1_ftx_b(T, 4 + (8 * j) + (3 * i), 5 + (8 * j) + i, 48 - (32 * i), 1); j = j + 1; }
+        i = i + 1;
+    }
+    i = 0;                                                                                               # 5
+    while (i <= 3) {
+        j = 0;
+        while (j <= 1) { av1_ftx_h(T, (8 * j) + i, 4 + (8 * j) + i, 0); j = j + 1; }
+        i = i + 1;
+    }
+    i = 0;                                                                                               # 4
+    while (i <= 1) {
+        av1_ftx_b(T, 13 + (2 * i), 12 + (2 * i), 8 + (32 * i), 1);
+        av1_ftx_b(T, 8 + (2 * i), 9 + (2 * i), 56 - (32 * i), 1);
+        i = i + 1;
+    }
+    i = 0; while (i <= 7) { av1_ftx_h(T, i, 8 + i, 0); i = i + 1; }                                     # 3
+    i = 0; while (i <= 7) { av1_ftx_b(T, 2 * i, (2 * i) + 1, 62 - (8 * i), 1); i = i + 1; }             # 2
+    av1_ftx_adst_in_t(T, 4, copy);
+    return DR_OK;
+}
+
+# ================================================================
+# Forward Walsh-Hadamard — the exact inverse of 7.13.2.10 (shift 0). Its outputs are (a, b, c, d) in T[ 0..3 ]: undo
+# d += c and a -= b, recompute e from the restored a and d, undo c = e - c and b = e - b, then d -= b and a += c. Its
+# inputs were read as a = T[ 0 ], c = T[ 1 ], d = T[ 2 ], b = T[ 3 ]. (libaom's av1_fwht4x4_c is the same lifting.)
+# ================================================================
+fn av1_ftx_wht(T): i64 {
+    var a = load64(T + 0);
+    var b = load64(T + 8);
+    var c = load64(T + 16);
+    var d = load64(T + 24);
+    d = d - c;
+    a = a + b;
+    var e = (a - d) >>> 1;
+    c = e - c;
+    b = e - b;
+    d = d + b;
+    a = a - c;
+    store64(T + 0, a);
+    store64(T + 8, c);
+    store64(T + 16, d);
+    store64(T + 24, b);
+    return DR_OK;
+}
+
+# 1 when a 1D transform of this kind and base-2 length exists (the inverse's domain: DCT 4..64, ADST 4..16, identity
+# 4..32).
+fn av1_ftx_kind_ok(kind, n): i64 {
+    if (kind == AV1_TX1D_DCT) { return (n >= 2) && (n <= 6); }
+    if (kind == AV1_TX1D_ADST) { return (n >= 2) && (n <= 4); }
+    return (n >= 2) && (n <= 5);
+}
+
+fn av1_ftx_1d(T, kind, n, copy): i64 {
+    if (kind == AV1_TX1D_DCT) { return av1_ftx_dct(T, n, copy); }
+    if (kind == AV1_TX1D_ADST) {
+        if (n == 2) { return av1_ftx_adst4(T); }
+        if (n == 3) { return av1_ftx_adst8(T, copy); }
+        return av1_ftx_adst16(T, copy);
+    }
+    return av1_itx_identity(T, n);     # a scaling is its own transpose
+}
+
+# x * 2 ^ up (a multiply: no shift of a negative value)
+fn av1_ftx_up(x, up): i64 { return x * (1 << up); }
+
+# ================================================================
+# 2D forward transform — 7.13.3 undone in reverse: the 7.12.3 flips on the input, the column transforms (up-scaled
+# first, rounded down after), then the row transforms (rounded down), then x sqrt(2) (Round2( x * 5793, 12 )) where
+# 7.13.3 scales a 2:1 rectangle by 1 / sqrt(2). Lossless: the forward WHT on the columns, then the rows, then x 4
+# (7.13.3's row pass reads T >> 2).
+# ================================================================
+
+# Transform `residual` (h * w row-major i64, the spatial residual) into `coeff` (h * w row-major i64, caller-allocated,
+# not aliasing residual) for tx_size / tx_type; lossless selects the 4x4 WHT (tx_type is then ignored, as 7.13.3
+# ignores it). Returns DR_OK, AV1_ERR_BAD_TX for a size or type out of range or a pair with no transform (an ADST
+# longer than 16, an identity longer than 32, a lossless block not 4x4), or DR_ERR_OOM.
+fn av1_forward_transform_2d(residual, coeff, tx_size, tx_type, lossless): i64 {
+    if ((tx_size < 0) || (tx_size > 18)) { return AV1_ERR_BAD_TX; }
+    if (av1_itx_tables() == 0) { return DR_ERR_OOM; }   # the size tables and cos128 read it unchecked
+    if ((tx_type < 0) || (tx_type > 15)) { return AV1_ERR_BAD_TX; }
+    var log2w = av1_tx_width_log2(tx_size);
+    var log2h = av1_tx_height_log2(tx_size);
+    var w = 1 << log2w;
+    var h = 1 << log2h;
+    var row_kind = av1_tx_row_kind(tx_type);
+    var col_kind = av1_tx_col_kind(tx_type);
+    if (lossless) {
+        if (tx_size != AV1_TX_4X4) { return AV1_ERR_BAD_TX; }
+    } else {
+        if ((av1_ftx_kind_ok(row_kind, log2w) == 0) || (av1_ftx_kind_ok(col_kind, log2h) == 0)) {
+            return AV1_ERR_BAD_TX;
+        }
+    }
+    var sc = av1_ftx_scratch();
+    if (sc == 0) { return DR_ERR_OOM; }
+    var sh = av1_ftx_shift_table();
+    if (sh == 0) { return DR_ERR_OOM; }
+    var T = sc;
+    var copy = sc + (64 * 8);
+    var up = load64(sh + (tx_size * 8));
+    var mid = load64(sh + ((19 + tx_size) * 8));
+    var low = load64(sh + ((38 + tx_size) * 8));
+    var ud = 0;
+    var lr = 0;
+    if (lossless == 0) {
+        ud = av1_recon_flip_ud(tx_type);
+        lr = av1_recon_flip_lr(tx_type);
+    }
+    var rect = 0;
+    if (av1_itx_abs(log2w - log2h) == 1) { rect = 1; }
+
+    # --- Column transforms, into coeff ---
+    var j = 0;
+    while (j < w) {
+        var sj = j;
+        if (lr) { sj = (w - 1) - j; }
+        var i = 0;
+        while (i < h) {
+            var si = i;
+            if (ud) { si = (h - 1) - i; }
+            var v = load64(residual + (((si * w) + sj) * 8));
+            if (lossless == 0) { v = av1_ftx_up(v, up); }
+            store64(T + (i * 8), v);
+            i = i + 1;
+        }
+        var rc = DR_OK;
+        if (lossless) { rc = av1_ftx_wht(T); } else { rc = av1_ftx_1d(T, col_kind, log2h, copy); }
+        if (rc != DR_OK) { return rc; }
+        i = 0;
+        while (i < h) {
+            var cv = load64(T + (i * 8));
+            if (lossless == 0) { cv = av1_round2(cv, mid); }
+            store64(coeff + (((i * w) + j) * 8), cv);
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+
+    # --- Row transforms, in place ---
+    var r = 0;
+    while (r < h) {
+        var c = 0;
+        while (c < w) {
+            store64(T + (c * 8), load64(coeff + (((r * w) + c) * 8)));
+            c = c + 1;
+        }
+        var rc2 = DR_OK;
+        if (lossless) { rc2 = av1_ftx_wht(T); } else { rc2 = av1_ftx_1d(T, row_kind, log2w, copy); }
+        if (rc2 != DR_OK) { return rc2; }
+        c = 0;
+        while (c < w) {
+            var ov = load64(T + (c * 8));
+            if (lossless) {
+                ov = ov * 4;
+            } else {
+                ov = av1_round2(ov, low);
+                if (rect) { ov = av1_round2(ov * 5793, 12); }
+            }
+            if ((r >= 32) || (c >= 32)) { ov = 0; }
+            store64(coeff + (((r * w) + c) * 8), ov);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return DR_OK;
+}

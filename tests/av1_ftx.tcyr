@@ -1,0 +1,489 @@
+# tests/av1_ftx.tcyr — the forward transform (src/av1_ftx.cyr): the transpose of the spec's inverse (7.13).
+#
+# Every known answer comes from scripts/refs/fwd_txfm_ref.py, which derives the forward transform from the spec's
+# inverse operation lists (7.13.2.3 / .7 / .8 / .6 / .10), proves each 1D forward is the exact transpose of the spec
+# inverse in rational arithmetic, and checks it bit for bit against libaom's own forward transform compiled from ref/
+# (scripts/refs/fwd_txfm_libaom.c, at the spec's 12-bit cosine precision) — never from this Cyrius. Regenerate with
+#   python3 scripts/refs/fwd_txfm_ref.py --emit
+# The residuals are seeded LCG blocks both sides compute alike: x = (x * 1103515245 + 12345) & (2^31 - 1), value
+# ((x >> 8) % (2 * maxv + 1)) - maxv. The digests are D1 = sum (k + 1) * c[ k ] (positions) and D2 = sum c[ k ]^2.
+include "src/main.cyr"
+
+var Ftx_Res = 0;    # 4096 i64: a residual
+var Ftx_Coef = 0;   # 4096 i64: its coefficients
+var Ftx_Rec = 0;    # 4096 i64: the inverse transform's output
+var Ftx_T = 0;      # 128 i64: a 1D array + its permutation copy
+
+fn ftx_bufs(): i64 {
+    if (Ftx_Res == 0) {
+        Ftx_Res = alloc(4096 * 8);
+        Ftx_Coef = alloc(4096 * 8);
+        Ftx_Rec = alloc(4096 * 8);
+        Ftx_T = alloc(128 * 8);
+    }
+    return 0;
+}
+fn ftx_lcg(buf, seed, count, maxv): i64 {
+    var x = seed;
+    var k = 0;
+    while (k < count) {
+        x = ((x * 1103515245) + 12345) & 2147483647;
+        store64(buf + (k * 8), ((x >> 8) % ((2 * maxv) + 1)) - maxv);
+        k = k + 1;
+    }
+    return 0;
+}
+fn ftx_d1(buf, count): i64 {
+    var s = 0;
+    var k = 0;
+    while (k < count) { s = s + ((k + 1) * load64(buf + (k * 8))); k = k + 1; }
+    return s;
+}
+fn ftx_d2(buf, count): i64 {
+    var s = 0;
+    var k = 0;
+    while (k < count) { var v = load64(buf + (k * 8)); s = s + (v * v); k = k + 1; }
+    return s;
+}
+fn ftx_w(t): i64 { return 1 << av1_tx_width_log2(t); }
+fn ftx_h(t): i64 { return 1 << av1_tx_height_log2(t); }
+fn ftx_big(t): i64 { return (ftx_w(t) == 64) || (ftx_h(t) == 64); }
+
+# max |Inv(coef) - res| through av1_inverse_transform_2d (7.13.3) and the flipped read of av1_reconstruct (7.12.3)
+fn ftx_roundtrip(t, typ, bd, lossless): i64 {
+    var w = ftx_w(t);
+    var h = ftx_h(t);
+    if (av1_inverse_transform_2d(Ftx_Coef, Ftx_Rec, t, typ, lossless, bd) != DR_OK) { return 0 - 1; }
+    var ud = 0;
+    var lr = 0;
+    if (lossless == 0) { ud = av1_recon_flip_ud(typ); lr = av1_recon_flip_lr(typ); }
+    var worst = 0;
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            var si = i;
+            if (ud) { si = (h - 1) - i; }
+            var sj = j;
+            if (lr) { sj = (w - 1) - j; }
+            var d = load64(Ftx_Rec + (((si * w) + sj) * 8)) - load64(Ftx_Res + (((i * w) + j) * 8));
+            if (d < 0) { d = 0 - d; }
+            if (d > worst) { worst = d; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return worst;
+}
+
+# ---- 1D: every kernel on a 15-bit seeded vector ----
+fn ftx_kat1(kind, n, d1, d2): i64 {
+    ftx_lcg(Ftx_T, (500 + (10 * kind)) + n, 1 << n, 32767);
+    assert_eq(av1_ftx_1d(Ftx_T, kind, n, Ftx_T + (64 * 8)), DR_OK, "1D forward runs");
+    assert_eq(ftx_d1(Ftx_T, 1 << n), d1, "1D forward: positions digest");
+    assert_eq(ftx_d2(Ftx_T, 1 << n), d2, "1D forward: energy digest");
+    return 0;
+}
+fn test_ftx_1d() {
+    ftx_kat1(0, 2, 109544, 2773813470);
+    ftx_kat1(0, 3, 374783, 12606456047);
+    ftx_kat1(0, 4, -2863003, 44938795230);
+    ftx_kat1(0, 5, -7322592, 201199502098);
+    ftx_kat1(0, 6, 32110947, 825689207902);
+    ftx_kat1(1, 2, 123081, 1831683742);
+    ftx_kat1(1, 3, -164487, 8693008768);
+    ftx_kat1(1, 4, -2288946, 22262723586);
+    ftx_kat1(2, 2, -2408, 479770120);
+    ftx_kat1(2, 3, -319806, 12070906852);
+    ftx_kat1(2, 4, -146950, 39901651886);
+    ftx_kat1(2, 5, -266920, 236887718240);
+    return 0;
+}
+
+# ---- 2D: every legal (size, type) pair, 8- and 12-bit residuals; then the round trip through drishti's inverse ----
+var Ftx_Rt_Bad = 0;   # non-64 pairs whose round trip exceeds 2 (8-bit) / 5 (12-bit)
+fn ftx_kat(t, typ, d1_8, d2_8, d1_12, d2_12, rt8, rt12): i64 {
+    var n = ftx_w(t) * ftx_h(t);
+    var seed = (1 + (16 * t)) + typ;
+    ftx_lcg(Ftx_Res, seed, n, 255);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, t, typ, 0), DR_OK, "forward 2D runs (8-bit residual)");
+    assert_eq(ftx_d1(Ftx_Coef, n), d1_8, "forward 2D, 8-bit: positions digest");
+    assert_eq(ftx_d2(Ftx_Coef, n), d2_8, "forward 2D, 8-bit: energy digest");
+    var e8 = ftx_roundtrip(t, typ, 8, 0);
+    assert_eq(e8, rt8, "round trip, 8-bit: the port's worst error");
+    ftx_lcg(Ftx_Res, seed, n, 4095);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, t, typ, 0), DR_OK, "forward 2D runs (12-bit residual)");
+    assert_eq(ftx_d1(Ftx_Coef, n), d1_12, "forward 2D, 12-bit: positions digest");
+    assert_eq(ftx_d2(Ftx_Coef, n), d2_12, "forward 2D, 12-bit: energy digest");
+    var e12 = ftx_roundtrip(t, typ, 12, 0);
+    assert_eq(e12, rt12, "round trip, 12-bit: the port's worst error");
+    # the property the forward exists for: below a 64-point dimension (whose upper 32 frequencies 7.13.3 drops), it
+    # inverts the inverse to within rounding
+    if ((ftx_big(t) == 0) && ((e8 > 2) || (e12 > 5))) { Ftx_Rt_Bad = Ftx_Rt_Bad + 1; }
+    return 0;
+}
+fn test_ftx_2d() {
+    ftx_kat(0, 0, 5576, 27210227, -606807, 7988037339, 0, 2);
+    ftx_kat(0, 1, -65522, 24972118, -247237, 7013470939, 0, 1);
+    ftx_kat(0, 2, 53112, 25212576, 396031, 4588982982, 0, 2);
+    ftx_kat(0, 3, -26892, 15888527, 843348, 6200902243, 0, 1);
+    ftx_kat(0, 4, -27760, 22741727, -681133, 6218185900, 0, 1);
+    ftx_kat(0, 5, 20634, 23005798, -448083, 3752980519, 0, 1);
+    ftx_kat(0, 6, 50980, 11078429, -929656, 3923761581, 0, 1);
+    ftx_kat(0, 7, -5684, 28330053, 816832, 5002094024, 0, 1);
+    ftx_kat(0, 8, -8432, 18363065, -659284, 6736046675, 0, 1);
+    ftx_kat(0, 9, -95898, 20910420, -774316, 6605426009, 0, 1);
+    ftx_kat(0, 10, 24615, 17206250, -397713, 5732114333, 0, 0);
+    ftx_kat(0, 11, -41825, 22207870, -265825, 4444003376, 0, 0);
+    ftx_kat(0, 12, -25815, 28698649, 1133724, 7549163654, 0, 1);
+    ftx_kat(0, 13, 10522, 21968961, -845325, 7421102079, 0, 0);
+    ftx_kat(0, 14, 75281, 22195757, -1184182, 7506358452, 0, 0);
+    ftx_kat(0, 15, 34219, 17696286, 265556, 9344858572, 0, 0);
+    ftx_kat(1, 0, -18741, 92427647, 75984, 25892332487, 0, 2);
+    ftx_kat(1, 1, 531209, 79957098, 2349212, 21398382370, 0, 3);
+    ftx_kat(1, 2, -47593, 85482055, 3317600, 21374669116, 0, 3);
+    ftx_kat(1, 3, -569085, 103799533, 10610609, 25580647437, 1, 4);
+    ftx_kat(1, 4, 260108, 96106037, 7316685, 22591892628, 0, 2);
+    ftx_kat(1, 5, -159324, 88194176, -2913735, 20901885175, 1, 3);
+    ftx_kat(1, 6, 15997, 93783232, -7892701, 21961797696, 1, 3);
+    ftx_kat(1, 7, 324155, 99953405, -2177113, 21109863367, 0, 3);
+    ftx_kat(1, 8, -457442, 105310291, 6305554, 21613694426, 1, 3);
+    ftx_kat(1, 9, -199008, 92520640, -991288, 25540770496, 0, 0);
+    ftx_kat(1, 10, -136972, 91675892, -1374082, 24147245372, 0, 1);
+    ftx_kat(1, 11, 393734, 79161587, 12618441, 22265499150, 0, 1);
+    ftx_kat(1, 12, -13178, 87826236, -2717130, 25480717688, 0, 2);
+    ftx_kat(1, 13, -242765, 95836089, -2564631, 29271396398, 0, 2);
+    ftx_kat(1, 14, -644836, 79708772, -2927196, 23907831844, 0, 2);
+    ftx_kat(1, 15, -152352, 70120375, -641042, 20627245554, 0, 2);
+    ftx_kat(2, 0, 627540, 372529307, 33611986, 81207098870, 1, 3);
+    ftx_kat(2, 1, -2533018, 343756702, 41644998, 87265715970, 1, 3);
+    ftx_kat(2, 2, -2561746, 379999492, -36928182, 89262264941, 1, 3);
+    ftx_kat(2, 3, 434798, 375384152, -16860267, 93543092325, 1, 3);
+    ftx_kat(2, 4, -3260245, 378625281, -22364465, 94446639298, 0, 4);
+    ftx_kat(2, 5, -18837, 329960653, 113030792, 94136514067, 1, 3);
+    ftx_kat(2, 6, 2124420, 353677559, -58222898, 96211257480, 1, 3);
+    ftx_kat(2, 7, 1772916, 342834216, -30645909, 96179191770, 1, 3);
+    ftx_kat(2, 8, -961702, 354621790, -7712337, 89487077274, 1, 3);
+    ftx_kat(2, 9, 451253, 368973999, 19114856, 87880978039, 0, 1);
+    ftx_kat(2, 10, -6316931, 372000787, -5615558, 102496125677, 0, 2);
+    ftx_kat(2, 11, 84679, 356346214, 69971360, 102126453734, 0, 2);
+    ftx_kat(2, 12, -2748536, 381032700, 36955992, 96632780041, 0, 2);
+    ftx_kat(2, 13, -6789533, 360843064, -57987880, 90316312243, 0, 2);
+    ftx_kat(2, 14, 2880683, 320960797, 22479056, 87172498222, 0, 2);
+    ftx_kat(2, 15, 3771734, 359724270, 4871689, 90587195882, 1, 1);
+    ftx_kat(3, 0, 2037661, 348807343, 62483627, 93955289762, 1, 4);
+    ftx_kat(3, 9, 995352, 361897104, -21375908, 93633696176, 0, 0);
+    ftx_kat(3, 10, 21576048, 357675792, 131975780, 87466694144, 1, 2);
+    ftx_kat(3, 11, 10048383, 340044872, -318643087, 90197180185, 1, 2);
+    ftx_kat(4, 0, 18222621, 89176750, 100974074, 22122062309, 383, 6067);
+    ftx_kat(5, 0, 8869, 44674045, -1341471, 9984474490, 0, 2);
+    ftx_kat(5, 1, -257229, 48929930, -2236972, 6711547610, 0, 2);
+    ftx_kat(5, 2, -21881, 43025394, -1924053, 9730241294, 0, 2);
+    ftx_kat(5, 3, -165957, 50131592, -90267, 9076274984, 0, 2);
+    ftx_kat(5, 4, -67881, 44271811, 595168, 11274513625, 0, 3);
+    ftx_kat(5, 5, -226688, 50051057, 1565034, 12637690535, 0, 2);
+    ftx_kat(5, 6, -64396, 61744894, 1553081, 10027303808, 0, 3);
+    ftx_kat(5, 7, 37954, 42987605, -3581917, 13875240904, 0, 3);
+    ftx_kat(5, 8, 101697, 38389348, -2871291, 13846752795, 0, 3);
+    ftx_kat(5, 9, -87841, 49902313, -1110109, 12096956414, 0, 0);
+    ftx_kat(5, 10, -126069, 37501702, 1064777, 13491663783, 0, 1);
+    ftx_kat(5, 11, -142974, 51702756, -512542, 12134573088, 0, 1);
+    ftx_kat(5, 12, -146522, 37063385, -1192418, 9716870304, 0, 2);
+    ftx_kat(5, 13, -182558, 57139256, -1909499, 12815826892, 0, 1);
+    ftx_kat(5, 14, -68307, 53460117, -2543577, 10992026512, 0, 2);
+    ftx_kat(5, 15, 207065, 45890069, 1464213, 10247741217, 0, 1);
+    ftx_kat(6, 0, -40290, 33363284, -3515518, 11336035052, 0, 2);
+    ftx_kat(6, 1, 48184, 47948348, -2936507, 9384714054, 0, 2);
+    ftx_kat(6, 2, -167864, 40886367, -635023, 12060492837, 1, 3);
+    ftx_kat(6, 3, 44556, 50231861, 1046747, 6989076792, 1, 2);
+    ftx_kat(6, 4, -120401, 52621660, 822837, 10731335746, 0, 2);
+    ftx_kat(6, 5, 32303, 48688268, -296538, 10059367374, 0, 3);
+    ftx_kat(6, 6, 164971, 50822750, 3013819, 11490283437, 0, 2);
+    ftx_kat(6, 7, -86959, 32156851, -1298221, 14914178139, 0, 3);
+    ftx_kat(6, 8, -153448, 52370855, -1756139, 12195811829, 1, 3);
+    ftx_kat(6, 9, 57133, 42540011, 524569, 10508563963, 0, 1);
+    ftx_kat(6, 10, 114043, 43797126, 4310822, 11156158989, 0, 1);
+    ftx_kat(6, 11, -32562, 48252294, 3927889, 12345143916, 0, 1);
+    ftx_kat(6, 12, -142389, 44662004, 321697, 11911394189, 0, 1);
+    ftx_kat(6, 13, 30506, 46495162, -78203, 11023597579, 0, 2);
+    ftx_kat(6, 14, -51653, 49692637, 1156733, 10309223655, 0, 1);
+    ftx_kat(6, 15, -99024, 42171422, -651908, 11525990871, 1, 2);
+    ftx_kat(7, 0, -1229461, 170330676, -25922969, 46587004866, 0, 2);
+    ftx_kat(7, 1, -897413, 177487444, -27457, 47908248334, 1, 2);
+    ftx_kat(7, 2, 420211, 201679777, 2989685, 36644388497, 1, 3);
+    ftx_kat(7, 3, -428460, 178972503, 15194876, 49498928884, 1, 4);
+    ftx_kat(7, 4, -1480627, 187652266, 1761995, 41035071413, 1, 3);
+    ftx_kat(7, 5, -1225537, 184549200, -7415361, 40288742907, 1, 3);
+    ftx_kat(7, 6, -922981, 203079496, 830164, 43860888657, 1, 4);
+    ftx_kat(7, 7, -39411, 194387324, -27359475, 43571753922, 1, 3);
+    ftx_kat(7, 8, 758196, 181781011, 26556441, 43646605151, 1, 4);
+    ftx_kat(7, 9, -799244, 180994731, -8597339, 49261901996, 0, 1);
+    ftx_kat(7, 10, 178686, 172668047, 5422470, 49867111473, 0, 2);
+    ftx_kat(7, 11, 93762, 181270604, 798802, 50493279176, 0, 1);
+    ftx_kat(7, 12, -1011870, 178658424, 4539683, 41158363086, 0, 2);
+    ftx_kat(7, 13, 319737, 211854218, -5290679, 45059892771, 0, 2);
+    ftx_kat(7, 14, -1636911, 184999054, 14052674, 42779169033, 0, 1);
+    ftx_kat(7, 15, 692930, 176325226, -5196978, 47972975462, 1, 2);
+    ftx_kat(8, 0, -1465948, 186286244, -92013, 42273511318, 1, 3);
+    ftx_kat(8, 1, 397353, 182726476, 6135416, 41139561714, 1, 4);
+    ftx_kat(8, 2, -955791, 186975717, 33205058, 46556538987, 1, 3);
+    ftx_kat(8, 3, 2180800, 181203156, -12007667, 46382847523, 1, 3);
+    ftx_kat(8, 4, 1130957, 177886381, -21016333, 48047030464, 1, 4);
+    ftx_kat(8, 5, 323791, 179561588, 8355529, 45657711477, 1, 3);
+    ftx_kat(8, 6, -1837552, 180986898, -12444731, 43166833416, 1, 3);
+    ftx_kat(8, 7, -1290878, 172224037, 23175984, 43983631736, 1, 3);
+    ftx_kat(8, 8, -1006978, 180110944, -9755824, 42757056551, 1, 4);
+    ftx_kat(8, 9, -1534018, 168211505, 10665371, 46663177663, 0, 1);
+    ftx_kat(8, 10, -890579, 175890475, -27442105, 42152499729, 1, 1);
+    ftx_kat(8, 11, 401465, 170522968, 4728334, 42621566498, 0, 2);
+    ftx_kat(8, 12, -135928, 154492596, 20683363, 49455744272, 0, 2);
+    ftx_kat(8, 13, -1165778, 193798088, 10944214, 45790968802, 0, 2);
+    ftx_kat(8, 14, -659409, 182991079, 11700412, 45052137423, 1, 2);
+    ftx_kat(8, 15, -699283, 179385669, -4996164, 47809130144, 1, 2);
+    ftx_kat(9, 0, -2416162, 165978846, -51664601, 45844904618, 1, 3);
+    ftx_kat(9, 2, -5379063, 169725848, -111378819, 48442789985, 1, 3);
+    ftx_kat(9, 5, 3096293, 187166200, 70552335, 45514586109, 2, 3);
+    ftx_kat(9, 9, 4434766, 177608419, -14492352, 45409873316, 0, 1);
+    ftx_kat(9, 10, 997076, 182746743, -17560008, 44294858199, 1, 2);
+    ftx_kat(9, 11, -2275826, 169805207, 79777805, 44440025607, 1, 2);
+    ftx_kat(9, 13, -4564071, 167672923, -38558109, 46025986751, 1, 2);
+    ftx_kat(9, 15, 1911867, 195937447, -4601859, 46351040966, 1, 2);
+    ftx_kat(10, 0, -3249979, 183334846, 46876221, 49253087684, 2, 4);
+    ftx_kat(10, 1, 2870506, 181746653, 148061757, 46374743050, 2, 4);
+    ftx_kat(10, 4, 1531601, 181682624, 157965081, 47262677094, 2, 5);
+    ftx_kat(10, 9, 8314819, 181541502, -93516681, 45407851999, 1, 1);
+    ftx_kat(10, 10, -1864437, 186371784, -31085981, 46381192427, 1, 3);
+    ftx_kat(10, 11, -7018143, 182615417, 23729892, 45007132401, 1, 2);
+    ftx_kat(10, 12, 1510977, 175001449, -52942004, 44440357494, 1, 3);
+    ftx_kat(10, 14, 5218882, 184379746, -75731542, 50127512841, 1, 3);
+    ftx_kat(11, 0, 9418289, 92575868, -34469703, 23475062204, 339, 5155);
+    ftx_kat(11, 10, -7778028, 88559747, -63158343, 24159922191, 303, 5009);
+    ftx_kat(12, 0, -1712097, 89000456, -380082332, 23798308415, 334, 4974);
+    ftx_kat(12, 11, -14511040, 91777063, -72726809, 24174101498, 330, 5053);
+    ftx_kat(13, 0, 279661, 85416821, -14214700, 24842622480, 0, 3);
+    ftx_kat(13, 1, -277096, 106785087, 1074927, 22649581376, 0, 2);
+    ftx_kat(13, 2, -502820, 96709266, -6322592, 27961966802, 1, 2);
+    ftx_kat(13, 3, 20646, 89538506, 3507813, 23911346145, 0, 3);
+    ftx_kat(13, 4, 385900, 97102153, 3279292, 21802293116, 0, 3);
+    ftx_kat(13, 5, 372554, 120957292, -3103754, 24527031865, 0, 2);
+    ftx_kat(13, 6, 498385, 84288418, -1247084, 21598078989, 0, 2);
+    ftx_kat(13, 7, -405604, 77431384, -7951415, 21422606424, 0, 3);
+    ftx_kat(13, 8, 413398, 94324876, 3897918, 23906519010, 0, 2);
+    ftx_kat(13, 9, 627669, 83890784, -312038, 24655589321, 0, 1);
+    ftx_kat(13, 10, 283095, 80282040, 6106309, 25030417776, 0, 2);
+    ftx_kat(13, 11, 257230, 82028409, -6888793, 24891511081, 0, 0);
+    ftx_kat(13, 12, 158097, 117693727, 2121515, 23749140834, 0, 1);
+    ftx_kat(13, 13, 25956, 71847033, -9137637, 26379908290, 0, 1);
+    ftx_kat(13, 14, 451556, 80405091, 1782227, 23794567271, 0, 1);
+    ftx_kat(13, 15, 27339, 80906982, 4028791, 16928377262, 0, 0);
+    ftx_kat(14, 0, 81384, 104776854, -5834344, 20094321836, 1, 2);
+    ftx_kat(14, 1, 772161, 79430726, 1711993, 22415394526, 1, 2);
+    ftx_kat(14, 2, -151692, 90674466, 10764986, 18765365139, 1, 2);
+    ftx_kat(14, 3, -14332, 103972749, 6217323, 27061582868, 1, 3);
+    ftx_kat(14, 4, -167241, 82726101, 4947852, 23779567915, 0, 3);
+    ftx_kat(14, 5, -369336, 91074306, -6601180, 21831631066, 1, 2);
+    ftx_kat(14, 6, -296263, 78287683, 3307760, 21675175990, 0, 2);
+    ftx_kat(14, 7, 725, 97561463, 475486, 19507263846, 0, 2);
+    ftx_kat(14, 8, -123055, 107737043, 8444450, 23254018017, 0, 2);
+    ftx_kat(14, 9, 323642, 93110210, -788518, 20763587214, 0, 1);
+    ftx_kat(14, 10, 371600, 89917266, -17435258, 22688455979, 1, 0);
+    ftx_kat(14, 11, 161952, 81196085, 2229248, 26471836468, 0, 1);
+    ftx_kat(14, 12, 228207, 83747723, 2703661, 25816024862, 0, 1);
+    ftx_kat(14, 13, -25911, 96666768, 5230815, 28692224180, 0, 2);
+    ftx_kat(14, 14, -86753, 71818220, -2599494, 18451376748, 0, 1);
+    ftx_kat(14, 15, -71339, 76544139, 4894317, 20942458908, 0, 2);
+    ftx_kat(15, 0, 2420786, 356531082, 2894226, 93280825295, 0, 3);
+    ftx_kat(15, 2, -7494367, 378165957, -28662414, 89542067097, 1, 4);
+    ftx_kat(15, 5, 1177815, 350918922, -7872860, 85120403474, 1, 3);
+    ftx_kat(15, 9, 1186208, 394794368, -24379784, 91041138944, 0, 0);
+    ftx_kat(15, 10, 4065252, 321077612, -10490114, 93403032452, 0, 2);
+    ftx_kat(15, 11, -3640373, 360794744, -4660171, 98917759651, 0, 1);
+    ftx_kat(15, 13, 184621, 358402098, -58975503, 101943692890, 0, 2);
+    ftx_kat(15, 15, 3154958, 361675168, 2068605, 91543105820, 0, 2);
+    ftx_kat(16, 0, 1836620, 337370179, 38831475, 84740017403, 1, 3);
+    ftx_kat(16, 1, -5572058, 350610962, 30299989, 96095208428, 1, 3);
+    ftx_kat(16, 4, 675521, 344266702, 13616914, 97580160885, 1, 4);
+    ftx_kat(16, 9, 3831696, 345441344, -41136888, 90180445376, 0, 0);
+    ftx_kat(16, 10, 239676, 346845888, -1165416, 85688698336, 0, 1);
+    ftx_kat(16, 11, 3842998, 368458297, -32125915, 93823112970, 0, 2);
+    ftx_kat(16, 12, 1004696, 393162736, 10699048, 90409579136, 1, 2);
+    ftx_kat(16, 14, -1669940, 357143200, -74047664, 95307041056, 1, 3);
+    ftx_kat(17, 0, -166887, 171833953, 68518858, 46544058264, 298, 4730);
+    ftx_kat(17, 2, -3403152, 177306723, -94384114, 47766946342, 328, 4891);
+    ftx_kat(17, 5, 2051976, 204207133, 86981066, 49589771027, 270, 5037);
+    ftx_kat(17, 10, 6033919, 174796161, -13501555, 49029007686, 314, 5146);
+    ftx_kat(18, 0, 11232783, 198157840, -203747223, 45003878722, 281, 4762);
+    ftx_kat(18, 1, -4086831, 171954735, -148891314, 44556586276, 372, 4601);
+    ftx_kat(18, 4, -8141274, 174545412, -128915161, 45432387254, 290, 5123);
+    ftx_kat(18, 11, 54537, 189782877, 120939080, 42754225158, 291, 4687);
+    assert_eq(Ftx_Rt_Bad, 0, "every pair below 64 points round-trips within 2 (8-bit) / 5 (12-bit)");
+    return 0;
+}
+
+# ---- the WHT kernel on its own. Inside the 2D lossless path a LOGICAL shift for its e = ( a - d ) >> 1 is an
+# equivalent mutant in wrapping i64 arithmetic: it adds 2^63, the second pass spreads that to multiples of 2^62, and the
+# final x 4 sends them to 0 mod 2^64. So the kernel is pinned directly, on vectors with a - d < 0 ----
+fn ftx_katw(seed, d1, d2): i64 {
+    ftx_lcg(Ftx_T, seed, 4, 32767);
+    av1_ftx_wht(Ftx_T);
+    assert_eq(ftx_d1(Ftx_T, 4), d1, "WHT kernel: positions digest");
+    assert_eq(ftx_d2(Ftx_T, 4), d2, "WHT kernel: energy digest");
+    return 0;
+}
+fn test_ftx_wht_kernel() {
+    ftx_katw(600, 23976, 1513503623);
+    ftx_katw(601, -3498, 520886395);
+    ftx_katw(602, -31363, 724513541);
+    ftx_katw(603, -190036, 1833676534);
+    ftx_katw(605, 82296, 1402816677);
+    # by hand: d = 5 - 0 = 5, a = 0 + 0 = 0, e = (0 - 5) >> 1 = -3 (floor), c = e - 0 = -3, b = e - 0 = -3,
+    # d = 5 + b = 2, a = 0 - c = 3; out (a, c, d, b)
+    store64(Ftx_T, 0); store64(Ftx_T + 8, 0); store64(Ftx_T + 16, 0); store64(Ftx_T + 24, 5);
+    av1_ftx_wht(Ftx_T);
+    assert_eq(load64(Ftx_T), 3, "fwd_wht([0, 0, 0, 5])[0] = 3");
+    assert_eq(load64(Ftx_T + 8), 0 - 3, "[1] = -3");
+    assert_eq(load64(Ftx_T + 16), 2, "[2] = 2");
+    assert_eq(load64(Ftx_T + 24), 0 - 3, "[3] = -3");
+    return 0;
+}
+
+# ---- lossless: the forward WHT is the exact inverse of 7.13.2.10 ----
+fn test_ftx_lossless() {
+    var seeds = alloc(3 * 8);
+    var want1 = alloc(3 * 8);
+    var want2 = alloc(3 * 8);
+    store64(want1 + 0, -401732);
+    store64(want2 + 0, 1357250272);
+    store64(want1 + 8, -364516);
+    store64(want2 + 8, 1252046928);
+    store64(want1 + 16, -40384);
+    store64(want2 + 16, 1034470992);
+    var s = 0;
+    while (s < 3) {
+        ftx_lcg(Ftx_Res, 101 + s, 16, 4095);
+        assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_4X4, AV1_DCT_DCT, 1), DR_OK, "lossless forward");
+        assert_eq(ftx_d1(Ftx_Coef, 16), load64(want1 + (s * 8)), "lossless: positions digest");
+        assert_eq(ftx_d2(Ftx_Coef, 16), load64(want2 + (s * 8)), "lossless: energy digest");
+        s = s + 1;
+    }
+    # exact round trip through the spec's inverse WHT, whatever the tx_type passed (7.13.3 ignores it when lossless)
+    var inexact = 0;
+    var k = 0;
+    while (k < 2000) {
+        var maxv = 255;
+        var bd = 8;
+        if (k >= 1000) { maxv = 4095; bd = 12; }
+        ftx_lcg(Ftx_Res, 7000 + k, 16, maxv);
+        av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_4X4, k % 16, 1);
+        if (ftx_roundtrip(AV1_TX_4X4, k % 16, bd, 1) != 0) { inexact = inexact + 1; }
+        k = k + 1;
+    }
+    assert_eq(inexact, 0, "2000 lossless blocks (8- and 12-bit) come back EXACTLY");
+    return 0;
+}
+
+# ---- a 64-point dimension keeps only its lowest 32 frequencies (7.13.3 reads nothing beyond) ----
+fn test_ftx_64_zero() {
+    var sizes = alloc(5 * 8);
+    store64(sizes, AV1_TX_64X64);
+    store64(sizes + 8, 11);    # TX_32X64
+    store64(sizes + 16, 12);   # TX_64X32
+    store64(sizes + 24, 17);   # TX_16X64
+    store64(sizes + 32, 18);   # TX_64X16
+    var stray = 0;
+    var kept = 0;
+    var s = 0;
+    while (s < 5) {
+        var t = load64(sizes + (s * 8));
+        var w = ftx_w(t);
+        var h = ftx_h(t);
+        ftx_lcg(Ftx_Res, 900 + s, w * h, 255);
+        av1_forward_transform_2d(Ftx_Res, Ftx_Coef, t, AV1_DCT_DCT, 0);
+        var i = 0;
+        while (i < h) {
+            var j = 0;
+            while (j < w) {
+                var v = load64(Ftx_Coef + (((i * w) + j) * 8));
+                if (((i >= 32) || (j >= 32)) && (v != 0)) { stray = stray + 1; }
+                if ((i < 32) && (j < 32) && (v != 0)) { kept = kept + 1; }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        s = s + 1;
+    }
+    assert_eq(stray, 0, "no coefficient outside the kept 32 x 32 region is non-zero");
+    assert(kept > 1000, "the kept region carries the block");
+    return 0;
+}
+
+# ---- refusals: what has no transform ----
+fn test_ftx_refusals() {
+    ftx_lcg(Ftx_Res, 5, 4096, 255);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, 0 - 1, AV1_DCT_DCT, 0), AV1_ERR_BAD_TX, "tx_size -1");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, 19, AV1_DCT_DCT, 0), AV1_ERR_BAD_TX, "tx_size 19");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_4X4, 16, 0), AV1_ERR_BAD_TX, "tx_type 16");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_4X4, 0 - 1, 0), AV1_ERR_BAD_TX, "tx_type -1");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_32X32, AV1_ADST_ADST, 0), AV1_ERR_BAD_TX,
+      "no 32-point ADST");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_64X64, AV1_IDTX, 0), AV1_ERR_BAD_TX,
+      "no 64-point identity");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, 13, AV1_V_ADST, 0), DR_OK, "4x16 V_ADST: ADST16 columns");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, 14, AV1_V_ADST, 0), DR_OK, "16x4 V_ADST: ADST4 columns");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, 17, AV1_V_ADST, 0), AV1_ERR_BAD_TX,
+      "16x64 V_ADST: no 64-point ADST column");
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_8X8, AV1_DCT_DCT, 1), AV1_ERR_BAD_TX,
+      "lossless is 4x4 only");
+    return 0;
+}
+
+# ---- memory: lazily built once (each failure stops the call with DR_ERR_OOM), then nothing per call ----
+var Ftx_Sweep_T = 0;
+fn ftx_sweep_op(arg): i64 {
+    return av1_forward_transform_2d(Ftx_Res, Ftx_Coef, arg, AV1_DCT_DCT, 0);
+}
+fn test_ftx_lazy_oom() {
+    # run FIRST, before anything in this process builds a table: each lazy build in turn is failed
+    ftx_bufs();
+    ftx_lcg(Ftx_Res, 3, 64, 255);
+    dr_alloc_fail_at(1);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_8X8, AV1_DCT_DCT, 0), DR_ERR_OOM,
+      "the inverse's size tables cannot be built: OOM, no crash");
+    dr_alloc_fail_at(0);
+    assert(av1_itx_tables() != 0, "they build once memory is back");
+    dr_alloc_fail_at(1);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_8X8, AV1_DCT_DCT, 0), DR_ERR_OOM,
+      "the scratch cannot be built: OOM");
+    dr_alloc_fail_at(0);
+    assert(av1_ftx_scratch() != 0, "the scratch builds once memory is back");
+    dr_alloc_fail_at(1);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_8X8, AV1_DCT_DCT, 0), DR_ERR_OOM,
+      "the shift table cannot be built: OOM");
+    dr_alloc_fail_at(0);
+    assert_eq(av1_forward_transform_2d(Ftx_Res, Ftx_Coef, AV1_TX_8X8, AV1_DCT_DCT, 0), DR_OK, "then it runs");
+    var n = 0;
+    assert_eq(dr_alloc_sweep(&ftx_sweep_op, AV1_TX_64X64, &n), 0, "the OOM sweep over a 64x64 forward holds");
+    assert_eq(n, 0, "a forward transform allocates nothing per call");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("forward transform: lazily built state under OOM");
+    test_ftx_lazy_oom();
+    ftx_bufs();
+    test_group("forward transform: 1D kernels (the transposed spec inverse)");
+    test_ftx_1d();
+    test_group("forward transform: 2D, every legal (size, type) pair, and the round trip");
+    test_ftx_2d();
+    test_group("forward transform: lossless WHT");
+    test_ftx_wht_kernel();
+    test_ftx_lossless();
+    test_group("forward transform: 64-point dimensions and refusals");
+    test_ftx_64_zero();
+    test_ftx_refusals();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

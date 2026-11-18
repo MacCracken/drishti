@@ -41,7 +41,7 @@ enum Av1ErrCode {
     AV1_ERR_BAD_PROFILE = 10;   # seq_profile 3..7 — reserved per 6.4.1
     AV1_ERR_BAD_SEQ     = 11;   # sequence-header conformance violation
     AV1_ERR_BAD_FRAME   = 12;   # frame-header conformance violation (5.9)
-    AV1_ERR_BAD_TRAILING = 13;  # a header's end breaks 5.3.4 trailing_bits / 5.3.5 byte_alignment (src/av1_obu.cyr)
+    AV1_ERR_BAD_TRAILING = 15;  # a header's end breaks 5.3.4 trailing_bits / 5.3.5 byte_alignment (src/av1_obu.cyr)
     AV1_ERR_BAD_SEGMENT_ID = 14;  # a read segment_id outside 0..LastActiveSegId (6.10.8; src/av1_modeinfo.cyr)
 }
 

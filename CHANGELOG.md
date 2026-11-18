@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.6 bite 2: the forward transform, the transpose of the spec's inverse, bit-exact with libaom's
+
+**The encode lane has a forward transform:** `av1_forward_transform_2d` (`src/av1_ftx.cyr`, a new module) turns a
+spatial residual block into the coefficients the spec's inverse transform and reconstruct process take back to it.
+It covers every transform drishti's decoder inverts: DCT 4..64, ADST 4/8/16, identity 4..32, the lossless 4x4
+Walsh-Hadamard, all 19 sizes and all 193 legal (size, type) pairs.
+
+The spec defines only the inverse; the forward is the encoder's choice. drishti's is the **transpose of the spec's
+inverse, at the spec's own constants**:
+- 7.13.2.3's DCT and 7.13.2.7 / .8's ADST8 / ADST16 are operation lists (a permutation, butterflies B, Hadamards H).
+  Their transpose is the steps in reverse, each transposed: `B( angle, 0 )` becomes `B( -angle, 0 )`; `B( angle, 1 )`
+  and `H` are symmetric, so their own transposes; each permutation is inverted. Each transposed B rounds as the
+  inverse's does.
+- ADST4 is `Round2( M^T * T, 12 )`; the identity transforms are their own transposes.
+- The WHT is an exact integer lifting, so its forward is its exact inverse: a lossless block round-trips bit for bit.
+- The 2D driver undoes 7.13.3 in reverse: the 7.12.3 FLIPADST flips on the input, the columns, the rows, then x
+  sqrt(2) for a 2:1 rectangle. A 64-point dimension keeps its lowest 32 frequencies, the only ones 7.13.3 reads.
+  Every 1D transform of length N has gain^2 = N / 2, so the 2D scale is `2 ^ ( rowShift + 6 - log2W - log2H )`; where
+  it is applied is libaom's placement (`av1_fwd_txfm_shift_ls`).
+
+**Verified two independent ways**, by a new port, `scripts/refs/fwd_txfm_ref.py`:
+- **The derivation:** each forward 1D matrix is the exact transpose of the spec inverse's, in rational arithmetic;
+  every gain^2 is N / 2; libaom's shift table sums to the derived scale for all 19 sizes; the lossless round trip is
+  exact; the lossy round trip is within 2 (8-bit residuals) and 5 (12-bit) below 64 points.
+- **libaom's own forward transform**, compiled from `ref/` by a new C harness (`scripts/refs/fwd_txfm_libaom.c`, which
+  `#include`s `av1_fwd_txfm2d.c` for its static driver), equals the port **bit for bit**: 2,400 1D vectors, 762
+  blocks over all 193 pairs, and 500 lossless blocks against `av1_fwht4x4_c`.
+
+The one difference: libaom computes its cosines at 10 to 13 bits by size, for int32 headroom. drishti computes in
+i64, so the spec's 12-bit `Cos128_Lookup` serves everywhere, and the bit-exact comparison sets libaom's precision to
+12. At libaom's own precision the coefficients differ by rounding only. At 8 bits the unquantized round trip is
+within 1 at either precision (2 at 16x32 / 32x16), so the choice costs nothing measurable next to quantization.
+rav1e's forward transforms are Daala lifting designs, a different family, not comparable bit for bit. libaom stores
+its coefficients transposed (`out[ j * h + i ]`); drishti keeps the spec's `Dequant[ i ][ j ]` layout.
+
+**Tests:** `tests/av1_ftx.tcyr`, 1,625 assertions:
+- known answers from the port for all 12 1D kernels, every pair at 8 and 12 bits, and the WHT kernel (one case by
+  hand);
+- each pair's exact round-trip error through drishti's own inverse;
+- 2,000 lossless blocks back exactly;
+- the 64-point zeroing; the refusals (`AV1_ERR_BAD_TX` for a 32-point ADST, a 64-point identity, a non-4x4 lossless
+  block, sizes and types out of range);
+- each lazily built table failing in turn with `DR_ERR_OOM`; and no allocation per call (`dr_alloc_sweep`: 0).
+
+**Mutation testing:** 25 mutants, all killed. One, a logical shift in the WHT's `e = ( a - d ) >> 1`, first survived.
+It is an **equivalent mutant inside the 2D lossless path**: wrapping i64 arithmetic turns the shift's 2^63 error into
+multiples of 2^62, and the final x 4 sends those to 0 mod 2^64. The kernel is now pinned on its own.
+
+**Bench:** `tests/av1_ftx.bcyr`. The forward runs about 13% faster than its inverse: 9.9 us against 11.3 us at 8x8,
+1.06 ms against 1.24 ms at 64x64. It has no clamps and allocates nothing per call.
+
+Its two lazily built tables join `av1_tables_init`. One new module (45).
+
+**Gates:** 45 suites, **33,645** assertions (+1,629), **7,416** fuzz (3 harnesses); bench, `vet`, `lint`,
+`fmt-check`, `version-check` and `distlib --check` all green (`dist/drishti.cyr` regenerated); all three programs
+build. `make conformance` is unchanged at **3974 matched / 0 known-gap / 0 regressed / 0 skipped**: the decoder is
+untouched.
+
 ### Fixed — 0.8.6 bite 1: the two stream kinds 0.8.5 carried, refused where and why libaom refuses them
 
 **drishti now refuses both stream kinds that 0.8.5 carried, at the same unit and for the same reason as libaom, and
@@ -18,7 +76,7 @@ new:
   it say it cannot, and aomdec refuses them with "byte_alignment() is not all 0 bits". drishti decoded their tile
   data from the misaligned offset, and was saved, when it was, only by the tile's exit process. Both OBU walks and
   the large-scale tile camera path now check, through `av1_obu_trailing_bits_ok` / `av1_obu_byte_alignment_ok`
-  (`src/av1_obu.cyr`), and refuse with the new **`AV1_ERR_BAD_TRAILING` (13)**. `av1_seq_parse` now records where
+  (`src/av1_obu.cyr`), and refuse with the new **`AV1_ERR_BAD_TRAILING` (15)**. `av1_seq_parse` now records where
   its syntax ends (`av1_seq_bits_consumed`), as the frame header always did.
 - **The `segment_id` range** (new). 6.10.8: "It is a requirement of bitstream conformance that the postprocessed
   value of segment_id ... is in the range 0 to LastActiveSegId". libaom refuses a value outside it ("Corrupted
@@ -43,19 +101,23 @@ defect, and is not chased here.
 **Verified:**
 - A 90-stream scratch sweep matched `aomdec` on every unit, in verdict and in the check named. It covered both kinds
   over six sizes and 1 and 4 frames: libaom at both superblock sizes and two speeds, SVT-AV1 4.2.0 and 4.3.0 with
-  and without quantizer matrices. 34 `byte_alignment` refusals gave err=13, 28 tile-data refusals err=12, 12
+  and without quantizer matrices. 34 `byte_alignment` refusals gave err=15, 28 tile-data refusals err=12, 12
   "Corrupted segment_ids" err=14, and all 16 streams libaom accepts decode bit-exact. Six more encodes crashed
   libaom's own `aomenc`.
 - **Three committed reproducers**, gated by their error code in a new `make conformance` section, "refused streams"
   (`tests/repro/refused/`, outside the memory-bound glob; one `.expect` line per unit, an md5 or `err=N`):
-  `svt-uvoff-64x64` (970 bytes, err=13), `aq2-segid-96x64` (err=14) and `aq2-tile-96x64` (err=12). A canary showed
+  `svt-uvoff-64x64` (970 bytes, err=15), `aq2-segid-96x64` (err=14) and `aq2-tile-96x64` (err=12). A canary showed
   the code is what makes each decisive. A harness without the segment check fails `aq2-segid` with "err=12, want
-  err=14", one without the header ends fails `svt-uvoff` with "err=12, want err=13", and a missing `.expect` fails.
+  err=14", one without the header ends fails `svt-uvoff` with "err=12, want err=15", and a missing `.expect` fails.
 - **Mutation testing:** 28 mutants, all killed. They cover every requirement in the two predicates (the one bit,
   the in-byte zeros, the padding bytes, nbBits > 0, the header-only OBU, an aligned end), the writer, the recorded
   position, the FRAME-vs-header branch, all nine call sites across the two walks and the camera path (each killed
   by its own walk's test), the code, and the segment check (both ways out of range, the top segment, the value
   returned, the writer's mirror).
+- **Error codes are now checked for collisions.** This bite first gave `AV1_ERR_BAD_TRAILING` the value 13, which
+  `src/av1_itx.cyr` already uses for `AV1_ERR_BAD_TX`; each module mints its own codes and nothing compared them.
+  Found while reading `av1_itx.cyr` for bite 2. It is now 15, and `tests/av1.tcyr` asserts that every AV1 code is
+  in the band 10..29 and that no two are equal (seen to fail with the old 13).
 - The fixtures were non-conformant: every test header builder in four suites and the decode fuzz harness ended a
   sequence or frame header OBU with no trailing bits. They now call the new encode-side `av1_obu_write_trailing_bits`
   (5.3.4's inverse, for the coming header writers). `frame_build_fh` splits into the header OBU form and the frame
