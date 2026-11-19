@@ -4,6 +4,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.7 bite 3: the transform decisions — size and type chosen by RD, 15–57% fewer bytes than fixed DC
+
+**The encoder chooses the luma transform.** Two new `decide` bits:
+- `AV1ENC_DECIDE_TXSIZE` (4): every tx depth the block allows, up to Min( Max_Tx_Depth, 2 ) (5.11.15).
+- `AV1ENC_DECIDE_TXTYPE` (8): each luma transform block's type, from its intra tx set (5.11.48: INTRA_1's seven types
+  below 16x16, INTRA_2's five at 16x16, DCT_DCT alone from 32 up).
+
+`AV1ENC_DECIDE_ALL` is now 15. Chroma transforms are fixed by the block size and the chroma mode, so nothing there
+changes.
+
+**The type is chosen inside the encode hook**, per transform block, in decode order. Each candidate is forward
+transformed and quantized. Its rate is its `coeffs( )` against the estimator, including the `intra_tx_type` symbol,
+whose CDF the luma mode selects. Its distortion is the SSE of the decoder's own reconstruction of it
+(`av1_reconstruct_qm`), done in place over the prediction, which is then put back. DCT_DCT is tried first, so a tie
+keeps it. The winner's levels go to the decoder exactly as before. Each candidate is costed from the transform
+block's coefficient contexts as it found them, and the winner leaves them as its `coeffs( )` would, so the next
+transform block is costed from where the decoder will be. After the pass, the block's contexts are put back for the
+symbol pass.
+
+**The size is chosen after the luma mode.** The mode search keeps its three cheapest candidates, at the largest
+transform with DCT_DCT. Each of the three is then re-tried at every tx depth, with the type search on, and the
+cheapest (mode, size) pair wins. The type search then stays on for the rest of the block, so the chroma search's luma
+re-run and the final pass reproduce the types it chose.
+
+**Decoder changes, both decode-neutral:**
+- `av1_tx_dequant` is split out of `av1_transform_block`, so the search reconstructs with the decoder's own steps
+  and matrix.
+- The intra lane now records each luma transform block's type in TxTypes, as the spec's `coeffs( )` does on every
+  lane (DCT_DCT for an all-zero block). Only an inter block's chroma ever reads it, and only inside its own block.
+  `enc-check` and the tests read it to see what the decoder decoded.
+
+**Memory:** each candidate's reconstruction scratch comes from a candidate arena, rewound per candidate. Without it,
+a 64x64 block's pass piled up 788 KB of candidates; a decided encode now takes at most 67 KB more than an undecided one.
+
+**The outcome, in `make conformance`.** BD-rate at equal PSNR against fixed DC_PRED at the largest transform (the gate
+now judges decide 15):
+
+| Picture | Modes only (bite 2) | Everything (decide 15) | Gate |
+|---|---|---|---|
+| mandelbrot 352x288 4:2:0, 8x8 blocks | -11.8% | -14.9% | -10% |
+| testsrc2 176x144 4:2:0, 16x16 | -33.1% | -56.9% | -40% |
+| mandelbrot 160x120 4:4:4 10-bit, 32x32 | -6.6% | -21.6% | -15% |
+| mandelbrot 352x288 4:2:0, 64x64 (new) | -2.5% | -42.7% | -30% |
+
+At 64x64 blocks the fixed encoder's PSNR stalls near 33 dB, because TX_64X64 keeps only its lowest 32 frequencies;
+the smaller transforms lift it. Each gate threshold is set inside its measured value, so a decision that stops paying
+fails the gate. New decided cases (decide 4, 8 and 15, across every format and both superblock sizes) are probe-checked:
+the decoder must read more than one luma transform size, and some luma type other than DCT_DCT.
+
+**Verified:** `tests/av1_enc.tcyr` 271 -> 417 assertions. The decided cases now run at decide 15, and the RD
+objective is checked for every decision alone and together. By construction:
+- impulses (flat 128, one 228 per 8x8 block) must take IDTX in every luma cell, as the decoder reads it: IDTX keeps
+  the impulse's reconstruction error on that one sample, so every block edge stays exactly 128;
+- noise in 64x64 blocks at qindex 20 must never keep TX_64X64, which drops the top 32 frequencies;
+- one flat 64x64 block 22 above its prediction must keep TX_64X64: one DC coefficient, against 4 or 16;
+- a flat picture must keep DCT_DCT, since a tie keeps it.
+
+Also tested: the type candidates against the decoder's own membership table (`Tx_Type_In_Set_Intra`, a different
+table from the `Inv_Set` ones they come from), the top-3 list's insertion, the memory bound, and the poisoned arenas.
+
+28 mutants: 19 killed, 4 stream-equivalent, 5 quality-only.
+- Stream-equivalent: the context restore before the winner's write (the write does not depend on what was there);
+  DCT_DCT for an all-zero winner (no type is coded); the qindex > 0 gate (qindex 0 is lossless); TxTypes taking OTT
+  for an all-zero block (both lanes leave DCT_DCT there).
+- Quality-only, unseen by any test: costing a candidate from contexts another candidate polluted, not advancing them
+  for the next transform block, re-trying only the cheapest luma candidate, ties going to the later candidate, and
+  the type search staying on into the next block's mode trials. Each changes which valid stream is coded, not
+  whether it is valid. An exact-cost oracle would be needed to see them.
+- The first run's two real gaps, both shrinking INTRA_1's candidates (five of seven tried, or Set2's table read for
+  Set1), are closed. The candidate list is now a helper pinned against the spec's sets.
+
+**Citations corrected:** the angle info is 5.11.42 / 5.11.43 (cited as 5.11.20 / 5.11.21, in `src/av1_modeinfo.cyr`
+too), `read_tx_size` is 5.11.15, CflAllowed lives in the `uv_mode` CDF selection (9.3; it was cited as 5.11.25, which
+is `read_ref_frames`), and `intra_frame_mode_info` is 5.11.7 (cited as 5.11.16 in `docs/sources.md`).
+
+**Gates after bite 3:** `make test` 49 suites, **35,246** assertions; `make fuzz` 7,422; bench, `vet`, `lint`,
+`fmt-check`, `version-check` and `distlib --check` green, `dist/drishti.cyr` regenerated; all five programs build;
+`make conformance` **4615 matched / 0 known-gap / 0 regressed / 0 skipped** (was 4575; +40: fourteen decided cases at
+decide 4, 8 and 15 with one lossless check, and the 64x64-block BD-rate picture).
+
 ### Added — 0.8.7 bite 2: intra mode decision — drishti picks its modes, and spends 7–33% fewer bytes for the same PSNR
 
 **The keyframe encoder decides.** `av1_encode_keyframe` / `_ivf` take a `decide` argument (`AV1ENC_DECIDE_*`), and

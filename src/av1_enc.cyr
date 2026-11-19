@@ -54,7 +54,10 @@ enum Av1EncConst {
     # what av1_encode_keyframe decides (its decide argument); 0 decides nothing (DC_PRED everywhere)
     AV1ENC_DECIDE_YMODE  = 1;    # the luma mode: 13 modes, filter intra, angle deltas
     AV1ENC_DECIDE_UVMODE = 2;    # the chroma mode: 13 modes, angle deltas, CfL and its alphas
-    AV1ENC_DECIDE_ALL    = 3;
+    AV1ENC_DECIDE_TXSIZE = 4;    # the luma transform size: every tx depth the block allows
+    AV1ENC_DECIDE_TXTYPE = 8;    # each luma transform block's type: its intra tx set
+    AV1ENC_DECIDE_ALL    = 15;
+    AV1ENC_TOPY          = 3;    # luma candidates the transform search re-tries
     AV1ENC_J_MAX         = 4611686018427387904;   # 2^62: no candidate yet
 }
 
@@ -80,7 +83,14 @@ enum Av1EncCtx {
     AV1EC_NB      = 152;  # 6 i64: its neighbours (av1_block_neighbours)
     AV1EC_MODEJ   = 160;  # 13 i64: the cost of each mode at angle delta 0 in the current search
     AV1EC_ARENA   = 168;  # the block arena: every residual pass's scratch (av1_enc_residual)
-    AV1EC_SIZE    = 176;
+    AV1EC_TXSEARCH = 176; # 1: the hook searches each luma transform block's type (av1_enc_tx_type_search)
+    AV1EC_PRED    = 184;  # 256 i64: a searched transform block's prediction, put back after each candidate
+    AV1EC_BESTLV  = 192;  # 256 i64: the cheapest candidate's levels
+    AV1EC_TXCTX   = 200;  # 64 i64: the transform block's coefficient contexts as it found them
+    AV1EC_DQ      = 208;  # 3 i64: a candidate's dequantization (av1_tx_dequant)
+    AV1EC_TOPY    = 216;  # AV1ENC_TOPY x 5 i64: the cheapest luma candidates (cost, mode, delta, fi, fi mode)
+    AV1EC_CARENA  = 224;  # the candidate arena: one transform type candidate's reconstruction scratch
+    AV1EC_SIZE    = 232;
 }
 # one recorded transform block: everything coeffs( ) needs, in the decoder's terms
 enum Av1EncRec {
@@ -122,6 +132,20 @@ fn av1_enc_new(src, s, fh, decide): i64 {
     var arena = dr_arena_new(1 << 18);              # 256 KiB chunks
     if ((ctx == 0) || (blk == 0) || (mi == 0) || (nb == 0) || (mj == 0) || (arena == 0)) { return 0; }
     store64(ec + AV1EC_ARENA, arena);
+    var pred = dr_alloc(256 * 8);
+    var blv = dr_alloc(256 * 8);
+    var txc = dr_alloc(64 * 8);
+    var dq = dr_alloc(3 * 8);
+    var top = dr_alloc(AV1ENC_TOPY * 5 * 8);
+    var carena = dr_arena_new(1 << 16);             # 64 KiB chunks
+    if ((pred == 0) || (blv == 0) || (txc == 0) || (dq == 0) || (top == 0) || (carena == 0)) { return 0; }
+    store64(ec + AV1EC_CARENA, carena);
+    store64(ec + AV1EC_PRED, pred);
+    store64(ec + AV1EC_BESTLV, blv);
+    store64(ec + AV1EC_TXCTX, txc);
+    store64(ec + AV1EC_DQ, dq);
+    store64(ec + AV1EC_TOPY, top);
+    store64(ec + AV1EC_TXSEARCH, 0);
     store64(ec + AV1EC_CTX, ctx);
     store64(ec + AV1EC_BLK, blk);
     store64(ec + AV1EC_MI, mi);
@@ -158,18 +182,194 @@ fn av1_enc_new(src, s, fh, decide): i64 {
     return ec;
 }
 
+# The forward transform of the residual (AV1EC_RESID) at tx_type and its levels into the tile's Quant[] (what the
+# reconstruction that follows dequantizes). Returns the eob — one past the last nonzero level in the decoder's scan for
+# this (TxSz, type), segEob long (5.11.39), 0 for none — or 0 - DR_ERR_*.
+fn av1_enc_quantize_tx(tile, ec, plane, tx_sz, tx_type, lossless): i64 {
+    var coeff = load64(ec + AV1EC_COEFF);
+    var rc = av1_forward_transform_2d(load64(ec + AV1EC_RESID), coeff, tx_sz, tx_type, lossless);
+    if (rc != DR_OK) { return 0 - rc; }
+    var quant = load64(tile + AV1TILE_QUANT);
+    var nz = 0;
+    rc = av1_quantize_block(coeff, quant, tx_sz, load64(ec + AV1EC_FQ + (plane * 8)), 0, &nz);
+    if (rc != DR_OK) { return 0 - rc; }
+    var seg_eob = av1_min(1024, av1_tx_width(tx_sz) * av1_tx_height(tx_sz));
+    if ((tx_sz == 17) || (tx_sz == 18)) { seg_eob = 512; }   # TX_16X64 / TX_64X16
+    var scan = av1_get_scan(tx_sz, tx_type);
+    var eob = 0;
+    var c = seg_eob - 1;
+    while ((c >= 0) && (eob == 0)) {
+        if (load64(quant + (load64(scan + (c * 8)) * 8)) != 0) { eob = c + 1; }
+        c = c - 1;
+    }
+    return eob;
+}
+
+# The luma transform block's coefficient contexts — above level / dc over its columns, left level / dc over its rows,
+# the entries its coeffs( ) reads for all_zero and dc_sign and writes at its end — saved to AV1EC_TXCTX (save 1) or
+# put back (save 0). A searched block is at most 16 x 16: 4 entries an array.
+fn av1_enc_txctx_copy(tile, ec, x4, y4, w4, h4, save): i64 {
+    var buf = load64(ec + AV1EC_TXCTX);
+    var k = 0;
+    while (k < 4) {
+        var arr = load64(tile + AV1TILE_ALVL);
+        if (k == 1) { arr = load64(tile + AV1TILE_ADC); }
+        if (k == 2) { arr = load64(tile + AV1TILE_LLVL); }
+        if (k == 3) { arr = load64(tile + AV1TILE_LDC); }
+        var lo = x4;
+        var n = w4;
+        if (k >= 2) { lo = y4; n = h4; }
+        var i = 0;
+        while (i < n) {
+            if (save) { store64(buf + (((k * 16) + i) * 8), load64(arr + ((lo + i) * 8))); }
+            else { store64(arr + ((lo + i) * 8), load64(buf + (((k * 16) + i) * 8))); }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The luma transform types an intra block of tx set `set` may code, in the order the search tries them: DCT_DCT first
+# (so a tie keeps it), then the rest of Tx_Type_Intra_Inv_Set1 (INTRA_1: seven) or _Set2 (INTRA_2: five) in its order
+# (5.11.47). av1_enc_tx_cand_count is how many; av1_enc_tx_cand( set, k ) the k-th, -1 past them. DCTONLY: DCT_DCT.
+fn av1_enc_tx_cand_count(set): i64 {
+    if (set == AV1_TX_SET_INTRA_1) { return 7; }
+    if (set == AV1_TX_SET_INTRA_2) { return 5; }
+    return 1;
+}
+fn av1_enc_tx_cand(set, k): i64 {
+    if (k == 0) { return AV1_DCT_DCT; }
+    if ((k < 0) || (k >= av1_enc_tx_cand_count(set))) { return 0 - 1; }
+    var i = 0;
+    var seen = 0;                                 # the non-DCT_DCT entries passed
+    while (i < av1_enc_tx_cand_count(set)) {
+        var t = av1_intra_tx_inv_set2(i);
+        if (set == AV1_TX_SET_INTRA_1) { t = av1_intra_tx_inv_set1(i); }
+        if (t != AV1_DCT_DCT) {
+            seen = seen + 1;
+            if (seen == k) { return t; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# The luma transform type by RD (AV1ENC_DECIDE_TXTYPE), for one transform block whose prediction is in the frame and
+# residual in AV1EC_RESID: each type of its intra tx set (5.11.48 get_tx_set: INTRA_1's seven, INTRA_2's five; DCT_DCT
+# first, so a tie keeps it) quantized, its rate its coeffs( ) against the estimator — the intra_tx_type symbol, coded
+# against a CDF the luma mode selects, among them — from the contexts the block found, its distortion the SSE of the
+# decoder's own reconstruction of it (av1_reconstruct_qm at av1_tx_dequant's steps, in place over the prediction,
+# which is put back). The cheapest's levels are left in Quant[], its type at *out_type (DCT_DCT when every level is 0,
+# as the decoder holds an all-zero block), and the contexts as its coeffs( ) leaves them, so the next transform block
+# of the pass is costed from where the decoder will be (av1_enc_residual puts the block's back after the pass).
+# Returns its eob, or 0 - DR_ERR_*.
+fn av1_enc_tx_type_search(tile, ec, tx_sz, start_x, start_y, x4, y4, max_x4, max_y4, bw, bh, set, out_type): i64 {
+    var frame = load64(tile + AV1TILE_FRAME);
+    var src = load64(ec + AV1EC_SRC);
+    var ttx = load64(tile + AV1TILE_TTX);
+    var cc = load64(tile + AV1TILE_CC);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var est = load64(ec + AV1EC_EST);
+    var quant = load64(tile + AV1TILE_QUANT);
+    var pred = load64(ec + AV1EC_PRED);
+    var blv = load64(ec + AV1EC_BESTLV);
+    var dq = load64(ec + AV1EC_DQ);
+    var w = av1_tx_width(tx_sz);
+    var h = av1_tx_height(tx_sz);
+    var nlv = w * h;                              # a searched block is at most 16 x 16: every level kept
+    var alvl = load64(tile + AV1TILE_ALVL);
+    var llvl = load64(tile + AV1TILE_LLVL);
+    var adc = load64(tile + AV1TILE_ADC);
+    var ldc = load64(tile + AV1TILE_LDC);
+    var i = 0;
+    while (i < h) {
+        var j = 0;
+        while (j < w) {
+            store64(pred + (((i * w) + j) * 8), dr_frame_get(frame, 0, start_x + j, start_y + i));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    av1_enc_txctx_copy(tile, ec, x4, y4, w >> 2, h >> 2, 1);
+    var n = av1_enc_tx_cand_count(set);
+    var best = AV1ENC_J_MAX;
+    var bt = AV1_DCT_DCT;
+    var beob = 0;
+    var k = 0;
+    while (k < n) {
+        var t = av1_enc_tx_cand(set, k);
+        if (t >= 0) {
+            var eob = av1_enc_quantize_tx(tile, ec, 0, tx_sz, t, 0);
+            if (eob < 0) { return eob; }
+            av1_enc_txctx_copy(tile, ec, x4, y4, w >> 2, h >> 2, 0);
+            av1_sym_enc_set_cost(est, 0);
+            var ce = av1_coeffs_encode(est, cc, ncc, 0, tx_sz, ttx, t, x4, y4, max_x4, max_y4, bw, bh,
+              alvl, llvl, adc, ldc, quant, eob);
+            if (ce == DR_OK) { ce = av1_sym_enc_err(est); }
+            if (ce != DR_OK) { return 0 - ce; }
+            var rate = av1_sym_enc_cost(est);
+            if (eob > 0) {
+                # the reconstruction's scratch from the candidate arena, dead at the next candidate (a pass's
+                # thousands of candidates would otherwise pile up in the block arena until the pass ends)
+                var carena = load64(ec + AV1EC_CARENA);
+                dr_arena_reset(carena);
+                var prev = dr_alloc_scope(carena);
+                var de = av1_tx_dequant(tile, 0, tx_sz, t, 0, dq);
+                if (de == DR_OK) {
+                    de = av1_reconstruct_qm(frame, 0, start_x, start_y, tx_sz, t, 0, quant, load64(dq), load64(dq + 8),
+                      load64(dq + 16));
+                }
+                dr_alloc_scope(prev);
+                if (de != DR_OK) { return 0 - de; }
+            }
+            var sse = av1_rd_sse(src, frame, 0, start_x, start_y, w, h);
+            if (eob > 0) {
+                i = 0;
+                while (i < h) {
+                    var jj = 0;
+                    while (jj < w) {
+                        dr_frame_set(frame, 0, start_x + jj, start_y + i, load64(pred + (((i * w) + jj) * 8)));
+                        jj = jj + 1;
+                    }
+                    i = i + 1;
+                }
+            }
+            var jt = av1_rd_cost(load64(ec + AV1EC_RDMULT), rate, av1_rd_dist(sse, load64(ec + AV1EC_BD)));
+            if (jt < best) {
+                best = jt;
+                bt = t;
+                beob = eob;
+                i = 0;
+                while (i < nlv) { store64(blv + (i * 8), load64(quant + (i * 8))); i = i + 1; }
+            }
+        }
+        k = k + 1;
+    }
+    i = 0;
+    while (i < nlv) { store64(quant + (i * 8), load64(blv + (i * 8))); i = i + 1; }
+    if (beob == 0) { bt = AV1_DCT_DCT; }
+    av1_enc_txctx_copy(tile, ec, x4, y4, w >> 2, h >> 2, 0);
+    var ca = av1_coeffs_encode(est, cc, ncc, 0, tx_sz, ttx, bt, x4, y4, max_x4, max_y4, bw, bh,
+      alvl, llvl, adc, ldc, quant, beob);
+    if (ca != DR_OK) { return 0 - ca; }
+    store64(out_type, bt);
+    return beob;
+}
+
 # The residual pass's hook (called by av1_transform_block, src/av1_residual.cyr, with the prediction for this transform
 # block already in the reconstruction frame): the source minus the prediction over the transform block (0 outside the
 # visible plane, where the decoder's output is cropped away), its forward transform, its levels into the tile's Quant[]
 # (what the reconstruction that follows dequantizes), PlaneTxType into the tile's out_tx_type, and a record of the block
-# for the symbol pass. Returns the eob — one past the last nonzero level in scan order, 0 for none — or 0 - DR_ERR_*.
+# for the symbol pass. The type is compute_tx_type's from DCT_DCT (luma) or the chroma mode — or, for a luma block
+# while AV1EC_TXSEARCH is set, the transform type search's (av1_enc_tx_type_search) over its intra tx set when the set
+# has more than DCT_DCT and the qindex codes intra_tx_type. Returns the eob, or 0 - DR_ERR_*.
 fn av1_enc_tx_levels(tile, ec, plane, tx_sz, start_x, start_y, x4, y4, max_x4, max_y4, bw, bh, lossless): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
     var src = load64(ec + AV1EC_SRC);
     var ttx = load64(tile + AV1TILE_TTX);
     # DC_PRED codes DCT_DCT (Mode_To_Txfm in chroma); compute_tx_type gives the type the decoder will apply
     var tx_type = av1_compute_tx_type(plane, tx_sz, ttx, AV1_DCT_DCT);
-    store64(load64(tile + AV1TILE_OTT), tx_type);
     var w = av1_tx_width(tx_sz);
     var h = av1_tx_height(tx_sz);
     var pw = dr_frame_plane_width(src, plane);
@@ -188,23 +388,20 @@ fn av1_enc_tx_levels(tile, ec, plane, tx_sz, start_x, start_y, x4, y4, max_x4, m
         }
         i = i + 1;
     }
-    var coeff = load64(ec + AV1EC_COEFF);
-    var rc = av1_forward_transform_2d(resid, coeff, tx_sz, tx_type, lossless);
-    if (rc != DR_OK) { return 0 - rc; }
-    var quant = load64(tile + AV1TILE_QUANT);
-    var nz = 0;
-    rc = av1_quantize_block(coeff, quant, tx_sz, load64(ec + AV1EC_FQ + (plane * 8)), 0, &nz);
-    if (rc != DR_OK) { return 0 - rc; }
-    # eob over the decoder's scan for this (TxSz, PlaneTxType), segEob long (5.11.39)
-    var seg_eob = av1_min(1024, w * h);
-    if ((tx_sz == 17) || (tx_sz == 18)) { seg_eob = 512; }   # TX_16X64 / TX_64X16
-    var scan = av1_get_scan(tx_sz, tx_type);
-    var eob = 0;
-    var c = seg_eob - 1;
-    while ((c >= 0) && (eob == 0)) {
-        if (load64(quant + (load64(scan + (c * 8)) * 8)) != 0) { eob = c + 1; }
-        c = c - 1;
+    var set = AV1_TX_SET_DCTONLY;
+    if ((plane == 0) && (lossless == 0) && (load64(ec + AV1EC_TXSEARCH) != 0) && (load64(ttx + AV1TTC_BASE_Q) > 0)) {
+        set = av1_get_tx_set(tx_sz, 0, load64(ttx + AV1TTC_REDUCED_TX));
     }
+    var eob = 0;
+    if (set == AV1_TX_SET_DCTONLY) {
+        eob = av1_enc_quantize_tx(tile, ec, plane, tx_sz, tx_type, lossless);
+    } else {
+        eob = av1_enc_tx_type_search(tile, ec, tx_sz, start_x, start_y, x4, y4, max_x4, max_y4, bw, bh, set, &tx_type);
+    }
+    if (eob < 0) { return eob; }
+    store64(load64(tile + AV1TILE_OTT), tx_type);
+    if ((plane == 0) && (tx_type != AV1_DCT_DCT)) { Av1_Enc_Log_Types = Av1_Enc_Log_Types + 1; }
+    var quant = load64(tile + AV1TILE_QUANT);
     # the record, with a copy of Quant[]
     var n = load64(ec + AV1EC_N);
     var nlv = av1_min(w, 32) * av1_min(h, 32);
@@ -232,10 +429,11 @@ fn av1_enc_tx_levels(tile, ec, plane, tx_sz, start_x, start_y, x4, y4, max_x4, m
 
 # The decisions, as a test sees them (0.8.7): while Av1_Enc_Log is set (av1_enc_set_log), each block appends its mode
 # info as decided — AV1ENC_LOG_W i64: MiRow, MiCol, YMode, AngleDeltaY, use_filter_intra, filter_intra_mode, UVMode,
-# AngleDeltaUV, CflAlphaU, CflAlphaV — until cap entries are held. What the stream codes is the decoder's to say
+# AngleDeltaUV, CflAlphaU, CflAlphaV, the luma TxSize, and the luma transform blocks not DCT_DCT (counted by the hook
+# over the final residual pass) — until cap entries are held. What the stream codes is the decoder's to say
 # (decode == reconstruction, and aomdec); this says what the search chose, for tests that know the answer by
 # construction.
-enum Av1EncLogConst { AV1ENC_LOG_W = 10; }
+enum Av1EncLogConst { AV1ENC_LOG_W = 12; }
 var Av1_Enc_Log = 0;
 var Av1_Enc_Log_Cap = 0;
 var Av1_Enc_Log_N = 0;
@@ -246,7 +444,8 @@ fn av1_enc_set_log(buf, cap): i64 {
     return 0;
 }
 fn av1_enc_log_count(): i64 { return Av1_Enc_Log_N; }
-fn av1_enc_log_block(r, c, mi): i64 {
+var Av1_Enc_Log_Types = 0;   # the luma transform blocks not DCT_DCT in the block being coded
+fn av1_enc_log_block(r, c, mi, tx_size): i64 {
     if ((Av1_Enc_Log == 0) || (Av1_Enc_Log_N >= Av1_Enc_Log_Cap)) { return 0; }
     var e = Av1_Enc_Log + (Av1_Enc_Log_N * AV1ENC_LOG_W * 8);
     store64(e, r);
@@ -259,6 +458,8 @@ fn av1_enc_log_block(r, c, mi): i64 {
     store64(e + 56, load64(mi + AV1MI_ANGLE_UV));
     store64(e + 64, load64(mi + AV1MI_CFL_U));
     store64(e + 72, load64(mi + AV1MI_CFL_V));
+    store64(e + 80, tx_size);
+    store64(e + 88, Av1_Enc_Log_Types);
     Av1_Enc_Log_N = Av1_Enc_Log_N + 1;
     return 0;
 }
@@ -403,8 +604,17 @@ fn av1_enc_residual(tile, ec, blk, mask): i64 {
     store64(blk + AV1BLK_PLANE_SKIP, 7 ^ mask);
     store64(ec + AV1EC_N, 0);
     store64(ec + AV1EC_LV_USED, 0);
+    Av1_Enc_Log_Types = 0;
     var e = av1_residual(tile, blk);
     store64(blk + AV1BLK_PLANE_SKIP, 0);
+    if (load64(ec + AV1EC_TXSEARCH) != 0) {
+        # the type search costed each transform block from the contexts the one before it left: the block's back
+        var num_planes = 1;
+        if (load64(blk + AV1BLK_HAS_CHROMA)) { num_planes = 3; }
+        var bsize = load64(blk + AV1BLK_MI_SIZE);
+        av1_enc_ctx_copy(tile, ec, load64(blk + AV1BLK_MI_ROW), load64(blk + AV1BLK_MI_COL), av1_num_4x4_w(bsize),
+          av1_num_4x4_h(bsize), num_planes, 0);
+    }
     return e;
 }
 
@@ -449,14 +659,42 @@ fn av1_enc_trial(tile, ec, blk, nb, mask): i64 {
       av1_rd_dist(sse, load64(ec + AV1EC_BD)));
 }
 
-# a luma candidate: mode, angle delta, filter intra; its trial's cost
+# The cheapest AV1ENC_TOPY luma candidates so far, cheapest first (AV1EC_TOPY: cost, mode, delta, fi, fi mode): a
+# candidate goes in ahead of the first it is cheaper than, so a tie keeps the earlier.
+fn av1_enc_top_insert(ec, j, mode, delta, use_fi, fi_mode): i64 {
+    var top = load64(ec + AV1EC_TOPY);
+    var at = 0;
+    while ((at < AV1ENC_TOPY) && (load64(top + (at * 40)) <= j)) { at = at + 1; }
+    if (at >= AV1ENC_TOPY) { return 0; }
+    var k = AV1ENC_TOPY - 1;
+    while (k > at) {
+        var f = 0;
+        while (f < 5) { store64(top + (k * 40) + (f * 8), load64(top + ((k - 1) * 40) + (f * 8))); f = f + 1; }
+        k = k - 1;
+    }
+    store64(top + (at * 40), j);
+    store64(top + (at * 40) + 8, mode);
+    store64(top + (at * 40) + 16, delta);
+    store64(top + (at * 40) + 24, use_fi);
+    store64(top + (at * 40) + 32, fi_mode);
+    return 0;
+}
+fn av1_enc_top_reset(ec): i64 {
+    var top = load64(ec + AV1EC_TOPY);
+    var k = 0;
+    while (k < AV1ENC_TOPY) { dr_fill(top + (k * 40), 0, 40); store64(top + (k * 40), AV1ENC_J_MAX); k = k + 1; }
+    return 0;
+}
+# a luma candidate: mode, angle delta, filter intra; its trial's cost (and its place among the cheapest)
 fn av1_enc_try_y(tile, ec, blk, nb, mode, delta, use_fi, fi_mode): i64 {
     var mi = load64(blk + AV1BLK_MI);
     store64(mi + AV1MI_YMODE, mode);
     store64(mi + AV1MI_ANGLE_Y, delta);
     store64(mi + AV1MI_USE_FI, use_fi);
     store64(mi + AV1MI_FI_MODE, fi_mode);
-    return av1_enc_trial(tile, ec, blk, nb, 1);
+    var j = av1_enc_trial(tile, ec, blk, nb, 1);
+    if (j >= 0) { av1_enc_top_insert(ec, j, mode, delta, use_fi, fi_mode); }
+    return j;
 }
 # the two directional modes (V_PRED .. D67_PRED) of lowest cost in AV1EC_MODEJ, into *out_a / *out_b
 fn av1_enc_best_directional(ec, out_a, out_b): i64 {
@@ -485,13 +723,15 @@ fn av1_enc_best_directional(ec, out_a, out_b): i64 {
 
 # The luma mode by RD (AV1ENC_DECIDE_YMODE): each of the 13 modes at angle delta 0, each filter intra mode where filter
 # intra is allowed (5.11.24: DC_PRED, no palette, at most 32x32), then the other six angle deltas of the two cheapest
-# directional modes (5.11.20: a block of at least 8x8). Luma-only trials, with the chroma mode as it stands — its
-# uv_mode symbol, coded against a CDF the luma mode selects, is part of each candidate's rate. The cheapest is left in
-# the mode info; ties keep the earlier candidate. DR_OK, or the first trial's error.
+# directional modes (5.11.42 intra_angle_info_y: a block of at least 8x8). Luma-only trials, with the chroma mode as it
+# stands — its uv_mode symbol, coded against a CDF the luma mode selects, is part of each candidate's rate. The
+# cheapest is left in the mode info, ties keeping the earlier, and the three cheapest in AV1EC_TOPY for the transform
+# search. DR_OK, or the first trial's error.
 fn av1_enc_pick_y(tile, ec, blk, nb): i64 {
     var mi = load64(blk + AV1BLK_MI);
     var bsize = load64(blk + AV1BLK_MI_SIZE);
     var mj = load64(ec + AV1EC_MODEJ);
+    av1_enc_top_reset(ec);
     var best = AV1ENC_J_MAX;
     var bmode = AV1_DC_PRED;
     var bdelta = 0;
@@ -538,6 +778,56 @@ fn av1_enc_pick_y(tile, ec, blk, nb): i64 {
     store64(mi + AV1MI_ANGLE_Y, bdelta);
     store64(mi + AV1MI_USE_FI, bfi);
     store64(mi + AV1MI_FI_MODE, bfim);
+    return DR_OK;
+}
+
+# The luma transform by RD (AV1ENC_DECIDE_TXSIZE / _TXTYPE), after the luma mode search: each of its AV1ENC_TOPY
+# cheapest candidates (the block's mode as it stands when the luma mode is not decided) re-tried at every tx depth the
+# block allows (5.11.15 read_tx_size: Max_Tx_Size_Rect split once per depth, up to Min( Max_Tx_Depth, MAX_TX_DEPTH );
+# depth 0 alone without AV1ENC_DECIDE_TXSIZE) with each luma transform block's type searched (with
+# AV1ENC_DECIDE_TXTYPE); the tx_depth symbol is part of each one's rate. The cheapest candidate and size are left in
+# the mode info and AV1BLK_TX_SIZE, and the type search stays on for the rest of the block, so every later luma pass
+# reproduces the types it chose. A lossless block has one transform, the 4x4 WHT.
+fn av1_enc_pick_tx(tile, ec, blk, nb): i64 {
+    if (load64(blk + AV1BLK_LOSSLESS)) { return DR_OK; }
+    var mi = load64(blk + AV1BLK_MI);
+    var bsize = load64(blk + AV1BLK_MI_SIZE);
+    var decide = load64(ec + AV1EC_DECIDE);
+    var maxd = 0;
+    if (decide & AV1ENC_DECIDE_TXSIZE) { maxd = av1_min(av1_max_tx_depth(bsize), AV1_MAX_TX_DEPTH); }
+    if (decide & AV1ENC_DECIDE_TXTYPE) { store64(ec + AV1EC_TXSEARCH, 1); }
+    var top = load64(ec + AV1EC_TOPY);
+    if ((decide & AV1ENC_DECIDE_YMODE) == 0) {
+        av1_enc_top_reset(ec);
+        av1_enc_top_insert(ec, 0, load64(mi + AV1MI_YMODE), load64(mi + AV1MI_ANGLE_Y), load64(mi + AV1MI_USE_FI),
+          load64(mi + AV1MI_FI_MODE));
+    }
+    var best = AV1ENC_J_MAX;
+    var bc = 0;
+    var btx = av1_max_tx_size_rect(bsize);
+    var ci = 0;
+    while ((ci < AV1ENC_TOPY) && (load64(top + (ci * 40)) < AV1ENC_J_MAX)) {
+        store64(mi + AV1MI_YMODE, load64(top + (ci * 40) + 8));
+        store64(mi + AV1MI_ANGLE_Y, load64(top + (ci * 40) + 16));
+        store64(mi + AV1MI_USE_FI, load64(top + (ci * 40) + 24));
+        store64(mi + AV1MI_FI_MODE, load64(top + (ci * 40) + 32));
+        var t = av1_max_tx_size_rect(bsize);
+        var d = 0;
+        while (d <= maxd) {
+            store64(blk + AV1BLK_TX_SIZE, t);
+            var j = av1_enc_trial(tile, ec, blk, nb, 1);
+            if (j < 0) { return 0 - j; }
+            if (j < best) { best = j; bc = ci; btx = t; }
+            t = av1_split_tx_size(t);
+            d = d + 1;
+        }
+        ci = ci + 1;
+    }
+    store64(mi + AV1MI_YMODE, load64(top + (bc * 40) + 8));
+    store64(mi + AV1MI_ANGLE_Y, load64(top + (bc * 40) + 16));
+    store64(mi + AV1MI_USE_FI, load64(top + (bc * 40) + 24));
+    store64(mi + AV1MI_FI_MODE, load64(top + (bc * 40) + 32));
+    store64(blk + AV1BLK_TX_SIZE, btx);
     return DR_OK;
 }
 
@@ -605,9 +895,10 @@ fn av1_enc_cfl_alpha(tile, ec, blk, nb, plane, allow_zero): i64 {
 
 # The chroma mode by RD (AV1ENC_DECIDE_UVMODE), after the luma mode is settled: the chosen luma reconstructed first
 # (CfL predicts from it), then each of the 13 modes at angle delta 0, the other six angle deltas of the two cheapest
-# directional modes, and, where CfL is allowed (5.11.25 CflAllowed), UV_CFL_PRED with CflAlphaU searched against
-# CflAlphaV = 0, CflAlphaV against it, and CflAlphaU again when CflAlphaV is not 0 (the joint sign never codes both
-# zero). The trials are over both chroma planes, the alpha searches over one. The cheapest is left in the mode info.
+# directional modes, and, where CfL is allowed (CflAllowed, the uv_mode CDF selection of 9.3), UV_CFL_PRED with
+# CflAlphaU searched against CflAlphaV = 0, CflAlphaV against it, and CflAlphaU again when CflAlphaV is not 0 (the
+# joint sign never codes both zero). The trials are over both chroma planes, the alpha searches over one. The cheapest
+# is left in the mode info.
 fn av1_enc_pick_uv(tile, ec, blk, nb): i64 {
     var mi = load64(blk + AV1BLK_MI);
     var bsize = load64(blk + AV1BLK_MI_SIZE);
@@ -685,6 +976,7 @@ fn av1_enc_decide_residual(tile, ec, blk, nb, num_planes): i64 {
     var c = load64(blk + AV1BLK_MI_COL);
     var mi = load64(blk + AV1BLK_MI);
     var decide = load64(ec + AV1EC_DECIDE);
+    store64(ec + AV1EC_TXSEARCH, 0);             # mode trials at the largest transform, DCT_DCT
     if (decide != 0) {
         var bsize = load64(blk + AV1BLK_MI_SIZE);
         av1_enc_ctx_copy(tile, ec, r, c, av1_num_4x4_w(bsize), av1_num_4x4_h(bsize), num_planes, 1);
@@ -692,13 +984,18 @@ fn av1_enc_decide_residual(tile, ec, blk, nb, num_planes): i64 {
             var ey = av1_enc_pick_y(tile, ec, blk, nb);
             if (ey != DR_OK) { return ey; }
         }
+        if (decide & (AV1ENC_DECIDE_TXSIZE | AV1ENC_DECIDE_TXTYPE)) {
+            var etx = av1_enc_pick_tx(tile, ec, blk, nb);
+            if (etx != DR_OK) { return etx; }
+        }
         if ((num_planes > 1) && ((decide & AV1ENC_DECIDE_UVMODE) != 0)) {
             var euv = av1_enc_pick_uv(tile, ec, blk, nb);
             if (euv != DR_OK) { return euv; }
         }
     }
-    av1_enc_log_block(r, c, mi);
-    return av1_enc_residual(tile, ec, blk, (1 << num_planes) - 1);
+    var er = av1_enc_residual(tile, ec, blk, (1 << num_planes) - 1);
+    av1_enc_log_block(r, c, mi, load64(blk + AV1BLK_TX_SIZE));
+    return er;
 }
 
 # One block at (r, c) of size bsize — decode_block (5.11.5) run as an encoder: the modes decided (when asked), the
@@ -781,7 +1078,7 @@ fn av1_enc_block(tile, ec, r, c, bsize): i64 {
         if (ecf != DR_OK) { return ecf; }
     }
     av1_block_write_grids(tile, r, c, bw4, bh4, bsize, load64(mi + AV1MI_YMODE), load64(mi + AV1MI_UVMODE), skip,
-      tx_size, has_chroma, 1);
+      load64(blk + AV1BLK_TX_SIZE), has_chroma, 1);
     return av1_sym_enc_err(enc);
 }
 
@@ -883,7 +1180,7 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_
         bs_ok = 1;
     }
     if ((block_size == AV1ENC_BLOCK_128X128) && (sb128 == 1)) { bs_ok = 1; }
-    if ((src == 0) || (bs_ok == 0) || ((sb128 != 0) && (sb128 != 1)) || ((decide & (0 - 4)) != 0)) {
+    if ((src == 0) || (bs_ok == 0) || ((sb128 != 0) && (sb128 != 1)) || ((decide & (0 - 16)) != 0)) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
     var np = dr_frame_num_planes(src);

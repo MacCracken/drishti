@@ -6,14 +6,16 @@
 
 ## Version
 
-**0.8.7 in progress** (bites 1–2 landed 2026-11-18, uncommitted until the user commits). **The keyframe encoder
-decides its intra modes.** Bite 1: rate and distortion (`src/av1_rd.cyr`, new module 49, and the symbol coder's
-estimator). Bite 2: the luma and chroma mode search (`decide` on `av1_encode_keyframe`; 0 = the 0.8.6 encoder byte
-for byte, gated by md5), and the block arena that bounds the encoder's memory. `make conformance` holds decided
-encodes aomdec-clean (18 cases) and measures them against fixed DC_PRED: BD-rate -11.8%, -33.1% and -6.6%. The
-roadmap's 0.8.7 outcome — measurably better than fixed DC at matched rate, still `aomdec`-clean — holds; still to come
-in the batch: the tx-size / tx-type decision and an RD partition search. Gates after bite 2: 49 suites, 35,100
-assertions; fuzz 7,422; `make conformance` 4575 matched / 0 known-gap / 0 regressed / 0 skipped; everything else green.
+**0.8.7 in progress** (bites 1–3 landed 2026-11-18, uncommitted until the user commits). **The keyframe encoder
+decides its intra modes and its luma transform.** Bite 1: rate and distortion (`src/av1_rd.cyr`, new module 49, and
+the symbol coder's estimator). Bite 2: the luma and chroma mode search (`decide` on `av1_encode_keyframe`; 0 = the
+0.8.6 encoder byte for byte, gated by md5), and the block arena that bounds the encoder's memory. Bite 3: the luma
+transform size and each transform block's type (`decide` bits 4 and 8, ALL = 15), the intra lane recording TxTypes
+(decode-neutral) and the candidate arena. `make conformance` holds decided encodes aomdec-clean and measures decide 15
+against fixed DC_PRED: BD-rate -14.9%, -56.9%, -21.6% and -42.7%, each gated. The roadmap's 0.8.7 outcome —
+measurably better than fixed DC at matched rate, still `aomdec`-clean — holds; still to come in the batch: an RD
+partition search. Gates after bite 3: 49 suites, 35,246
+assertions; fuzz 7,422; `make conformance` 4615 matched / 0 known-gap / 0 regressed / 0 skipped; everything else green.
 
 **0.8.6** — cut 2026-11-18, not yet tagged (user's git). **drishti encodes: a picture in, a standalone `.ivf` that
 `aomdec` and dav1d decode to exactly drishti's reconstruction, at both superblock sizes.** The first encode batch.

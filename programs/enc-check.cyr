@@ -10,8 +10,9 @@
 #                              monochrome), each its visible rectangle, one byte per sample at 8 bits and two
 #                              little-endian at 10 / 12
 #   OUT  build/enc-out.ivf     the encoded stream: an IVF file, one temporal unit
-#   stdout: "MODES y=<n> uv=<n> cfl=<cells> ymask=<bits>" (the luma / chroma modes the decoder reads in the stream:
-#     how many distinct, the CfL cells, the luma modes as a bit mask), "RD sse=<n> samples=<n> peak=<n>" (the
+#   stdout: "MODES y=<n> uv=<n> cfl=<cells> ymask=<bits> txsizes=<n> txtypes=<cells>" (what the decoder reads in the
+#     stream: how many distinct luma / chroma modes, the CfL cells, the luma modes as a bit mask, how many distinct luma
+#     transform sizes, the luma cells not DCT_DCT), "RD sse=<n> samples=<n> peak=<n>" (the
 #     reconstruction's squared error over every visible sample of every plane, the sample count, the largest sample
 #     value: a PSNR), "ENC bytes=<ivf bytes> decode_eq_recon=<1|0> lossless_exact=<1|0|->" and a SUMMARY line.
 #     decode_eq_recon: drishti, decoding the .ivf it wrote (read back with the IVF reader), outputs exactly the
@@ -108,14 +109,18 @@ fn ec_decode_grids(tu, n): i64 {
     }
     return tile;
 }
-# "MODES y=<distinct luma modes> uv=<distinct chroma modes> cfl=<CfL cells>": over every MI cell of the frame, as the
-# decoder read them — the proof a decided encode decided something (DC_PRED alone is y=1 uv=1).
+# "MODES y=<distinct luma modes> uv=<distinct chroma modes> cfl=<CfL cells> ymask=<luma modes, bits>
+# txsizes=<distinct luma TxSizes> txtypes=<luma cells whose TxType is not DCT_DCT>": over every MI cell of the frame,
+# as the decoder read them (YModes, UVModes, InterTxSizes, TxTypes) — the proof a decided encode decided something
+# (DC_PRED at the largest transform alone is y=1 uv=1 txsizes=1 txtypes=0).
 fn ec_modes(tu, n, w, h, has_uv): i64 {
     var tile = ec_decode_grids(tu, n);
     if (tile == 0) { ec_puts("MODES unreadable\n"); return 0; }
     var ym = 0;
     var um = 0;
     var cfl = 0;
+    var txm = 0;
+    var ntt = 0;
     var rows = (h + 3) >> 2;
     var cols = (w + 3) >> 2;
     var r = 0;
@@ -126,14 +131,19 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
             var u = av1_grid_get(tile, AV1TILE_UVMODES, r, c);
             um = um | (1 << u);
             if (u == AV1_UV_CFL_PRED) { cfl = cfl + 1; }
+            txm = txm | (1 << av1_grid_get(tile, AV1TILE_INTERTX, r, c));
+            if (av1_grid_get(tile, AV1TILE_TXTYPES, r, c) != AV1_DCT_DCT) { ntt = ntt + 1; }
             c = c + 1;
         }
         r = r + 1;
     }
     var ny = 0;
     var nu = 0;
+    var ntx = 0;
     var b = 0;
     while (b < 14) { ny = ny + ((ym >> b) & 1); nu = nu + ((um >> b) & 1); b = b + 1; }
+    b = 0;
+    while (b < 19) { ntx = ntx + ((txm >> b) & 1); b = b + 1; }
     if (has_uv == 0) { nu = 0; }
     ec_puts("MODES y=");
     ec_putn(ny);
@@ -143,6 +153,10 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
     ec_putn(cfl);
     ec_puts(" ymask=");
     ec_putn(ym);
+    ec_puts(" txsizes=");
+    ec_putn(ntx);
+    ec_puts(" txtypes=");
+    ec_putn(ntt);
     ec_puts("\n");
     return 0;
 }

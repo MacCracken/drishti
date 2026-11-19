@@ -2082,7 +2082,8 @@ fn av1_tables_init(): i64 {
     # the persistent per-call scratches (0.8.5) — each replaced a per-block / per-sample allocation
     if ((av1_cdef_scratch() == 0) || (av1_lf_scratch() == 0) || (av1_lr_scratch() == 0)
       || (av1_part_synth_scratch() == 0) || (av1_segid_scratch() == 0) || (av1_pal_scratch() == 0)
-      || (av1_ftx_scratch() == 0) || (av1_ftx_shift_table() == 0) || (av1_coeffs_enc_scratch() == 0)) {
+      || (av1_ftx_scratch() == 0) || (av1_ftx_shift_table() == 0) || (av1_coeffs_enc_scratch() == 0)
+      || (av1_tx_dq_scratch() == 0)) {
         return DR_ERR_OOM;
     }
     return DR_OK;

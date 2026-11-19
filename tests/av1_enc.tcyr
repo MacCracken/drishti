@@ -682,6 +682,66 @@ fn ec_bd_case(jv, jh, j3, j4, j5, j6, j7, j8, want_a, want_b): i64 {
     assert_eq(b, want_b, "the second");
     return 0;
 }
+# The transform type candidates against the decoder's own membership table (Tx_Type_In_Set_Intra, 5.11.40's
+# is_tx_type_in_set — a different table from the Inv_Set ones the candidates come from): DCT_DCT first, every candidate
+# in the set, no candidate twice, and as many as the set has members.
+fn ec_cand_case(set, want): i64 {
+    assert_eq(av1_enc_tx_cand_count(set), want, "the candidate count");
+    assert_eq(av1_enc_tx_cand(set, 0), AV1_DCT_DCT, "DCT_DCT first");
+    var seen = 0;
+    var k = 0;
+    while (k < av1_enc_tx_cand_count(set)) {
+        var t = av1_enc_tx_cand(set, k);
+        assert((t >= 0) && (t < 16), "a transform type");
+        if ((t >= 0) && (t < 16)) {
+            assert_eq(av1_is_tx_type_in_set_intra(set, t), 1, "in the set");
+            assert_eq((seen >> t) & 1, 0, "not seen before");
+            seen = seen | (1 << t);
+        }
+        k = k + 1;
+    }
+    var members = 0;
+    var t2 = 0;
+    while (t2 < 16) { members = members + av1_is_tx_type_in_set_intra(set, t2); t2 = t2 + 1; }
+    assert_eq(members, want, "every member of the set is a candidate");
+    assert_eq(av1_enc_tx_cand(set, want), 0 - 1, "none past them");
+    return 0;
+}
+fn test_ec_tx_candidates() {
+    ec_cand_case(AV1_TX_SET_INTRA_1, 7);
+    ec_cand_case(AV1_TX_SET_INTRA_2, 5);
+    assert_eq(av1_enc_tx_cand_count(AV1_TX_SET_DCTONLY), 1, "DCTONLY: one candidate");
+    assert_eq(av1_enc_tx_cand(AV1_TX_SET_DCTONLY, 0), AV1_DCT_DCT, "DCT_DCT");
+    return 0;
+}
+# av1_enc_top_insert: the AV1ENC_TOPY cheapest, cheapest first, a tie behind the earlier
+fn ec_top(k, f): i64 { return load64(Ec_Top + (((k * 5) + f) * 8)); }
+var Ec_Top = 0;
+fn test_ec_top_insert() {
+    var ec = alloc(AV1EC_SIZE);
+    Ec_Top = alloc(AV1ENC_TOPY * 5 * 8);
+    store64(ec + AV1EC_TOPY, Ec_Top);
+    av1_enc_top_reset(ec);
+    assert_eq(ec_top(0, 0), AV1ENC_J_MAX, "empty: no candidate");
+    av1_enc_top_insert(ec, 50, 1, 0, 0, 0);
+    av1_enc_top_insert(ec, 30, 2, 1, 0, 0);
+    av1_enc_top_insert(ec, 70, 3, 0, 0, 0);
+    av1_enc_top_insert(ec, 40, 0, 0, 1, 4);
+    assert_eq(ec_top(0, 0), 30, "the cheapest first");
+    assert_eq(ec_top(0, 1), 2, "its mode");
+    assert_eq(ec_top(0, 2), 1, "its delta");
+    assert_eq(ec_top(1, 0), 40, "the second");
+    assert_eq(ec_top(1, 3), 1, "its filter intra");
+    assert_eq(ec_top(1, 4), 4, "its filter intra mode");
+    assert_eq(ec_top(2, 0), 50, "the third; 70 fell off");
+    assert_eq(ec_top(2, 1), 1, "its mode");
+    av1_enc_top_insert(ec, 40, 9, 0, 0, 0);
+    assert_eq(ec_top(1, 1), 0, "a tie goes behind the earlier");
+    assert_eq(ec_top(2, 1), 9, "into third");
+    av1_enc_top_insert(ec, 99, 5, 0, 0, 0);
+    assert_eq(ec_top(2, 1), 9, "a dearer candidate changes nothing");
+    return 0;
+}
 fn test_ec_best_directional() {
     ec_bd_case(10, 20, 30, 40, 50, 60, 70, 80, AV1_V_PRED, AV1_H_PRED);
     ec_bd_case(20, 10, 30, 40, 50, 60, 70, 80, AV1_H_PRED, AV1_V_PRED);
@@ -689,6 +749,74 @@ fn test_ec_best_directional() {
     ec_bd_case(30, 20, 40, 50, 60, 70, 80, 10, AV1_D67_PRED, AV1_H_PRED);   # the last cheapest
     ec_bd_case(90, 80, 70, 60, 50, 40, 30, 20, AV1_D67_PRED, AV1_D203_PRED);
     ec_bd_case(50, 50, 50, 50, 50, 50, 50, 50, AV1_V_PRED, AV1_H_PRED);   # ties keep the earlier
+    return 0;
+}
+# 0.8.7 bite 3: the TRANSFORM decisions, where the answer is known by construction
+fn test_ec_decide_tx_known() {
+    var e = 0;
+    # IMPULSES: flat 128 with one sample of 228 at (3, 3) of every 8x8 block, deciding the transform type alone
+    # (DC_PRED, 8x8 blocks, TX_8X8's INTRA_1 set). IDTX codes the impulse as one coefficient and its reconstruction
+    # error stays on that sample, so every block edge reconstructs to exactly 128 and the next block's DC prediction is
+    # 128 again; any
+    # type with a DCT or ADST spreads it across the block. So every block's luma type is IDTX.
+    var imp = dr_frame_new(64, 32, 3, 1, 1, 8, 8, &e);
+    dr_frame_fill(imp, 0, 128);
+    dr_frame_fill(imp, 1, 128);
+    dr_frame_fill(imp, 2, 128);
+    var by = 0;
+    while (by < 4) {
+        var bx = 0;
+        while (bx < 8) { dr_frame_set(imp, 0, (8 * bx) + 3, (8 * by) + 3, 228); bx = bx + 1; }
+        by = by + 1;
+    }
+    Ec_Decide = AV1ENC_DECIDE_TXTYPE;
+    assert_eq(ec_run(imp, 60, 3), 0, "impulses: decoded = reconstruction");
+    var tile = ec_decode_grids(Ec_Tu, Ec_Bytes);
+    assert(tile != 0, "the decoder's grids");
+    var idtx = 0;
+    var r = 0;
+    while (r < 8) {
+        var c = 0;
+        while (c < 16) {
+            if (av1_grid_get(tile, AV1TILE_TXTYPES, r, c) == AV1_IDTX) { idtx = idtx + 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(idtx, 128, "the decoder reads IDTX in every luma cell");
+    # NOISE in 64x64 blocks at qindex 20, deciding the transform size alone: TX_64X64 keeps only its lowest 32
+    # frequencies (5.11.39), so it cannot code noise; every block takes a smaller size
+    var noise = ec_pic(128, 64, 3, 1, 1, 8, 1, 71);
+    Ec_Decide = AV1ENC_DECIDE_TXSIZE;
+    ec_log_on();
+    assert_eq(ec_run(noise, 20, 12), 0, "noise in 64x64 blocks: decoded = reconstruction");
+    assert_eq(av1_enc_log_count(), 2, "two blocks logged");
+    assert(ec_log(0, 10) != AV1_TX_64X64, "the first block does not keep TX_64X64");
+    assert(ec_log(1, 10) != AV1_TX_64X64, "nor the second");
+    tile = ec_decode_grids(Ec_Tu, Ec_Bytes);
+    assert(av1_grid_get(tile, AV1TILE_INTERTX, 0, 0) == ec_log(0, 10), "the decoder reads the size chosen");
+    # ONE FLAT BLOCK at 150, 64x64, deciding the size alone: the prediction (no neighbours) is 128, so the residual is a
+    # constant 22 — one DC coefficient at TX_64X64, four at TX_32X32, sixteen at TX_16X16, each reconstructing alike.
+    # The largest codes it cheapest.
+    var one = dr_frame_new(64, 64, 3, 1, 1, 8, 8, &e);
+    dr_frame_fill(one, 0, 150);
+    dr_frame_fill(one, 1, 128);
+    dr_frame_fill(one, 2, 128);
+    Ec_Decide = AV1ENC_DECIDE_TXSIZE;
+    ec_log_on();
+    assert_eq(ec_run(one, 60, 12), 0, "one flat block: decoded = reconstruction");
+    assert_eq(ec_log(0, 10), AV1_TX_64X64, "it keeps TX_64X64");
+    # FLAT: every candidate type codes nothing, and a tie keeps DCT_DCT (the decoder's type for an all-zero block)
+    var flat = ec_pic(48, 32, 3, 1, 1, 8, 2, 1);
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    ec_log_on();
+    assert_eq(ec_run(flat, 60, 3), 0, "flat: decoded = reconstruction");
+    var nondct = 0;
+    var i = 0;
+    while (i < av1_enc_log_count()) { nondct = nondct + ec_log(i, 11); i = i + 1; }
+    assert_eq(nondct, 0, "flat: every luma transform block DCT_DCT");
+    av1_enc_set_log(0, 0);
+    Ec_Decide = 0;
     return 0;
 }
 fn test_ec_decide_uses() {
@@ -716,6 +844,16 @@ fn test_ec_decide_uses() {
     assert(delta_y > 0, "some block uses a luma angle delta");
     assert(fi > 0, "some block uses filter intra");
     assert(delta_uv > 0, "some block uses a chroma angle delta");
+    var small = 0;
+    var types = 0;
+    i = 0;
+    while (i < n) {
+        if (ec_log(i, 10) != AV1_TX_8X8) { small = small + 1; }
+        types = types + ec_log(i, 11);
+        i = i + 1;
+    }
+    assert(small > 0, "some block splits its 8x8 transform");
+    assert(types > 0, "some luma transform block is not DCT_DCT");
     # the decoder reads them: its YModes / UVModes grids hold more than DC_PRED
     var tile = ec_decode_grids(Ec_Tu, Ec_Bytes);
     assert(tile != 0, "the decoder's grids");
@@ -733,6 +871,20 @@ fn test_ec_decide_uses() {
     }
     assert(ym != 1, "the decoder reads luma modes other than DC_PRED");
     assert(um != 1, "and chroma modes other than DC_PRED");
+    var txm = 0;
+    var ntt = 0;
+    r = 0;
+    while (r < 16) {
+        var c2 = 0;
+        while (c2 < 24) {
+            txm = txm | (1 << av1_grid_get(tile, AV1TILE_INTERTX, r, c2));
+            if (av1_grid_get(tile, AV1TILE_TXTYPES, r, c2) != AV1_DCT_DCT) { ntt = ntt + 1; }
+            c2 = c2 + 1;
+        }
+        r = r + 1;
+    }
+    assert(txm != (1 << AV1_TX_8X8), "the decoder reads transform sizes other than TX_8X8");
+    assert(ntt > 0, "and transform types other than DCT_DCT");
     # the sequence header: enable_filter_intra exactly when the luma mode is decided (0.8.6's header otherwise)
     var d = 0;
     while (d < 4) {
@@ -780,11 +932,12 @@ fn test_ec_decide_rd() {
             ec_run(pic, qi, 3);
             var j0 = ec_frame_j(pic, qi);
             var d = 1;
-            while (d <= 3) {
+            while (d <= 15) {
                 Ec_Decide = d;
                 assert_eq(ec_run(pic, qi, 3), 0, "a decided encode decodes to its reconstruction");
                 assert(ec_frame_j(pic, qi) < j0, "its frame RD cost is below DC_PRED's");
                 d = d + 1;
+                if (d == 5) { d = 8; }                    # 1, 2, 3, 4, 8, 9 .. 15
             }
             qi = qi + 160;
         }
@@ -858,12 +1011,12 @@ fn test_ec_decide_refusals() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 4, &n, &rec, &e), 0, "decide 4 (no such decision) refused");
-    assert_eq(e, DR_ERR_BOUNDS, "decide 4 -> BOUNDS");
+    assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 16, &n, &rec, &e), 0, "decide 16 (no such decision) refused");
+    assert_eq(e, DR_ERR_BOUNDS, "decide 16 -> BOUNDS");
     e = DR_OK;
     assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 0 - 1, &n, &rec, &e), 0, "decide -1 refused");
     assert_eq(e, DR_ERR_BOUNDS, "decide -1 -> BOUNDS");
-    assert(av1_encode_keyframe(src, 40, 6, Ec_Sb, 3, &n, &rec, &e) != 0, "decide 3 accepted");
+    assert(av1_encode_keyframe(src, 40, 6, Ec_Sb, 15, &n, &rec, &e) != 0, "decide 15 accepted");
     return 0;
 }
 
@@ -903,6 +1056,9 @@ fn main() {
     test_group("mode decision: answers known by construction");
     test_ec_decide_known();
     test_ec_best_directional();
+    test_ec_top_insert();
+    test_ec_tx_candidates();
+    test_ec_decide_tx_known();
     test_group("mode decision: every branch reaches the stream; the decoder reads it");
     test_ec_decide_uses();
     test_group("mode decision: the RD objective");

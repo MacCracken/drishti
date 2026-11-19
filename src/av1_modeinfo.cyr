@@ -602,7 +602,7 @@ fn av1_write_intra_block_mode_info(enc, ncc, mi, mi_size, has_chroma, enable_fil
     return av1_sym_enc_err(enc);
 }
 
-# intra_angle_info_y (5.11.20): AngleDeltaY = 0, and only for MiSize >= BLOCK_8X8
+# intra_angle_info_y (5.11.42): AngleDeltaY = 0, and only for MiSize >= BLOCK_8X8
 # and a directional YMode read angle_delta_y (7 symbols, cdf indexed YMode-V_PRED)
 # with AngleDeltaY = angle_delta_y - MAX_ANGLE_DELTA.
 fn av1_angle_delta_active(mi_size, mode): i64 {
@@ -690,7 +690,7 @@ fn av1_write_cfl_alphas(enc, ncc, cfl_u, cfl_v): i64 {
     return DR_OK;
 }
 
-# intra_angle_info_uv (5.11.21) — mirror of the Y variant with UVMode.
+# intra_angle_info_uv (5.11.43) — mirror of the Y variant with UVMode.
 fn av1_read_angle_delta_uv(sd, ncc, mi_size, uvmode): i64 {
     if (av1_angle_delta_active(mi_size, uvmode) == 0) { return 0; }
     var s = av1_sym_read_symbol(sd, av1_ncdf_angle_delta(ncc, uvmode - AV1_V_PRED), 7);

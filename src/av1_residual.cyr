@@ -754,6 +754,39 @@ fn av1_coeff_ctx_row(tile, start_y, suby): i64 {
     return (start_y >> 2) - (load64(tile + AV1TILE_ROW_START) >> suby);
 }
 
+# The dequantization a transform block of plane / tx_sz / tx_type is reconstructed with (7.12.2, 7.12.3): its DC and
+# AC steps and its quantizer matrix (0 when flat), into out[ 0 .. 2 ]. DR_OK, or DR_ERR_OOM from the matrix table.
+# Per-plane DC/AC quant deltas (7.12.2) come from the frame header the tile carries at SEG_FH (the intra lane's qindex
+# source; AV1TILE_FH is 0 on an intra tile); fh == 0 for a bare test tile -> deltas 0. A LOSSLESS block keeps the
+# fixed dc_q(0)/ac_q(0) its WHT inverts: a conformant lossless block has all deltas 0 anyway (av1_compute_lossless
+# requires it), and the guard also shields the base_q == 0 lossless shortcut (av1_partition.cyr — deltas-blind) from a
+# hostile delta. The quantizer matrix (7.12.3 step 1b, 0.8.4): SegQMLevel follows LosslessArray[ segment_id ], the
+# block's lossless flag; 0 (flat) for a bare test tile (qfh 0). The qindex is the block's (per segment). Shared with
+# the encoder's transform type search (src/av1_enc.cyr), which reconstructs each candidate as this does.
+var Av1_Tx_Dq = 0;   # 3 i64: transform_block's av1_tx_dequant output
+fn av1_tx_dq_scratch(): i64 {
+    if (Av1_Tx_Dq != 0) { return Av1_Tx_Dq; }
+    Av1_Tx_Dq = dr_alloc_keep(3 * 8);
+    return Av1_Tx_Dq;
+}
+fn av1_tx_dequant(tile, plane, tx_sz, tx_type, lossless, out): i64 {
+    var bit_depth = load64(tile + AV1TILE_BIT_DEPTH);
+    var qindex = load64(tile + AV1TILE_CUR_QINDEX);
+    var qfh = load64(tile + AV1TILE_SEG_FH);
+    var ddc = 0;
+    var dac = 0;
+    if (lossless == 0) {
+        ddc = av1_plane_dc_delta(qfh, plane);
+        dac = av1_plane_ac_delta(qfh, plane);
+    }
+    store64(out, av1_get_dc_quant(bit_depth, qindex, ddc));
+    store64(out + 8, av1_get_ac_quant(bit_depth, qindex, dac));
+    var qm = av1_qm_matrix(qfh, plane, tx_sz, tx_type, lossless);
+    if (qm < 0) { return DR_ERR_OOM; }
+    store64(out + 16, qm);
+    return DR_OK;
+}
+
 # ================================================================
 # transform_block (5.11.36) — predict → (coeffs → reconstruct) for one tx block.
 # blk is an Av1Block; mi (AV1MI_*) carries the mode info. plane/tx_sz/x/y select
@@ -852,8 +885,6 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
         var plane_sz = av1_get_plane_residual_size(load64(blk + AV1BLK_MI_SIZE), plane, subx, suby);
         var bw = av1_block_width(plane_sz);
         var bh = av1_block_height(plane_sz);
-        var bit_depth = load64(tile + AV1TILE_BIT_DEPTH);
-        var qindex = load64(tile + AV1TILE_CUR_QINDEX);   # per-segment qindex (== base_q when unsegmented)
         var quant = load64(tile + AV1TILE_QUANT);
         var eob = 0;
         var ekey = load64(tile + AV1TILE_EKEY);
@@ -873,29 +904,30 @@ fn av1_transform_block(tile, blk, plane, tx_sz, x, y): i64 {
               load64(tile + AV1TILE_ADC + (plane * 8)), load64(tile + AV1TILE_LDC + (plane * 8)),
               quant, load64(tile + AV1TILE_OTT));
         }
-        if (eob > 0) {
-            # per-plane DC/AC quant deltas (7.12.2) from the frame header the tile carries at
-            # SEG_FH (the intra lane's qindex source; AV1TILE_FH is 0 on an intra tile). fh==0
-            # for a bare test tile → deltas 0. A LOSSLESS block keeps the fixed dc_q(0)/ac_q(0)
-            # its WHT inverts: a conformant lossless block has all deltas 0 anyway
-            # (av1_compute_lossless requires it), and the guard also shields the base_q==0
-            # lossless shortcut (av1_partition.cyr — deltas-blind) from a hostile delta.
-            var qfh = load64(tile + AV1TILE_SEG_FH);
-            var ddc = 0;
-            var dac = 0;
-            if (load64(blk + AV1BLK_LOSSLESS) == 0) {
-                ddc = av1_plane_dc_delta(qfh, plane);
-                dac = av1_plane_ac_delta(qfh, plane);
+        # TxTypes (5.11.39 coeffs( ): DCT_DCT for an all-zero luma block, else transform_type's TxType) over the luma
+        # transform block, as the spec keeps it on every lane. Only an inter block's chroma reads it, and only inside
+        # its own block, so on the intra lane it is a record — the encoder's probes read it (0.8.7). A bare test tile
+        # has no grid.
+        if ((plane == 0) && (load64(tile + AV1TILE_TXTYPES) != 0)) {
+            var tt = AV1_DCT_DCT;
+            if (eob > 0) { tt = load64(load64(tile + AV1TILE_OTT)); }
+            var ty = 0;
+            while ((ty < step_y) && (((start_y >> 2) + ty) < load64(tile + AV1TILE_ROW_END))) {
+                var tx = 0;
+                while ((tx < step_x) && (((start_x >> 2) + tx) < load64(tile + AV1TILE_COL_END))) {
+                    av1_grid_set(tile, AV1TILE_TXTYPES, (start_y >> 2) + ty, (start_x >> 2) + tx, tt);
+                    tx = tx + 1;
+                }
+                ty = ty + 1;
             }
-            var q_dc = av1_get_dc_quant(bit_depth, qindex, ddc);
-            var q_ac = av1_get_ac_quant(bit_depth, qindex, dac);
-            # quantizer matrix (7.12.3 step 1b, 0.8.4): SegQMLevel follows LosslessArray[ segment_id ], the
-            # block's lossless flag; 0 (flat) for a bare test tile (qfh 0).
-            var qm = av1_qm_matrix(qfh, plane, tx_sz, load64(load64(tile + AV1TILE_OTT)),
-              load64(blk + AV1BLK_LOSSLESS));
-            if (qm < 0) { return DR_ERR_OOM; }
+        }
+        if (eob > 0) {
+            var dq = av1_tx_dq_scratch();               # built by av1_tables_init, which av1_tile_new runs
+            var dqe = av1_tx_dequant(tile, plane, tx_sz, load64(load64(tile + AV1TILE_OTT)),
+              load64(blk + AV1BLK_LOSSLESS), dq);
+            if (dqe != DR_OK) { return dqe; }
             var rrc = av1_reconstruct_qm(frame, plane, start_x, start_y, tx_sz, load64(load64(tile + AV1TILE_OTT)),
-              load64(blk + AV1BLK_LOSSLESS), quant, q_dc, q_ac, qm);
+              load64(blk + AV1BLK_LOSSLESS), quant, load64(dq), load64(dq + 8), load64(dq + 16));
             if (rrc != DR_OK) { return rrc; }   # its OOM / bad tx (the same-footprint prediction refuses first)
         }
     }
