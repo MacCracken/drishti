@@ -2,14 +2,18 @@
 # the standalone .ivf for make conformance to decode with aomdec, dav1d and drishti.
 #
 # I/O contract (fixed paths, as the other harness programs):
-#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK SB": FORMAT 0 monochrome, 1 4:2:0, 2 4:2:2,
-#                              3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64,
-#                              15 = 128x128); SB the superblock size, 64 or 128
+#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK SB [DECIDE]": FORMAT 0 monochrome, 1 4:2:0,
+#                              2 4:2:2, 3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64,
+#                              15 = 128x128); SB the superblock size, 64 or 128; DECIDE what the encoder decides
+#                              (AV1ENC_DECIDE_* bits: 1 the luma mode, 2 the chroma mode; 0, the default, nothing)
 #   IN   build/enc-input.yuv   the picture, planar in the `aomdec --rawvideo` layout: Y, then U and V (none for
 #                              monochrome), each its visible rectangle, one byte per sample at 8 bits and two
 #                              little-endian at 10 / 12
 #   OUT  build/enc-out.ivf     the encoded stream: an IVF file, one temporal unit
-#   stdout: "ENC bytes=<ivf bytes> decode_eq_recon=<1|0> lossless_exact=<1|0|->" and a SUMMARY line.
+#   stdout: "MODES y=<n> uv=<n> cfl=<cells> ymask=<bits>" (the luma / chroma modes the decoder reads in the stream:
+#     how many distinct, the CfL cells, the luma modes as a bit mask), "RD sse=<n> samples=<n> peak=<n>" (the
+#     reconstruction's squared error over every visible sample of every plane, the sample count, the largest sample
+#     value: a PSNR), "ENC bytes=<ivf bytes> decode_eq_recon=<1|0> lossless_exact=<1|0|->" and a SUMMARY line.
 #     decode_eq_recon: drishti, decoding the .ivf it wrote (read back with the IVF reader), outputs exactly the
 #       reconstruction the encoder returned — the script then holds that output to aomdec's and dav1d's.
 #     lossless_exact (QINDEX 0 only): the reconstruction is the input picture, sample for sample.
@@ -80,13 +84,79 @@ fn ec_same(a, b): i64 {
     return 1;
 }
 
+# The decoder's own reading of the temporal unit's mode info (its frame pieces, as tests/av1_enc.tcyr reads them): the
+# frame's grid tile, 0 on failure.
+fn ec_decode_grids(tu, n): i64 {
+    var it = av1_obu_iter_init(tu, n);
+    var t = 0;
+    var off = 0;
+    var sz = 0;
+    var seq = 0;
+    var tile = 0;
+    while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+        var e = 0;
+        if (t == AV1_OBU_SEQUENCE_HEADER) { seq = av1_seq_parse(tu + off, sz, &e); }
+        if ((t == AV1_OBU_FRAME) && (seq != 0)) {
+            var fh = av1_frame_parse_uncompressed_header(seq, av1_ref_state_new(), 0, 0, tu + off, sz, &e);
+            if (fh == 0) { return 0; }
+            var hb = (av1_fh_bits_consumed(fh) + 7) >> 3;
+            var fdc = av1_frame_dec_new(seq, fh, &e);
+            if (fdc == 0) { return 0; }
+            if (av1_frame_dec_group(fdc, tu + off + hb, sz - hb, &e) < 1) { return 0; }
+            tile = av1_frame_dec_tile0(fdc);
+        }
+    }
+    return tile;
+}
+# "MODES y=<distinct luma modes> uv=<distinct chroma modes> cfl=<CfL cells>": over every MI cell of the frame, as the
+# decoder read them — the proof a decided encode decided something (DC_PRED alone is y=1 uv=1).
+fn ec_modes(tu, n, w, h, has_uv): i64 {
+    var tile = ec_decode_grids(tu, n);
+    if (tile == 0) { ec_puts("MODES unreadable\n"); return 0; }
+    var ym = 0;
+    var um = 0;
+    var cfl = 0;
+    var rows = (h + 3) >> 2;
+    var cols = (w + 3) >> 2;
+    var r = 0;
+    while (r < rows) {
+        var c = 0;
+        while (c < cols) {
+            ym = ym | (1 << av1_grid_get(tile, AV1TILE_YMODES, r, c));
+            var u = av1_grid_get(tile, AV1TILE_UVMODES, r, c);
+            um = um | (1 << u);
+            if (u == AV1_UV_CFL_PRED) { cfl = cfl + 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var ny = 0;
+    var nu = 0;
+    var b = 0;
+    while (b < 14) { ny = ny + ((ym >> b) & 1); nu = nu + ((um >> b) & 1); b = b + 1; }
+    if (has_uv == 0) { nu = 0; }
+    ec_puts("MODES y=");
+    ec_putn(ny);
+    ec_puts(" uv=");
+    ec_putn(nu);
+    ec_puts(" cfl=");
+    ec_putn(cfl);
+    ec_puts(" ymask=");
+    ec_putn(ym);
+    ec_puts("\n");
+    return 0;
+}
 fn main(): i64 {
     alloc_init();
     if (av1_tables_init() != DR_OK) { ec_puts("SUMMARY oom\n"); return 1; }
     var cbuf = alloc(256);
     var cn = file_read_all("build/enc-input.cfg", cbuf, 255);
-    var cfg = alloc(7 * 8);
-    if ((cn <= 0) || (ec_parse(cbuf, cn, cfg, 7) != 7)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    var cfg = alloc(8 * 8);
+    var nc = 0;
+    if (cn > 0) { nc = ec_parse(cbuf, cn, cfg, 8); }
+    if ((nc != 7) && (nc != 8)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    var decide = 0;
+    if (nc == 8) { decide = load64(cfg + 56); }
     var w = load64(cfg);
     var h = load64(cfg + 8);
     var bd = load64(cfg + 16);
@@ -139,7 +209,7 @@ fn main(): i64 {
     }
     var ilen = 0;
     var recon = 0;
-    var ivf = av1_encode_keyframe_ivf(src, q, bs, sb128, &ilen, &recon, &e);
+    var ivf = av1_encode_keyframe_ivf(src, q, bs, sb128, decide, &ilen, &recon, &e);
     if (ivf == 0) { ec_puts("SUMMARY encode-error err="); ec_putn(e); ec_puts("\n"); return 1; }
     if (file_write_all("build/enc-out.ivf", ivf, ilen) < 0) { ec_puts("SUMMARY write-failed\n"); return 1; }
     # read the file back as a decoder would, and decode its one temporal unit
@@ -152,9 +222,27 @@ fn main(): i64 {
         var de = 0;
         var out = av1_decode_obus(pp, ps, &de);
         if ((out != 0) && (de == DR_OK)) { same = ec_same(out, recon); }
+        ec_modes(pp, ps, w, h, np > 1);
     }
     var exact = 0 - 1;
     if (q == 0) { exact = ec_same(recon, src); }
+    # the distortion of what the decoders output (the reconstruction, which aomdec's output is held to): the SSE over
+    # every visible sample of every plane, against the input
+    var sse = 0;
+    var nsamp = 0;
+    p = 0;
+    while (p < np) {
+        sse = sse + av1_rd_sse(src, recon, p, 0, 0, dr_frame_plane_width(src, p), dr_frame_plane_height(src, p));
+        nsamp = nsamp + (dr_frame_plane_width(src, p) * dr_frame_plane_height(src, p));
+        p = p + 1;
+    }
+    ec_puts("RD sse=");
+    ec_putn(sse);
+    ec_puts(" samples=");
+    ec_putn(nsamp);
+    ec_puts(" peak=");
+    ec_putn(maxv);
+    ec_puts("\n");
     ec_puts("ENC bytes=");
     ec_putn(ilen);
     ec_puts(" decode_eq_recon=");

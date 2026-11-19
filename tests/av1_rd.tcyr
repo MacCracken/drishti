@@ -1,0 +1,347 @@
+# tests/av1_rd.tcyr — rate and distortion (0.8.7 bite 1): the symbol cost table and the symbol coder's ESTIMATOR
+# (src/av1_symbol.cyr), and the distortion, RD multiplier and RDCOST of src/av1_rd.cyr.
+#
+# Every known answer comes from scripts/refs/rd_ref.py — the table from an operation-for-operation transcription that
+# it checks against 60-digit logarithms, the symbol costs from its model of the coder, the seeded streams' coded
+# lengths from its port of the coder, the RD multiplier from libaom's double arithmetic — never from this Cyrius.
+# Regenerate with
+#   python3 scripts/refs/rd_ref.py --emit
+# The SSE answers are worked by hand in their comments.
+include "src/main.cyr"
+
+fn rd_tbl(p): i64 { return load64(av1_sym_cost_table() + (p * 8)); }
+
+# a CDF of n symbols (n + 1 slots, the last the adaptation count 0) from up to 16 listed entries
+var Rd_Cdf = 0;
+fn rd_cdf(n, a0, a1, a2, a3, a4): i64 {
+    if (Rd_Cdf == 0) { Rd_Cdf = alloc(17 * 8); }
+    var k = 0;
+    while (k < 17) { store64(Rd_Cdf + (k * 8), 0); k = k + 1; }
+    store64(Rd_Cdf, a0);
+    store64(Rd_Cdf + 8, a1);
+    store64(Rd_Cdf + 16, a2);
+    store64(Rd_Cdf + 24, a3);
+    store64(Rd_Cdf + 32, a4);
+    return Rd_Cdf;
+}
+# the 16-symbol uniform CDF 2048 (k + 1)
+fn rd_cdf16(): i64 {
+    rd_cdf(16, 0, 0, 0, 0, 0);
+    var k = 0;
+    while (k < 16) { store64(Rd_Cdf + (k * 8), 2048 * (k + 1)); k = k + 1; }
+    return Rd_Cdf;
+}
+
+# ---- the cost table: round( 512 log2( 32768 / p ) ), correctly rounded at every p ----
+fn test_rd_table() {
+    assert(av1_sym_cost_table() != 0, "the table builds");
+    assert_eq(rd_tbl(1), 7680, "Cost[ 1 ]");
+    assert_eq(rd_tbl(2), 7168, "Cost[ 2 ]");
+    assert_eq(rd_tbl(3), 6868, "Cost[ 3 ] (6868.4992: 16 fraction bits round it up)");
+    assert_eq(rd_tbl(4), 6656, "Cost[ 4 ]");
+    assert_eq(rd_tbl(3609), 1629, "Cost[ 3609 ] (1629.4997: 20 fraction bits round it up)");
+    assert_eq(rd_tbl(3925), 1567, "Cost[ 3925 ]");
+    assert_eq(rd_tbl(6169), 1233, "Cost[ 6169 ]");
+    assert_eq(rd_tbl(16384), 512, "Cost[ 16384 ]: one bit");
+    assert_eq(rd_tbl(16385), 512, "Cost[ 16385 ]");
+    assert_eq(rd_tbl(24000), 230, "Cost[ 24000 ]");
+    assert_eq(rd_tbl(32766), 0, "Cost[ 32766 ]");
+    assert_eq(rd_tbl(32767), 0, "Cost[ 32767 ]");
+    assert_eq(rd_tbl(32768), 0, "Cost[ 32768 ]: a share of the whole range, inside the table");
+    var s1 = 0;
+    var s2 = 0;
+    var p = 1;
+    while (p < 32768) { s1 = s1 + rd_tbl(p); s2 = s2 + (p * rd_tbl(p)); p = p + 1; }
+    assert_eq(s1, 24199879, "the whole table: sum Cost[ p ]");
+    assert_eq(s2, 198282479021, "the whole table: sum p * Cost[ p ]");
+    assert_eq(av1_sym_cost_table(), av1_sym_cost_table(), "built once and kept");
+    return 0;
+}
+
+# ---- the symbol cost: the share of the range the coder gives the symbol ----
+fn test_rd_sym_cost() {
+    rd_cdf(2, 16384, 32768, 0, 0, 0);
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 0), 512, "a fair bool, 0: one bit");
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 1), 512, "a fair bool, 1: one bit");
+    rd_cdf(2, 100, 32768, 0, 0, 0);
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 0), 4114, "a rare first symbol: 64 * 1 - 3 of 2^15");
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 1), 3, "its likely partner");
+    rd_cdf(2, 32700, 32768, 0, 0, 0);
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 0), 2, "a likely first symbol");
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 1), 4574, "a rare last symbol: 64 * 1 + 3 of 2^15");
+    rd_cdf(2, 0, 32768, 0, 0, 0);
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 0), 7680, "a share below 1 clamps to 1");
+    assert_eq(av1_sym_cost(Rd_Cdf, 2, 1), 0, "a share of 64 * 512 + 3 clamps to 32767");
+    rd_cdf(4, 1, 2, 3, 32768, 0);
+    assert_eq(av1_sym_cost(Rd_Cdf, 4, 1), 6868, "equal top 9 bits: the minimum-probability share 3 alone");
+    rd_cdf(5, 4000, 9000, 20000, 30000, 32768);
+    assert_eq(av1_sym_cost(Rd_Cdf, 5, 0), 1550, "5 symbols, the first");
+    assert_eq(av1_sym_cost(Rd_Cdf, 5, 2), 806, "5 symbols, the middle");
+    assert_eq(av1_sym_cost(Rd_Cdf, 5, 4), 1829, "5 symbols, the last");
+    rd_cdf16();
+    assert_eq(av1_sym_cost(Rd_Cdf, 16, 0), 2063, "16 uniform, the first: 15 symbols' minimum share taken from it");
+    assert_eq(av1_sym_cost(Rd_Cdf, 16, 15), 2047, "16 uniform, the last");
+    return 0;
+}
+
+# ---- the estimator: costs, never codes, never adapts; refuses as the coder does ----
+fn test_rd_estimator() {
+    var est = av1_sym_enc_est_new();
+    assert(est != 0, "an estimator");
+    assert_eq(av1_sym_enc_cost(est), 0, "it starts at 0");
+    rd_cdf(5, 4000, 9000, 20000, 30000, 32768);
+    assert_eq(av1_sym_encode(est, Rd_Cdf, 5, 2, 1), DR_OK, "a symbol, adapt asked for");
+    assert_eq(av1_sym_encode_symbol(est, Rd_Cdf, 5, 4), DR_OK, "another, through read_symbol's mirror");
+    assert_eq(av1_sym_enc_cost(est), 806 + 1829, "the two costs");
+    assert_eq(load64(Rd_Cdf + 16), 20000, "the CDF is untouched (adapt asked for)");
+    assert_eq(load64(Rd_Cdf + 40), 0, "and its count");
+    assert_eq(av1_sym_encode_literal(est, 19, 5), DR_OK, "five literal bits");
+    assert_eq(av1_sym_enc_cost(est), (806 + 1829) + (5 * 512), "each a fair bool: one bit");
+    assert_eq(av1_sym_encode_bool(est, 1), DR_OK, "a bool");
+    assert_eq(av1_sym_enc_cost(est), (806 + 1829) + (6 * 512), "one more bit");
+    assert_eq(load64(est + AV1SE_LEN), 0, "no word was ever pushed");
+    av1_sym_enc_set_cost(est, 0);
+    assert_eq(av1_sym_enc_cost(est), 0, "a new measurement starts at 0");
+    # a refusal: the same sticky DR_ERR_BOUNDS as the coder, nothing added
+    assert_eq(av1_sym_encode(est, Rd_Cdf, 5, 5, 0), DR_ERR_BOUNDS, "a symbol outside [0, n) is refused");
+    assert_eq(av1_sym_enc_cost(est), 0, "and costs nothing");
+    assert_eq(av1_sym_encode(est, Rd_Cdf, 5, 0, 0), DR_ERR_BOUNDS, "sticky");
+    assert_eq(av1_sym_enc_err(est), DR_ERR_BOUNDS, "latched");
+    var est2 = av1_sym_enc_est_new();
+    rd_cdf(3, 100, 200, 32000, 0, 0);
+    assert_eq(av1_sym_encode(est2, Rd_Cdf, 3, 0, 0), DR_ERR_BOUNDS, "a CDF without its terminator is refused");
+    rd_cdf(2, 40000, 32768, 0, 0, 0);
+    var est3 = av1_sym_enc_est_new();
+    assert_eq(av1_sym_encode(est3, Rd_Cdf, 2, 0, 0), DR_ERR_BOUNDS, "an entry above 1 << 15 is refused");
+    # nothing to flush
+    var est4 = av1_sym_enc_est_new();
+    var n = 7;
+    assert_eq(av1_sym_enc_finish(est4, &n), 0, "an estimator has no stream to finish");
+    assert_eq(n, 0, "length 0");
+    assert_eq(av1_sym_enc_err(est4), DR_ERR_BOUNDS, "and the misuse is latched");
+    # a coder is not an estimator
+    var enc = av1_sym_enc_init(64, 0);
+    rd_cdf(5, 4000, 9000, 20000, 30000, 32768);
+    av1_sym_encode(enc, Rd_Cdf, 5, 2, 1);
+    assert(load64(Rd_Cdf + 16) != 20000, "a coder with adapt on adapts");
+    assert_eq(av1_sym_enc_cost(enc), 0, "and costs nothing");
+    return 0;
+}
+
+# ---- seeded streams: the estimate against the coded length (rd_ref.py's stream, built alike) ----
+fn rd_lcg(x): i64 { return ((x * 1103515245) + 12345) & 2147483647; }
+var Rd_Cdfs = 0;   # 24 CDFs of 17 slots
+fn rd_stream(seed, k, e, s, count, want_est, want_bytes) {
+    if (Rd_Cdfs == 0) { Rd_Cdfs = alloc(24 * 17 * 8); }
+    var x = seed;
+    var i = 0;
+    while (i < k) {
+        var cdf = Rd_Cdfs + (i * 17 * 8);
+        var n = 2;
+        var m6 = i % 6;
+        if (m6 == 1) { n = 3; }
+        if (m6 == 2) { n = 4; }
+        if (m6 == 3) { n = 8; }
+        if (m6 == 4) { n = 13; }
+        if (m6 == 5) { n = 16; }
+        var tot = 0;
+        var j = 0;
+        while (j < n) {
+            x = rd_lcg(x);
+            var b = (x >> 8) & 1023;
+            var pw = b;
+            if (e >= 2) { pw = pw * b; }
+            if (e >= 3) { pw = pw * b; }
+            var wj = 1 + (pw >> s);
+            store64(cdf + (j * 8), wj);          # the weights, cumulated below
+            tot = tot + wj;
+            j = j + 1;
+        }
+        var cum = 0;
+        var prev = 0 - 1;
+        j = 0;
+        while (j < n) {
+            cum = cum + load64(cdf + (j * 8));
+            var c = (32768 * cum) / tot;
+            if ((j > 0) && (c <= prev)) { c = prev + 1; }
+            store64(cdf + (j * 8), c);
+            prev = c;
+            j = j + 1;
+        }
+        store64(cdf + ((n - 1) * 8), 32768);
+        store64(cdf + (n * 8), 0);
+        store64(cdf + (16 * 8), n);              # the symbol count, past the CDF
+        i = i + 1;
+    }
+    var est = av1_sym_enc_est_new();
+    var enc = av1_sym_enc_init(4096, 1);
+    var t = 0;
+    while (t < count) {
+        x = rd_lcg(x);
+        var cd = Rd_Cdfs + (((x >> 8) % k) * 17 * 8);
+        var nn = load64(cd + (16 * 8));
+        x = rd_lcg(x);
+        var draw = (x >> 8) & 32767;
+        var sym = 0;
+        while (load64(cd + (sym * 8)) <= draw) { sym = sym + 1; }
+        av1_sym_encode(est, cd, nn, sym, 0);
+        av1_sym_encode(enc, cd, nn, sym, 0);
+        t = t + 1;
+    }
+    var len = 0;
+    var bytes = av1_sym_enc_finish(enc, &len);
+    assert(bytes != 0, "the coder finishes");
+    assert_eq(av1_sym_enc_err(est), DR_OK, "every symbol estimated");
+    assert_eq(av1_sym_enc_cost(est), want_est, "the stream's estimate (1/512 bits)");
+    assert_eq(len, want_bytes, "the stream's coded length (bytes)");
+    # within 0.5%: | est / 512 - 8 len | * 200 < 8 len
+    var diff = av1_sym_enc_cost(est) - (len * 8 * 512);
+    if (diff < 0) { diff = 0 - diff; }
+    assert((diff * 200) < (len * 8 * 512), "the estimate is within 0.5% of the coded length");
+    return 0;
+}
+fn test_rd_streams() {
+    rd_stream(1, 24, 1, 0, 20000, 23558211, 5752);
+    rd_stream(2, 24, 2, 10, 20000, 20555459, 5020);
+    rd_stream(3, 24, 3, 20, 20000, 17268660, 4218);
+    return 0;
+}
+
+# ---- the RD multiplier, the distortion units, RDCOST ----
+fn test_rd_mult() {
+    assert_eq(av1_rd_mult(8, 0), 52, "rdmult 8-bit qindex 0");
+    assert_eq(av1_rd_mult(8, 1), 211, "rdmult 8-bit qindex 1");
+    assert_eq(av1_rd_mult(8, 16), 1332, "rdmult 8-bit qindex 16: exact (libaom's double gives 1331)");
+    assert_eq(av1_rd_mult(8, 60), 10999, "rdmult 8-bit qindex 60");
+    assert_eq(av1_rd_mult(8, 128), 68796, "rdmult 8-bit qindex 128");
+    assert_eq(av1_rd_mult(8, 255), 9467088, "rdmult 8-bit qindex 255");
+    assert_eq(av1_rd_mult(10, 0), 3, "rdmult 10-bit qindex 0");
+    assert_eq(av1_rd_mult(10, 60), 10466, "rdmult 10-bit qindex 60");
+    assert_eq(av1_rd_mult(10, 255), 20228608, "rdmult 10-bit qindex 255");
+    assert_eq(av1_rd_mult(12, 0), 1, "rdmult 12-bit qindex 0: at least 1");
+    assert_eq(av1_rd_mult(12, 60), 12705, "rdmult 12-bit qindex 60");
+    assert_eq(av1_rd_mult(12, 255), 63215524, "rdmult 12-bit qindex 255");
+    assert_eq(av1_rd_dist(0, 8), 0, "dist 0 at 8 bits");
+    assert_eq(av1_rd_dist(12345, 8), 197520, "dist 12345 at 8 bits: x16");
+    assert_eq(av1_rd_dist(12345, 10), 12352, "dist 12345 at 10 bits: Round2 by 4, x16");
+    assert_eq(av1_rd_dist(12352, 10), 12352, "dist 12352 at 10 bits");
+    assert_eq(av1_rd_dist(12344, 10), 12352, "dist 12344 at 10 bits: rounds half up");
+    assert_eq(av1_rd_dist(1000000, 12), 62496, "dist 1000000 at 12 bits: Round2 by 8, x16");
+    assert_eq(av1_rd_dist(128, 12), 16, "dist 128 at 12 bits");
+    assert_eq(av1_rd_dist(127, 12), 0, "dist 127 at 12 bits");
+    assert_eq(av1_rd_cost(7, 1000, 0), 14, "rdcost: Round2( 7000, 9 )");
+    assert_eq(av1_rd_cost(100000, 3000, 12345), 2166098, "rdcost: rate and distortion");
+    assert_eq(av1_rd_cost(52, 1, 1), 128, "rdcost: distortion x 2^7");
+    assert_eq(av1_rd_cost(5000000, 777777, 0), 7595478516, "rdcost: a large rate");
+    return 0;
+}
+
+# ---- the SSE over the visible samples ----
+fn test_rd_sse() {
+    var e = 0;
+    var a = dr_frame_new(10, 6, 3, 1, 1, 8, 8, &e);
+    var b = dr_frame_new(10, 6, 3, 1, 1, 8, 8, &e);
+    assert((a != 0) && (b != 0), "two 10x6 4:2:0 frames");
+    # plane 0: a = x + 10 y, b = 0 — and b = 200 in the two columns past the visible width (its border), which a
+    # wrong clip would count; plane 1: a = 3, b = 1 (each sample 4); plane 2 equal
+    var y = 0 - 2;
+    while (y < 8) {
+        var x = 0 - 2;
+        while (x < 12) {
+            dr_frame_set(a, 0, x, y, 0);
+            dr_frame_set(b, 0, x, y, 200);
+            if ((x >= 0) && (x < 10) && (y >= 0) && (y < 6)) {
+                dr_frame_set(a, 0, x, y, x + (10 * y));
+                dr_frame_set(b, 0, x, y, 0);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    dr_frame_fill(a, 1, 3);
+    dr_frame_fill(b, 1, 1);
+    # b = 200 past chroma's visible 5x3 (x 5..6, y 3..4), which a clip to the LUMA plane would count
+    y = 0;
+    while (y < 5) {
+        var xc = 0;
+        while (xc < 7) {
+            if ((xc >= 5) || (y >= 3)) { dr_frame_set(b, 1, xc, y, 200); }
+            xc = xc + 1;
+        }
+        y = y + 1;
+    }
+    dr_frame_fill(a, 2, 9);
+    dr_frame_fill(b, 2, 9);
+    # 48^2 + 49^2 + 58^2 + 59^2 = 2304 + 2401 + 3364 + 3481: the 4x4 at (8, 4) keeps x 8..9, y 4..5
+    assert_eq(av1_rd_sse(a, b, 0, 8, 4, 4, 4), 11550, "clipped at the right and bottom");
+    # 0 + 1 + 100 + 121: the 4x4 at (-2, -2) keeps x 0..1, y 0..1
+    assert_eq(av1_rd_sse(a, b, 0, 0 - 2, 0 - 2, 4, 4), 222, "clipped at the left and top");
+    # sum v^2 for v = 0..59 = 59 * 60 * 119 / 6
+    assert_eq(av1_rd_sse(a, b, 0, 0, 0, 10, 6), 70210, "the whole plane");
+    assert_eq(av1_rd_sse(a, b, 0, 0, 0, 16, 16), 70210, "a rectangle past the plane counts only the plane");
+    assert_eq(av1_rd_sse(a, b, 0, 10, 0, 4, 4), 0, "outside on the right: nothing");
+    assert_eq(av1_rd_sse(a, b, 0, 0, 6, 4, 4), 0, "outside below: nothing");
+    assert_eq(av1_rd_sse(a, b, 0, 3, 3, 0, 4), 0, "an empty rectangle: nothing");
+    # chroma is 5x3: the 4x4 at (3, 1) keeps x 3..4, y 1..2, four samples of (3 - 1)^2
+    assert_eq(av1_rd_sse(a, b, 1, 3, 1, 4, 4), 16, "chroma, clipped to its own plane");
+    assert_eq(av1_rd_sse(a, b, 1, 0, 0, 5, 3), 60, "the whole chroma plane: 15 x 4");
+    assert_eq(av1_rd_sse(a, b, 1, 0, 0, 10, 6), 60, "a luma-sized rectangle in chroma counts only chroma");
+    assert_eq(av1_rd_sse(a, b, 2, 0, 0, 5, 3), 0, "equal planes");
+    assert_eq(av1_rd_sse(a, a, 0, 0, 0, 10, 6), 0, "a frame against itself");
+    var c = dr_frame_new(4, 2, 1, 1, 1, 12, 8, &e);
+    var d = dr_frame_new(4, 2, 1, 1, 1, 12, 8, &e);
+    dr_frame_fill(c, 0, 4095);
+    dr_frame_fill(d, 0, 0);
+    assert_eq(av1_rd_sse(c, d, 0, 0, 0, 4, 2), 8 * 16769025, "12-bit extremes: 8 x 4095^2");
+    return 0;
+}
+
+# ---- memory: the estimator's allocations fail cleanly; nothing else allocates ----
+fn rd_est_op(arg): i64 {
+    if (av1_sym_enc_est_new() == 0) { return DR_ERR_OOM; }
+    return DR_OK;
+}
+fn rd_sse_op(arg): i64 {
+    av1_rd_sse(arg, arg, 0, 0, 0, 4, 4);
+    av1_rd_mult(10, 77);
+    return DR_OK;
+}
+fn test_rd_oom() {
+    # first, before anything builds the cost table: its allocation fails, and a later call builds it
+    dr_alloc_fail_at(1);
+    assert_eq(av1_sym_enc_est_new(), 0, "the table cannot be built: no estimator");
+    assert_eq(Av1_Sym_Cost_Tbl, 0, "and no half-built table is kept");
+    dr_alloc_fail_at(0);
+    var n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&rd_est_op, 0, &n), 0, "the estimator's OOM sweep holds");
+    assert_eq(n, 2, "it allocates its record and its (unused) word buffer");
+    var e = 0;
+    var f = dr_frame_new(4, 4, 1, 1, 1, 8, 8, &e);
+    n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&rd_sse_op, f, &n), 0, "distortion and the multiplier");
+    assert_eq(n, 0, "allocate nothing");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { return 1; }
+    test_group("rd: OOM (first: the cost table is unbuilt)");
+    test_rd_oom();
+    test_group("rd: the cost table");
+    test_rd_table();
+    test_group("rd: the symbol cost");
+    test_rd_sym_cost();
+    test_group("rd: the estimator");
+    test_rd_estimator();
+    test_group("rd: seeded streams, the estimate against the coded length");
+    test_rd_streams();
+    test_group("rd: the RD multiplier, distortion units and RDCOST");
+    test_rd_mult();
+    test_group("rd: the SSE over the visible samples");
+    test_rd_sse();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

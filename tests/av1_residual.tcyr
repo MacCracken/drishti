@@ -332,6 +332,37 @@ fn test_three_plane_skip() {
     return 0;
 }
 
+# AV1BLK_PLANE_SKIP (0.8.7, the encoder's mode search): residual( ) leaves out the planes it names, bit p for plane p,
+# and walks the rest exactly as it would. Every sample starts at 77; a DC skip block predicts 128 where it runs.
+fn rs_plane_skip_case(mask, want0, want12): i64 {
+    var oe = alloc(8);
+    var frame = dr_frame_new(16, 16, 3, 1, 1, 8, 8, oe);
+    dr_frame_fill(frame, 0, 77);
+    dr_frame_fill(frame, 1, 77);
+    dr_frame_fill(frame, 2, 77);
+    var tile = av1_tile_new(frame, 4, 4, 0, 1, 0, 3);
+    store64(tile + AV1TILE_CC, av1_ccdf_new(0));
+    store64(tile + AV1TILE_NCC, av1_noncoeff_cdf_blob());
+    av1_bd_clear(tile, 0, 0, 16, 3);
+    var blk = mk_block(6, 2, 1, mk_mi_dc(1));
+    store64(blk + AV1BLK_PLANE_SKIP, mask);
+    assert_eq(av1_residual(tile, blk), DR_OK, "a masked residual walks");
+    assert_eq(dr_frame_get(frame, 0, 5, 9), want0, "luma: predicted where it runs, untouched where masked");
+    assert_eq(dr_frame_get(frame, 1, 3, 2), want12, "U likewise");
+    assert_eq(dr_frame_get(frame, 2, 7, 7), want12, "V likewise");
+    assert_eq(av1_bd_get(tile, 0, 0, 0), want0 == 128, "luma BlockDecoded only where it ran");
+    assert_eq(av1_bd_get(tile, 1, 0, 0), want12 == 128, "chroma BlockDecoded only where it ran");
+    return 0;
+}
+fn test_plane_skip() {
+    rs_plane_skip_case(0, 128, 128);
+    rs_plane_skip_case(6, 128, 77);
+    rs_plane_skip_case(1, 77, 128);
+    rs_plane_skip_case(7, 77, 77);
+    assert_eq(load64(av1_block_new() + AV1BLK_PLANE_SKIP), 0, "a new block skips no plane (decoding)");
+    return 0;
+}
+
 # CfL chroma path runs (UV_CFL_PRED): with a flat 128 luma, CfL adds 0 so chroma
 # stays 128 — this exercises the is_cfl branch + predict_chroma_from_luma without
 # crashing and with the correct flat-luma result.
@@ -668,6 +699,7 @@ fn main() {
     test_palette_refusal_propagates();
     test_all_zero_is_prediction();
     test_three_plane_skip();
+    test_plane_skip();
     test_group("residual driver — reconstruct path");
     test_reconstruct_consistency();
     test_deltaq_ydc_shifts_dc();

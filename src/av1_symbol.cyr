@@ -55,7 +55,12 @@ enum Av1SymEncOff {
     AV1SE_CAP         = 48;
     AV1SE_ERR         = 56;
     AV1SE_BOOL_CDF    = 64;   # {1<<14, 1<<15, 0} for encode_bool (3 slots)
-    AV1SE_SIZE        = 96;
+    AV1SE_EST         = 88;   # 1: an ESTIMATOR (av1_sym_enc_est_new) — it costs each symbol and codes none
+    AV1SE_COST        = 96;   # the estimator's running cost, in 1/512 bits (AV1_COST_SHIFT)
+    AV1SE_SIZE        = 104;
+}
+enum Av1SymCostConst {
+    AV1_COST_SHIFT = 9;        # costs are in 1/512 bits (libaom's AV1_PROB_COST_SHIFT, av1/encoder/cost.h)
 }
 
 # ================================================================
@@ -302,8 +307,87 @@ fn av1_sym_enc_init(cap_hint, disable_cdf_update): i64 {
     store64(enc + AV1SE_BOOL_CDF, 16384);
     store64(enc + AV1SE_BOOL_CDF + 8, 32768);
     store64(enc + AV1SE_BOOL_CDF + 16, 0);
+    store64(enc + AV1SE_EST, 0);
+    store64(enc + AV1SE_COST, 0);
     return enc;
 }
+
+# ================================================================
+# The ESTIMATOR (0.8.7) — the rate an encoder decision weighs. An estimator is an encoder every writer runs against
+# unchanged: av1_sym_encode validates each symbol exactly as it does when coding (a refusal is the same sticky
+# DR_ERR_BOUNDS), then adds the symbol's cost to AV1SE_COST and stops — no interval coded, no word pushed, and NO CDF
+# adapted, whatever the caller's adapt flag. So a run of writers against an estimator leaves every CDF as it found it,
+# and its cost is the rate of those symbols under the CDFs as they stand (an encoder's decision, made before the
+# symbols are coded for real, adapting). scripts/refs/rd_ref.py holds every number here.
+# ================================================================
+
+# Cost[ p ] = round( 512 * log2( 32768 / p ) ), p in 1..32767 ([ 0 ] unused): the cost in 1/512 bits of a symbol whose
+# share of the range is p / 2^15. Built in integers: log2 p is floor_log2( p ) plus the fraction from 24 squarings of
+# the Q30 mantissa (truncated), then rounded to Q9 — correctly rounded for EVERY p, which rd_ref.py checks against
+# 60-digit logarithms (16 or 20 fraction bits are not: 272 and 15 entries round the wrong way). Cost[ 32768 ] = 0 too,
+# so every p in [ 1, 32768 ] indexes inside the table. Lazily built; kept.
+var Av1_Sym_Cost_Tbl = 0;   # 32769 i64
+fn av1_sym_cost_table(): i64 {
+    if (Av1_Sym_Cost_Tbl != 0) { return Av1_Sym_Cost_Tbl; }
+    var t = dr_alloc_keep((AV1_CDF_PROB_TOP + 1) * 8);
+    if (t == 0) { return 0; }
+    store64(t, 0);
+    store64(t + (AV1_CDF_PROB_TOP * 8), 0);
+    var p = 1;
+    while (p < AV1_CDF_PROB_TOP) {
+        var n = dr_floor_log2(p);
+        var m = p << (30 - n);                 # the mantissa p / 2^n in [ 1, 2 ), Q30
+        var frac = 0;
+        var i = 0;
+        while (i < 24) {
+            m = (m * m) >> 30;                 # m < 2^31, so m * m < 2^62: no overflow
+            frac = frac << 1;
+            if (m >= (1 << 31)) {
+                m = m >> 1;
+                frac = frac | 1;
+            }
+            i = i + 1;
+        }
+        var c = (15 << 24) - ((n << 24) | frac);   # log2( 32768 / p ), Q24
+        store64(t + (p * 8), ((c * 512) + (1 << 23)) >> 24);
+        p = p + 1;
+    }
+    Av1_Sym_Cost_Tbl = t;
+    return t;
+}
+
+# The cost, in 1/512 bits, of coding sym (in [0, n)) against cdf: Cost[ p ] for p the share of the range av1_sym_encode
+# gives it, in 1/2^15 units. The coder reads the CDF's top 9 bits (>> EC_PROB_SHIFT) and adds EC_MIN_PROB per symbol:
+# sym's interval is about D / 512 + 4 / R of the range R for sym > 0, D = ( fu >> 6 ) - ( fv >> 6 ), and for sym 0
+# about ( 512 - ( fv >> 6 ) ) / 512 - 4 ( n - 1 ) / R (fu = 32768 - cdf[ sym - 1 ], fv = 32768 - cdf[ sym ]). R lies in
+# [ 2^15, 2^16 ); at its geometric midpoint 2^15.5 the 4 / R term is 2 sqrt 2 / 2^15 — 3 rounded, and 2896 / 1024
+# per symbol for sym 0. Clamped to [ 1, 32767 ]. The table must be built (av1_sym_enc_est_new builds it).
+fn av1_sym_cost(cdf, n, sym): i64 {
+    var fv = AV1_CDF_PROB_TOP - load64(cdf + (sym * 8));
+    var p = 0;
+    if (sym > 0) {
+        var fu = AV1_CDF_PROB_TOP - load64(cdf + ((sym - 1) * 8));
+        p = (((fu >> AV1_EC_PROB_SHIFT) - (fv >> AV1_EC_PROB_SHIFT)) << AV1_EC_PROB_SHIFT) + 3;
+    } else {
+        p = (((AV1_CDF_PROB_TOP >> AV1_EC_PROB_SHIFT) - (fv >> AV1_EC_PROB_SHIFT)) << AV1_EC_PROB_SHIFT)
+        - ((((n - 1) * 2896) + 512) >> 10);
+    }
+    if (p < 1) { p = 1; }
+    if (p > (AV1_CDF_PROB_TOP - 1)) { p = AV1_CDF_PROB_TOP - 1; }
+    return load64(Av1_Sym_Cost_Tbl + (p * 8));
+}
+
+# An estimator: an encoder whose av1_sym_encode costs symbols instead of coding them (above). 0 on OOM.
+fn av1_sym_enc_est_new(): i64 {
+    if (av1_sym_cost_table() == 0) { return 0; }
+    var enc = av1_sym_enc_init(64, 1);
+    if (enc == 0) { return 0; }
+    store64(enc + AV1SE_EST, 1);
+    return enc;
+}
+# its running cost (1/512 bits), and setting it (0 to start a new measurement)
+fn av1_sym_enc_cost(enc): i64 { return load64(enc + AV1SE_COST); }
+fn av1_sym_enc_set_cost(enc, v): i64 { store64(enc + AV1SE_COST, v); return 0; }
 
 fn av1_sym_enc_err(enc): i64 { return load64(enc + AV1SE_ERR); }
 # Latch an encoder-side failure the symbol layer did not see (an OOM in a caller's scratch): first error wins,
@@ -356,6 +440,11 @@ fn av1_sym_encode(enc, cdf, n, sym, adapt): i64 {
     if ((cvs < 0) || (cvs > AV1_CDF_PROB_TOP) || (cvp < 0) || (cvp > AV1_CDF_PROB_TOP)) {
         store64(enc + AV1SE_ERR, DR_ERR_BOUNDS);
         return DR_ERR_BOUNDS;
+    }
+    if (load64(enc + AV1SE_EST) != 0) {
+        # an estimator: the symbol's cost, and nothing coded or adapted
+        store64(enc + AV1SE_COST, load64(enc + AV1SE_COST) + av1_sym_cost(cdf, n, sym));
+        return DR_OK;
     }
     # v = U(r, sym)
     var fv = AV1_CDF_PROB_TOP - cvs;
@@ -426,6 +515,10 @@ fn av1_sym_encode_literal(enc, value, n): i64 {
 fn av1_sym_enc_finish(enc, out_len): i64 {
     store64(out_len, 0);
     if (load64(enc + AV1SE_ERR) != DR_OK) { return 0; }
+    if (load64(enc + AV1SE_EST) != 0) {               # an estimator has coded nothing: there is no stream to flush
+        store64(enc + AV1SE_ERR, DR_ERR_BOUNDS);
+        return 0;
+    }
     var l = load64(enc + AV1SE_LOW);
     var c = load64(enc + AV1SE_CNT);
     var s = 10 + c;

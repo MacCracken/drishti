@@ -676,7 +676,10 @@ enum Av1BlockOff {
     AV1BLK_AVAIL_LC    = 72;   # AvailLChroma
     AV1BLK_AVAIL_UC    = 80;   # AvailUChroma
     AV1BLK_FILTER_TYPE = 88;   # reserved; get_filter_type derived in transform_block
-    AV1BLK_SIZE        = 96;
+    # the planes residual( ) leaves out, bit p for plane p: 0 decoding; set by the encoder's mode search
+    # (src/av1_enc.cyr) to try one plane's choices alone
+    AV1BLK_PLANE_SKIP  = 96;
+    AV1BLK_SIZE        = 104;
 }
 fn av1_block_new(): i64 {
     var b = dr_alloc(AV1BLK_SIZE);
@@ -947,6 +950,7 @@ fn av1_residual(tile, blk): i64 {
     var suby = load64(tile + AV1TILE_SUBY);
     var num_planes = 1;
     if (has_chroma) { num_planes = 3; }
+    var plane_skip = load64(blk + AV1BLK_PLANE_SKIP);   # 0 decoding: every plane
     # 5.11.34 CHUNKING: a block WIDER or TALLER than 64 luma samples (only reachable with
     # 128x128 superblocks) is walked as a grid of 64x64 chunks, each stepping the tx grid
     # of BLOCK_64X64 rather than of the whole block. For every block <= 64 both counts are
@@ -963,32 +967,34 @@ fn av1_residual(tile, blk): i64 {
         while (chunk_x < width_chunks) {
             var plane = 0;
             while (plane < num_planes) {
-                var sx = 0;
-                var sy = 0;
-                if (plane > 0) { sx = subx; sy = suby; }
-                # NOTE the spec's asymmetry (5.11.34): get_tx_size is keyed on the FULL
-                # MiSize, while the plane residual size uses the CHUNK size.
-                var tx_sz = load64(blk + AV1BLK_TX_SIZE);
-                if (lossless) { tx_sz = 0; }                # TX_4X4
-                else { tx_sz = av1_get_tx_size(plane, tx_sz, mi_size, subx, suby); }
-                var step_x = av1_tx_width(tx_sz) >> 2;
-                var step_y = av1_tx_height(tx_sz) >> 2;
-                var plane_sz = av1_get_plane_residual_size(mi_size_chunk, plane, subx, suby);
-                var num4x4w = av1_num_4x4_w(plane_sz);
-                var num4x4h = av1_num_4x4_h(plane_sz);
-                # x/y stay relative to the BLOCK origin (transform_block derives its base
-                # from the block's MiRow/MiCol), so the chunk offset is folded into them.
-                var off_x = (chunk_x << 4) >> sx;
-                var off_y = (chunk_y << 4) >> sy;
-                var y = 0;
-                while (y < num4x4h) {
-                    var x = 0;
-                    while (x < num4x4w) {
-                        var trc = av1_transform_block(tile, blk, plane, tx_sz, x + off_x, y + off_y);
-                        if (trc != DR_OK) { return trc; }   # a refused block write, an OOM: the first error ends it
-                        x = x + step_x;
+                if (((plane_skip >> plane) & 1) == 0) {
+                    var sx = 0;
+                    var sy = 0;
+                    if (plane > 0) { sx = subx; sy = suby; }
+                    # NOTE the spec's asymmetry (5.11.34): get_tx_size is keyed on the FULL
+                    # MiSize, while the plane residual size uses the CHUNK size.
+                    var tx_sz = load64(blk + AV1BLK_TX_SIZE);
+                    if (lossless) { tx_sz = 0; }                # TX_4X4
+                    else { tx_sz = av1_get_tx_size(plane, tx_sz, mi_size, subx, suby); }
+                    var step_x = av1_tx_width(tx_sz) >> 2;
+                    var step_y = av1_tx_height(tx_sz) >> 2;
+                    var plane_sz = av1_get_plane_residual_size(mi_size_chunk, plane, subx, suby);
+                    var num4x4w = av1_num_4x4_w(plane_sz);
+                    var num4x4h = av1_num_4x4_h(plane_sz);
+                    # x/y stay relative to the BLOCK origin (transform_block derives its base
+                    # from the block's MiRow/MiCol), so the chunk offset is folded into them.
+                    var off_x = (chunk_x << 4) >> sx;
+                    var off_y = (chunk_y << 4) >> sy;
+                    var y = 0;
+                    while (y < num4x4h) {
+                        var x = 0;
+                        while (x < num4x4w) {
+                            var trc = av1_transform_block(tile, blk, plane, tx_sz, x + off_x, y + off_y);
+                            if (trc != DR_OK) { return trc; }   # a refused block write, an OOM: the first error ends it
+                            x = x + step_x;
+                        }
+                        y = y + step_y;
                     }
-                    y = y + step_y;
                 }
                 plane = plane + 1;
             }

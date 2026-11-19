@@ -1,0 +1,81 @@
+# @public — drishti AV1: RATE AND DISTORTION (0.8.7) — the two quantities every encoder decision weighs.
+#
+# The spec defines no encoder decision, so what is measured here is drishti's choice; scripts/refs/rd_ref.py checks
+# each part against what it claims to approximate, and holds every known answer tests/av1_rd.tcyr asserts.
+#
+# RATE is the cost of the symbols a choice would code, in 1/512 bits (AV1_COST_SHIFT): run the choice's writers — the
+# decoder's syntax, inverted — against the symbol coder's ESTIMATOR (av1_sym_enc_est_new, src/av1_symbol.cyr), which
+# costs each symbol under the CDFs as they stand and codes nothing. On seeded streams it is within 0.05% of the coded
+# length (rd_ref.py: 0.5% is asserted).
+#
+# DISTORTION is the sum of squared differences between the source and a reconstruction over the visible samples (the
+# decoder's output is cropped to them): av1_rd_sse. av1_rd_dist puts it in libaom's units, the SSE Round2'd to 8-bit
+# scale (2 ( BitDepth - 8 ) bits) and times 16, as av1/encoder/tx_search.c's `dist << 4`.
+#
+# The trade between them is libaom's: RDCOST( rdmult, R, D ) = Round2( R * rdmult, 9 ) + D * 2^7 (av1/encoder/rd.h),
+# at libaom's key-frame RD multiplier (av1/encoder/rd.c av1_compute_rd_mult_based_on_qindex): q = dc_q( qindex ),
+# q^2 ( 3.3 + 0.0015 q ), scaled to 8-bit units by Round2 4 / 8 bits at 10 / 12 bits, at least 1. drishti's is exact
+# integer arithmetic — q^2 ( 33000 + 15 q ) / 10000 — equal to libaom's double arithmetic at 764 of the 768 (bit depth,
+# qindex) pairs; at the other four (8-bit qindex 16, 63, 165, 190) the product is an exact integer that libaom's double
+# falls one short of. Every i64 here stays far from overflow: rdmult < 2^26 (12-bit qindex 255), a block's R < 2^30,
+# and a 128x128 4:4:4 block's D * 2^7 < 2^43.
+#
+# FLAT module (no includes) — wiring in src/main.cyr, before av1_enc (the encoder that uses it): it reads frames
+# (src/frame.cyr) and the decoder's quantizer step (av1_get_dc_quant, src/av1_quant.cyr).
+
+enum Av1RdConst {
+    AV1_RDDIV_BITS = 7;    # libaom's RDDIV_BITS
+}
+
+# libaom's key-frame RD multiplier at (bit_depth, qindex), in 8-bit units (see the header).
+fn av1_rd_mult(bit_depth, qindex): i64 {
+    var q = av1_get_dc_quant(bit_depth, qindex, 0);
+    var r = (q * q * (33000 + (15 * q))) / 10000;
+    if (bit_depth == 10) { r = (r + 8) >> 4; }
+    if (bit_depth == 12) { r = (r + 128) >> 8; }
+    if (r < 1) { r = 1; }
+    return r;
+}
+
+# A sum of squared differences at bit_depth in libaom's distortion units: Round2( sse, 2 ( bit_depth - 8 ) ) * 16.
+fn av1_rd_dist(sse, bit_depth): i64 {
+    var sh = 2 * (bit_depth - 8);
+    var d = sse;
+    if (sh > 0) { d = (sse + (1 << (sh - 1))) >> sh; }
+    return d << 4;
+}
+
+# RDCOST: rate in 1/512 bits, distortion from av1_rd_dist. Lower is better.
+fn av1_rd_cost(rdmult, rate, dist): i64 {
+    return (((rate * rdmult) + (1 << (AV1_COST_SHIFT - 1))) >> AV1_COST_SHIFT) + (dist << AV1_RDDIV_BITS);
+}
+
+# The sum of squared differences between frames a and b in plane p over the w x h rectangle at plane-local (x0, y0),
+# clipped to a's VISIBLE plane (the samples a decoder outputs). b must hold every sample of that clipped rectangle
+# (the reconstruction frame does: it is allocated to the superblock grid). 0 for an empty intersection.
+fn av1_rd_sse(a, b, p, x0, y0, w, h): i64 {
+    var x1 = av1_min(x0 + w, dr_frame_plane_width(a, p));
+    var y1 = av1_min(y0 + h, dr_frame_plane_height(a, p));
+    var xs = av1_max(x0, 0);
+    var ys = av1_max(y0, 0);
+    if ((xs >= x1) || (ys >= y1)) { return 0; }
+    var sa = dr_frame_plane_stride(a, p) * 2;
+    var sb = dr_frame_plane_stride(b, p) * 2;
+    var ra = dr_frame_plane_ptr(a, p) + (ys * sa) + (xs * 2);
+    var rb = dr_frame_plane_ptr(b, p) + (ys * sb) + (xs * 2);
+    var n = x1 - xs;
+    var s = 0;
+    var y = ys;
+    while (y < y1) {
+        var x = 0;
+        while (x < n) {
+            var d = load16(ra + (x * 2)) - load16(rb + (x * 2));
+            s = s + (d * d);
+            x = x + 1;
+        }
+        ra = ra + sa;
+        rb = rb + sb;
+        y = y + 1;
+    }
+    return s;
+}

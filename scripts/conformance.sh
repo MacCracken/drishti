@@ -256,6 +256,7 @@ skip_external() { # reason
     for c in $WRITER_CASES; do skip_case "$c" "$1"; done
     skip_case "rewrite-published+generated" "$1"
     for c in $ENC_CASES; do skip_case "$c" "$1"; done
+    for c in $RD_CASES; do skip_case "$c" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
 finish() {
@@ -593,26 +594,42 @@ for c in $REFUSED_CASES; do refused_case "$c"; done
 # all-skip DC tile) at 8-bit 4:2:0, monochrome, 10-bit, 4:4:4 and 12-bit 4:2:2, each decoded by drishti to aomdec's
 # bytes, with dav1d agreeing (vs_judge) — the acceptance shape of batch 0.8.6, with no hand-built byte in the stream.
 WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-444-64x64 writer-422-b12-64x64"
-# ---- THE KEYFRAME ENCODER (0.8.6) — src/av1_enc.cyr through programs/enc-check.cyr ----
-# encKIND_WxH_qQ_bB[_s128]: an ffmpeg picture (mandelbrot; testsrc2 for 4:4:4 8-bit) of W x H in KIND's format,
+# ---- THE KEYFRAME ENCODER (0.8.6; intra mode decision 0.8.7) — src/av1_enc.cyr through programs/enc-check.cyr ----
+# encKIND_WxH_qQ_bB[_s128][_dD]: an ffmpeg picture (mandelbrot; testsrc2 for 4:4:4 8-bit) of W x H in KIND's format,
 # encoded by drishti at qindex Q in blocks of size B (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64, 15 = 128x128) at
 # 64x64 superblocks, or 128x128 with _s128 — the probe first proves the stream's use_128x128_superblock is the one the
-# case names (the 128x128 encode lane, 0.8.6). Three checks, all hard:
+# case names (the 128x128 encode lane, 0.8.6) — deciding what D says (AV1ENC_DECIDE_*: 1 the luma mode, 2 the chroma
+# mode; no _d, nothing). Three checks, all hard:
 #  - drishti-enc-check's own: decoding the .ivf it wrote, drishti outputs exactly the reconstruction the encoder
 #    returned (and, at qindex 0, that reconstruction is the picture);
 #  - vs_judge: drishti's output is aomdec's, and dav1d agrees with aomdec;
 #  - at qindex 0, aomdec's output IS the source file, byte for byte.
-# So the stream means, to two decoders drishti had no hand in, exactly the picture the encoder says it coded.
+# So the stream means, to two decoders drishti had no hand in, exactly the picture the encoder says it coded. A case
+# that decides nothing must also be the 0.8.6 encoder's stream, byte for byte (tests/repro/enc-d0.md5, made by the
+# 0.8.6 binary); a decided case must be shown to have decided — the decoder reads more than one luma mode (decide 1)
+# and more than one chroma mode (decide 2, with chroma) — or it would prove nothing about the decisions.
 ENC_CASES="enc420_176x144_q60_b9 enc420ll_176x144_q0_b6 enc420_352x288_q120_b12 enc420_99x61_q30_b3 \
 enc444_160x120_q90_b6 enc422b10_72x40_q80_b3 enc420b10ll_128x96_q0_b9 enc444b12_64x64_q40_b12 encmono_99x61_q200_b12 \
 enc420_17x9_q50_b3 \
 enc420_352x288_q60_b15_s128 enc420ll_200x136_q0_b15_s128 enc444_176x144_q90_b6_s128 enc422b10_264x152_q120_b15_s128 \
-encmono_136x136_q30_b12_s128 enc420b10ll_96x64_q0_b9_s128"
-enccase() { # name = encKIND_WxH_qQ_bB[_s128]
-    local n="$1" kind geo qs bs ss
-    IFS=_ read -r kind geo qs bs ss <<< "$n"
-    local w="${geo%x*}" h="${geo#*x}" q="${qs#q}" b="${bs#b}" sb=64 pf bd fmt src="mandelbrot" out sbw=0
-    [ "${ss:-}" = "s128" ] && { sb=128; sbw=1; }
+encmono_136x136_q30_b12_s128 enc420b10ll_96x64_q0_b9_s128 \
+enc420_176x144_q60_b9_d1 enc420_176x144_q60_b9_d2 enc420_176x144_q60_b9_d3 enc420ll_176x144_q0_b6_d3 \
+enc420_352x288_q120_b12_d3 enc420_99x61_q30_b3_d3 enc444_160x120_q90_b6_d3 enc422b10_72x40_q80_b3_d3 \
+enc420b10ll_128x96_q0_b9_d3 enc444b12_64x64_q40_b6_d3 encmono_99x61_q100_b3_d3 enc420_17x9_q50_b3_d3 \
+enc420_352x288_q60_b15_s128_d3 enc420ll_200x136_q0_b15_s128_d3 enc444_176x144_q90_b6_s128_d3 \
+enc422b10_264x152_q120_b15_s128_d3 encmono_136x136_q30_b12_s128_d3 enc420b10ll_96x64_q0_b9_s128_d3"
+enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
+    local n="$1" kind geo qs bs t1 t2
+    IFS=_ read -r kind geo qs bs t1 t2 <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" q="${qs#q}" b="${bs#b}" sb=64 pf bd fmt src="mandelbrot" out sbw=0 dec=0 tk
+    for tk in "${t1:-}" "${t2:-}"; do
+        case "$tk" in
+            s128) sb=128; sbw=1 ;;
+            d[0-9]) dec="${tk#d}" ;;
+            "") ;;
+            *) echo "  $n: SETUP FAILED (unknown case token $tk)"; fail=$((fail+1)); return ;;
+        esac
+    done
     case "$kind" in
         enc420|enc420ll) pf=yuv420p;     bd=8;  fmt=1 ;;
         enc420b10ll)     pf=yuv420p10le; bd=10; fmt=1 ;;
@@ -627,12 +644,35 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128]
     ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v 1 -pix_fmt "$pf" \
         -f rawvideo "$WORK/$n.src.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
     cp "$WORK/$n.src.yuv" build/enc-input.yuv
-    echo "$w $h $bd $fmt $q $b $sb" > build/enc-input.cfg
+    echo "$w $h $bd $fmt $q $b $sb $dec" > build/enc-input.cfg
     out=$(timeout 120 ./build/drishti-enc-check 2>&1)
     if ! echo "$out" | grep -q '^SUMMARY ok'; then
         echo "  $n: REGRESSED (the encoder's own check: $(echo "$out" | tr '\n' ' '))"; fail=$((fail+1)); return
     fi
     cp build/enc-out.ivf "$WORK/$n.ivf"
+    if [ "$dec" = "0" ]; then
+        local want got
+        want=$(awk -v c="$n" '$1 == c { print $2 }' tests/repro/enc-d0.md5)
+        got=$(md5sum < "$WORK/$n.ivf" | cut -c1-32)
+        if [ -z "$want" ]; then
+            echo "  $n: SETUP FAILED (no 0.8.6 md5 in tests/repro/enc-d0.md5)"; fail=$((fail+1)); return
+        fi
+        if [ "$got" != "$want" ]; then
+            echo "  $n: REGRESSED (deciding nothing, the stream is not the 0.8.6 encoder's byte for byte)"
+            fail=$((fail+1)); return
+        fi
+        echo "  $n: deciding nothing, the 0.8.6 encoder's stream byte for byte"; pass=$((pass+1))
+    else
+        local ny nu
+        ny=$(echo "$out" | sed -n 's/^MODES y=\([0-9]*\) .*/\1/p')
+        nu=$(echo "$out" | sed -n 's/^MODES y=[0-9]* uv=\([0-9]*\) .*/\1/p')
+        if [ -z "$ny" ] || { [ $((dec & 1)) -ne 0 ] && [ "$ny" -le 1 ]; } \
+          || { [ $((dec & 2)) -ne 0 ] && [ "$fmt" != "0" ] && [ "${nu:-0}" -le 1 ]; }; then
+            echo "  $n: SETUP FAILED (the decoder reads ${ny:-?} luma / ${nu:-?} chroma modes: nothing was decided," \
+              "it would prove nothing)"
+            fail=$((fail+1)); return
+        fi
+    fi
     rm -f build/conformance-input.ivf
     cp "$WORK/$n.ivf" build/conformance-input.ivf
     local got_sb
@@ -641,7 +681,8 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128]
         echo "  $n: SETUP FAILED (use_128x128_superblock=${got_sb:-none}, the case names $sbw — it would prove nothing)"
         fail=$((fail+1)); return
     fi
-    echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); ${sb}x${sb} superblocks; reconstruction = drishti's decode)"
+    echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); ${sb}x${sb} superblocks; decide $dec, $(echo "$out" \
+      | sed -n 's/^MODES y=\([0-9]*\) uv=\([0-9]*\) .*/\1 luma \/ \2 chroma modes/p'); reconstruction = drishti's decode)"
     pass=$((pass+1))
     vs_judge "$n" 1
     if [ "$q" = "0" ]; then
@@ -652,6 +693,76 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128]
             echo "  $n: REGRESSED (lossless: aomdec's output is not the source)"; fail=$((fail+1))
         fi
     fi
+}
+# ---- MODE DECISION PAYS (0.8.7's acceptance) — the keyframe encoder deciding against deciding nothing ----
+# rdKIND_WxH_bB: an ffmpeg picture (KIND 420: mandelbrot 4:2:0; 420t: testsrc2 4:2:0; 444b10: mandelbrot 4:4:4 10-bit)
+# encoded at qindex 40, 80, 120, 160 and 200 in blocks of size B, deciding nothing (decide 0: DC_PRED everywhere) and
+# deciding the luma and chroma modes (decide 3). Every stream is judged as the cases above (aomdec == drishti's decode,
+# dav1d agreeing), so the quality measured is what a decoder drishti had no hand in outputs. Then the BD-RATE of
+# decide 3 against decide 0 — the mean bitrate difference at equal PSNR (every plane, sample-weighted), over the PSNR
+# range both curves cover, log-rate interpolated piecewise linearly — must be at most RD_BD_MAX percent: the decided
+# encoder must spend at least 3% fewer bytes for the same quality, or it is not "measurably better than fixed-DC".
+RD_CASES="rd420_352x288_b3 rd420t_176x144_b6 rd444b10_160x120_b9"
+RD_BD_MAX=-3
+RD_QS="40 80 120 160 200"
+rdcase() { # name = rdKIND_WxH_bB
+    local n="$1" kind geo bs pf bd fmt src w h b q d out pts=""
+    IFS=_ read -r kind geo bs <<< "$n"
+    w="${geo%x*}"; h="${geo#*x}"; b="${bs#b}"
+    case "$kind" in
+        rd420)    pf=yuv420p;     bd=8;  fmt=1; src=mandelbrot ;;
+        rd420t)   pf=yuv420p;     bd=8;  fmt=1; src=testsrc2 ;;
+        rd444b10) pf=yuv444p10le; bd=10; fmt=3; src=mandelbrot ;;
+        *) echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.src.yuv"
+    ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v 1 -pix_fmt "$pf" \
+        -f rawvideo "$WORK/$n.src.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    for d in 0 3; do
+        for q in $RD_QS; do
+            rm -f build/enc-input.yuv build/enc-input.cfg build/enc-out.ivf "${WORK:?}/${n}_q${q}_d$d.ivf"
+            cp "$WORK/$n.src.yuv" build/enc-input.yuv
+            echo "$w $h $bd $fmt $q $b 64 $d" > build/enc-input.cfg
+            out=$(timeout 120 ./build/drishti-enc-check 2>&1)
+            if ! echo "$out" | grep -q '^SUMMARY ok'; then
+                echo "  ${n}_q${q}_d$d: REGRESSED (the encoder's own check)"; fail=$((fail+1)); return
+            fi
+            cp build/enc-out.ivf "$WORK/${n}_q${q}_d$d.ivf"
+            vs_judge "${n}_q${q}_d$d" 1
+            pts="$pts $d $(echo "$out" | sed -n 's/^ENC bytes=\([0-9]*\) .*/\1/p') $(echo "$out" \
+              | sed -n 's/^RD sse=\([0-9]*\) samples=\([0-9]*\) peak=\([0-9]*\).*/\1 \2 \3/p')"
+        done
+    done
+    # pts: d bytes sse samples peak, ten times; the BD-rate of decide 3 against decide 0
+    local verdict
+    verdict=$(echo "$pts" | awk -v bdmax="$RD_BD_MAX" '
+        { for (i = 1; i + 4 <= NF; i += 5) { d = $i; k = n[d]++; r[d, k] = log($(i + 1));
+            p[d, k] = 10 * log($(i + 4) * $(i + 4) * $(i + 3) / ($(i + 2) > 0 ? $(i + 2) : 1)) / log(10) } }
+        function lr(d, x,   j, a, b, t) {      # log-rate at PSNR x on curve d (points sorted by PSNR)
+            for (j = 0; j + 1 < n[d]; j++) { a = p[d, j]; b = p[d, j + 1]
+                if ((x >= a && x <= b) || (x <= a && x >= b)) { t = (b == a) ? 0 : (x - a) / (b - a)
+                    return r[d, j] + t * (r[d, j + 1] - r[d, j]) } }
+            return "none" }
+        END {
+            if (n[0] != 5 || n[3] != 5) { print "BAD points"; exit }
+            lo0 = p[0, 0]; hi0 = p[0, 0]; lo3 = p[3, 0]; hi3 = p[3, 0]
+            for (j = 0; j < 5; j++) { if (p[0, j] < lo0) lo0 = p[0, j]; if (p[0, j] > hi0) hi0 = p[0, j]
+                                      if (p[3, j] < lo3) lo3 = p[3, j]; if (p[3, j] > hi3) hi3 = p[3, j] }
+            lo = (lo0 > lo3) ? lo0 : lo3; hi = (hi0 < hi3) ? hi0 : hi3
+            if (hi <= lo) { print "BAD overlap"; exit }
+            acc = 0
+            for (k = 0; k <= 200; k++) { x = lo + (hi - lo) * k / 200; a = lr(0, x); b = lr(3, x)
+                if (a == "none" || b == "none") { print "BAD interpolation"; exit }
+                acc += b - a }
+            bd = (exp(acc / 201) - 1) * 100
+            printf "%s %.2f %.2f %.2f\n", (bd <= bdmax) ? "OK" : "WORSE", bd, lo, hi }')
+    case "$verdict" in
+        OK*) echo "  $n: BD-rate of the decided encoder against DC_PRED $(echo "$verdict" | awk '{print $2}')%" \
+               "over $(echo "$verdict" | awk '{print $3 "-" $4}') dB (at most $RD_BD_MAX%)"; pass=$((pass+1)) ;;
+        WORSE*) echo "  $n: REGRESSED (BD-rate $(echo "$verdict" | awk '{print $2}')%, not at most $RD_BD_MAX%)"
+               fail=$((fail+1)) ;;
+        *) echo "  $n: SETUP FAILED (the RD curves: $verdict)"; fail=$((fail+1)) ;;
+    esac
 }
 hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_inter=0; hdr_refs=0; hdr_streams=0
 hdr_rewrite_case() { # ivf
@@ -2567,5 +2678,7 @@ writer_streams
 
 echo "--- keyframe encoder: real pictures encoded by drishti, decoded by drishti = aomdec = dav1d ---"
 for c in $ENC_CASES; do enccase "$c"; done
+echo "--- keyframe encoder: mode decision against fixed DC_PRED, BD-rate at equal PSNR (0.8.7's acceptance) ---"
+for c in $RD_CASES; do rdcase "$c"; done
 
 finish

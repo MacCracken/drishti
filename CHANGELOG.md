@@ -4,6 +4,109 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.7 bite 2: intra mode decision — drishti picks its modes, and spends 7–33% fewer bytes for the same PSNR
+
+**The keyframe encoder decides.** `av1_encode_keyframe` / `_ivf` take a `decide` argument (`AV1ENC_DECIDE_*`), and
+each block's modes are chosen by rate and distortion:
+- **luma** (`AV1ENC_DECIDE_YMODE`): the 13 intra modes at angle delta 0, the five filter intra modes where filter intra
+  is allowed (the sequence header then sets `enable_filter_intra`), and the six other angle deltas of the two cheapest
+  directional modes;
+- **chroma** (`AV1ENC_DECIDE_UVMODE`): the 13 modes, their angle deltas likewise, and chroma-from-luma. CfL's alphas
+  are searched per plane (magnitudes 1, 3, 6, 10, 15 of each sign, then within 2 of the best), alpha_u, then alpha_v,
+  then alpha_u again with 0 allowed, since the joint sign never codes both zero.
+
+`decide` 0 is the 0.8.6 encoder byte for byte, and the gate holds it to the 0.8.6 binary's md5s
+(`tests/repro/enc-d0.md5`).
+
+**Each candidate is a trial**, made of the decoder's own code:
+- the decoder's residual pass runs over the planes the candidate changes. A new `Av1Block` field, `AV1BLK_PLANE_SKIP`,
+  names the planes `residual( )` leaves out; the decoder never sets it, so decoding is unchanged;
+- its rate is the candidate's mode info, tx size and `coeffs( )`, written against bite 1's estimator under the CDFs as
+  the block finds them;
+- its distortion is the SSE against the source, and its cost libaom's RDCOST.
+
+Between trials the encoder puts back what a trial changed. The block's coefficient contexts are saved and restored,
+and the BlockDecoded cells a trial marked are cleared, so every trial, and the final pass after them, starts from
+the state the decoder will be in. The chroma search first re-runs the chosen luma, because CfL reads it.
+
+**Found: the 0.8.6 encoder leaked the decoder's scratch.** A decoder takes its per-transform-block scratch
+(prediction edges, the inverse transform, the dequantized block) from its frame arena (ADR 0002). The encoder ran
+outside any arena, so every block's scratch stayed allocated, and seventy trials a block would have multiplied that.
+Each block's decisions and residual pass now allocate from a block arena rewound at every trial. A decided encode of
+a 128x64 picture takes no more memory than an undecided one; before, it took 15–25 MB more. `coeffs( )`'s encoder also
+kept a per-call scratch allocation, now kept once.
+
+**The outcome, in `make conformance`:**
+- 18 decided cases over every format and bit depth, both superblock sizes and 128x128 blocks. Each decodes in aomdec
+  and dav1d to exactly drishti's reconstruction, lossless ones to the source. Each is probe-checked to have decided
+  something: the decoder reads more than one luma mode, and more than one chroma mode.
+- A new section, mode decision against fixed DC_PRED. Three pictures are encoded at qindex 40–200 both ways, every
+  stream judged the same way, and the BD-rate at equal PSNR must be at most -3%. It is:
+  - -11.8% for mandelbrot 352x288 4:2:0 in 8x8 blocks;
+  - -33.1% for testsrc2 176x144 4:2:0 in 16x16 blocks;
+  - -6.6% for mandelbrot 160x120 4:4:4 10-bit in 32x32 blocks.
+  At every qindex measured, the decided encode has both fewer bytes and a higher PSNR.
+- Luma alone gains less (-1.9% to -8.9%). One mode per fixed-size block, through a DCT only, is all it can change
+  until the transform type and the partition are decided too.
+
+A decided encode is about 8x slower than an undecided one (the 16 gated pictures: 1.9 s to 15 s).
+
+**Verified:** `tests/av1_enc.tcyr` 163 -> 271 assertions; `tests/av1_residual.tcyr` 82 -> 107, for the plane mask. Where the
+answer is known by construction, a test-only decision log (`av1_enc_set_log`) checks the search's choice:
+- vertical stripes must take V_PRED, PAETH or FILTER_V_PRED;
+- horizontal stripes must take H_PRED, PAETH or FILTER_H_PRED;
+- stripes in 64x64 blocks, where filter intra is not allowed, must take V_PRED or PAETH;
+- chroma equal to the luma must take CfL( 8, 8 ), an alpha only the refinement reaches;
+- a flat U plane must take CfL( 0, 8 ), reachable only by the third alpha search.
+
+Also tested: the frame RD cost falls below DC_PRED's for each decision; a decided encode codes the same bytes with its
+arena poisoned at every rewind; the memory bound; refusals; OOM sweeps.
+
+31 mutants: 28 killed, 3 equivalent. The equivalent three each add a constant across one block's candidates: running
+the other planes in a trial, counting their SSE, and the defensive mode-info reset. The first run left 8 survivors,
+5 of them test gaps, now closed:
+- the nominal-mode comparison, which filter intra had hidden;
+- the two-cheapest-directional helper (two mutants);
+- the third CfL pass;
+- the decoder-side plane mask.
+Three of 0.8.6's mutants, equivalent only while every mode was DC, are now live and killed, as predicted: the 64x64
+BlockDecoded clear at 128x128 superblocks, the swapped neighbour modes, and the chroma tx type. Its others stay
+equivalent until block and transform sizes vary (the tx-depth neighbours, among them).
+
+The first known answer was wrong, and the search showed it. Filter intra's FILTER_V_PRED taps (-10 topleft + 16 top
++ 10 left, with topleft = left) are an exact copy on vertical stripes, and cheaper to signal than V_PRED. A known
+answer has to list every exact candidate.
+
+**Gates after bites 1–2:** `make test` 49 suites, **35,100** assertions (was 34,853); `make fuzz` 7,422; bench,
+`vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` green, `dist/drishti.cyr` regenerated; all five
+programs build; `make conformance` **4575 matched / 0 known-gap / 0 regressed / 0 skipped** (was 4486; +89: the 16
+byte-identity pins, the 18 decided cases with their four lossless checks, and the three BD-rate pictures, each 10
+streams judged and one verdict).
+
+### Added — 0.8.7 bite 1: rate and distortion, the two quantities every encoder decision weighs
+
+**The symbol coder can estimate.** `av1_sym_enc_est_new` (`src/av1_symbol.cyr`) makes an ESTIMATOR: an encoder that
+every writer runs against unchanged, which validates each symbol exactly as the coder does (a refusal is the same sticky
+`DR_ERR_BOUNDS`), then adds its cost and stops. Nothing is coded, nothing is pushed, and no CDF adapts, whatever the
+caller's adapt flag. So a choice's rate is its writers run against an estimator, under the CDFs as they stand.
+- The cost is the share of the range the coder actually gives the symbol: it reads the CDF's top 9 bits, as the coder
+  does, and adds the minimum-probability term at the range's geometric midpoint (`av1_sym_cost`).
+- `Cost[ p ] = round( 512 log2( 32768 / p ) )`, in 1/512 bits (libaom's `AV1_PROB_COST_SHIFT`), is built in integers
+  from 24 squarings of a Q30 mantissa. It is correctly rounded at every p; 16 or 20 fraction bits are not.
+- On three seeded streams of 20,000 symbols the estimate is within 0.05% of the coded length (0.5% is asserted).
+
+**`src/av1_rd.cyr` (new module, 49):** the distortion (`av1_rd_sse`, over the visible samples only), libaom's key-frame
+RD multiplier (`av1_rd_mult`), its distortion units (`av1_rd_dist`) and `RDCOST` (`av1_rd_cost`). The multiplier is
+exact integer arithmetic, equal to libaom's double arithmetic at 764 of 768 (bit depth, qindex) pairs. At the other
+four the product is an exact integer that libaom's double falls one short of.
+
+**Verified:** `scripts/refs/rd_ref.py` holds every known answer (the table against 60-digit logarithms, the streams
+through its own port of the coder, the multiplier against libaom's arithmetic); `tests/av1_rd.tcyr`, 114 assertions.
+31 mutants: 28 killed, 3 equivalent (a mantissa of exactly 2^31 that squaring cannot produce; an early return that only
+skips an empty loop; the upper clamp moved to 32768, which now reads the table's own 0). Two survivors of the first run
+were real gaps, now closed: that clamp could index one past the table, and the chroma SSE case had no out-of-plane
+samples to catch a clip to the luma plane.
+
 ## [0.8.6] - 2026-11-18
 
 **drishti encodes.** The first encode batch: a picture in, a standalone `.ivf` out that `aomdec` and dav1d decode to

@@ -15,6 +15,7 @@ include "src/main.cyr"
 
 var Ec_Seed = 1;
 var Ec_Sb = 0;        # the superblock size every encode below uses: 0 = 64x64, 1 = 128x128
+var Ec_Decide = 0;    # what ec_run / the OOM op decide (AV1ENC_DECIDE_*; 0.8.7)
 fn ec_rnd(): i64 {
     Ec_Seed = ((Ec_Seed * 1103515245) + 12345) & 2147483647;
     return Ec_Seed >> 8;
@@ -75,6 +76,8 @@ fn ec_sad(a, b): i64 {
 }
 
 var Ec_Bytes = 0;     # the last ec_run's temporal unit length
+var Ec_Tu = 0;        # its temporal unit
+var Ec_Rec = 0;       # its reconstruction
 var Ec_SrcErr = 0;    # the last ec_run's sum |reconstruction - source|
 # encode src, decode the temporal unit with av1_decode_obus: 0 when the decoder's output IS the encoder's
 # reconstruction, else a negative step (-1 encode, -2 decode, -3 output != reconstruction)
@@ -82,9 +85,11 @@ fn ec_run(src, q, bs): i64 {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(src, q, bs, Ec_Sb, &n, &rec, &e);
+    var tu = av1_encode_keyframe(src, q, bs, Ec_Sb, Ec_Decide, &n, &rec, &e);
     if (tu == 0) { return 0 - 1; }
     Ec_Bytes = n;
+    Ec_Tu = tu;
+    Ec_Rec = rec;
     var de = 0;
     var out = av1_decode_obus(tu, n, &de);
     if ((out == 0) || (de != DR_OK)) { return 0 - 2; }
@@ -198,7 +203,7 @@ fn test_ec_flat() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(src, 40, 12, Ec_Sb, &n, &rec, &e);
+    var tu = av1_encode_keyframe(src, 40, 12, Ec_Sb, 0, &n, &rec, &e);
     assert_eq(n, 24, "flat 64x64: a 24-byte temporal unit (TD 2 + sequence header 12 + frame OBU 10)");
     # the tile ends the unit: the all-skip DC tile the plan-driven tile writer gives the header writers' streams
     assert_eq(load8(tu + 22), 0x98, "flat: tile byte 0");
@@ -246,7 +251,7 @@ fn ec_grid_check(src, q, bs, want): i64 {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(src, q, bs, Ec_Sb, &n, &rec, &e);
+    var tu = av1_encode_keyframe(src, q, bs, Ec_Sb, 0, &n, &rec, &e);
     if (tu == 0) { return 0 - 1; }
     var tile = ec_decode_grids(tu, n);
     if (tile == 0) { return 0 - 2; }
@@ -284,7 +289,7 @@ fn test_ec_grids() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(e2, 60, 12, Ec_Sb, &n, &rec, &e);
+    var tu = av1_encode_keyframe(e2, 60, 12, Ec_Sb, 0, &n, &rec, &e);
     var t2 = ec_decode_grids(tu, n);
     assert(t2 != 0, "72x40 decodes to grids");
     if (t2 != 0) {
@@ -340,7 +345,7 @@ fn test_ec_sb128() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var tu = av1_encode_keyframe(t2, 60, 15, 1, &n, &rec, &e);
+    var tu = av1_encode_keyframe(t2, 60, 15, 1, 0, &n, &rec, &e);
     var g = ec_decode_grids(tu, n);
     assert(g != 0, "sb128 200x136 decodes to grids");
     if (g != 0) {
@@ -357,16 +362,16 @@ fn test_ec_sb128() {
         var r64 = 0;
         var n128 = 0;
         var r128 = 0;
-        av1_encode_keyframe(same, 80, bs, 0, &n64, &r64, &e);
-        av1_encode_keyframe(same, 80, bs, 1, &n128, &r128, &e);
+        av1_encode_keyframe(same, 80, bs, 0, 0, &n64, &r64, &e);
+        av1_encode_keyframe(same, 80, bs, 1, 0, &n128, &r128, &e);
         if ((r64 == 0) || (r128 == 0) || (ec_sad(r64, r128) != 0)) { bad = bad + 1; }
         bs = bs + 3;
     }
     assert_eq(bad, 0, "8x8 .. 64x64 blocks: the 64x64- and the 128x128-superblock encodes reconstruct the same");
     # refusals: 128x128 blocks need 128x128 superblocks; sb128 is a flag
-    assert_eq(av1_encode_keyframe(same, 40, 15, 0, &n, &rec, &e), 0, "128x128 blocks at 64x64 superblocks refused");
+    assert_eq(av1_encode_keyframe(same, 40, 15, 0, 0, &n, &rec, &e), 0, "128x128 blocks at 64x64 superblocks refused");
     assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
-    assert_eq(av1_encode_keyframe(same, 40, 12, 2, &n, &rec, &e), 0, "sb128 = 2 refused");
+    assert_eq(av1_encode_keyframe(same, 40, 12, 2, 0, &n, &rec, &e), 0, "sb128 = 2 refused");
     Ec_Sb = 0;
 }
 
@@ -375,7 +380,7 @@ fn test_ec_ivf() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var ivf = av1_encode_keyframe_ivf(src, 50, 6, Ec_Sb, &n, &rec, &e);
+    var ivf = av1_encode_keyframe_ivf(src, 50, 6, Ec_Sb, 0, &n, &rec, &e);
     assert(ivf != 0, "the IVF wrapper writes");
     assert_eq(load8(ivf), 68, "D");
     assert_eq(load8(ivf + 1), 75, "K");
@@ -404,36 +409,36 @@ fn test_ec_refusals() {
     var n = 0;
     var rec = 0;
     var e = 0;
-    assert_eq(av1_encode_keyframe(0, 40, 6, Ec_Sb, &n, &rec, &e), 0, "a null picture refused");
+    assert_eq(av1_encode_keyframe(0, 40, 6, Ec_Sb, 0, &n, &rec, &e), 0, "a null picture refused");
     assert_eq(e, DR_ERR_BOUNDS, "null -> BOUNDS");
-    assert_eq(av1_encode_keyframe(src, 40, 0, Ec_Sb, &n, &rec, &e), 0, "BLOCK_4X4 refused");
+    assert_eq(av1_encode_keyframe(src, 40, 0, Ec_Sb, 0, &n, &rec, &e), 0, "BLOCK_4X4 refused");
     assert_eq(e, DR_ERR_BOUNDS, "4x4 -> BOUNDS");
-    assert_eq(av1_encode_keyframe(src, 40, 7, Ec_Sb, &n, &rec, &e), 0, "BLOCK_16X32 (not square) refused");
-    assert_eq(av1_encode_keyframe(src, 40, 15, 0, &n, &rec, &e), 0, "BLOCK_128X128 refused (64x64 superblocks)");
-    assert_eq(av1_encode_keyframe(src, 256, 6, Ec_Sb, &n, &rec, &e), 0, "base_q_idx 256 refused");
+    assert_eq(av1_encode_keyframe(src, 40, 7, Ec_Sb, 0, &n, &rec, &e), 0, "BLOCK_16X32 (not square) refused");
+    assert_eq(av1_encode_keyframe(src, 40, 15, 0, 0, &n, &rec, &e), 0, "BLOCK_128X128 refused (64x64 superblocks)");
+    assert_eq(av1_encode_keyframe(src, 256, 6, Ec_Sb, 0, &n, &rec, &e), 0, "base_q_idx 256 refused");
     assert_eq(e, DR_ERR_BOUNDS, "256 -> BOUNDS");
-    assert_eq(av1_encode_keyframe(src, 0 - 1, 6, Ec_Sb, &n, &rec, &e), 0, "base_q_idx -1 refused");
+    assert_eq(av1_encode_keyframe(src, 0 - 1, 6, Ec_Sb, 0, &n, &rec, &e), 0, "base_q_idx -1 refused");
     assert_eq(n, 0, "a refusal reports no bytes");
     assert_eq(rec, 0, "and no reconstruction");
     var s440 = ec_pic(16, 16, 3, 0, 1, 8, 1, 3);
-    assert_eq(av1_encode_keyframe(s440, 40, 6, Ec_Sb, &n, &rec, &e), 0, "4:4:0 refused (AV1 has no such format)");
+    assert_eq(av1_encode_keyframe(s440, 40, 6, Ec_Sb, 0, &n, &rec, &e), 0, "4:4:0 refused (AV1 has no such format)");
     assert_eq(e, DR_ERR_BOUNDS, "4:4:0 -> BOUNDS");
     # dr_frame_new makes neither a 2-plane nor a 9-bit frame, so those records are edited into a valid one: the
     # encoder's own checks are what refuse them
     var s2 = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
     store64(s2 + DR_FRAME_NUM_PLANES, 2);
     e = DR_OK;
-    assert_eq(av1_encode_keyframe(s2, 40, 6, Ec_Sb, &n, &rec, &e), 0, "a 2-plane frame record refused");
+    assert_eq(av1_encode_keyframe(s2, 40, 6, Ec_Sb, 0, &n, &rec, &e), 0, "a 2-plane frame record refused");
     assert_eq(e, DR_ERR_BOUNDS, "2 planes -> BOUNDS");
     var s9 = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
     store64(s9 + DR_FRAME_BIT_DEPTH, 9);
     e = DR_OK;
-    assert_eq(av1_encode_keyframe(s9, 40, 6, Ec_Sb, &n, &rec, &e), 0, "a 9-bit frame record refused");
+    assert_eq(av1_encode_keyframe(s9, 40, 6, Ec_Sb, 0, &n, &rec, &e), 0, "a 9-bit frame record refused");
     assert_eq(e, DR_ERR_BOUNDS, "9-bit -> BOUNDS");
     var wide = ec_pic(4160, 8, 1, 1, 1, 8, 2, 3);
-    assert_eq(av1_encode_keyframe(wide, 40, 12, Ec_Sb, &n, &rec, &e), 0, "4160 wide (two tile columns) refused");
+    assert_eq(av1_encode_keyframe(wide, 40, 12, Ec_Sb, 0, &n, &rec, &e), 0, "4160 wide (two tile columns) refused");
     assert_eq(e, DR_ERR_UNSUPPORTED, "4160 wide -> UNSUPPORTED");
-    var ivf = av1_encode_keyframe_ivf(src, 300, 6, Ec_Sb, &n, &rec, &e);
+    var ivf = av1_encode_keyframe_ivf(src, 300, 6, Ec_Sb, 0, &n, &rec, &e);
     assert_eq(ivf, 0, "the IVF wrapper passes a refusal on");
     assert_eq(e, DR_ERR_BOUNDS, "as BOUNDS");
 }
@@ -444,7 +449,7 @@ fn ec_oom_op(q): i64 {
     var n = 0;
     var rec = 0;
     var e = 0;
-    var ivf = av1_encode_keyframe_ivf(Ec_Oom_Src, q, 3, Ec_Sb, &n, &rec, &e);
+    var ivf = av1_encode_keyframe_ivf(Ec_Oom_Src, q, 3, Ec_Sb, Ec_Decide, &n, &rec, &e);
     if (ivf == 0) { return e; }
     return DR_OK;
 }
@@ -454,6 +459,412 @@ fn test_ec_oom() {
     assert_eq(dr_alloc_sweep(&ec_oom_op, 60, &n), 0, "OOM sweep: a lossy 24x16 encode");
     assert(n > 20, "the sweep failed more than twenty allocations");
     assert_eq(dr_alloc_sweep(&ec_oom_op, 0, &n), 0, "OOM sweep: the same encode lossless");
+}
+
+# ================================================================
+# 0.8.7: intra MODE DECISION. Every decided encode must still decode to its reconstruction (and lossless to the
+# source): the cases above re-run with decide 3, at both superblock sizes. Then what the search chooses where the
+# answer is known by construction (av1_enc_set_log), what the decoder reads, the RD objective, refusals, OOM.
+# ================================================================
+var Ec_Log = 0;       # AV1ENC_LOG_W i64 per block
+fn ec_log_on(): i64 {
+    if (Ec_Log == 0) { Ec_Log = alloc(4096 * AV1ENC_LOG_W * 8); }
+    av1_enc_set_log(Ec_Log, 4096);
+    return 0;
+}
+fn ec_log(i, k): i64 { return load64(Ec_Log + (((i * AV1ENC_LOG_W) + k) * 8)); }
+# a picture whose luma is constant down each column (vertical 1) or along each row (vertical 0), every line distinct
+fn ec_stripes(w, h, vertical): i64 {
+    var e = 0;
+    var f = dr_frame_new(w, h, 3, 1, 1, 8, 8, &e);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var t = y;
+            if (vertical) { t = x; }
+            dr_frame_set(f, 0, x, y, (t * 37 + 11) % 256);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    dr_frame_fill(f, 1, 128);
+    dr_frame_fill(f, 2, 128);
+    return f;
+}
+# The encoder's cases above, decided (decide 3): every format and bit depth lossless and lossy, sizes that end
+# mid-block and mid-MI, a block overhanging the MI grid, both superblock sizes and 128x128 blocks with their 64x64
+# chunks. Fewer than above, at smaller sizes: each decided encode tries some seventy candidates a block.
+fn test_ec_decided_cases() {
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    var sb = 0;
+    while (sb < 2) {
+        Ec_Sb = sb;
+        assert_eq(ec_lossless(32, 32, 3, 1, 1, 8, 1, 3), 0, "decided lossless 4:2:0 8-bit noise, 8x8 blocks");
+        assert_eq(ec_lossless(48, 32, 3, 1, 1, 8, 3, 6), 0, "decided lossless 4:2:0 blob, 16x16 blocks");
+        assert_eq(ec_lossless(32, 32, 3, 1, 1, 10, 1, 9), 0, "decided lossless 10-bit 4:2:0, 32x32 blocks");
+        assert_eq(ec_lossless(64, 64, 3, 1, 1, 12, 0, 12), 0, "decided lossless 12-bit 4:2:0 gradient, 64x64");
+        assert_eq(ec_lossless(32, 24, 3, 1, 0, 8, 1, 3), 0, "decided lossless 4:2:2");
+        assert_eq(ec_lossless(32, 24, 3, 0, 0, 10, 3, 6), 0, "decided lossless 10-bit 4:4:4");
+        assert_eq(ec_lossless(33, 17, 1, 1, 1, 8, 1, 3), 0, "decided lossless 33x17 monochrome");
+        assert_eq(ec_lossless(1, 1, 3, 1, 1, 8, 1, 3), 0, "decided lossless 1x1");
+        assert_eq(ec_lossless(100, 100, 3, 1, 1, 8, 3, 12), 0, "decided lossless 100x100, 64x64 past the MI grid");
+        var bad = 0;
+        var f = 0;
+        while (f < 4) {
+            var np = 3;
+            var subx = 1;
+            var suby = 1;
+            var bd = 8;
+            if (f == 1) { suby = 0; bd = 10; }
+            if (f == 2) { subx = 0; suby = 0; bd = 12; }
+            if (f == 3) { np = 1; }
+            var src = ec_pic(57, 39, np, subx, suby, bd, 3, 7 + f);
+            if (ec_run(src, 1, 3) != 0) { bad = bad + 1; }
+            if (ec_run(src, 128, 6) != 0) { bad = bad + 1; }
+            if (ec_run(src, 255, 12) != 0) { bad = bad + 1; }
+            f = f + 1;
+        }
+        assert_eq(bad, 0, "decided lossy, 4 formats x 3 (qindex, block size): decoded = reconstruction");
+        sb = sb + 1;
+    }
+    Ec_Sb = 1;
+    assert_eq(ec_lossless(128, 128, 3, 1, 1, 8, 3, 15), 0, "decided lossless 128x128 blob, one 128x128 block");
+    assert_eq(ec_lossless(200, 136, 3, 1, 1, 8, 1, 15), 0, "decided lossless 200x136, a 128x128 block overhanging");
+    var big = ec_pic(200, 136, 3, 1, 0, 8, 3, 41);
+    assert_eq(ec_run(big, 60, 15), 0, "decided lossy 200x136 4:2:2 in 128x128 blocks: decoded = reconstruction");
+    Ec_Sb = 0;
+    Ec_Decide = 0;
+    return 0;
+}
+fn test_ec_decide_known() {
+    # VERTICAL STRIPES, lossless, 8x8 blocks: under every block below the first row, three candidates predict every
+    # sample, so their residual is zero: V_PRED at angle delta 0; PAETH (top - topleft + left is top, the closest); and
+    # filter intra's FILTER_V_PRED (Intra_Filter_Taps[ 1 ]: -10 topleft + 16 top + 10 left, topleft = left, so a copy
+    # of top, patch after patch). No other candidate's residual is zero, and lossless distortion is 0 for all, so the
+    # cheapest is one of the three.
+    var e = 0;
+    var vs = ec_stripes(48, 32, 1);
+    Ec_Decide = AV1ENC_DECIDE_YMODE;
+    ec_log_on();
+    assert_eq(ec_run(vs, 0, 3), 0, "vertical stripes: decoded = reconstruction");
+    assert_eq(Ec_SrcErr, 0, "and lossless");
+    var n = av1_enc_log_count();
+    assert_eq(n, 24, "24 blocks logged");
+    var good = 0;
+    var below = 0;
+    var i = 0;
+    while (i < n) {
+        if (ec_log(i, 0) > 0) {
+            below = below + 1;
+            var m = ec_log(i, 2);
+            var fiv = (m == AV1_DC_PRED) && (ec_log(i, 4) == 1) && (ec_log(i, 5) == 1);
+            if (((m == AV1_V_PRED) && (ec_log(i, 3) == 0)) || (m == AV1_PAETH_PRED) || fiv) { good = good + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(below, 18, "18 blocks have a row above");
+    assert_eq(good, 18, "every one picks V_PRED (delta 0), PAETH or FILTER_V_PRED");
+    # HORIZONTAL STRIPES: H_PRED, PAETH or FILTER_H_PRED (-8 topleft + 8 top + 16 left, topleft = top) right of the
+    # first column
+    var hs = ec_stripes(48, 32, 0);
+    ec_log_on();
+    assert_eq(ec_run(hs, 0, 3), 0, "horizontal stripes: decoded = reconstruction");
+    n = av1_enc_log_count();
+    good = 0;
+    var right = 0;
+    i = 0;
+    while (i < n) {
+        if (ec_log(i, 1) > 0) {
+            right = right + 1;
+            var mh = ec_log(i, 2);
+            var fih = (mh == AV1_DC_PRED) && (ec_log(i, 4) == 1) && (ec_log(i, 5) == 2);
+            if (((mh == AV1_H_PRED) && (ec_log(i, 3) == 0)) || (mh == AV1_PAETH_PRED) || fih) { good = good + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(right, 20, "20 blocks have a column to the left");
+    assert_eq(good, 20, "every one picks H_PRED (delta 0), PAETH or FILTER_H_PRED");
+    # VERTICAL STRIPES in 64x64 blocks: filter intra is not allowed past 32x32, so V_PRED at delta 0 and PAETH are the
+    # only exact candidates for the block below the first — the nominal-mode pass's own choice
+    var vs64 = ec_stripes(64, 128, 1);
+    ec_log_on();
+    assert_eq(ec_run(vs64, 0, 12), 0, "vertical stripes, 64x64 blocks: decoded = reconstruction");
+    assert_eq(av1_enc_log_count(), 2, "two blocks logged");
+    var m64 = ec_log(1, 2);
+    assert(((m64 == AV1_V_PRED) && (ec_log(1, 3) == 0)) || (m64 == AV1_PAETH_PRED),
+      "the lower picks V_PRED (delta 0) or PAETH");
+    assert_eq(ec_log(1, 4), 0, "without filter intra");
+    # CHROMA = LUMA, lossless 4:2:0 in 8x8 blocks (CfL allowed: a 4x4 chroma residual): luma is noise n constant over
+    # each 2x2, U = V = n. CfL's average of each 2x2, x8, minus the block's mean, times alpha / 64, is n minus the mean
+    # at alpha 8 — so CfL( 8, 8 ) leaves a constant residual and every other alpha or mode leaves n's texture.
+    Ec_Seed = 5;
+    var cf = dr_frame_new(48, 32, 3, 1, 1, 8, 8, &e);
+    var cy = 0;
+    while (cy < 16) {
+        var cx = 0;
+        while (cx < 24) {
+            var v = 32 + (ec_rnd() % 192);
+            dr_frame_set(cf, 1, cx, cy, v);
+            dr_frame_set(cf, 2, cx, cy, v);
+            dr_frame_set(cf, 0, 2 * cx, 2 * cy, v);
+            dr_frame_set(cf, 0, (2 * cx) + 1, 2 * cy, v);
+            dr_frame_set(cf, 0, 2 * cx, (2 * cy) + 1, v);
+            dr_frame_set(cf, 0, (2 * cx) + 1, (2 * cy) + 1, v);
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    ec_log_on();
+    assert_eq(ec_run(cf, 0, 3), 0, "chroma = luma: decoded = reconstruction");
+    assert_eq(Ec_SrcErr, 0, "and lossless");
+    n = av1_enc_log_count();
+    var cfl8 = 0;
+    i = 0;
+    while (i < n) {
+        if ((ec_log(i, 6) == AV1_UV_CFL_PRED) && (ec_log(i, 8) == 8) && (ec_log(i, 9) == 8)) { cfl8 = cfl8 + 1; }
+        i = i + 1;
+    }
+    assert_eq(cfl8, 24, "every block picks CfL with alpha 8 in both planes (8 is reached only by refinement)");
+    var tile = ec_decode_grids(Ec_Tu, Ec_Bytes);
+    assert(tile != 0, "the decoder's grids");
+    var ncfl = 0;
+    var r = 0;
+    while (r < 8) {
+        var c = 0;
+        while (c < 12) {
+            if (av1_grid_get(tile, AV1TILE_UVMODES, r, c) == AV1_UV_CFL_PRED) { ncfl = ncfl + 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(ncfl, 96, "the decoder reads UV_CFL_PRED in every cell");
+    # U FLAT, V = n: CfL( 0, 8 ) predicts U exactly (alpha 0 is DC, and every neighbour is 128) and V up to its DC.
+    # CflAlphaU = 0 is only reachable by the third search (alpha_u again, allowed 0 once alpha_v is not 0).
+    dr_frame_fill(cf, 1, 128);
+    ec_log_on();
+    assert_eq(ec_run(cf, 0, 3), 0, "U flat, V = luma: decoded = reconstruction");
+    n = av1_enc_log_count();
+    var cfl08 = 0;
+    i = 0;
+    while (i < n) {
+        if ((ec_log(i, 6) == AV1_UV_CFL_PRED) && (ec_log(i, 8) == 0) && (ec_log(i, 9) == 8)) { cfl08 = cfl08 + 1; }
+        i = i + 1;
+    }
+    assert_eq(cfl08, 24, "every block picks CfL( 0, 8 )");
+    av1_enc_set_log(0, 0);
+    Ec_Decide = 0;
+    return 0;
+}
+# av1_enc_best_directional: the two cheapest of V_PRED .. D67_PRED in AV1EC_MODEJ, cheapest first
+fn ec_bd_case(jv, jh, j3, j4, j5, j6, j7, j8, want_a, want_b): i64 {
+    var ec = alloc(AV1EC_SIZE);
+    var mj = alloc(13 * 8);
+    store64(ec + AV1EC_MODEJ, mj);
+    store64(mj, 1);                       # DC_PRED: not directional, never picked
+    store64(mj + 8, jv);
+    store64(mj + 16, jh);
+    store64(mj + 24, j3);
+    store64(mj + 32, j4);
+    store64(mj + 40, j5);
+    store64(mj + 48, j6);
+    store64(mj + 56, j7);
+    store64(mj + 64, j8);
+    store64(mj + 72, 0);                  # SMOOTH .. PAETH: not directional
+    store64(mj + 80, 0);
+    store64(mj + 88, 0);
+    store64(mj + 96, 0);
+    var a = 0 - 1;
+    var b = 0 - 1;
+    av1_enc_best_directional(ec, &a, &b);
+    assert_eq(a, want_a, "the cheapest directional mode");
+    assert_eq(b, want_b, "the second");
+    return 0;
+}
+fn test_ec_best_directional() {
+    ec_bd_case(10, 20, 30, 40, 50, 60, 70, 80, AV1_V_PRED, AV1_H_PRED);
+    ec_bd_case(20, 10, 30, 40, 50, 60, 70, 80, AV1_H_PRED, AV1_V_PRED);
+    ec_bd_case(30, 10, 20, 40, 50, 60, 70, 80, AV1_H_PRED, AV1_D45_PRED);   # one between H and V
+    ec_bd_case(30, 20, 40, 50, 60, 70, 80, 10, AV1_D67_PRED, AV1_H_PRED);   # the last cheapest
+    ec_bd_case(90, 80, 70, 60, 50, 40, 30, 20, AV1_D67_PRED, AV1_D203_PRED);
+    ec_bd_case(50, 50, 50, 50, 50, 50, 50, 50, AV1_V_PRED, AV1_H_PRED);   # ties keep the earlier
+    return 0;
+}
+fn test_ec_decide_uses() {
+    # On a smooth blob, a lossy decided encode uses a luma and a chroma angle delta and filter intra somewhere — the
+    # search's branches reach the stream (the decoder's reading of it is held by decoded = reconstruction; CfL's is
+    # the chroma = luma case above)
+    var blob = ec_pic(96, 64, 3, 1, 1, 8, 3, 21);
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    ec_log_on();
+    assert_eq(ec_run(blob, 100, 3), 0, "a decided blob: decoded = reconstruction");
+    var n = av1_enc_log_count();
+    var delta_y = 0;
+    var fi = 0;
+    var delta_uv = 0;
+    var nondc = 0;
+    var i = 0;
+    while (i < n) {
+        if (ec_log(i, 3) != 0) { delta_y = delta_y + 1; }
+        if (ec_log(i, 4) != 0) { fi = fi + 1; }
+        if (ec_log(i, 7) != 0) { delta_uv = delta_uv + 1; }
+        if (ec_log(i, 2) != AV1_DC_PRED) { nondc = nondc + 1; }
+        i = i + 1;
+    }
+    assert(nondc > 0, "some block's luma is not DC_PRED");
+    assert(delta_y > 0, "some block uses a luma angle delta");
+    assert(fi > 0, "some block uses filter intra");
+    assert(delta_uv > 0, "some block uses a chroma angle delta");
+    # the decoder reads them: its YModes / UVModes grids hold more than DC_PRED
+    var tile = ec_decode_grids(Ec_Tu, Ec_Bytes);
+    assert(tile != 0, "the decoder's grids");
+    var ym = 0;
+    var um = 0;
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 24) {
+            ym = ym | (1 << av1_grid_get(tile, AV1TILE_YMODES, r, c));
+            um = um | (1 << av1_grid_get(tile, AV1TILE_UVMODES, r, c));
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert(ym != 1, "the decoder reads luma modes other than DC_PRED");
+    assert(um != 1, "and chroma modes other than DC_PRED");
+    # the sequence header: enable_filter_intra exactly when the luma mode is decided (0.8.6's header otherwise)
+    var d = 0;
+    while (d < 4) {
+        Ec_Decide = d;
+        ec_run(blob, 100, 6);
+        var it = av1_obu_iter_init(Ec_Tu, Ec_Bytes);
+        var t = 0;
+        var off = 0;
+        var sz = 0;
+        var fi_on = 0 - 1;
+        while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+            var e = 0;
+            if (t == AV1_OBU_SEQUENCE_HEADER) {
+                var seq = av1_seq_parse(Ec_Tu + off, sz, &e);
+                if (seq != 0) { fi_on = load64(seq + AV1_SEQ_ENABLE_FILTER_INTRA); }
+            }
+        }
+        assert_eq(fi_on, d & 1, "enable_filter_intra follows AV1ENC_DECIDE_YMODE");
+        d = d + 1;
+    }
+    av1_enc_set_log(0, 0);
+    Ec_Decide = 0;
+    return 0;
+}
+# libaom's RDCOST of a whole encode at qindex q: its bytes x 8 bits, its SSE against the source over every plane
+fn ec_frame_j(src, q): i64 {
+    var sse = 0;
+    var p = 0;
+    while (p < dr_frame_num_planes(src)) {
+        sse = sse + av1_rd_sse(src, Ec_Rec, p, 0, 0, dr_frame_plane_width(src, p), dr_frame_plane_height(src, p));
+        p = p + 1;
+    }
+    var bd = dr_frame_bit_depth(src);
+    return av1_rd_cost(av1_rd_mult(bd, q), Ec_Bytes * 8 * 512, av1_rd_dist(sse, bd));
+}
+fn test_ec_decide_rd() {
+    # the objective the search minimises block by block, measured over the whole frame: lower than DC_PRED's, for
+    # each decision alone and both together, on a blob and a gradient at two quantizers
+    var k = 0;
+    while (k < 2) {
+        var pic = ec_pic(96, 64, 3, 1, 1, 8, 3 * (1 - k), 41 + k);
+        var qi = 40;
+        while (qi <= 200) {
+            Ec_Decide = 0;
+            ec_run(pic, qi, 3);
+            var j0 = ec_frame_j(pic, qi);
+            var d = 1;
+            while (d <= 3) {
+                Ec_Decide = d;
+                assert_eq(ec_run(pic, qi, 3), 0, "a decided encode decodes to its reconstruction");
+                assert(ec_frame_j(pic, qi) < j0, "its frame RD cost is below DC_PRED's");
+                d = d + 1;
+            }
+            qi = qi + 160;
+        }
+        k = k + 1;
+    }
+    Ec_Decide = 0;
+    return 0;
+}
+# The block arena is rewound at every trial: a decided encode whose arena is POISONED at each rewind (0xA5 over every
+# chunk) must code the same bytes as one that is not — nothing a trial allocated is read after it.
+fn test_ec_decide_poison() {
+    var pic = ec_pic(72, 40, 3, 1, 1, 8, 3, 61);
+    var bs = 3;
+    while (bs <= 12) {
+        Ec_Decide = AV1ENC_DECIDE_ALL;
+        assert_eq(ec_run(pic, 90, bs), 0, "decided, unpoisoned: decoded = reconstruction");
+        var n1 = Ec_Bytes;
+        var t1 = Ec_Tu;
+        dr_alloc_set_poison(1);
+        var r2 = ec_run(pic, 90, bs);
+        dr_alloc_set_poison(0);
+        assert_eq(r2, 0, "decided, poisoned: decoded = reconstruction");
+        assert_eq(Ec_Bytes, n1, "the same length poisoned");
+        var same = 1;
+        var i = 0;
+        while ((i < n1) && (i < Ec_Bytes)) {
+            if (load8(t1 + i) != load8(Ec_Tu + i)) { same = 0; }
+            i = i + 1;
+        }
+        assert_eq(same, 1, "the same bytes poisoned");
+        bs = bs + 9;
+    }
+    Ec_Decide = 0;
+    return 0;
+}
+# The memory bound: a decided encode takes no more memory than an undecided one (its frame, tile and grids) plus the
+# block arena's chunk — its trials' scratch is rewound trial by trial. Without the arena a 128x64 picture's decided
+# encode took 15-25 MB more; without the rewind, a 64x64 block's seventy trials 8.6 MB.
+fn test_ec_decide_memory() {
+    var pic = ec_pic(128, 64, 3, 1, 1, 8, 3, 61);
+    var bs = 3;
+    while (bs <= 12) {
+        Ec_Decide = AV1ENC_DECIDE_ALL;
+        ec_run(pic, 90, bs);                                  # any lazily-built state first
+        var g0 = dr_alloc_global_bytes();
+        ec_run(pic, 90, bs);
+        var dec = dr_alloc_global_bytes() - g0;
+        Ec_Decide = 0;
+        g0 = dr_alloc_global_bytes();
+        ec_run(pic, 90, bs);
+        var und = dr_alloc_global_bytes() - g0;
+        assert(dec < (und + 524288), "a decided encode's memory: an undecided one's plus at most 512 KiB");
+        bs = bs + 9;
+    }
+    return 0;
+}
+fn test_ec_decide_oom() {
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    # one 8x8 block (the sweep re-runs the encode once per allocation, and a decided block makes thousands: its
+    # trials' scratch, from the block arena)
+    Ec_Oom_Src = ec_pic(8, 8, 3, 1, 1, 8, 1, 12);
+    var n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&ec_oom_op, 60, &n), 0, "OOM sweep: a decided lossy 8x8 encode");
+    assert(n > 20, "the sweep failed more than twenty allocations");
+    assert_eq(dr_alloc_sweep(&ec_oom_op, 0, &n), 0, "OOM sweep: the same encode lossless");
+    Ec_Decide = 0;
+    return 0;
+}
+fn test_ec_decide_refusals() {
+    var src = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 4, &n, &rec, &e), 0, "decide 4 (no such decision) refused");
+    assert_eq(e, DR_ERR_BOUNDS, "decide 4 -> BOUNDS");
+    e = DR_OK;
+    assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 0 - 1, &n, &rec, &e), 0, "decide -1 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "decide -1 -> BOUNDS");
+    assert(av1_encode_keyframe(src, 40, 6, Ec_Sb, 3, &n, &rec, &e) != 0, "decide 3 accepted");
+    return 0;
 }
 
 fn main() {
@@ -487,6 +898,20 @@ fn main() {
     Ec_Sb = 1;
     test_ec_oom();
     Ec_Sb = 0;
+    test_group("mode decision (0.8.7): decided encodes decode to their reconstruction, lossless to the source");
+    test_ec_decided_cases();
+    test_group("mode decision: answers known by construction");
+    test_ec_decide_known();
+    test_ec_best_directional();
+    test_group("mode decision: every branch reaches the stream; the decoder reads it");
+    test_ec_decide_uses();
+    test_group("mode decision: the RD objective");
+    test_ec_decide_rd();
+    test_group("mode decision: refusals and OOM");
+    test_ec_decide_refusals();
+    test_ec_decide_poison();
+    test_ec_decide_memory();
+    test_ec_decide_oom();
     return assert_summary();
 }
 

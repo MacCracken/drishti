@@ -330,6 +330,14 @@ fn av1_coeffs_decode(sd, cc, ncc, plane, tx_size, ttx, x4, y4, max_x4, max_y4,
     return eob;
 }
 
+# coeffs( ) ENCODE's abs-level work array: 1024 i64 (segEob at most), allocated once and kept.
+var Av1_Coeffs_Enc_Absl = 0;
+fn av1_coeffs_enc_scratch(): i64 {
+    if (Av1_Coeffs_Enc_Absl != 0) { return Av1_Coeffs_Enc_Absl; }
+    Av1_Coeffs_Enc_Absl = dr_alloc_keep(1024 * 8);
+    return Av1_Coeffs_Enc_Absl;
+}
+
 # coeffs() ENCODE — the exact inverse of av1_coeffs_decode. quant[] holds the
 # signed coefficients (as decode produces); eob is the number of scanned
 # coefficients (0 => all_zero). tx_type is the target luma TxType (chroma is
@@ -379,8 +387,9 @@ fn av1_coeffs_encode(enc, cc, ncc, plane, tx_size, ttx, tx_type, x4, y4, max_x4,
             }
         }
         # abs-level work array mirrors the decoder's quant[] state during the
-        # base/br loop (needed so the neighbour contexts match).
-        var absl = dr_alloc(seg_eob * 8);
+        # base/br loop (needed so the neighbour contexts match). Persistent (0.8.7: an encoder's mode search runs
+        # this per trial, and per-call scratch is arena growth).
+        var absl = av1_coeffs_enc_scratch();
         if (absl == 0) { return DR_ERR_OOM; }
         var z = 0;
         while (z < seg_eob) { store64(absl + (z * 8), 0); z = z + 1; }
