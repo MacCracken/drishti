@@ -4,6 +4,118 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-11-19
+
+**drishti decides.** The second encode batch: the keyframe encoder chooses its partition tree, each block's intra
+modes and its luma transform by rate and distortion. On the pictures `make conformance` measures, it needs 14.9–56.9%
+fewer bytes than 0.8.6's fixed DC_PRED for the same PSNR, and every decided stream decodes in `aomdec` and dav1d to
+exactly drishti's reconstruction. `decide` 0 is the 0.8.6 encoder byte for byte (gated by md5). Four bites, listed
+below newest first:
+- **The partition search (bite 4):** `av1_enc_search` tries NONE / SPLIT / HORZ / VERT per square region against the
+  estimator, then codes the chosen tree with every block decided in full. A test-only self-check
+  (`av1_enc_set_verify`) proves the search's state management exact. 31.7% fewer bytes than fixed DC on mandelbrot
+  CIF, and 3.3–9.9% fewer than the best fixed block size.
+- **The transform decisions (bite 3):** the luma transform size, and each transform block's type from its intra set,
+  searched inside the encode hook against the decoder's own reconstruction. The intra lane now records TxTypes as the
+  spec's `coeffs( )` does (decode-neutral).
+- **Intra mode decision (bite 2):** a `decide` argument on `av1_encode_keyframe`. It searches the 13 luma modes, filter
+  intra and angle deltas, then the 13 chroma modes and CfL with its alphas per plane. Each candidate is a trial of the
+  decoder's own residual pass.
+- **Rate and distortion (bite 1):** `src/av1_rd.cyr` and the symbol coder's estimator, which costs any writer's
+  symbols under the CDFs as they stand, within 0.05% of the coded length; libaom's key-frame RD multiplier and RDCOST
+  in exact arithmetic.
+
+**Found on the way:**
+- drishti's decoder accepted 4:2:2 partitions with no chroma shape (VERT at 64x64 and every other block twice as tall
+  as wide) and left their chroma unreconstructed; `aomdec` and dav1d refuse them. They are now refused,
+  `AV1_ERR_BAD_BLOCK` (16), with a committed reproducer (`tests/repro/refused/vert-422-64x64`).
+- The 0.8.6 encoder ran outside any arena, so the decoder's per-transform-block scratch leaked; a block arena now
+  bounds it.
+
+The arc's limits, from the roadmap: one intra frame at a fixed qindex, no extended partitions (HORZ_A / _B,
+VERT_A / _B, HORZ_4 / VERT_4), no palette or intra block copy decisions. Inter frames are 0.8.8, full RDO 0.8.9 and
+rate control 0.8.10.
+
+**Gates at the cut:**
+- `make test`: 49 suites, **35,283** assertions.
+- `make fuzz`: **7,422** assertions (4 harnesses).
+- bench, `vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` all green; `dist/drishti.cyr` regenerated
+  (v0.8.7); all five programs build.
+- `make conformance`: **4664 matched / 0 known-gap / 0 regressed / 0 skipped** (was 4486 at 0.8.6), including the new
+  BD-rate section that holds each decision set against fewer decisions.
+- One new module (49 in all): `av1_rd`. One new error code: `AV1_ERR_BAD_BLOCK` = 16. `drishti_version()` = 8007.
+
+### Added — 0.8.7 bite 4: the partition search — block sizes chosen by RD, 32% fewer bytes than fixed DC
+
+**The encoder chooses its partition tree.** A new `decide` bit, `AV1ENC_DECIDE_PARTITION` (16), makes
+`AV1ENC_DECIDE_ALL` 31. With it, the `block_size` argument is the smallest block the search may reach. Each superblock
+is coded in two passes:
+- **The search (`av1_enc_search`)**, every symbol against the estimator. Each square region tries NONE, then SPLIT
+  (searching each quarter the same way), then HORZ and VERT. Each candidate costs its partition syntax (the partition
+  symbol, `split_or_horz` / `split_or_vert` at an edge, or nothing) plus each of its blocks, decided and coded as
+  `av1_enc_block` codes them. Before each candidate, the region's coefficient contexts are restored and its
+  BlockDecoded cells cleared. Pixels and MI grid cells need nothing: every candidate codes the whole region and
+  writes each cell before anything reads it. A winner that was not tried last is coded again from its plan, so the
+  region is left exactly as it codes it.
+- **The coding (`av1_enc_partition`)** from the superblock's start state (its contexts back, BlockDecoded cleared),
+  over the plan: its partitions, and each block decided again with the full search against the CDFs as the coding
+  has left them.
+
+To keep it affordable, the search decides its blocks more cheaply (the 13 nominal luma modes; tx size for the
+cheapest; DCT_DCT; chroma left at DC), and it prunes:
+- a region whose NONE codes skip goes no deeper;
+- HORZ and VERT are tried only where SPLIT beat NONE.
+
+A 352x288 picture searched down to 8x8 takes 12.6 s, against 4.6 s at a fixed size; before the shortcuts it took
+49 s.
+
+**A test-only self-check (`av1_enc_set_verify`).** It costs every superblock's plan again from the superblock's start
+and requires the search's own cost to match exactly. That holds because every block is deterministic under the same
+state and the same unadapted CDFs. This is what witnesses the search's state management, which no decode check can
+see: a wrong restore or a missing re-coding only changes which valid stream is chosen. Mutants of the region restore,
+the BlockDecoded reset, the re-coding and its geometry all die on it.
+
+**Found: a 4:2:2 conformance rule drishti broke on both lanes.** In 4:2:2, a block twice as tall as wide or taller
+has no chroma shape: `Subsampled_Size` is BLOCK_INVALID for 4x8, 8x16, 16x32, 32x64, 64x128 and the 1:4 shapes. The
+5.11.4 semantics require that `get_plane_residual_size( subSize, 1 )` is never BLOCK_INVALID.
+- The search's first 4:2:2 encodes chose VERT at 64x64. aomdec refused them: "Block size 32x64 invalid with this
+  subsampling mode". dav1d refused them too.
+- **drishti's decoder decoded them without an error, leaving chroma that no transform reached.** It now refuses the
+  partition with `AV1_ERR_BAD_BLOCK` (16, minted in the AV1 band and added to the distinctness test). The stream is
+  committed as `tests/repro/refused/vert-422-64x64` in the refused-streams gate, and `tests/av1_decode.tcyr` refuses
+  it too.
+- The search leaves out any partition the frame's chroma cannot code. In 4:2:2 VERT is never tried, and at a right
+  edge only SPLIT is left.
+
+**The outcome, in `make conformance`.** Twelve decided cases (decide 16 and 31, every format including 8- and 10-bit
+4:2:2, both superblock sizes) decode in aomdec and dav1d to drishti's reconstruction. Each is probe-checked to read
+more than one block size. The BD-rate section now compares any two configurations; its two new verdicts hold the
+search against the best fixed block size with every other decision:
+
+| Picture | Search (down to 8x8) vs the best fixed size | Gate |
+|---|---|---|
+| mandelbrot 176x144 4:2:0 | -9.9% | -5% |
+| testsrc2 176x144 4:2:0 (fine detail: 8x8 wins nearly everywhere) | -3.3% | -1.5% |
+
+On mandelbrot 352x288 the search is -31.7% against fixed DC, against -23.1% for the best fixed size (16x16, decide
+15). At every qindex measured it has both fewer bytes and a higher PSNR than the best fixed size.
+
+**Verified:** `tests/av1_enc.tcyr` 417 -> 449 assertions. The bites 2–3 cases keep their fixed block size at decide 15.
+The new partition cases run with the self-check on and require it to hold on every superblock. By construction:
+- a flat picture is one 64x64 block;
+- top and bottom halves of two values are HORZ (two 64x32 blocks: one exact, one a single DC coefficient);
+- left and right halves are VERT in 4:2:0;
+- in 4:2:2 the same picture has no block without a chroma shape, and is still split.
+
+Also: an OOM sweep through the search, which found the search returning BOUNDS for an OOM (it did not latch the
+block coder's errors on the estimator; fixed). 20 mutants, 18 killed. The two survivors are the shortcuts (the skip
+stop and the rectangle pruning): they cost speed, not validity, and changed no tested choice.
+
+**Gates after bite 4:** `make test` 49 suites, **35,283** assertions; `make fuzz` 7,422; bench, `vet`, `lint`,
+`fmt-check`, `version-check` and `distlib --check` green, `dist/drishti.cyr` regenerated; all five programs build;
+`make conformance` **4664 matched / 0 known-gap / 0 regressed / 0 skipped** (was 4615; +49: the twelve partitioned
+cases, the refused 4:2:2 reproducer, the two partition BD-rate pictures).
+
 ### Added — 0.8.7 bite 3: the transform decisions — size and type chosen by RD, 15–57% fewer bytes than fixed DC
 
 **The encoder chooses the luma transform.** Two new `decide` bits:

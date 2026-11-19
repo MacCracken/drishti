@@ -840,7 +840,8 @@ fn test_av1_obu_write_trailing_bits() {
 # bite 1 gave AV1_ERR_BAD_TRAILING the 13 av1_itx.cyr already used for AV1_ERR_BAD_TX. Each must be in the AV1 band
 # (src/drishti.cyr: 10..29) and no two may be equal, or a caller cannot tell which check refused it.
 fn test_av1_err_codes_distinct() {
-    var c = alloc(6 * 8);
+    var c = alloc(7 * 8);
+    store64(c + 48, AV1_ERR_BAD_BLOCK);
     store64(c + 0, AV1_ERR_BAD_PROFILE);
     store64(c + 8, AV1_ERR_BAD_SEQ);
     store64(c + 16, AV1_ERR_BAD_FRAME);
@@ -850,11 +851,11 @@ fn test_av1_err_codes_distinct() {
     var i = 0;
     var dup = 0;
     var out = 0;
-    while (i < 6) {
+    while (i < 7) {
         var v = load64(c + (i * 8));
         if ((v < 10) || (v > 29)) { out = out + 1; }
         var j = i + 1;
-        while (j < 6) {
+        while (j < 7) {
             if (load64(c + (j * 8)) == v) { dup = dup + 1; }
             j = j + 1;
         }
@@ -864,6 +865,7 @@ fn test_av1_err_codes_distinct() {
     assert_eq(dup, 0, "no two AV1 error codes share a value");
     assert_eq(AV1_ERR_BAD_TRAILING, 15, "AV1_ERR_BAD_TRAILING is 15 (the refused-stream gate expects err=15)");
     assert_eq(AV1_ERR_BAD_SEGMENT_ID, 14, "AV1_ERR_BAD_SEGMENT_ID is 14 (the refused-stream gate expects err=14)");
+    assert_eq(AV1_ERR_BAD_BLOCK, 16, "AV1_ERR_BAD_BLOCK is 16 (the refused-stream gate expects err=16)");
     return 0;
 }
 # The sequence parse records where sequence_header_obu( ) ended (the walks' trailing-bits position).

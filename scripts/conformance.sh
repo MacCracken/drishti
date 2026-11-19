@@ -256,7 +256,7 @@ skip_external() { # reason
     for c in $WRITER_CASES; do skip_case "$c" "$1"; done
     skip_case "rewrite-published+generated" "$1"
     for c in $ENC_CASES; do skip_case "$c" "$1"; done
-    for c in $RD_CASES; do skip_case "${c%%:*}" "$1"; done
+    for c in $RD_CASES; do skip_case "${c%%:*}:$(echo "$c" | cut -d: -f3-)" "$1"; done
 }
 # The verdict. Exit 0 ONLY when every case ran and matched.
 finish() {
@@ -549,7 +549,12 @@ repro_svc svc-l2t3-layers-96x64
 #  - aq2-tile-96x64: the same libaom settings at --sb-size=128. Its tile's symbol data ends with ~1.1 KB of non-zero
 #    data after the trailing bit: aomdec "Failed to decode tile data" -> err=12 (AV1_ERR_BAD_FRAME, the 8.2.4 exit
 #    process, enforced since 0.8.5 bite 4; dav1d refuses it in its default strict mode).
-REFUSED_CASES="svt-uvoff-64x64 aq2-segid-96x64 aq2-tile-96x64"
+#  - vert-422-64x64: drishti's own 0.8.7 partition search, before it learned 4:2:2's rule (decide 20 on a 64x64 4:2:2
+#    mandelbrot at qindex 80): PARTITION_VERT at 64x64, two 32x64 blocks, whose chroma would be 16x64 — BLOCK_INVALID
+#    in Subsampled_Size. aomdec "Block size 32x64 invalid with this subsampling mode" -> err=16 (AV1_ERR_BAD_BLOCK, the
+#    5.11.4 semantics' get_plane_residual_size( subSize, 1 ) requirement); dav1d refuses it. Before 0.8.7 drishti
+#    decoded it, leaving chroma no transform reached.
+REFUSED_CASES="svt-uvoff-64x64 aq2-segid-96x64 aq2-tile-96x64 vert-422-64x64"
 refused_case() { # name
     local n="$1" ivf="tests/repro/refused/$1.ivf" exf="tests/repro/refused/$1.expect" log nu k w got line
     if [ ! -f "$ivf" ] || [ ! -f "$exf" ]; then
@@ -599,7 +604,8 @@ WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-
 # encoded by drishti at qindex Q in blocks of size B (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64, 15 = 128x128) at
 # 64x64 superblocks, or 128x128 with _s128 — the probe first proves the stream's use_128x128_superblock is the one the
 # case names (the 128x128 encode lane, 0.8.6) — deciding what D says (AV1ENC_DECIDE_* bits: 1 the luma mode, 2 the
-# chroma mode, 4 the luma transform size, 8 each luma transform type; no _d, nothing). Three checks, all hard:
+# chroma mode, 4 the luma transform size, 8 each luma transform type, 16 the partition — B is then the smallest block
+# the search may reach; no _d, nothing). Three checks, all hard:
 #  - drishti-enc-check's own: decoding the .ivf it wrote, drishti outputs exactly the reconstruction the encoder
 #    returned (and, at qindex 0, that reconstruction is the picture);
 #  - vs_judge: drishti's output is aomdec's, and dav1d agrees with aomdec;
@@ -607,8 +613,9 @@ WRITER_CASES="writer-420-64x64 writer-mono-128x64 writer-b10-420-128x128 writer-
 # So the stream means, to two decoders drishti had no hand in, exactly the picture the encoder says it coded. A case
 # that decides nothing must also be the 0.8.6 encoder's stream, byte for byte (tests/repro/enc-d0.md5, made by the
 # 0.8.6 binary); a decided case must be shown to have decided — the decoder reads more than one luma mode (decide 1),
-# more than one chroma mode (decide 2, with chroma), more than one luma transform size (decide 4, lossy) and some luma
-# transform type other than DCT_DCT (decide 8, lossy) — or it would prove nothing about the decisions.
+# more than one chroma mode (decide 2, with chroma), more than one luma transform size (decide 4, lossy), some luma
+# transform type other than DCT_DCT (decide 8, lossy) and more than one block size (decide 16) — or it would prove
+# nothing about the decisions.
 ENC_CASES="enc420_176x144_q60_b9 enc420ll_176x144_q0_b6 enc420_352x288_q120_b12 enc420_99x61_q30_b3 \
 enc444_160x120_q90_b6 enc422b10_72x40_q80_b3 enc420b10ll_128x96_q0_b9 enc444b12_64x64_q40_b12 encmono_99x61_q200_b12 \
 enc420_17x9_q50_b3 \
@@ -622,7 +629,10 @@ enc422b10_264x152_q120_b15_s128_d3 encmono_136x136_q30_b12_s128_d3 enc420b10ll_9
 enc420_176x144_q60_b9_d4 enc420_176x144_q60_b9_d8 enc420_176x144_q60_b9_d15 enc420ll_176x144_q0_b6_d15 \
 enc420_352x288_q120_b12_d15 enc420_99x61_q30_b3_d15 enc444_160x120_q90_b6_d15 enc422b10_72x40_q80_b3_d15 \
 enc444b12_64x64_q40_b6_d15 encmono_99x61_q100_b3_d15 enc420_352x288_q60_b15_s128_d15 enc444_176x144_q90_b6_s128_d15 \
-enc422b10_264x152_q120_b15_s128_d15 encmono_136x136_q30_b12_s128_d15"
+enc422b10_264x152_q120_b15_s128_d15 encmono_136x136_q30_b12_s128_d15 \
+enc420_176x144_q60_b3_d16 enc420_176x144_q60_b3_d31 enc420ll_176x144_q0_b3_d31 enc420_99x61_q30_b3_d31 \
+enc444_160x120_q90_b3_d31 enc422b10_72x40_q80_b3_d31 enc422_176x144_q60_b3_d31 enc444b12_64x64_q40_b3_d31 \
+encmono_99x61_q100_b3_d31 enc420_17x9_q50_b3_d31 enc420_352x288_q60_b6_s128_d31 enc422b10_264x152_q120_b3_s128_d31"
 enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
     local n="$1" kind geo qs bs t1 t2
     IFS=_ read -r kind geo qs bs t1 t2 <<< "$n"
@@ -639,6 +649,7 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
         enc420|enc420ll) pf=yuv420p;     bd=8;  fmt=1 ;;
         enc420b10ll)     pf=yuv420p10le; bd=10; fmt=1 ;;
         enc422b10)       pf=yuv422p10le; bd=10; fmt=2 ;;
+        enc422)          pf=yuv422p;     bd=8;  fmt=2 ;;
         enc444)          pf=yuv444p;     bd=8;  fmt=3; src=testsrc2 ;;
         enc444b12)       pf=yuv444p12le; bd=12; fmt=3 ;;
         encmono)         pf=gray;        bd=8;  fmt=0 ;;
@@ -673,13 +684,16 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
         nu=$(echo "$out" | sed -n 's/^MODES y=[0-9]* uv=\([0-9]*\) .*/\1/p')
         nts=$(echo "$out" | sed -n 's/^MODES .* txsizes=\([0-9]*\) .*/\1/p')
         ntt=$(echo "$out" | sed -n 's/^MODES .* txtypes=\([0-9]*\).*/\1/p')
+        local nbs
+        nbs=$(echo "$out" | sed -n 's/^MODES .* bsizes=\([0-9]*\).*/\1/p')
         if [ -z "$ny" ] || { [ $((dec & 1)) -ne 0 ] && [ "$ny" -le 1 ]; } \
           || { [ $((dec & 2)) -ne 0 ] && [ "$fmt" != "0" ] && [ "${nu:-0}" -le 1 ]; } \
           || { [ $((dec & 4)) -ne 0 ] && [ "$q" != "0" ] && [ "${nts:-0}" -le 1 ]; } \
-          || { [ $((dec & 8)) -ne 0 ] && [ "$q" != "0" ] && [ "${ntt:-0}" -le 0 ]; }; then
+          || { [ $((dec & 8)) -ne 0 ] && [ "$q" != "0" ] && [ "${ntt:-0}" -le 0 ]; } \
+          || { [ $((dec & 16)) -ne 0 ] && [ "${nbs:-0}" -le 1 ]; }; then
             echo "  $n: SETUP FAILED (the decoder reads ${ny:-?} luma / ${nu:-?} chroma modes, ${nts:-?} luma" \
-              "transform sizes, ${ntt:-?} luma cells not DCT_DCT: something asked for was not decided, it would" \
-              "prove nothing)"
+              "transform sizes, ${ntt:-?} luma cells not DCT_DCT, ${nbs:-?} block sizes: something asked for was" \
+              "not decided, it would prove nothing)"
             fail=$((fail+1)); return
         fi
     fi
@@ -692,7 +706,7 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
         fail=$((fail+1)); return
     fi
     echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); ${sb}x${sb} superblocks; decide $dec, $(echo "$out" \
-      | sed -n 's/^MODES y=\([0-9]*\) uv=\([0-9]*\) .* txsizes=\([0-9]*\) txtypes=\([0-9]*\).*/\1 luma \/ \2 chroma modes, \3 tx sizes, \4 cells not DCT_DCT/p'); reconstruction = drishti's decode)"
+      | sed -n 's/^MODES y=\([0-9]*\) uv=\([0-9]*\) .* txsizes=\([0-9]*\) txtypes=\([0-9]*\) bsizes=\([0-9]*\).*/\1 luma \/ \2 chroma modes, \3 tx sizes, \4 cells not DCT_DCT, \5 block sizes/p'); reconstruction = drishti's decode)"
     pass=$((pass+1))
     vs_judge "$n" 1
     if [ "$q" = "0" ]; then
@@ -704,23 +718,28 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
         fi
     fi
 }
-# ---- MODE DECISION PAYS (0.8.7's acceptance) — the keyframe encoder deciding against deciding nothing ----
-# rdKIND_WxH_bB:MAX: an ffmpeg picture (KIND 420: mandelbrot 4:2:0; 420t: testsrc2 4:2:0; 444b10: mandelbrot 4:4:4
-# 10-bit) encoded at qindex 40, 80, 120, 160 and 200 in blocks of size B, deciding nothing (decide 0: DC_PRED at the
-# largest transform everywhere) and deciding everything the encoder can (decide 15: the luma and chroma modes, the luma
-# transform size and types). Every stream is judged as the cases above (aomdec == drishti's decode, dav1d agreeing), so
-# the quality measured is what a decoder drishti had no hand in outputs. Then the BD-RATE of decide 15 against decide
-# 0 — the mean bitrate difference at equal PSNR (every plane, sample-weighted), over the PSNR range both curves cover,
-# log-rate interpolated piecewise linearly — must be at most MAX percent. The roadmap's bar is "measurably better than
-# fixed-DC", so MAX is never above -3; each is set some way inside the measured value (0.8.7: -14.9, -56.9, -21.6 and
-# -42.7) so that a decision that silently stops paying fails here.
-RD_CASES="rd420_352x288_b3:-10 rd420t_176x144_b6:-40 rd444b10_160x120_b9:-15 rd420_352x288_b12:-30"
+# ---- MODE DECISION PAYS (0.8.7's acceptance) — the keyframe encoder deciding against deciding less ----
+# rdKIND_WxH:MAX:DA:BA:DB:BB — an ffmpeg picture (KIND 420: mandelbrot 4:2:0; 420t: testsrc2 4:2:0; 444b10:
+# mandelbrot 4:4:4 10-bit) encoded at qindex 40, 80, 120, 160 and 200 twice: deciding DA in blocks of BA, and deciding
+# DB in blocks of BB (AV1ENC_DECIDE_* bits; with 16, the partition, the block size is the smallest the search may
+# reach). Every stream is judged as the cases above (aomdec == drishti's decode, dav1d agreeing), so the quality
+# measured is what a decoder drishti had no hand in outputs. Then the BD-RATE of the second against the first — the
+# mean bitrate difference at equal PSNR (every plane, sample-weighted), over the PSNR range both curves cover, log-rate
+# interpolated piecewise linearly — must be at most MAX percent. The first four hold every decision but the partition
+# (15) against none (0: DC_PRED at the largest transform): the roadmap's bar, "measurably better than fixed-DC", is
+# -3; each MAX is set some way inside the measured value (-14.9, -56.9, -21.6, -42.7 at 0.8.7) so that a decision that
+# silently stops paying fails here. The last two hold the partition search (31, down to 8x8) against the best fixed
+# block size with every other decision (15 in 8x8 blocks: measured -9.9 and -3.3).
+RD_CASES="rd420_352x288:-10:0:3:15:3 rd420t_176x144:-40:0:6:15:6 rd444b10_160x120:-15:0:9:15:9 \
+rd420_352x288:-30:0:12:15:12 rd420_176x144:-5:15:3:31:3 rd420t_176x144:-1.5:15:3:31:3"
 RD_QS="40 80 120 160 200"
-RD_DECIDE=15
-rdcase() { # name:max = rdKIND_WxH_bB:MAX
-    local n="${1%%:*}" RD_BD_MAX="${1##*:}" kind geo bs pf bd fmt src w h b q d out pts=""
-    IFS=_ read -r kind geo bs <<< "$n"
-    w="${geo%x*}"; h="${geo#*x}"; b="${bs#b}"
+rdcase() { # spec = rdKIND_WxH:MAX:DA:BA:DB:BB
+    local spec="$1" kind geo pf bd fmt src w h q out pts="" dd bb pass_n
+    local base mx da ba db bbb
+    IFS=: read -r base mx da ba db bbb <<< "$spec"
+    IFS=_ read -r kind geo <<< "$base"
+    local n="${base}_d${da}b${ba}_d${db}b${bbb}"
+    w="${geo%x*}"; h="${geo#*x}"
     case "$kind" in
         rd420)    pf=yuv420p;     bd=8;  fmt=1; src=mandelbrot ;;
         rd420t)   pf=yuv420p;     bd=8;  fmt=1; src=testsrc2 ;;
@@ -730,24 +749,27 @@ rdcase() { # name:max = rdKIND_WxH_bB:MAX
     rm -f "${WORK:?}/$n.src.yuv"
     ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v 1 -pix_fmt "$pf" \
         -f rawvideo "$WORK/$n.src.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
-    for d in 0 $RD_DECIDE; do
+    local which=0
+    for dd in "$da:$ba" "$db:$bbb"; do
+        local d="${dd%%:*}" b="${dd##*:}"
         for q in $RD_QS; do
-            rm -f build/enc-input.yuv build/enc-input.cfg build/enc-out.ivf "${WORK:?}/${n}_q${q}_d$d.ivf"
+            rm -f build/enc-input.yuv build/enc-input.cfg build/enc-out.ivf "${WORK:?}/${n}_q${q}_$which.ivf"
             cp "$WORK/$n.src.yuv" build/enc-input.yuv
             echo "$w $h $bd $fmt $q $b 64 $d" > build/enc-input.cfg
-            out=$(timeout 120 ./build/drishti-enc-check 2>&1)
+            out=$(timeout 300 ./build/drishti-enc-check 2>&1)
             if ! echo "$out" | grep -q '^SUMMARY ok'; then
-                echo "  ${n}_q${q}_d$d: REGRESSED (the encoder's own check)"; fail=$((fail+1)); return
+                echo "  ${n}_q${q}_$which: REGRESSED (the encoder's own check)"; fail=$((fail+1)); return
             fi
-            cp build/enc-out.ivf "$WORK/${n}_q${q}_d$d.ivf"
-            vs_judge "${n}_q${q}_d$d" 1
-            pts="$pts $d $(echo "$out" | sed -n 's/^ENC bytes=\([0-9]*\) .*/\1/p') $(echo "$out" \
+            cp build/enc-out.ivf "$WORK/${n}_q${q}_$which.ivf"
+            vs_judge "${n}_q${q}_$which" 1
+            pts="$pts $which $(echo "$out" | sed -n 's/^ENC bytes=\([0-9]*\) .*/\1/p') $(echo "$out" \
               | sed -n 's/^RD sse=\([0-9]*\) samples=\([0-9]*\) peak=\([0-9]*\).*/\1 \2 \3/p')"
         done
+        which=1
     done
-    # pts: d bytes sse samples peak, ten times; the BD-rate of decide RD_DECIDE against decide 0
+    # pts: which bytes sse samples peak, ten times; the BD-rate of the second configuration against the first
     local verdict
-    verdict=$(echo "$pts" | awk -v bdmax="$RD_BD_MAX" -v dd="$RD_DECIDE" '
+    verdict=$(echo "$pts" | awk -v bdmax="$mx" '
         { for (i = 1; i + 4 <= NF; i += 5) { d = ($i == 0) ? 0 : 3; k = n[d]++; r[d, k] = log($(i + 1));
             p[d, k] = 10 * log($(i + 4) * $(i + 4) * $(i + 3) / ($(i + 2) > 0 ? $(i + 2) : 1)) / log(10) } }
         function lr(d, x,   j, a, b, t) {      # log-rate at PSNR x on curve d (points sorted by PSNR)
@@ -767,11 +789,12 @@ rdcase() { # name:max = rdKIND_WxH_bB:MAX
                 if (a == "none" || b == "none") { print "BAD interpolation"; exit }
                 acc += b - a }
             bd = (exp(acc / 201) - 1) * 100
-            printf "%s %.2f %.2f %.2f\n", (bd <= bdmax) ? "OK" : "WORSE", bd, lo, hi }')
+            printf "%s %.2f %.2f %.2f\n", (bd <= bdmax + 0) ? "OK" : "WORSE", bd, lo, hi }')
     case "$verdict" in
-        OK*) echo "  $n: BD-rate of the decided encoder against DC_PRED $(echo "$verdict" | awk '{print $2}')%" \
-               "over $(echo "$verdict" | awk '{print $3 "-" $4}') dB (at most $RD_BD_MAX%)"; pass=$((pass+1)) ;;
-        WORSE*) echo "  $n: REGRESSED (BD-rate $(echo "$verdict" | awk '{print $2}')%, not at most $RD_BD_MAX%)"
+        OK*) echo "  $n: BD-rate of decide $db in blocks from $bbb against decide $da in $ba" \
+               "$(echo "$verdict" | awk '{print $2}')% over $(echo "$verdict" | awk '{print $3 "-" $4}') dB" \
+               "(at most $mx%)"; pass=$((pass+1)) ;;
+        WORSE*) echo "  $n: REGRESSED (BD-rate $(echo "$verdict" | awk '{print $2}')%, not at most $mx%)"
                fail=$((fail+1)) ;;
         *) echo "  $n: SETUP FAILED (the RD curves: $verdict)"; fail=$((fail+1)) ;;
     esac
@@ -2690,7 +2713,7 @@ writer_streams
 
 echo "--- keyframe encoder: real pictures encoded by drishti, decoded by drishti = aomdec = dav1d ---"
 for c in $ENC_CASES; do enccase "$c"; done
-echo "--- keyframe encoder: mode decision against fixed DC_PRED, BD-rate at equal PSNR (0.8.7's acceptance) ---"
+echo "--- keyframe encoder: decisions against fewer decisions, BD-rate at equal PSNR (0.8.7's acceptance) ---"
 for c in $RD_CASES; do rdcase "$c"; done
 
 finish

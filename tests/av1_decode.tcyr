@@ -1958,6 +1958,25 @@ fn dec_oom_op(a): i64 {
     if (d != Dec_Oom_Digest) { return DR_ERR_OTHER; }   # a fault-free decode that differs from the first one
     return DR_OK;
 }
+# 5.11.4's semantics: get_plane_residual_size( subSize, 1 ) is never BLOCK_INVALID. tests/repro/refused/vert-422-64x64
+# (drishti's own partition search before it knew the rule) codes PARTITION_VERT at 64x64 in 4:2:2 — two 32x64 blocks
+# whose chroma would be 16x64. libaom and dav1d refuse it; so must drishti, with AV1_ERR_BAD_BLOCK, outputting nothing.
+fn test_decode_refuses_chromaless_block() {
+    var buf = alloc(65536);
+    var len = file_read_all("tests/repro/refused/vert-422-64x64.ivf", buf, 65536);
+    assert_gt(len, 32, "the reproducer reads");
+    var e = 0;
+    var r = dr_ivf_reader_init(buf, len, &e);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    assert_eq(dr_ivf_next_frame(r, &pp, &ps, &pt), DR_OK, "its one temporal unit");
+    var de = 0;
+    var out = av1_decode_obus(pp, ps, &de);
+    assert_eq(de, AV1_ERR_BAD_BLOCK, "refused: AV1_ERR_BAD_BLOCK");
+    assert_eq(out, 0, "and no frame output");
+    return 0;
+}
 fn dec_oom_case(path, what): i64 {
     Dec_Oom_Buf = alloc(65536);   # bytes; the reproducers are under 64 KB
     Dec_Oom_Len = file_read_all(path, Dec_Oom_Buf, 65536);
@@ -2240,6 +2259,8 @@ fn main() {
     test_obus_forbidden_bit();
     test_obus_bad_seq_payload();
     test_obus_metadata_padding_skipped();
+    test_group("block-level conformance: a block without a chroma shape (5.11.4)");
+    test_decode_refuses_chromaless_block();
     test_group("OOM fault injection");
     test_decoder_oom();
     test_group("the memory bound");

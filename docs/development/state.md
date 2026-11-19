@@ -6,16 +6,30 @@
 
 ## Version
 
-**0.8.7 in progress** (bites 1–3 landed 2026-11-18, uncommitted until the user commits). **The keyframe encoder
-decides its intra modes and its luma transform.** Bite 1: rate and distortion (`src/av1_rd.cyr`, new module 49, and
-the symbol coder's estimator). Bite 2: the luma and chroma mode search (`decide` on `av1_encode_keyframe`; 0 = the
-0.8.6 encoder byte for byte, gated by md5), and the block arena that bounds the encoder's memory. Bite 3: the luma
-transform size and each transform block's type (`decide` bits 4 and 8, ALL = 15), the intra lane recording TxTypes
-(decode-neutral) and the candidate arena. `make conformance` holds decided encodes aomdec-clean and measures decide 15
-against fixed DC_PRED: BD-rate -14.9%, -56.9%, -21.6% and -42.7%, each gated. The roadmap's 0.8.7 outcome —
-measurably better than fixed DC at matched rate, still `aomdec`-clean — holds; still to come in the batch: an RD
-partition search. Gates after bite 3: 49 suites, 35,246
-assertions; fuzz 7,422; `make conformance` 4615 matched / 0 known-gap / 0 regressed / 0 skipped; everything else green.
+**0.8.7** — cut 2026-11-19, not yet tagged (user's git). **drishti decides: the keyframe encoder chooses its
+partition tree, each block's intra modes and its luma transform by rate and distortion**, for 14.9–56.9% fewer bytes
+than 0.8.6's fixed DC_PRED at the same PSNR, every decided stream decoding in `aomdec` and dav1d to drishti's
+reconstruction. The second encode batch. Four bites, listed newest first in the CHANGELOG:
+- the RD partition search (`av1_enc_search`; `decide` bit 16, ALL = 31): NONE / SPLIT / HORZ / VERT per square region
+  against the estimator, the chosen tree coded with every block decided in full, and a test-only self-check
+  (`av1_enc_set_verify`) of its state; -31.7% against fixed DC on mandelbrot CIF, -3.3% to -9.9% against the best
+  fixed block size;
+- the luma transform size and each transform block's type (`decide` bits 4 and 8), searched against the decoder's own
+  reconstruction; the intra lane records TxTypes (decode-neutral);
+- the luma and chroma mode search (`decide` bits 1 and 2): 13 luma modes, filter intra, angle deltas, 13 chroma modes,
+  CfL and its alphas; `decide` 0 is the 0.8.6 encoder byte for byte (gated by md5); the block arena that bounds the
+  encoder's memory (the 0.8.6 encoder leaked the decoder's per-transform-block scratch);
+- rate and distortion (`src/av1_rd.cyr`, new module 49) and the symbol coder's estimator.
+
+Decoder change: 4:2:2 partitions with no chroma shape are refused (`AV1_ERR_BAD_BLOCK` = 16), where they decoded
+silently with chroma unreconstructed (committed reproducer `tests/repro/refused/vert-422-64x64`).
+
+`drishti_version()` = 8007.
+
+**ALL gates green:** 49 suites with **35,283** suite + **7,422** fuzz assertions (4 fuzz harnesses), bench, vet,
+lint, fmt-check, version-check, `distlib --check`, all five programs build, and `make conformance` at **4664
+matched / 0 known-gap / 0 regressed / 0 skipped** (was 4486), including six BD-rate checks of the decisions. One new
+module (49): `av1_rd`. NEXT: 0.8.8 (roadmap).
 
 **0.8.6** — cut 2026-11-18, not yet tagged (user's git). **drishti encodes: a picture in, a standalone `.ivf` that
 `aomdec` and dav1d decode to exactly drishti's reconstruction, at both superblock sizes.** The first encode batch.
@@ -1826,10 +1840,12 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 
 > ### Picking this up cold — the next task, concretely
 >
-> **Where we are (0.8.5, the fourth AV1 batch and the last decode one, cut 2026-11-16).** **`make conformance` is
-> 3971 matched / 0 KNOWN-GAP / 0 regressed / 0 skipped.** Every hard case is BIT-EXACT against libaom on EVERY
-> frame, with dav1d as a tiebreak.
-> That covers:
+> **Where we are (0.8.7, the second encode batch, cut 2026-11-19).** Decode closed at 0.8.5; since 0.8.6 drishti
+> encodes a key frame, and since 0.8.7 it decides its partitions, intra modes and luma transforms by RD.
+> **`make conformance` is 4664 matched / 0 KNOWN-GAP / 0 regressed / 0 skipped.** Every hard decode case is
+> BIT-EXACT against libaom on EVERY frame, with dav1d as a tiebreak, and every encoded picture decodes in `aomdec`
+> and dav1d to drishti's reconstruction.
+> The decode side covers:
 > - every profile, bit depth (8/10/12) and chroma format (4:2:0, 4:2:2, 4:4:4, monochrome);
 > - GOPs to 90 frames: hidden frames, `show_existing_frame`, every refresh slot, SWITCH frames, error resilience;
 > - frame sizes from 1x1 up at both superblock sizes, superres, and scaled references;
@@ -1840,10 +1856,28 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 >   remuxed from .mkv; the svc vectors at every operating point);
 > - streams from libaom, rav1e and SVT-AV1, and committed reproducers under `tests/repro/` that run without libaom.
 >
-> **NEXT: 0.8.7, "intra mode decision: drishti picks modes and the output is measurably better than fixed-DC"**
-> (roadmap table): intra mode search over the 13 Y modes + UV + CfL + angle deltas, tx-size and tx-type decision, an
-> RD-driven partition search, and the distortion + rate estimators they need — still `aomdec`-clean. 0.8.6's encoder
-> is the base: its reconstruction is the decoder's code, so every new choice is held to aomdec by the same gate.
+> **NEXT: 0.8.8, "an INTER frame drishti encoded decodes correctly: motion estimation produces MVs that
+> reconstruct"** (roadmap table): motion estimation (diamond / hex search, sub-pel refinement), reference selection,
+> MV prediction reused from the decode side, and the inter residual + skip decision. 0.8.7's encoder is the base:
+> its RD (`src/av1_rd.cyr`, the estimator) and its trial machinery (a decoder residual pass per candidate, the block
+> and candidate arenas, context save / restore) carry over; the inter frame header writer does not exist yet.
+>
+> **0.8.7 (cut 2026-11-19), bite by bite:** bite 1 = **rate and distortion**: the symbol coder's ESTIMATOR (each
+> symbol validated as the coder does, then costed in 1/512 bits under the CDFs as they stand, nothing coded and no
+> CDF adapted; within 0.05% of the coded length on seeded streams) and `src/av1_rd.cyr` (libaom's key-frame RD
+> multiplier, its RDCOST and distortion scaling in exact arithmetic), against `scripts/refs/rd_ref.py`. Bite 2 =
+> **intra mode decision**: `decide` on `av1_encode_keyframe`, each candidate a trial of the decoder's own residual
+> pass over a plane mask (`AV1BLK_PLANE_SKIP`); FOUND the 0.8.6 encoder leaking the decoder's per-transform-block
+> scratch (it ran outside any arena), now a block arena. Bite 3 = **tx size + per-tx-block type**, searched inside
+> the encode hook against the decoder's reconstruction, under a candidate arena. Bite 4 = **the RD partition search**:
+> two phases per superblock (search against the estimator with cheaper decisions, then code the plan with full
+> ones), restoring only coefficient contexts and BlockDecoded between candidates; the self-check
+> `av1_enc_set_verify` is the only witness of that state management, since a wrong restore still yields a valid
+> stream. FOUND the decoder silently decoding 4:2:2 partitions with no chroma shape (aomdec: "Block size 32x64
+> invalid with this subsampling mode"), now `AV1_ERR_BAD_BLOCK`. BD-rate is gated in `make conformance` (decide 15
+> against 0: -14.9%, -56.9%, -21.6%, -42.7%; decide 31 against 15: -9.9%, -3.3%). Mutants: 31 / 31 / 28 / 20, every
+> survivor equivalent, quality-only or speed-only. LESSON: a by-construction known answer must list EVERY exact
+> candidate (filter intra reproduces stripes exactly, as V_PRED does).
 >
 > **0.8.6 (cut 2026-11-18), bite by bite:** bite 1 = **the two stream kinds 0.8.5 carried, refused where and why libaom
 > refuses them** (libaom 3.15.3 `--aq-mode=2 --cq-level=0`; SVT-AV1 4.2 / 4.3 with chroma qindex offsets; libaom and
@@ -2227,9 +2261,8 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > Eight generated configurations at every operating point in two packings, the published vectors at every point, and
 > two reproducers are gated: 3314 matched / 0 / 0 / 0. That completes 0.8.4's bite list.
 >
-> **Known-and-tracked, not in 0.8.3 or 0.8.4:** the encode lane has NEVER run at 128 superblocks
-> (`av1_tile_set_sb128` is never called on an encode tile, so that whole path is unexecuted).
-> It is scheduled in 0.8.6, where the encoder first runs.
+> **Known-and-tracked at 0.8.3 / 0.8.4, RESOLVED in 0.8.6 bite 6:** the encode lane had never run at 128
+> superblocks; it now does, gated by the `_s128` encode cases.
 
 The **intra still-picture decode MILESTONE is COMPLETE (0.7.25)** — profile-0
 AV1 keyframes decode end-to-end to pixels. Per-release history is in

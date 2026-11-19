@@ -43,6 +43,7 @@ enum Av1ErrCode {
     AV1_ERR_BAD_FRAME   = 12;   # frame-header conformance violation (5.9)
     AV1_ERR_BAD_TRAILING = 15;  # a header's end breaks 5.3.4 trailing_bits / 5.3.5 byte_alignment (src/av1_obu.cyr)
     AV1_ERR_BAD_SEGMENT_ID = 14;  # a read segment_id outside 0..LastActiveSegId (6.10.8; src/av1_modeinfo.cyr)
+    AV1_ERR_BAD_BLOCK = 16;     # a partition whose block has no chroma shape (5.11.4 semantics; src/av1_partition.cyr)
 }
 
 # Av1Seq field byte offsets. Offsets 0..48 are the 0.7.0 layout (kept

@@ -632,6 +632,15 @@ fn av1_decode_partition(tile, r, c, bsize): i64 {
         }
     }
     var sub_size = av1_partition_subsize(partition, bsize);
+    # 5.11.4's semantics: "get_plane_residual_size( subSize, 1 ) is not equal to BLOCK_INVALID every time subSize is
+    # computed" — in 4:2:2 a block twice as tall as wide (or more) has no chroma shape. libaom refuses the frame ("Block
+    # size ... invalid with this subsampling mode"); drishti decoded it, with chroma no transform reached, until 0.8.7,
+    # whose partition search first produced one. Refused, sticky, and nothing below is decoded.
+    if ((dr_frame_num_planes(load64(tile + AV1TILE_FRAME)) > 1)
+      && (av1_get_plane_residual_size(sub_size, 1, load64(tile + AV1TILE_SUBX), load64(tile + AV1TILE_SUBY))
+        < 0)) {
+        return av1_sym_dec_fail(sd, AV1_ERR_BAD_BLOCK);
+    }
     if (partition == AV1_PARTITION_SPLIT) {
         av1_decode_partition(tile, r, c, sub_size);
         av1_decode_partition(tile, r, c + half, sub_size);

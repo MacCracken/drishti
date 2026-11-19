@@ -56,7 +56,10 @@ enum Av1EncConst {
     AV1ENC_DECIDE_UVMODE = 2;    # the chroma mode: 13 modes, angle deltas, CfL and its alphas
     AV1ENC_DECIDE_TXSIZE = 4;    # the luma transform size: every tx depth the block allows
     AV1ENC_DECIDE_TXTYPE = 8;    # each luma transform block's type: its intra tx set
-    AV1ENC_DECIDE_ALL    = 15;
+    AV1ENC_DECIDE_PARTITION = 16; # the partition tree: NONE / HORZ / VERT / SPLIT, down to block_size
+    AV1ENC_DECIDE_ALL    = 31;
+    AV1ENC_NODE_CAP      = 400;  # plan nodes one superblock's search can use (341 for 128x128 down to 8x8)
+    AV1ENC_LEVELS        = 6;    # region context snapshots, one per depth (128 -> 8: five)
     AV1ENC_TOPY          = 3;    # luma candidates the transform search re-tries
     AV1ENC_J_MAX         = 4611686018427387904;   # 2^62: no candidate yet
 }
@@ -90,7 +93,36 @@ enum Av1EncCtx {
     AV1EC_DQ      = 208;  # 3 i64: a candidate's dequantization (av1_tx_dequant)
     AV1EC_TOPY    = 216;  # AV1ENC_TOPY x 5 i64: the cheapest luma candidates (cost, mode, delta, fi, fi mode)
     AV1EC_CARENA  = 224;  # the candidate arena: one transform type candidate's reconstruction scratch
-    AV1EC_SIZE    = 232;
+    AV1EC_NODES   = 232;  # AV1ENC_NODE_CAP plan nodes (Av1EncNode) for the superblock being searched
+    AV1EC_NNODES  = 240;  # nodes in use
+    AV1EC_LVCTX   = 248;  # AV1ENC_LEVELS x 384 i64: each depth's region coefficient contexts as it found them
+    AV1EC_FAST    = 256;  # 1 while the partition search decides blocks: the cheaper decisions (av1_enc_search)
+    AV1EC_SIZE    = 264;
+}
+# A node of a superblock's partition plan: one square region the search decided (av1_enc_search), the plan the final
+# pass codes (av1_enc_partition).
+enum Av1EncNode {
+    AV1EN_PART  = 0;      # the partition chosen; -1 for a region outside the frame (nothing is coded there)
+    AV1EN_J     = 8;      # its RD cost
+    AV1EN_LEAF  = 16;     # 4 x AV1ENL_SIZE: the decisions of the chosen partition's blocks, in decode order
+    AV1EN_TMP   = 336;    # 4 x AV1ENL_SIZE: those of the candidate being tried
+    AV1EN_CHILD = 656;    # 4 i64: SPLIT's four children (node pointers)
+    AV1EN_CANDS = 688;    # 4 i64: the partitions tried (av1_enc_part_candidates)
+    AV1EN_SIZE  = 720;
+}
+# one block's decisions, what av1_enc_block codes it with when given them as a plan
+enum Av1EncLeaf {
+    AV1ENL_YMODE    = 0;
+    AV1ENL_ANGLE_Y  = 8;
+    AV1ENL_USE_FI   = 16;
+    AV1ENL_FI_MODE  = 24;
+    AV1ENL_UVMODE   = 32;
+    AV1ENL_ANGLE_UV = 40;
+    AV1ENL_CFL_U    = 48;
+    AV1ENL_CFL_V    = 56;
+    AV1ENL_TXSZ     = 64;
+    AV1ENL_SKIP     = 72;     # the block was coded skip (an output: av1_enc_block ignores it in a plan)
+    AV1ENL_SIZE     = 80;
 }
 # one recorded transform block: everything coeffs( ) needs, in the decoder's terms
 enum Av1EncRec {
@@ -140,6 +172,17 @@ fn av1_enc_new(src, s, fh, decide): i64 {
     var carena = dr_arena_new(1 << 16);             # 64 KiB chunks
     if ((pred == 0) || (blv == 0) || (txc == 0) || (dq == 0) || (top == 0) || (carena == 0)) { return 0; }
     store64(ec + AV1EC_CARENA, carena);
+    store64(ec + AV1EC_NODES, 0);
+    store64(ec + AV1EC_NNODES, 0);
+    store64(ec + AV1EC_LVCTX, 0);
+    store64(ec + AV1EC_FAST, 0);
+    if (decide & AV1ENC_DECIDE_PARTITION) {
+        var nodes = dr_alloc(AV1ENC_NODE_CAP * AV1EN_SIZE);
+        var lvc = dr_alloc(AV1ENC_LEVELS * 384 * 8);
+        if ((nodes == 0) || (lvc == 0)) { return 0; }
+        store64(ec + AV1EC_NODES, nodes);
+        store64(ec + AV1EC_LVCTX, lvc);
+    }
     store64(ec + AV1EC_PRED, pred);
     store64(ec + AV1EC_BESTLV, blv);
     store64(ec + AV1EC_TXCTX, txc);
@@ -445,8 +488,9 @@ fn av1_enc_set_log(buf, cap): i64 {
 }
 fn av1_enc_log_count(): i64 { return Av1_Enc_Log_N; }
 var Av1_Enc_Log_Types = 0;   # the luma transform blocks not DCT_DCT in the block being coded
+var Av1_Enc_Log_Off = 0;     # 1 while the partition search codes blocks against the estimator (not logged)
 fn av1_enc_log_block(r, c, mi, tx_size): i64 {
-    if ((Av1_Enc_Log == 0) || (Av1_Enc_Log_N >= Av1_Enc_Log_Cap)) { return 0; }
+    if ((Av1_Enc_Log == 0) || (Av1_Enc_Log_N >= Av1_Enc_Log_Cap) || (Av1_Enc_Log_Off != 0)) { return 0; }
     var e = Av1_Enc_Log + (Av1_Enc_Log_N * AV1ENC_LOG_W * 8);
     store64(e, r);
     store64(e + 8, c);
@@ -507,7 +551,10 @@ fn av1_enc_bd_reset(tile, r, c, bw4, bh4, mask): i64 {
 # plane, the entries coeffs( ) writes and reset_block_context clears (src/av1_partition.cyr) — saved to AV1EC_CTX
 # (save 1) or put back from it (save 0). At most 32 entries per array: a 128-sample side in 4x4 units.
 fn av1_enc_ctx_copy(tile, ec, r, c, bw4, bh4, num_planes, save): i64 {
-    var buf = load64(ec + AV1EC_CTX);
+    return av1_enc_ctx_copy_buf(tile, load64(ec + AV1EC_CTX), r, c, bw4, bh4, num_planes, save);
+}
+# the same, to / from buf (384 i64): a region's contexts for the partition search
+fn av1_enc_ctx_copy_buf(tile, buf, r, c, bw4, bh4, num_planes, save): i64 {
     var subx = load64(tile + AV1TILE_SUBX);
     var suby = load64(tile + AV1TILE_SUBY);
     var col0 = load64(tile + AV1TILE_COL_START);
@@ -745,7 +792,8 @@ fn av1_enc_pick_y(tile, ec, blk, nb): i64 {
         if (j < best) { best = j; bmode = m; bdelta = 0; bfi = 0; bfim = 0; }
         m = m + 1;
     }
-    if (av1_filter_intra_allowed(load64(tile + AV1TILE_ENABLE_FI), bsize, AV1_DC_PRED, 0)) {
+    if (av1_filter_intra_allowed(load64(tile + AV1TILE_ENABLE_FI), bsize, AV1_DC_PRED, 0)
+      && (load64(ec + AV1EC_FAST) == 0)) {
         var f = 0;
         while (f < 5) {
             var jf = av1_enc_try_y(tile, ec, blk, nb, AV1_DC_PRED, 0, 1, f);
@@ -754,7 +802,7 @@ fn av1_enc_pick_y(tile, ec, blk, nb): i64 {
             f = f + 1;
         }
     }
-    if (av1_angle_delta_active(bsize, AV1_V_PRED)) {
+    if (av1_angle_delta_active(bsize, AV1_V_PRED) && (load64(ec + AV1EC_FAST) == 0)) {
         var da = 0;
         var db = 0;
         av1_enc_best_directional(ec, &da, &db);
@@ -795,7 +843,10 @@ fn av1_enc_pick_tx(tile, ec, blk, nb): i64 {
     var decide = load64(ec + AV1EC_DECIDE);
     var maxd = 0;
     if (decide & AV1ENC_DECIDE_TXSIZE) { maxd = av1_min(av1_max_tx_depth(bsize), AV1_MAX_TX_DEPTH); }
-    if (decide & AV1ENC_DECIDE_TXTYPE) { store64(ec + AV1EC_TXSEARCH, 1); }
+    var fast = load64(ec + AV1EC_FAST);
+    if (((decide & AV1ENC_DECIDE_TXTYPE) != 0) && (fast == 0)) { store64(ec + AV1EC_TXSEARCH, 1); }
+    var ncand = AV1ENC_TOPY;
+    if (fast != 0) { ncand = 1; }
     var top = load64(ec + AV1EC_TOPY);
     if ((decide & AV1ENC_DECIDE_YMODE) == 0) {
         av1_enc_top_reset(ec);
@@ -806,7 +857,7 @@ fn av1_enc_pick_tx(tile, ec, blk, nb): i64 {
     var bc = 0;
     var btx = av1_max_tx_size_rect(bsize);
     var ci = 0;
-    while ((ci < AV1ENC_TOPY) && (load64(top + (ci * 40)) < AV1ENC_J_MAX)) {
+    while ((ci < ncand) && (load64(top + (ci * 40)) < AV1ENC_J_MAX)) {
         store64(mi + AV1MI_YMODE, load64(top + (ci * 40) + 8));
         store64(mi + AV1MI_ANGLE_Y, load64(top + (ci * 40) + 16));
         store64(mi + AV1MI_USE_FI, load64(top + (ci * 40) + 24));
@@ -920,7 +971,8 @@ fn av1_enc_pick_uv(tile, ec, blk, nb): i64 {
         if (j < best) { best = j; bmode = m; bdelta = 0; }
         m = m + 1;
     }
-    if (av1_angle_delta_active(bsize, AV1_V_PRED)) {
+    var fast = load64(ec + AV1EC_FAST);
+    if (av1_angle_delta_active(bsize, AV1_V_PRED) && (fast == 0)) {
         var da = 0;
         var db = 0;
         av1_enc_best_directional(ec, &da, &db);
@@ -940,7 +992,7 @@ fn av1_enc_pick_uv(tile, ec, blk, nb): i64 {
             t = t + 1;
         }
     }
-    if (av1_cfl_allowed(bsize, load64(blk + AV1BLK_LOSSLESS), load64(tile + AV1TILE_SUBX),
+    if ((fast == 0) && av1_cfl_allowed(bsize, load64(blk + AV1BLK_LOSSLESS), load64(tile + AV1TILE_SUBX),
         load64(tile + AV1TILE_SUBY))) {
         store64(mi + AV1MI_UVMODE, AV1_UV_CFL_PRED);
         store64(mi + AV1MI_ANGLE_UV, 0);
@@ -971,13 +1023,23 @@ fn av1_enc_pick_uv(tile, ec, blk, nb): i64 {
 
 # The block's modes decided (when asked) — trials from the coefficient contexts as the block finds them — then the
 # residual pass: the decoder's residual( ) over every plane, levels from av1_enc_tx_levels.
-fn av1_enc_decide_residual(tile, ec, blk, nb, num_planes): i64 {
+fn av1_enc_decide_residual(tile, ec, blk, nb, num_planes, plan): i64 {
     var r = load64(blk + AV1BLK_MI_ROW);
     var c = load64(blk + AV1BLK_MI_COL);
     var mi = load64(blk + AV1BLK_MI);
     var decide = load64(ec + AV1EC_DECIDE);
     store64(ec + AV1EC_TXSEARCH, 0);             # mode trials at the largest transform, DCT_DCT
-    if (decide != 0) {
+    if (plan != 0) {
+        # decided already (the partition search's plan): only each luma transform block's type is searched again,
+        # in the residual pass, against the CDFs as they now stand
+        if (((decide & AV1ENC_DECIDE_TXTYPE) != 0) && (load64(blk + AV1BLK_LOSSLESS) == 0)
+          && (load64(ec + AV1EC_FAST) == 0)) {
+            var pb = load64(blk + AV1BLK_MI_SIZE);
+            av1_enc_ctx_copy(tile, ec, r, c, av1_num_4x4_w(pb), av1_num_4x4_h(pb), num_planes, 1);
+            store64(ec + AV1EC_TXSEARCH, 1);
+        }
+    }
+    if ((decide != 0) && (plan == 0)) {
         var bsize = load64(blk + AV1BLK_MI_SIZE);
         av1_enc_ctx_copy(tile, ec, r, c, av1_num_4x4_w(bsize), av1_num_4x4_h(bsize), num_planes, 1);
         if (decide & AV1ENC_DECIDE_YMODE) {
@@ -988,7 +1050,7 @@ fn av1_enc_decide_residual(tile, ec, blk, nb, num_planes): i64 {
             var etx = av1_enc_pick_tx(tile, ec, blk, nb);
             if (etx != DR_OK) { return etx; }
         }
-        if ((num_planes > 1) && ((decide & AV1ENC_DECIDE_UVMODE) != 0)) {
+        if ((num_planes > 1) && ((decide & AV1ENC_DECIDE_UVMODE) != 0) && (load64(ec + AV1EC_FAST) == 0)) {
             var euv = av1_enc_pick_uv(tile, ec, blk, nb);
             if (euv != DR_OK) { return euv; }
         }
@@ -998,12 +1060,13 @@ fn av1_enc_decide_residual(tile, ec, blk, nb, num_planes): i64 {
     return er;
 }
 
-# One block at (r, c) of size bsize — decode_block (5.11.5) run as an encoder: the modes decided (when asked), the
-# residual pass, then the symbol pass (outside the block arena: the coder's word buffer grows into memory that must
-# outlive the block).
-fn av1_enc_block(tile, ec, r, c, bsize): i64 {
+# One block at (r, c) of size bsize — decode_block (5.11.5) run as an encoder: the modes decided (when asked; or taken
+# from plan, an Av1EncLeaf), the residual pass, then the symbol pass against enc (outside the block arena: the coder's
+# word buffer grows into memory that must outlive the block). enc is the tile's coder, or — for the partition search —
+# the estimator, and then *out_j is the block's RD cost: the cost of its symbols, and the SSE of its reconstruction.
+# The decisions go to out_leaf when it is not 0.
+fn av1_enc_block(tile, ec, r, c, bsize, enc, plan, out_leaf, out_j): i64 {
     var frame = load64(tile + AV1TILE_FRAME);
-    var enc = load64(tile + AV1TILE_ENC);
     var ncc = load64(tile + AV1TILE_NCC);
     var subx = load64(tile + AV1TILE_SUBX);
     var suby = load64(tile + AV1TILE_SUBY);
@@ -1045,13 +1108,36 @@ fn av1_enc_block(tile, ec, r, c, bsize): i64 {
     store64(blk + AV1BLK_PLANE_SKIP, 0);
     var num_planes = 1;
     if (has_chroma) { num_planes = 3; }
+    if (plan != 0) {
+        store64(mi + AV1MI_YMODE, load64(plan + AV1ENL_YMODE));
+        store64(mi + AV1MI_ANGLE_Y, load64(plan + AV1ENL_ANGLE_Y));
+        store64(mi + AV1MI_USE_FI, load64(plan + AV1ENL_USE_FI));
+        store64(mi + AV1MI_FI_MODE, load64(plan + AV1ENL_FI_MODE));
+        store64(mi + AV1MI_UVMODE, load64(plan + AV1ENL_UVMODE));
+        store64(mi + AV1MI_ANGLE_UV, load64(plan + AV1ENL_ANGLE_UV));
+        store64(mi + AV1MI_CFL_U, load64(plan + AV1ENL_CFL_U));
+        store64(mi + AV1MI_CFL_V, load64(plan + AV1ENL_CFL_V));
+        store64(blk + AV1BLK_TX_SIZE, load64(plan + AV1ENL_TXSZ));
+    }
     # ---- the decisions, then the residual pass, their scratch from the block arena ----
     var arena = load64(ec + AV1EC_ARENA);
     var prev = dr_alloc_scope(arena);
-    var rerr = av1_enc_decide_residual(tile, ec, blk, nb, num_planes);
+    var rerr = av1_enc_decide_residual(tile, ec, blk, nb, num_planes, plan);
     dr_alloc_scope(prev);
     dr_arena_reset(arena);
     if (rerr != DR_OK) { return rerr; }
+    if (out_leaf != 0) {
+        store64(out_leaf + AV1ENL_YMODE, load64(mi + AV1MI_YMODE));
+        store64(out_leaf + AV1ENL_ANGLE_Y, load64(mi + AV1MI_ANGLE_Y));
+        store64(out_leaf + AV1ENL_USE_FI, load64(mi + AV1MI_USE_FI));
+        store64(out_leaf + AV1ENL_FI_MODE, load64(mi + AV1MI_FI_MODE));
+        store64(out_leaf + AV1ENL_UVMODE, load64(mi + AV1MI_UVMODE));
+        store64(out_leaf + AV1ENL_ANGLE_UV, load64(mi + AV1MI_ANGLE_UV));
+        store64(out_leaf + AV1ENL_CFL_U, load64(mi + AV1MI_CFL_U));
+        store64(out_leaf + AV1ENL_CFL_V, load64(mi + AV1MI_CFL_V));
+        store64(out_leaf + AV1ENL_TXSZ, load64(blk + AV1BLK_TX_SIZE));
+    }
+    if (out_j != 0) { av1_sym_enc_set_cost(enc, 0); }
     var n = load64(ec + AV1EC_N);
     var recs = load64(ec + AV1EC_RECS);
     var skip = 1;
@@ -1061,6 +1147,7 @@ fn av1_enc_block(tile, ec, r, c, bsize): i64 {
         k = k + 1;
     }
     store64(mi + AV1MI_SKIP, skip);
+    if (out_leaf != 0) { store64(out_leaf + AV1ENL_SKIP, skip); }
     # ---- the symbol pass: mode info, palette (none), tx size, then each transform block's coeffs( ) ----
     var eme = av1_enc_write_mode_info(tile, enc, blk, nb);
     if (eme != DR_OK) { return eme; }
@@ -1079,50 +1166,396 @@ fn av1_enc_block(tile, ec, r, c, bsize): i64 {
     }
     av1_block_write_grids(tile, r, c, bw4, bh4, bsize, load64(mi + AV1MI_YMODE), load64(mi + AV1MI_UVMODE), skip,
       load64(blk + AV1BLK_TX_SIZE), has_chroma, 1);
+    if (out_j != 0) {
+        var src = load64(ec + AV1EC_SRC);
+        var sse = 0;
+        var plane = 0;
+        while (plane < num_planes) {
+            var sx = 0;
+            var sy = 0;
+            if (plane > 0) { sx = subx; sy = suby; }
+            var psz = av1_get_plane_residual_size(bsize, plane, sx, sy);
+            sse = sse + av1_rd_sse(src, frame, plane, (c >> sx) * AV1_MI_SIZE, (r >> sy) * AV1_MI_SIZE,
+              av1_block_width(psz), av1_block_height(psz));
+            plane = plane + 1;
+        }
+        store64(out_j, av1_rd_cost(load64(ec + AV1EC_RDMULT), av1_sym_enc_cost(enc),
+            av1_rd_dist(sse, load64(ec + AV1EC_BD))));
+    }
     return av1_sym_enc_err(enc);
 }
 
-# decode_partition (5.11.4) run as an encoder over the fixed decision: SPLIT above the target size, and SPLIT where a
-# block's half would leave the frame (NONE is not codable there); NONE at the target. A BLOCK_8X8 is always inside
-# (MiRows / MiCols are even), so the walk never goes below the target's floor of 8x8.
-fn av1_enc_partition(tile, ec, r, c, bsize, target): i64 {
+# The k-th block (k from 0, in decode order) a partition other than SPLIT codes for the bsize region at (r, c): its
+# position and size at *out_r / *out_c / *out_size, 1 when it is coded, 0 when it is not (past the partition's blocks,
+# or — HORZ / VERT / HORZ_4 / VERT_4 — outside the tile window, where decode_partition (5.11.4) codes nothing).
+fn av1_enc_part_block(tile, partition, k, r, c, bsize, out_r, out_c, out_size): i64 {
+    var mi_rows = load64(tile + AV1TILE_ROW_END);
+    var mi_cols = load64(tile + AV1TILE_COL_END);
+    var half = av1_num_4x4_w(bsize) >> 1;
+    var quarter = half >> 1;
+    var sub = av1_partition_subsize(partition, bsize);
+    var split = av1_partition_subsize(AV1_PARTITION_SPLIT, bsize);
+    var br = r;
+    var bc = c;
+    var bs = sub;
+    var n = 1;
+    if ((partition == AV1_PARTITION_HORZ) || (partition == AV1_PARTITION_VERT)) { n = 2; }
+    if ((partition >= AV1_PARTITION_HORZ_A) && (partition <= AV1_PARTITION_VERT_B)) { n = 3; }
+    if ((partition == AV1_PARTITION_HORZ_4) || (partition == AV1_PARTITION_VERT_4)) { n = 4; }
+    if ((k < 0) || (k >= n)) { return 0; }
+    if (partition == AV1_PARTITION_HORZ) {
+        if (k == 1) {
+            br = r + half;
+            if (br >= mi_rows) { return 0; }
+        }
+    }
+    if (partition == AV1_PARTITION_VERT) {
+        if (k == 1) {
+            bc = c + half;
+            if (bc >= mi_cols) { return 0; }
+        }
+    }
+    if (partition == AV1_PARTITION_HORZ_A) {
+        if (k < 2) { bs = split; bc = c + (half * k); } else { br = r + half; }
+    }
+    if (partition == AV1_PARTITION_HORZ_B) {
+        if (k > 0) { bs = split; br = r + half; bc = c + (half * (k - 1)); }
+    }
+    if (partition == AV1_PARTITION_VERT_A) {
+        if (k < 2) { bs = split; br = r + (half * k); } else { bc = c + half; }
+    }
+    if (partition == AV1_PARTITION_VERT_B) {
+        if (k > 0) { bs = split; bc = c + half; br = r + (half * (k - 1)); }
+    }
+    if (partition == AV1_PARTITION_HORZ_4) {
+        br = r + (quarter * k);
+        if ((k == 3) && (br >= mi_rows)) { return 0; }
+    }
+    if (partition == AV1_PARTITION_VERT_4) {
+        bc = c + (quarter * k);
+        if ((k == 3) && (bc >= mi_cols)) { return 0; }
+    }
+    store64(out_r, br);
+    store64(out_c, bc);
+    store64(out_size, bs);
+    return 1;
+}
+
+# The partition syntax decode_partition (5.11.4) reads for the bsize region at (r, c), against enc: the partition
+# symbol where both halves are inside, split_or_horz / split_or_vert where only one is (coding SPLIT as 1), nothing
+# where neither is (SPLIT is implied). The caller keeps partition to what that syntax can code.
+fn av1_enc_write_partition_syntax(tile, enc, r, c, bsize, partition): i64 {
+    var mi_rows = load64(tile + AV1TILE_ROW_END);
+    var mi_cols = load64(tile + AV1TILE_COL_END);
+    var ncc = load64(tile + AV1TILE_NCC);
+    var half = av1_num_4x4_w(bsize) >> 1;
+    var has_rows = (r + half) < mi_rows;
+    var has_cols = (c + half) < mi_cols;
+    var ctx = av1_partition_ctx(tile, r, c, bsize, av1_is_inside(tile, r - 1, c), av1_is_inside(tile, r, c - 1));
+    var bsl = av1_mi_width_log2(bsize);
+    var split = 0;
+    if (partition == AV1_PARTITION_SPLIT) { split = 1; }
+    if (has_rows && has_cols) { return av1_write_partition(enc, ncc, ctx, bsl, partition); }
+    if (has_cols) { return av1_write_split_or_horz(enc, ncc, ctx, bsl, split); }
+    if (has_rows) { return av1_write_split_or_vert(enc, ncc, ctx, bsl, split); }
+    return DR_OK;
+}
+
+# 1 when partition p of a bsize block may be coded in this frame: its blocks have a chroma shape (5.11.4's semantics:
+# get_plane_residual_size( subSize, 1 ) is never BLOCK_INVALID — in 4:2:2, no block twice as tall as wide; VERT is
+# never codable there, and the decoder refuses it, AV1_ERR_BAD_BLOCK).
+fn av1_enc_part_codable(tile, p, bsize): i64 {
+    if (dr_frame_num_planes(load64(tile + AV1TILE_FRAME)) < 2) { return 1; }
+    var sub = av1_partition_subsize(p, bsize);
+    if (av1_get_plane_residual_size(sub, 1, load64(tile + AV1TILE_SUBX), load64(tile + AV1TILE_SUBY))
+      < 0) {
+        return 0;
+    }
+    return 1;
+}
+# The partitions the search tries for the bsize region at (r, c), in the order tried, into out[] (count returned).
+# Where both halves are inside: NONE, and above the minimum block size (target) SPLIT, HORZ and VERT. Where only the
+# upper (left) half is: HORZ (VERT), the only partition split_or_horz (split_or_vert) codes besides SPLIT, and SPLIT.
+# Where neither is: SPLIT alone. A partition the frame's chroma cannot code (av1_enc_part_codable) is left out.
+fn av1_enc_part_candidates(tile, r, c, bsize, target, out): i64 {
+    var mi_rows = load64(tile + AV1TILE_ROW_END);
+    var mi_cols = load64(tile + AV1TILE_COL_END);
+    var half = av1_num_4x4_w(bsize) >> 1;
+    var has_rows = (r + half) < mi_rows;
+    var has_cols = (c + half) < mi_cols;
+    var n = 0;
+    if (has_rows && has_cols) {
+        store64(out, AV1_PARTITION_NONE);
+        n = 1;
+        if (bsize > target) {
+            store64(out + (n * 8), AV1_PARTITION_SPLIT);
+            n = n + 1;
+            if (av1_enc_part_codable(tile, AV1_PARTITION_HORZ, bsize)) {
+                store64(out + (n * 8), AV1_PARTITION_HORZ);
+                n = n + 1;
+            }
+            if (av1_enc_part_codable(tile, AV1_PARTITION_VERT, bsize)) {
+                store64(out + (n * 8), AV1_PARTITION_VERT);
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+    if (has_cols) {
+        if (av1_enc_part_codable(tile, AV1_PARTITION_HORZ, bsize)) {
+            store64(out + (n * 8), AV1_PARTITION_HORZ);
+            n = n + 1;
+        }
+    } else {
+        if (has_rows && av1_enc_part_codable(tile, AV1_PARTITION_VERT, bsize)) {
+            store64(out + (n * 8), AV1_PARTITION_VERT);
+            n = n + 1;
+        }
+    }
+    store64(out + (n * 8), AV1_PARTITION_SPLIT);
+    return n + 1;
+}
+
+# The partition by RD (AV1ENC_DECIDE_PARTITION) for the bsize region at (r, c), depth levels below the superblock, as
+# the first pass of a superblock (av1_enc_tile): every symbol against the estimator. Each candidate starts from the
+# state the region was entered in — its coefficient contexts put back (the depth's snapshot) and its BlockDecoded
+# cells cleared; its pixels and MI grid cells need nothing, since every candidate codes the whole region and writes
+# each cell before anything reads it — and costs its partition syntax plus each of its blocks, each block decided as
+# av1_enc_block decides one (or, for SPLIT, each quarter searched the same way). The cheapest wins, a tie keeping the
+# earlier. Two shortcuts, the search's own (libaom prunes alike, by other means): a region whose NONE codes skip goes
+# no deeper — its prediction alone serves it — and HORZ / VERT are tried only where SPLIT beat NONE. The blocks are
+# decided with the cheaper decisions (AV1EC_FAST); the final pass decides the chosen tree's blocks in full. The region
+# is left as its winner codes it: the last candidate tried already has; any other is coded again from its plan
+# (av1_enc_replay). Returns the region's plan node, its cost at *out_j; 0 on an error, latched on the estimator.
+fn av1_enc_search(tile, ec, r, c, bsize, target, depth, out_j): i64 {
+    store64(out_j, 0);
+    var est = load64(ec + AV1EC_EST);
+    var nn = load64(ec + AV1EC_NNODES);
+    if ((nn >= AV1ENC_NODE_CAP) || (depth >= AV1ENC_LEVELS)) { av1_sym_enc_fail(est, DR_ERR_BOUNDS); return 0; }
+    var node = load64(ec + AV1EC_NODES) + (nn * AV1EN_SIZE);
+    store64(ec + AV1EC_NNODES, nn + 1);
+    dr_fill(node, 0, AV1EN_SIZE);
+    store64(node + AV1EN_PART, 0 - 1);
+    if ((r >= load64(tile + AV1TILE_ROW_END)) || (c >= load64(tile + AV1TILE_COL_END))) { return node; }
+    var num_planes = dr_frame_num_planes(load64(tile + AV1TILE_FRAME));
+    var bw4 = av1_num_4x4_w(bsize);
+    var bh4 = av1_num_4x4_h(bsize);
+    var half = bw4 >> 1;
+    var lvc = load64(ec + AV1EC_LVCTX) + (depth * 384 * 8);
+    av1_enc_ctx_copy_buf(tile, lvc, r, c, bw4, bh4, num_planes, 1);
+    var cv = node + AV1EN_CANDS;
+    var cands = av1_enc_part_candidates(tile, r, c, bsize, target, cv);
+    var best = AV1ENC_J_MAX;
+    var bp = 0 - 1;
+    var last = 0 - 1;
+    var jnone = AV1ENC_J_MAX;
+    var k = 0;
+    while (k < cands) {
+        var p = load64(cv + (k * 8));
+        if (((p == AV1_PARTITION_HORZ) || (p == AV1_PARTITION_VERT)) && (bp == AV1_PARTITION_NONE)
+          && (jnone < AV1ENC_J_MAX)) {
+            k = cands;                              # SPLIT did not beat NONE: no rectangle tried
+            break;
+        }
+        av1_enc_ctx_copy_buf(tile, lvc, r, c, bw4, bh4, num_planes, 0);
+        av1_enc_bd_reset(tile, r, c, bw4, bh4, (1 << num_planes) - 1);
+        av1_sym_enc_set_cost(est, 0);
+        var ep = av1_enc_write_partition_syntax(tile, est, r, c, bsize, p);
+        if (ep != DR_OK) { av1_sym_enc_fail(est, ep); return 0; }
+        var jp = av1_rd_cost(load64(ec + AV1EC_RDMULT), av1_sym_enc_cost(est), 0);
+        if (p == AV1_PARTITION_SPLIT) {
+            var sub = av1_partition_subsize(AV1_PARTITION_SPLIT, bsize);
+            var q = 0;
+            while (q < 4) {
+                var jq = 0;
+                var ch = av1_enc_search(tile, ec, r + (half * (q >> 1)), c + (half * (q & 1)), sub, target,
+                  depth + 1, &jq);
+                if (ch == 0) { return 0; }
+                store64(node + AV1EN_CHILD + (q * 8), ch);
+                jp = jp + jq;
+                q = q + 1;
+            }
+        } else {
+            var b = 0;
+            while (b < 4) {
+                var lr = 0;
+                var lc = 0;
+                var ls = 0;
+                if (av1_enc_part_block(tile, p, b, r, c, bsize, &lr, &lc, &ls)) {
+                    var jb = 0;
+                    var eb = av1_enc_block(tile, ec, lr, lc, ls, est, 0, node + AV1EN_TMP + (b * AV1ENL_SIZE), &jb);
+                    if (eb != DR_OK) { av1_sym_enc_fail(est, eb); return 0; }
+                    jp = jp + jb;
+                }
+                b = b + 1;
+            }
+        }
+        var stop = 0;
+        # NONE coded skip: the prediction alone serves the whole region, and the search goes no deeper
+        if (p == AV1_PARTITION_NONE) {
+            jnone = jp;
+            if (load64(node + AV1EN_TMP + AV1ENL_SKIP) != 0) { stop = 1; }
+        }
+        if (jp < best) {
+            best = jp;
+            bp = p;
+            if (p != AV1_PARTITION_SPLIT) {
+                var w = 0;
+                while (w < ((4 * AV1ENL_SIZE) / 8)) {
+                    store64(node + AV1EN_LEAF + (w * 8), load64(node + AV1EN_TMP + (w * 8)));
+                    w = w + 1;
+                }
+            }
+        }
+        last = p;
+        k = k + 1;
+        if (stop) { k = cands; }
+    }
+    store64(node + AV1EN_PART, bp);
+    if (bp != last) {
+        # an earlier candidate won: code it again from its plan, so the region is left as it codes it
+        av1_enc_ctx_copy_buf(tile, lvc, r, c, bw4, bh4, num_planes, 0);
+        av1_enc_bd_reset(tile, r, c, bw4, bh4, (1 << num_planes) - 1);
+        var erp = av1_enc_replay(tile, ec, node, r, c, bsize);
+        if (erp != DR_OK) { av1_sym_enc_fail(est, erp); return 0; }
+    }
+    store64(node + AV1EN_J, best);
+    store64(out_j, best);
+    return node;
+}
+
+# The region at (r, c) coded again, against the estimator, from a plan node the search made: SPLIT's quarters from
+# theirs, any other partition's blocks from their decisions. DR_OK, or the estimator's error.
+fn av1_enc_replay(tile, ec, node, r, c, bsize): i64 {
+    var est = load64(ec + AV1EC_EST);
+    var p = load64(node + AV1EN_PART);
+    if (p < 0) { return DR_OK; }                    # outside the frame
+    if (p == AV1_PARTITION_SPLIT) {
+        var half = av1_num_4x4_w(bsize) >> 1;
+        var sub = av1_partition_subsize(AV1_PARTITION_SPLIT, bsize);
+        var q = 0;
+        while (q < 4) {
+            var e = av1_enc_replay(tile, ec, load64(node + AV1EN_CHILD + (q * 8)), r + (half * (q >> 1)),
+              c + (half * (q & 1)), sub);
+            if (e != DR_OK) { return e; }
+            q = q + 1;
+        }
+        return DR_OK;
+    }
+    var b = 0;
+    while (b < 4) {
+        var lr = 0;
+        var lc = 0;
+        var ls = 0;
+        if (av1_enc_part_block(tile, p, b, r, c, bsize, &lr, &lc, &ls)) {
+            var jr = 0;
+            var er = av1_enc_block(tile, ec, lr, lc, ls, est, node + AV1EN_LEAF + (b * AV1ENL_SIZE), 0, &jr);
+            if (er != DR_OK) { return er; }
+        }
+        b = b + 1;
+    }
+    return DR_OK;
+}
+
+# The plan's cost coded again from the superblock's start, against the estimator: its partition syntax and each block's
+# cost, summed into *acc. The partition search's own cost for the superblock must equal it exactly — every block is
+# deterministic under the same state and the same (unadapted) CDFs — so a state the search failed to restore or
+# re-code shows as a difference (av1_enc_set_verify). DR_OK, or the estimator's error.
+fn av1_enc_replay_j(tile, ec, node, r, c, bsize, acc): i64 {
+    var est = load64(ec + AV1EC_EST);
+    var p = load64(node + AV1EN_PART);
+    if (p < 0) { return DR_OK; }
+    av1_sym_enc_set_cost(est, 0);
+    var ep = av1_enc_write_partition_syntax(tile, est, r, c, bsize, p);
+    if (ep != DR_OK) { return ep; }
+    store64(acc, load64(acc) + av1_rd_cost(load64(ec + AV1EC_RDMULT), av1_sym_enc_cost(est), 0));
+    if (p == AV1_PARTITION_SPLIT) {
+        var half = av1_num_4x4_w(bsize) >> 1;
+        var sub = av1_partition_subsize(AV1_PARTITION_SPLIT, bsize);
+        var q = 0;
+        while (q < 4) {
+            var e = av1_enc_replay_j(tile, ec, load64(node + AV1EN_CHILD + (q * 8)), r + (half * (q >> 1)),
+              c + (half * (q & 1)), sub, acc);
+            if (e != DR_OK) { return e; }
+            q = q + 1;
+        }
+        return DR_OK;
+    }
+    var b = 0;
+    while (b < 4) {
+        var lr = 0;
+        var lc = 0;
+        var ls = 0;
+        if (av1_enc_part_block(tile, p, b, r, c, bsize, &lr, &lc, &ls)) {
+            var jr = 0;
+            var er = av1_enc_block(tile, ec, lr, lc, ls, est, node + AV1EN_LEAF + (b * AV1ENL_SIZE), 0, &jr);
+            if (er != DR_OK) { return er; }
+            store64(acc, load64(acc) + jr);
+        }
+        b = b + 1;
+    }
+    return DR_OK;
+}
+# A test's check of the partition search (0.8.7): while set, every superblock's plan is costed again from the
+# superblock's start (av1_enc_replay_j) and compared with the search's cost; Av1_Enc_Verify_Bad counts the
+# superblocks where they differ, Av1_Enc_Verify_N those checked.
+var Av1_Enc_Verify = 0;
+var Av1_Enc_Verify_N = 0;
+var Av1_Enc_Verify_Bad = 0;
+fn av1_enc_set_verify(on): i64 {
+    Av1_Enc_Verify = on;
+    Av1_Enc_Verify_N = 0;
+    Av1_Enc_Verify_Bad = 0;
+    return 0;
+}
+
+# decode_partition (5.11.4) run as an encoder, coding for real: over a plan node (av1_enc_search's) when node is not
+# 0 — its partition, each of its blocks from its decisions, SPLIT's children from theirs — or else over the fixed
+# decision: SPLIT above the target size, and SPLIT where a block's half would leave the frame (NONE is not codable
+# there); NONE at the target. A BLOCK_8X8 is always inside (MiRows / MiCols are even), so the fixed walk never goes
+# below the target's floor of 8x8.
+fn av1_enc_partition(tile, ec, r, c, bsize, target, node): i64 {
     var mi_cols = load64(tile + AV1TILE_COL_END);
     var mi_rows = load64(tile + AV1TILE_ROW_END);
     if ((r >= mi_rows) || (c >= mi_cols)) { return DR_OK; }
     var enc = load64(tile + AV1TILE_ENC);
-    var ncc = load64(tile + AV1TILE_NCC);
-    var avail_u = av1_is_inside(tile, r - 1, c);
-    var avail_l = av1_is_inside(tile, r, c - 1);
     var half = av1_num_4x4_w(bsize) >> 1;
     var has_rows = 0;
     if ((r + half) < mi_rows) { has_rows = 1; }
     var has_cols = 0;
     if ((c + half) < mi_cols) { has_cols = 1; }
     var partition = AV1_PARTITION_NONE;
-    if ((bsize > target) || ((has_rows == 0) || (has_cols == 0))) { partition = AV1_PARTITION_SPLIT; }
-    if (bsize >= AV1ENC_BLOCK_8X8) {
-        var ctx = av1_partition_ctx(tile, r, c, bsize, avail_u, avail_l);
-        var bsl = av1_mi_width_log2(bsize);
-        if (has_rows && has_cols) {
-            av1_write_partition(enc, ncc, ctx, bsl, partition);
-        } else {
-            if (has_cols) {
-                av1_write_split_or_horz(enc, ncc, ctx, bsl, 1);   # split_or_horz: SPLIT
-            } else {
-                if (has_rows) { av1_write_split_or_vert(enc, ncc, ctx, bsl, 1); }   # split_or_vert: SPLIT
-            }
-        }
+    if (node != 0) {
+        partition = load64(node + AV1EN_PART);
+    } else {
+        if ((bsize > target) || ((has_rows == 0) || (has_cols == 0))) { partition = AV1_PARTITION_SPLIT; }
     }
+    if (bsize >= AV1ENC_BLOCK_8X8) { av1_enc_write_partition_syntax(tile, enc, r, c, bsize, partition); }
     if (partition == AV1_PARTITION_SPLIT) {
         var sub = av1_partition_subsize(AV1_PARTITION_SPLIT, bsize);
-        av1_enc_partition(tile, ec, r, c, sub, target);
-        av1_enc_partition(tile, ec, r, c + half, sub, target);
-        av1_enc_partition(tile, ec, r + half, c, sub, target);
-        return av1_enc_partition(tile, ec, r + half, c + half, sub, target);
+        var q = 0;
+        while (q < 4) {
+            var ch = 0;
+            if (node != 0) { ch = load64(node + AV1EN_CHILD + (q * 8)); }
+            av1_enc_partition(tile, ec, r + (half * (q >> 1)), c + (half * (q & 1)), sub, target, ch);
+            q = q + 1;
+        }
+        return av1_sym_enc_err(enc);
     }
-    var e = av1_enc_block(tile, ec, r, c, bsize);
-    if (e != DR_OK) { av1_sym_enc_fail(enc, e); }   # latched: the recursion above drops returns
-    return e;
+    var b = 0;
+    while (b < 4) {
+        var lr = 0;
+        var lc = 0;
+        var ls = 0;
+        if (av1_enc_part_block(tile, partition, b, r, c, bsize, &lr, &lc, &ls)) {
+            # a plan gives the tree; each of its blocks is decided again here, with the full search (the plan's own
+            # decisions were the search's cheaper ones), against the CDFs as the coding has left them
+            var e = av1_enc_block(tile, ec, lr, lc, ls, enc, 0, 0, 0);
+            if (e != DR_OK) { av1_sym_enc_fail(enc, e); return e; }   # latched: the recursion above drops returns
+        }
+        b = b + 1;
+    }
+    return av1_sym_enc_err(enc);
 }
 
 # decode_tile (5.11.2) run as an encoder: the contexts it clears, then each superblock's partition (sbSize from the
@@ -1154,7 +1587,38 @@ fn av1_enc_tile(tile, ec, target): i64 {
             av1_dctx_sb_start(av1_tile_dctx(tile));
             if (cdef_grid != 0) { av1_clear_cdef(cdef_grid, fmi_cols, fmi_rows, r, c, use128); }
             av1_bd_clear(tile, r, c, sb4, num_planes);
-            av1_enc_partition(tile, ec, r, c, sb_bsize, target);
+            var plan = 0;
+            if (load64(ec + AV1EC_DECIDE) & AV1ENC_DECIDE_PARTITION) {
+                # the search, against the estimator; then the superblock as the decoder finds it, for the coding
+                store64(ec + AV1EC_NNODES, 0);
+                var jsb = 0;
+                Av1_Enc_Log_Off = 1;
+                store64(ec + AV1EC_FAST, 1);
+                plan = av1_enc_search(tile, ec, r, c, sb_bsize, target, 0, &jsb);
+                store64(ec + AV1EC_FAST, 0);
+                Av1_Enc_Log_Off = 0;
+                if (plan == 0) {
+                    var se = av1_sym_enc_err(load64(ec + AV1EC_EST));
+                    if (se == DR_OK) { se = DR_ERR_BOUNDS; }
+                    return av1_sym_enc_fail(load64(tile + AV1TILE_ENC), se);
+                }
+                av1_enc_ctx_copy_buf(tile, load64(ec + AV1EC_LVCTX), r, c, sb4, sb4, num_planes, 0);
+                av1_bd_clear(tile, r, c, sb4, num_planes);
+                if (Av1_Enc_Verify != 0) {
+                    var jv = 0;
+                    store64(ec + AV1EC_FAST, 1);
+                    Av1_Enc_Log_Off = 1;
+                    var ev = av1_enc_replay_j(tile, ec, plan, r, c, sb_bsize, &jv);
+                    Av1_Enc_Log_Off = 0;
+                    store64(ec + AV1EC_FAST, 0);
+                    if (ev != DR_OK) { return av1_sym_enc_fail(load64(tile + AV1TILE_ENC), ev); }
+                    Av1_Enc_Verify_N = Av1_Enc_Verify_N + 1;
+                    if (jv != jsb) { Av1_Enc_Verify_Bad = Av1_Enc_Verify_Bad + 1; }
+                    av1_enc_ctx_copy_buf(tile, load64(ec + AV1EC_LVCTX), r, c, sb4, sb4, num_planes, 0);
+                    av1_bd_clear(tile, r, c, sb4, num_planes);
+                }
+            }
+            av1_enc_partition(tile, ec, r, c, sb_bsize, target, plan);
             c = c + sb4;
         }
         r = r + sb4;
@@ -1180,7 +1644,7 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_
         bs_ok = 1;
     }
     if ((block_size == AV1ENC_BLOCK_128X128) && (sb128 == 1)) { bs_ok = 1; }
-    if ((src == 0) || (bs_ok == 0) || ((sb128 != 0) && (sb128 != 1)) || ((decide & (0 - 16)) != 0)) {
+    if ((src == 0) || (bs_ok == 0) || ((sb128 != 0) && (sb128 != 1)) || ((decide & (0 - 32)) != 0)) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
     var np = dr_frame_num_planes(src);

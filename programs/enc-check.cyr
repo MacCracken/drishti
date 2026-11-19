@@ -5,16 +5,19 @@
 #   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK SB [DECIDE]": FORMAT 0 monochrome, 1 4:2:0,
 #                              2 4:2:2, 3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64,
 #                              15 = 128x128); SB the superblock size, 64 or 128; DECIDE what the encoder decides
-#                              (AV1ENC_DECIDE_* bits: 1 the luma mode, 2 the chroma mode; 0, the default, nothing)
+#                              (AV1ENC_DECIDE_* bits: 1 the luma mode, 2 the chroma mode, 4 the luma transform
+#                              size, 8 the luma transform types, 16 the partition — BLOCK is then the smallest; 0,
+#                              the default, nothing)
 #   IN   build/enc-input.yuv   the picture, planar in the `aomdec --rawvideo` layout: Y, then U and V (none for
 #                              monochrome), each its visible rectangle, one byte per sample at 8 bits and two
 #                              little-endian at 10 / 12
 #   OUT  build/enc-out.ivf     the encoded stream: an IVF file, one temporal unit
-#   stdout: "MODES y=<n> uv=<n> cfl=<cells> ymask=<bits> txsizes=<n> txtypes=<cells>" (what the decoder reads in the
-#     stream: how many distinct luma / chroma modes, the CfL cells, the luma modes as a bit mask, how many distinct luma
-#     transform sizes, the luma cells not DCT_DCT), "RD sse=<n> samples=<n> peak=<n>" (the
-#     reconstruction's squared error over every visible sample of every plane, the sample count, the largest sample
-#     value: a PSNR), "ENC bytes=<ivf bytes> decode_eq_recon=<1|0> lossless_exact=<1|0|->" and a SUMMARY line.
+#   stdout: "MODES y=<n> uv=<n> cfl=<cells> ymask=<bits> txsizes=<n> txtypes=<cells> bsizes=<n>" (what the decoder
+#     reads in the stream: how many distinct luma / chroma modes, the CfL cells, the luma modes as a bit mask, how many
+#     distinct luma transform sizes, the luma cells not DCT_DCT, how many distinct block sizes), "RD sse=<n>
+#     samples=<n> peak=<n>" (the reconstruction's squared error over every visible sample of every plane, the sample
+#     count, the largest sample value: a PSNR), "ENC bytes=<ivf bytes> decode_eq_recon=<1|0>
+#     lossless_exact=<1|0|->" and a SUMMARY line.
 #     decode_eq_recon: drishti, decoding the .ivf it wrote (read back with the IVF reader), outputs exactly the
 #       reconstruction the encoder returned — the script then holds that output to aomdec's and dav1d's.
 #     lossless_exact (QINDEX 0 only): the reconstruction is the input picture, sample for sample.
@@ -110,9 +113,9 @@ fn ec_decode_grids(tu, n): i64 {
     return tile;
 }
 # "MODES y=<distinct luma modes> uv=<distinct chroma modes> cfl=<CfL cells> ymask=<luma modes, bits>
-# txsizes=<distinct luma TxSizes> txtypes=<luma cells whose TxType is not DCT_DCT>": over every MI cell of the frame,
-# as the decoder read them (YModes, UVModes, InterTxSizes, TxTypes) — the proof a decided encode decided something
-# (DC_PRED at the largest transform alone is y=1 uv=1 txsizes=1 txtypes=0).
+# txsizes=<distinct luma TxSizes> txtypes=<luma cells whose TxType is not DCT_DCT> bsizes=<distinct block sizes>":
+# over every MI cell of the frame, as the decoder read them (YModes, UVModes, InterTxSizes, TxTypes, MiSizes) — the
+# proof a decided encode decided something (DC_PRED at the largest transform alone is y=1 uv=1 txsizes=1 txtypes=0).
 fn ec_modes(tu, n, w, h, has_uv): i64 {
     var tile = ec_decode_grids(tu, n);
     if (tile == 0) { ec_puts("MODES unreadable\n"); return 0; }
@@ -121,6 +124,7 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
     var cfl = 0;
     var txm = 0;
     var ntt = 0;
+    var bsm = 0;
     var rows = (h + 3) >> 2;
     var cols = (w + 3) >> 2;
     var r = 0;
@@ -132,6 +136,7 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
             um = um | (1 << u);
             if (u == AV1_UV_CFL_PRED) { cfl = cfl + 1; }
             txm = txm | (1 << av1_grid_get(tile, AV1TILE_INTERTX, r, c));
+            bsm = bsm | (1 << av1_grid_get(tile, AV1TILE_MISIZES, r, c));
             if (av1_grid_get(tile, AV1TILE_TXTYPES, r, c) != AV1_DCT_DCT) { ntt = ntt + 1; }
             c = c + 1;
         }
@@ -140,10 +145,13 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
     var ny = 0;
     var nu = 0;
     var ntx = 0;
+    var nbs = 0;
     var b = 0;
     while (b < 14) { ny = ny + ((ym >> b) & 1); nu = nu + ((um >> b) & 1); b = b + 1; }
     b = 0;
     while (b < 19) { ntx = ntx + ((txm >> b) & 1); b = b + 1; }
+    b = 0;
+    while (b < 22) { nbs = nbs + ((bsm >> b) & 1); b = b + 1; }
     if (has_uv == 0) { nu = 0; }
     ec_puts("MODES y=");
     ec_putn(ny);
@@ -157,6 +165,8 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
     ec_putn(ntx);
     ec_puts(" txtypes=");
     ec_putn(ntt);
+    ec_puts(" bsizes=");
+    ec_putn(nbs);
     ec_puts("\n");
     return 0;
 }

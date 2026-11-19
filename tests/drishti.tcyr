@@ -71,10 +71,10 @@ fn test_dr_err_name() {
 
 # ================================================================
 # drishti_version() — MAJOR*1000000 + MINOR*1000 + PATCH (each 0..999).
-# Known answer by hand: 0*1000000 + 8*1000 + 6 = 8006.
+# Known answer by hand: 0*1000000 + 8*1000 + 7 = 8007.
 # ================================================================
 fn test_drishti_version() {
-    assert_eq(drishti_version(), 8006, "version 0.8.6 packs to 8006");
+    assert_eq(drishti_version(), 8007, "version 0.8.7 packs to 8007");
     # Ordering across the 0.8.0 widening: the old form's largest value was
     # 0.7.131 -> 831, so any widened value must sit above it.
     assert(drishti_version() > 831, "widened packing orders above every old-form value");

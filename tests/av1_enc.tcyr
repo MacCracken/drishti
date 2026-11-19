@@ -467,6 +467,8 @@ fn test_ec_oom() {
 # answer is known by construction (av1_enc_set_log), what the decoder reads, the RD objective, refusals, OOM.
 # ================================================================
 var Ec_Log = 0;       # AV1ENC_LOG_W i64 per block
+# every decision but the partition: the bites 2-3 cases, whose blocks are the size the case names
+enum EcConst { EC_FIXED_ALL = 15; }
 fn ec_log_on(): i64 {
     if (Ec_Log == 0) { Ec_Log = alloc(4096 * AV1ENC_LOG_W * 8); }
     av1_enc_set_log(Ec_Log, 4096);
@@ -496,7 +498,7 @@ fn ec_stripes(w, h, vertical): i64 {
 # mid-block and mid-MI, a block overhanging the MI grid, both superblock sizes and 128x128 blocks with their 64x64
 # chunks. Fewer than above, at smaller sizes: each decided encode tries some seventy candidates a block.
 fn test_ec_decided_cases() {
-    Ec_Decide = AV1ENC_DECIDE_ALL;
+    Ec_Decide = EC_FIXED_ALL;
     var sb = 0;
     while (sb < 2) {
         Ec_Sb = sb;
@@ -615,7 +617,7 @@ fn test_ec_decide_known() {
         }
         cy = cy + 1;
     }
-    Ec_Decide = AV1ENC_DECIDE_ALL;
+    Ec_Decide = EC_FIXED_ALL;
     ec_log_on();
     assert_eq(ec_run(cf, 0, 3), 0, "chroma = luma: decoded = reconstruction");
     assert_eq(Ec_SrcErr, 0, "and lossless");
@@ -808,7 +810,7 @@ fn test_ec_decide_tx_known() {
     assert_eq(ec_log(0, 10), AV1_TX_64X64, "it keeps TX_64X64");
     # FLAT: every candidate type codes nothing, and a tie keeps DCT_DCT (the decoder's type for an all-zero block)
     var flat = ec_pic(48, 32, 3, 1, 1, 8, 2, 1);
-    Ec_Decide = AV1ENC_DECIDE_ALL;
+    Ec_Decide = EC_FIXED_ALL;
     ec_log_on();
     assert_eq(ec_run(flat, 60, 3), 0, "flat: decoded = reconstruction");
     var nondct = 0;
@@ -824,7 +826,7 @@ fn test_ec_decide_uses() {
     # search's branches reach the stream (the decoder's reading of it is held by decoded = reconstruction; CfL's is
     # the chroma = luma case above)
     var blob = ec_pic(96, 64, 3, 1, 1, 8, 3, 21);
-    Ec_Decide = AV1ENC_DECIDE_ALL;
+    Ec_Decide = EC_FIXED_ALL;
     ec_log_on();
     assert_eq(ec_run(blob, 100, 3), 0, "a decided blob: decoded = reconstruction");
     var n = av1_enc_log_count();
@@ -952,7 +954,7 @@ fn test_ec_decide_poison() {
     var pic = ec_pic(72, 40, 3, 1, 1, 8, 3, 61);
     var bs = 3;
     while (bs <= 12) {
-        Ec_Decide = AV1ENC_DECIDE_ALL;
+        Ec_Decide = EC_FIXED_ALL;
         assert_eq(ec_run(pic, 90, bs), 0, "decided, unpoisoned: decoded = reconstruction");
         var n1 = Ec_Bytes;
         var t1 = Ec_Tu;
@@ -980,7 +982,7 @@ fn test_ec_decide_memory() {
     var pic = ec_pic(128, 64, 3, 1, 1, 8, 3, 61);
     var bs = 3;
     while (bs <= 12) {
-        Ec_Decide = AV1ENC_DECIDE_ALL;
+        Ec_Decide = EC_FIXED_ALL;
         ec_run(pic, 90, bs);                                  # any lazily-built state first
         var g0 = dr_alloc_global_bytes();
         ec_run(pic, 90, bs);
@@ -995,7 +997,7 @@ fn test_ec_decide_memory() {
     return 0;
 }
 fn test_ec_decide_oom() {
-    Ec_Decide = AV1ENC_DECIDE_ALL;
+    Ec_Decide = EC_FIXED_ALL;
     # one 8x8 block (the sweep re-runs the encode once per allocation, and a decided block makes thousands: its
     # trials' scratch, from the block arena)
     Ec_Oom_Src = ec_pic(8, 8, 3, 1, 1, 8, 1, 12);
@@ -1006,17 +1008,137 @@ fn test_ec_decide_oom() {
     Ec_Decide = 0;
     return 0;
 }
+# ================================================================
+# 0.8.7 bite 4: the PARTITION search. Every encode below runs with av1_enc_set_verify on: each superblock's plan is
+# costed again from its start and must equal the search's own cost — the search's restores and re-codings are right.
+# ================================================================
+fn ec_verify_ok(what): i64 {
+    assert(Av1_Enc_Verify_N > 0, "the search's self-check ran");
+    assert_eq(Av1_Enc_Verify_Bad, 0, what);
+    return 0;
+}
+fn test_ec_partition_cases() {
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    var sb = 0;
+    while (sb < 2) {
+        Ec_Sb = sb;
+        av1_enc_set_verify(1);
+        assert_eq(ec_lossless(48, 32, 3, 1, 1, 8, 3, 3), 0, "partitioned lossless 4:2:0 blob, down to 8x8");
+        assert_eq(ec_lossless(40, 24, 3, 1, 0, 10, 1, 3), 0, "partitioned lossless 10-bit 4:2:2 noise");
+        assert_eq(ec_lossless(33, 17, 1, 1, 1, 8, 0, 3), 0, "partitioned lossless 33x17 monochrome");
+        ec_verify_ok("lossless: every superblock's plan costs what the search said");
+        av1_enc_set_verify(1);
+        var bad = 0;
+        var f = 0;
+        while (f < 4) {
+            var np = 3;
+            var subx = 1;
+            var suby = 1;
+            var bd = 8;
+            if (f == 1) { suby = 0; bd = 10; }
+            if (f == 2) { subx = 0; suby = 0; bd = 12; }
+            if (f == 3) { np = 1; }
+            var src = ec_pic(72, 40, np, subx, suby, bd, 3, 17 + f);
+            if (ec_run(src, 90, 3) != 0) { bad = bad + 1; }
+            if (ec_run(src, 220, 6) != 0) { bad = bad + 1; }
+            f = f + 1;
+        }
+        assert_eq(bad, 0, "partitioned lossy, 4 formats x 2 (qindex, minimum size): decoded = reconstruction");
+        ec_verify_ok("lossy: every superblock's plan costs what the search said");
+        sb = sb + 1;
+    }
+    Ec_Sb = 0;
+    av1_enc_set_verify(0);
+    Ec_Decide = 0;
+    return 0;
+}
+# the decoder's MiSizes grid of the last encode
+fn ec_misize(r, c): i64 { return av1_grid_get(ec_decode_grids(Ec_Tu, Ec_Bytes), AV1TILE_MISIZES, r, c); }
+# a 64x64 picture, luma a where the predicate splits it one way, b the other (horizontal 1: by row y < 32; else by
+# column x < 32), chroma flat
+fn ec_halves(subx, suby, horizontal, a, b): i64 {
+    var e = 0;
+    var f = dr_frame_new(64, 64, 3, subx, suby, 8, 8, &e);
+    dr_frame_fill(f, 1, 128);
+    dr_frame_fill(f, 2, 128);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) {
+            var v = b;
+            if ((horizontal && (y < 32)) || ((horizontal == 0) && (x < 32))) { v = a; }
+            dr_frame_set(f, 0, x, y, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+fn test_ec_partition_known() {
+    var e = 0;
+    Ec_Decide = AV1ENC_DECIDE_ALL;
+    av1_enc_set_verify(1);
+    # FLAT: one block predicts it all, coded skip, and the search goes no deeper: one 64x64 block
+    var flat = ec_pic(64, 64, 3, 1, 1, 8, 2, 1);
+    assert_eq(ec_run(flat, 60, 3), 0, "flat: decoded = reconstruction");
+    assert_eq(ec_misize(0, 0), AV1_BLOCK_64X64, "flat: one 64x64 block");
+    assert_eq(ec_misize(15, 15), AV1_BLOCK_64X64, "(every cell of it)");
+    # TWO HALVES, top 60 and bottom 190: HORZ codes two flat 64x32 blocks — the top exactly predicted, the bottom one
+    # DC coefficient from it; SPLIT needs two such coefficients and three more partitions; NONE codes the step. HORZ.
+    var hz = ec_halves(1, 1, 1, 60, 190);
+    assert_eq(ec_run(hz, 60, 3), 0, "horizontal halves: decoded = reconstruction");
+    assert_eq(ec_misize(0, 0), 11, "horizontal halves: the top is one 64x32 block (BLOCK_64X32)");
+    assert_eq(ec_misize(8, 15), 11, "and the bottom");
+    # LEFT AND RIGHT HALVES in 4:2:0: VERT, two 32x64 blocks
+    var vt = ec_halves(1, 1, 0, 60, 190);
+    assert_eq(ec_run(vt, 60, 3), 0, "vertical halves 4:2:0: decoded = reconstruction");
+    assert_eq(ec_misize(0, 0), 10, "vertical halves 4:2:0: the left is one 32x64 block (BLOCK_32X64)");
+    assert_eq(ec_misize(15, 8), 10, "and the right");
+    # the same in 4:2:2, where a 32x64 block has no chroma shape (BLOCK_INVALID): the search never codes one, nor any
+    # block twice as tall as wide — and the decoder reads it all
+    var vt2 = ec_halves(1, 0, 0, 60, 190);
+    assert_eq(ec_run(vt2, 60, 3), 0, "vertical halves 4:2:2: decoded = reconstruction");
+    var tall = 0;
+    var r = 0;
+    while (r < 16) {
+        var c = 0;
+        while (c < 16) {
+            var ms = ec_misize(r, c);
+            if (av1_get_plane_residual_size(ms, 1, 1, 0) < 0) { tall = tall + 1; }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    assert_eq(tall, 0, "vertical halves 4:2:2: no block without a chroma shape");
+    assert(ec_misize(0, 0) != AV1_BLOCK_64X64, "nor one block: the step is still split");
+    ec_verify_ok("known answers: every superblock's plan costs what the search said");
+    av1_enc_set_verify(0);
+    Ec_Decide = 0;
+    return 0;
+}
+# OOM through the search: a 16x8 picture, whose one region the search really searches (HORZ or SPLIT, split_or_horz),
+# deciding the partition alone (the sweep fails each allocation in turn, and the mode decisions' thousands are swept
+# above)
+fn test_ec_partition_oom() {
+    Ec_Decide = AV1ENC_DECIDE_PARTITION;
+    Ec_Oom_Src = ec_pic(16, 8, 3, 1, 1, 8, 1, 13);
+    var n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&ec_oom_op, 60, &n), 0, "OOM sweep: a partitioned lossy 16x8 encode");
+    assert(n > 20, "the sweep failed more than twenty allocations");
+    Ec_Decide = 0;
+    return 0;
+}
 fn test_ec_decide_refusals() {
     var src = ec_pic(16, 16, 3, 1, 1, 8, 1, 3);
     var n = 0;
     var rec = 0;
     var e = 0;
-    assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 16, &n, &rec, &e), 0, "decide 16 (no such decision) refused");
-    assert_eq(e, DR_ERR_BOUNDS, "decide 16 -> BOUNDS");
+    assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 32, &n, &rec, &e), 0, "decide 32 (no such decision) refused");
+    assert_eq(e, DR_ERR_BOUNDS, "decide 32 -> BOUNDS");
     e = DR_OK;
     assert_eq(av1_encode_keyframe(src, 40, 6, Ec_Sb, 0 - 1, &n, &rec, &e), 0, "decide -1 refused");
     assert_eq(e, DR_ERR_BOUNDS, "decide -1 -> BOUNDS");
-    assert(av1_encode_keyframe(src, 40, 6, Ec_Sb, 15, &n, &rec, &e) != 0, "decide 15 accepted");
+    assert(av1_encode_keyframe(src, 40, 6, Ec_Sb, 31, &n, &rec, &e) != 0, "decide 31 accepted");
     return 0;
 }
 
@@ -1063,6 +1185,11 @@ fn main() {
     test_ec_decide_uses();
     test_group("mode decision: the RD objective");
     test_ec_decide_rd();
+    test_group("partition search (0.8.7 bite 4): decided encodes, the search's self-check");
+    test_ec_partition_cases();
+    test_group("partition search: answers known by construction");
+    test_ec_partition_known();
+    test_ec_partition_oom();
     test_group("mode decision: refusals and OOM");
     test_ec_decide_refusals();
     test_ec_decide_poison();
