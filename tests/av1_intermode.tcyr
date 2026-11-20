@@ -3153,6 +3153,74 @@ fn fb_rt(fh, s, g, sz, au, al, a_skip, l_skip, sm_ctx, blk, exp_ref1, exp_mm, ta
       "marker: reader consumed exactly the writer's symbols");
     return got;
 }
+# av1_fb_set_single (0.8.8): the record the inter frame encoder builds for a single-reference block is the record
+# av1_inter_frame_mode_info leaves after reading what the writer wrote from it — WORD FOR WORD, every one of the
+# AV1FB_SIZE / 8 words, not the few fields fb_rt looks at. The block sits at (4, 4) beside ib_grid2's two distinct
+# neighbour MVs, so the NEARESTMV / NEARMV stack is not empty; their mv is the stack's (the decoder's derivation, which
+# the encoder does not make) and is taken from the reader before the comparison, while GLOBALMV's (the identity
+# model's: zero) and NEWMV's are the record's own and compared as they are. rmi is the RefMvIdx (NEARMV's starts at
+# 1). Returns the number of words that differ.
+fn fbs_case(filt, sz, ymode, rmi, mvr, mvc, skip, tag): i64 {
+    var s0 = ib_seq(0, 0, 0, 0);
+    var fh = ib_fh(0, filt, 0, 0, 0, 0);
+    var g = ib_grid2(AV1_LAST_FRAME, AV1_REF_NONE);
+    var blk = av1_blockinfo_new();
+    assert_eq(av1_fb_set_single(blk, fh, AV1_LAST_FRAME, ymode, rmi, mvr, mvc, skip), DR_OK, tag);
+    var ccr = av1_refcdf_blob();
+    var ccim = av1_imcdf_blob();
+    var ccii = av1_iicdf_blob();
+    var ccmv = av1_mvcdf_blob();
+    var ncc = av1_ncdf_new();
+    var refs = mm_refs(64, 64);
+    var enc = av1_sym_enc_init(160, 1);
+    assert_eq(av1_write_inter_frame_mode_info(enc, ccr, ccim, ccii, ccmv, ncc, blk, ib_ctx(g, sz), av1_nbctx_new(),
+        av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0), DR_OK, tag);
+    av1_sym_encode_literal(enc, 165, 8);             # marker
+    var olen = 0;
+    var out = av1_sym_enc_finish(enc, &olen);
+    var sd = av1_sym_dec_init(out, olen, 1);
+    var got = av1_blockinfo_new();
+    memset(got, 255, AV1FB_SIZE);                    # every word the reader leaves alone shows as -1
+    assert_eq(av1_inter_frame_mode_info(sd, ccr, ccim, ccii, ccmv, ncc, got, ib_ctx(g, sz), av1_nbctx_new(),
+        av1_warp_new(), fh, refs, s0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0), DR_OK, tag);
+    assert_eq(av1_sym_read_literal(sd, 8), 165, tag);
+    if ((ymode == AV1_NEARESTMV) || (ymode == AV1_NEARMV)) {
+        store64(blk + AV1FB_IB + AV1IB_MV0 + AV1MV_ROW, load64(got + AV1FB_IB + AV1IB_MV0 + AV1MV_ROW));
+        store64(blk + AV1FB_IB + AV1IB_MV0 + AV1MV_COL, load64(got + AV1FB_IB + AV1IB_MV0 + AV1MV_COL));
+    }
+    var diff = 0;
+    var w = 0;
+    while (w < (AV1FB_SIZE / 8)) {
+        if (load64(blk + (w * 8)) != load64(got + (w * 8))) { diff = diff + 1; }
+        w = w + 1;
+    }
+    return diff;
+}
+fn test_fb_set_single() {
+    assert_eq(fbs_case(AV1_EIGHTTAP, 6, AV1_GLOBALMV, 0, 0, 0, 0, "GLOBALMV 16x16"), 0,
+      "GLOBALMV: the reader's record");
+    assert_eq(fbs_case(AV1_EIGHTTAP, 6, AV1_GLOBALMV, 0, 0, 0, 1, "GLOBALMV skip"), 0, "GLOBALMV skip: the reader's");
+    assert_eq(fbs_case(2, 6, AV1_GLOBALMV, 0, 0, 0, 0, "GLOBALMV SHARP"), 0,
+      "the frame filter (SHARP), both directions");
+    assert_eq(fbs_case(1, 3, AV1_GLOBALMV, 0, 0, 0, 1, "GLOBALMV 8x8 SMOOTH"), 0, "an 8x8 block, SMOOTH");
+    assert_eq(fbs_case(AV1_EIGHTTAP, 9, AV1_NEWMV, 0, 12, 0 - 4, 0, "NEWMV 32x32"), 0, "NEWMV (12, -4): the reader's");
+    assert_eq(fbs_case(AV1_EIGHTTAP, 6, AV1_NEARESTMV, 0, 0, 0, 0, "NEARESTMV"), 0, "NEARESTMV: the reader's record");
+    assert_eq(fbs_case(3, 6, AV1_NEARMV, 1, 0, 0, 1, "NEARMV BILINEAR skip"), 0,
+      "NEARMV (RefMvIdx 1: NEARMV's first), BILINEAR, skip");
+    # the refusals
+    var fb = av1_blockinfo_new();
+    var fh = ib_fh(0, AV1_EIGHTTAP, 0, 0, 0, 0);
+    assert_eq(av1_fb_set_single(fb, fh, AV1_INTRA_FRAME, AV1_GLOBALMV, 0, 0, 0, 0), DR_ERR_BOUNDS, "ref INTRA refused");
+    assert_eq(av1_fb_set_single(fb, fh, 8, AV1_GLOBALMV, 0, 0, 0, 0), DR_ERR_BOUNDS, "ref 8 refused");
+    assert_eq(av1_fb_set_single(fb, fh, AV1_LAST_FRAME, AV1_NEARESTMV - 1, 0, 0, 0, 0), DR_ERR_BOUNDS,
+      "an intra mode refused");
+    assert_eq(av1_fb_set_single(fb, fh, AV1_LAST_FRAME, AV1_NEWMV + 1, 0, 0, 0, 0), DR_ERR_BOUNDS,
+      "a compound mode refused");
+    var fsw = ib_fh(0, AV1_INTERP_SWITCHABLE, 0, 0, 0, 0);
+    assert_eq(av1_fb_set_single(fb, fsw, AV1_LAST_FRAME, AV1_GLOBALMV, 0, 0, 0, 0), DR_ERR_BOUNDS,
+      "a SWITCHABLE frame filter refused");
+    assert_eq(av1_fb_set_single(0, fh, AV1_LAST_FRAME, AV1_GLOBALMV, 0, 0, 0, 0), DR_ERR_BOUNDS, "a null record");
+}
 fn fb_fh(skip_mode_present, smf0, smf1): i64 {
     var fh = ib_fh(1, AV1_INTERP_SWITCHABLE, 1, 1, smf0, smf1);
     store64(fh + AV1FH_SKIP_MODE_PRESENT, skip_mode_present);
@@ -3928,6 +3996,7 @@ fn main() {
     test_inter_frame_mode_info();
     test_inter_frame_hardening();
     test_inter_frame_conformance();
+    test_fb_set_single();
     test_group("read_compound_type (5.11.29: comp_group_idx / compound_idx / compound_type)");
     test_comptype_cdf();
     test_wedge_bits();

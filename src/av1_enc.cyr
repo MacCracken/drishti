@@ -97,7 +97,10 @@ enum Av1EncCtx {
     AV1EC_NNODES  = 240;  # nodes in use
     AV1EC_LVCTX   = 248;  # AV1ENC_LEVELS x 384 i64: each depth's region coefficient contexts as it found them
     AV1EC_FAST    = 256;  # 1 while the partition search decides blocks: the cheaper decisions (av1_enc_search)
-    AV1EC_SIZE    = 264;
+    AV1EC_FB      = 264;  # an inter block's record (Av1BlockInfo, AV1FB_SIZE bytes), reused block to block
+    AV1EC_ST      = 272;  # its av1_inter_block_setup record (5 i64)
+    AV1EC_GMV     = 280;  # an Av1Mv (16 bytes): the block's global motion vector (av1_setup_global_mv)
+    AV1EC_SIZE    = 288;
 }
 # A node of a superblock's partition plan: one square region the search decided (av1_enc_search), the plan the final
 # pass codes (av1_enc_partition).
@@ -164,6 +167,13 @@ fn av1_enc_new(src, s, fh, decide): i64 {
     var arena = dr_arena_new(1 << 18);              # 256 KiB chunks
     if ((ctx == 0) || (blk == 0) || (mi == 0) || (nb == 0) || (mj == 0) || (arena == 0)) { return 0; }
     store64(ec + AV1EC_ARENA, arena);
+    var fb = av1_blockinfo_new();
+    var st = dr_alloc(5 * 8);
+    var gmv = dr_alloc(16);
+    if ((fb == 0) || (st == 0) || (gmv == 0)) { return 0; }
+    store64(ec + AV1EC_FB, fb);
+    store64(ec + AV1EC_ST, st);
+    store64(ec + AV1EC_GMV, gmv);
     var pred = dr_alloc(256 * 8);
     var blv = dr_alloc(256 * 8);
     var txc = dr_alloc(64 * 8);
@@ -1185,6 +1195,83 @@ fn av1_enc_block(tile, ec, r, c, bsize, enc, plan, out_leaf, out_j): i64 {
     return av1_sym_enc_err(enc);
 }
 
+# One block of an INTER frame at (r, c) of size bsize — av1_decode_block_inter (5.11.5) run as an encoder (0.8.8). The
+# block is GLOBALMV off LAST_FRAME: single reference, its motion vector the global one the decoder derives for the block
+# (av1_setup_global_mv; with the identity model the encoder's frames carry, zero motion), the SIMPLE motion mode and the
+# frame's filter. Two passes, as on a key frame. The residual pass runs the decoder's own code: storage loop 1 and the
+# prediction (av1_inter_predict), then residual( ) (av1_residual_inter), whose av1_transform_block_inter takes each
+# transform block's levels from av1_enc_tx_levels — the source quantized against that prediction — and reconstructs from
+# them. The block is skip when every level is 0. The symbol pass then writes the mode info
+# (av1_write_inter_frame_mode_info, with that skip) and each recorded block's coeffs( ), and the decoder's storage loop
+# 2 and BlockDecoded marks finish the block. The mode info is written after storage loop 1 has filled the block's own MI
+# cells, where the decoder reads it before: nothing it reads lies inside the block (the neighbour cache, the MV
+# candidate scans and the skip context look above and to the left), so the symbols are the ones the decoder expects —
+# which aomdec and dav1d confirm. The frame codes no transform size for an inter block (TX_MODE_LARGEST, or ONLY_4X4
+# lossless), CDEF is off and so are the deltas.
+fn av1_enc_block_inter(tile, ec, r, c, bsize): i64 {
+    if (load64(tile + AV1TILE_ICDEF) != 0) { return DR_ERR_UNSUPPORTED; }   # a CDEF frame needs a cdef plan: not here
+    var frame = load64(tile + AV1TILE_FRAME);
+    var fh = load64(tile + AV1TILE_FH);
+    var enc = load64(tile + AV1TILE_ENC);
+    var subx = load64(tile + AV1TILE_SUBX);
+    var suby = load64(tile + AV1TILE_SUBY);
+    var bw4 = av1_num_4x4_w(bsize);
+    var bh4 = av1_num_4x4_h(bsize);
+    var has_chroma = av1_has_chroma(frame, r, c, bw4, bh4, subx, suby);
+    var st = load64(ec + AV1EC_ST);
+    av1_inter_block_setup(tile, r, c, bsize, st);
+    if (av1_tile_segctx_oom(tile)) { return DR_ERR_OOM; }
+    # the decision: GLOBALMV off LAST_FRAME, at the motion vector the decoder assigns it (assign_mv, 5.11.26)
+    var gmv = load64(ec + AV1EC_GMV);
+    av1_setup_global_mv(gmv, fh, AV1_LAST_FRAME, c, r, bsize);
+    var fb = load64(ec + AV1EC_FB);
+    var ef = av1_fb_set_single(fb, fh, AV1_LAST_FRAME, AV1_GLOBALMV, 0, load64(gmv + AV1MV_ROW),
+      load64(gmv + AV1MV_COL), 0);
+    if (ef != DR_OK) { return ef; }
+    av1_tile_block_setup(tile, fh, 0);            # segment 0: the qindex, Lossless and the tx-type gate
+    var tx_size = av1_max_tx_size_rect(bsize);
+    if (load64(tile + AV1TILE_CUR_LOSSLESS) != 0) { tx_size = 0; }   # TX_4X4
+    # ---- the residual pass: the decoder's prediction and residual( ), their scratch from the block arena ----
+    store64(ec + AV1EC_N, 0);
+    store64(ec + AV1EC_LV_USED, 0);
+    var arena = load64(ec + AV1EC_ARENA);
+    var prev = dr_alloc_scope(arena);
+    var er = av1_inter_predict(tile, r, c, bsize, fb, st, has_chroma);
+    if (er == DR_OK) { er = av1_residual_inter(tile, r, c, bsize, has_chroma, tx_size, 0); }
+    dr_alloc_scope(prev);
+    dr_arena_reset(arena);
+    if (er != DR_OK) { return er; }
+    var n = load64(ec + AV1EC_N);
+    var recs = load64(ec + AV1EC_RECS);
+    var skip = 1;
+    var k = 0;
+    while (k < n) {
+        if (load64(recs + (k * AV1ER_SIZE) + AV1ER_EOB) != 0) { skip = 0; }
+        k = k + 1;
+    }
+    store64(fb + AV1FB_SKIP, skip);
+    # ---- the symbol pass: the mode info, then each transform block's coeffs( ) ----
+    var e = av1_write_inter_frame_mode_info(enc, load64(tile + AV1TILE_CCREF), load64(tile + AV1TILE_CCIM),
+      load64(tile + AV1TILE_CCII), load64(tile + AV1TILE_CCMV), load64(tile + AV1TILE_NCC), fb,
+      load64(tile + AV1TILE_MVCTX), load64(tile + AV1TILE_NB), load64(tile + AV1TILE_WS), fh,
+      load64(tile + AV1TILE_REFS), load64(tile + AV1TILE_SEQ),
+      load64(st + 0), load64(st + 8), load64(st + 16), load64(st + 24), load64(st + 32), 0, has_chroma,
+      load64(tile + AV1TILE_ENABLE_FI), load64(tile + AV1TILE_LOSSLESS_MASK), av1_tile_segctx(tile),
+      av1_tile_dctx(tile), av1_tile_palctx(tile));
+    if (e != DR_OK) { return e; }
+    if (skip) {
+        av1_reset_block_context(tile, c, r, bw4, bh4, has_chroma);
+    } else {
+        e = av1_enc_write_coeffs(tile, ec, enc);
+        if (e != DR_OK) { return e; }
+    }
+    av1_inter_store_block(tile, r, c, bsize, fb, tx_size, has_chroma, 0);
+    var nbdp = 1;
+    if (has_chroma != 0) { nbdp = 3; }
+    av1_bd_mark_block(tile, r, c, bsize, nbdp);
+    return av1_sym_enc_err(enc);
+}
+
 # The k-th block (k from 0, in decode order) a partition other than SPLIT codes for the bsize region at (r, c): its
 # position and size at *out_r / *out_c / *out_size, 1 when it is coded, 0 when it is not (past the partition's blocks,
 # or — HORZ / VERT / HORZ_4 / VERT_4 — outside the tile window, where decode_partition (5.11.4) codes nothing).
@@ -1550,7 +1637,12 @@ fn av1_enc_partition(tile, ec, r, c, bsize, target, node): i64 {
         if (av1_enc_part_block(tile, partition, b, r, c, bsize, &lr, &lc, &ls)) {
             # a plan gives the tree; each of its blocks is decided again here, with the full search (the plan's own
             # decisions were the search's cheaper ones), against the CDFs as the coding has left them
-            var e = av1_enc_block(tile, ec, lr, lc, ls, enc, 0, 0, 0);
+            var e = DR_OK;
+            if (load64(tile + AV1TILE_FH) != 0) {
+                e = av1_enc_block_inter(tile, ec, lr, lc, ls);   # an inter frame's tile (av1_tile_set_inter_ctx)
+            } else {
+                e = av1_enc_block(tile, ec, lr, lc, ls, enc, 0, 0, 0);
+            }
             if (e != DR_OK) { av1_sym_enc_fail(enc, e); return e; }   # latched: the recursion above drops returns
         }
         b = b + 1;
@@ -1626,17 +1718,43 @@ fn av1_enc_tile(tile, ec, target): i64 {
     return av1_sym_enc_err(load64(tile + AV1TILE_ENC));
 }
 
-# Encode src (a DrFrame of any format drishti decodes: 1 or 3 planes, 8 / 10 / 12 bits, 4:2:0 / 4:2:2 / 4:4:4, at
-# most 4096 samples wide in one tile) as one shown KEY_FRAME at base_q_idx (0..255; 0 = lossless), at 64x64
-# superblocks (sb128 0) or 128x128 (sb128 1), in blocks of block_size (BLOCK_8X8, BLOCK_16X16, BLOCK_32X32,
-# BLOCK_64X64, and BLOCK_128X128 at 128x128 superblocks), deciding what decide says (AV1ENC_DECIDE_* bits; 0 = DC_PRED
-# everywhere, the 0.8.6 encoder byte for byte). Returns a temporal unit — temporal delimiter, sequence header OBU,
-# frame OBU — with its byte length at *out_len, and at *out_recon the frame any conforming decoder outputs for it
-# (cropped to src's size). 0 on error, DR_ERR_* at *out_err: BOUNDS for a bad argument, UNSUPPORTED for a frame needing
-# more than one tile, OOM.
-fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_recon, out_err): i64 {
-    store64(out_len, 0);
-    store64(out_recon, 0);
+# ================================================================
+# THE ENCODER (0.8.8) — pictures in, one temporal unit out for each. The first picture is a shown KEY_FRAME, coded as
+# av1_encode_keyframe codes it (its blocks, its decisions, its sequence header in front); every picture after it is a
+# shown INTER_FRAME at the next order hint, all seven of its references in slot 0 (LAST_FRAME is the picture before
+# it), refreshing slot 0, every block GLOBALMV off LAST_FRAME in blocks of block_size (av1_enc_block_inter), its
+# residual coded and the block skip when the residual quantizes to nothing. An inter frame's header is
+# av1_fh_init_inter's with TX_MODE_LARGEST (the encoder codes no inter transform split): no primary reference frame, so
+# each starts from the default CDFs. decide applies to the key frame alone.
+#
+# The encoder keeps a decoder's reference state, updated as a decoder updates it: each frame's reconstruction is the
+# decoder's frame end (av1_frame_dec_finish: the saved motion field, segment map and CDF context into the slots it
+# refreshes, from the coder's adapted CDFs, which are the decoder's) and the 7.20 reference update (av1_dpb_update);
+# each frame header is written against the state the decoder will read it against. So the reconstruction of every
+# frame is the picture a conforming decoder outputs, and an inter frame's prediction reads the very reference frames
+# the decoder's does. make conformance holds that against aomdec and dav1d.
+#
+# MEMORY: like av1_encode_keyframe, a frame's encode allocates from dr_alloc and never frees — the encoder grows with
+# the frames it codes (roadmap 0.8.10: the encoder's memory bound, ADR 0002's arena and frame pool on the encode side).
+# ================================================================
+enum Av1EncoderOff {
+    AV1E_SEQ    = 0;      # the sequence header, made from the first picture (0 before it)
+    AV1E_REFS   = 8;      # the reference state (Av1RefState) every frame header is written against
+    AV1E_DPB    = 16;     # the reference frames (Av1Dpb)
+    AV1E_COUNT  = 24;     # pictures encoded
+    AV1E_QIDX   = 32;     # base_q_idx
+    AV1E_BSIZE  = 40;     # the block size
+    AV1E_SB128  = 48;     # 1: 128x128 superblocks
+    AV1E_DECIDE = 56;     # AV1ENC_DECIDE_* bits, for the key frame
+    AV1E_ERR    = 64;     # DR_OK, or the failure that ended the encoder (sticky: av1_encoder_encode)
+    AV1E_SIZE   = 72;
+}
+
+# An encoder coding at base_q_idx (0..255; 0 = lossless), at 64x64 superblocks (sb128 0) or 128x128 (sb128 1), in
+# blocks of block_size (BLOCK_8X8, BLOCK_16X16, BLOCK_32X32, BLOCK_64X64, and BLOCK_128X128 at 128x128 superblocks),
+# deciding on its key frame what decide says (AV1ENC_DECIDE_* bits). Returns it, or 0 with DR_ERR_BOUNDS (a bad
+# argument) or DR_ERR_OOM at *out_err.
+fn av1_encoder_new(base_q_idx, block_size, sb128, decide, out_err): i64 {
     store64(out_err, DR_OK);
     var bs_ok = 0;
     if ((block_size == AV1ENC_BLOCK_8X8) || (block_size == AV1ENC_BLOCK_16X16)
@@ -1644,9 +1762,33 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_
         bs_ok = 1;
     }
     if ((block_size == AV1ENC_BLOCK_128X128) && (sb128 == 1)) { bs_ok = 1; }
-    if ((src == 0) || (bs_ok == 0) || ((sb128 != 0) && (sb128 != 1)) || ((decide & (0 - 32)) != 0)) {
+    if ((bs_ok == 0) || ((sb128 != 0) && (sb128 != 1)) || ((decide & (0 - 32)) != 0) || (base_q_idx < 0)
+      || (base_q_idx > 255)) {
         store64(out_err, DR_ERR_BOUNDS); return 0;
     }
+    var e = dr_alloc(AV1E_SIZE);
+    var refs = av1_ref_state_new();
+    var dpb = av1_dpb_new();
+    if ((e == 0) || (refs == 0) || (dpb == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
+    store64(e + AV1E_SEQ, 0);
+    store64(e + AV1E_REFS, refs);
+    store64(e + AV1E_DPB, dpb);
+    store64(e + AV1E_COUNT, 0);
+    store64(e + AV1E_QIDX, base_q_idx);
+    store64(e + AV1E_BSIZE, block_size);
+    store64(e + AV1E_SB128, sb128);
+    store64(e + AV1E_DECIDE, decide);
+    store64(e + AV1E_ERR, DR_OK);
+    return e;
+}
+fn av1_encoder_count(e): i64 { return load64(e + AV1E_COUNT); }
+fn av1_encoder_refs(e): i64 { return load64(e + AV1E_REFS); }
+fn av1_encoder_dpb(e): i64 { return load64(e + AV1E_DPB); }
+
+# The sequence header the encoder codes src's format with: av1_seq_init at its size, depth and subsampling (a
+# monochrome src as 4:2:0's), the superblock size, and filter intra on when the key frame's luma mode is decided (a
+# candidate there). 0 with *out_err on error: DR_ERR_BOUNDS for a frame that is neither 1 nor 3 planes.
+fn av1_enc_seq_for(src, sb128, decide, out_err): i64 {
     var np = dr_frame_num_planes(src);
     var mono = 0;
     var subx = dr_frame_subx(src);
@@ -1658,40 +1800,75 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_
     } else {
         if (np != 3) { store64(out_err, DR_ERR_BOUNDS); return 0; }
     }
-    var e = 0;
-    var s = av1_seq_init(dr_frame_width(src), dr_frame_height(src), dr_frame_bit_depth(src), mono, subx, suby, &e);
-    if (s == 0) { store64(out_err, e); return 0; }
+    var s = av1_seq_init(dr_frame_width(src), dr_frame_height(src), dr_frame_bit_depth(src), mono, subx, suby, out_err);
+    if (s == 0) { return 0; }
     av1_seq_set_sb128(s, sb128);
-    # filter intra is a luma candidate: its tool on when the luma mode is decided (0.8.6's header otherwise)
     if (decide & AV1ENC_DECIDE_YMODE) { store64(s + AV1_SEQ_ENABLE_FILTER_INTRA, 1); }
-    var fh = av1_fh_init_key(s, base_q_idx, &e);
-    if (fh == 0) { store64(out_err, e); return 0; }
-    # the decoder's frame and tile
-    var fdc = av1_frame_dec_new(s, fh, &e);
-    if (fdc == 0) { store64(out_err, e); return 0; }
-    var tile = av1_frame_tile_setup(fdc, 0, &e);
-    if (tile == 0) { store64(out_err, e); return 0; }
+    return s;
+}
+# src's format is the sequence's: its size, depth, planes and subsampling
+fn av1_enc_same_format(s, src): i64 {
+    if ((dr_frame_width(src) != av1_seq_width(s)) || (dr_frame_height(src) != av1_seq_height(s))
+      || (dr_frame_bit_depth(src) != av1_seq_bitdepth(s)) || (dr_frame_num_planes(src) != av1_seq_num_planes(s))) {
+        return 0;
+    }
+    if (dr_frame_num_planes(src) == 1) { return 1; }
+    return (dr_frame_subx(src) == av1_seq_subsampling_x(s)) && (dr_frame_suby(src) == av1_seq_subsampling_y(s));
+}
+
+# One frame, under header fh, of src: the decoder's frame and tile (the inter lane's context on an inter frame), the
+# tile coded (av1_enc_tile), the temporal unit written — temporal delimiter, the sequence header in front of the first
+# frame, the frame OBU against the encoder's reference state — and then the decoder's frame end and 7.20 reference
+# update. Returns the temporal unit (its length at *out_len, the reconstruction at *out_recon), or 0 with *out_err.
+fn av1_enc_frame(e, src, fh, out_len, out_recon, out_err): i64 {
+    var s = load64(e + AV1E_SEQ);
+    var refs = load64(e + AV1E_REFS);
+    var dpb = load64(e + AV1E_DPB);
+    var intra = av1_fh_frame_is_intra(fh);
+    var err = 0;
+    var fdc = av1_frame_dec_new(s, fh, &err);
+    if (fdc == 0) { store64(out_err, err); return 0; }
+    av1_frame_dec_set_inter(fdc, dpb, refs);
+    var tile = av1_frame_tile_setup(fdc, 0, &err);
+    if (tile == 0) { store64(out_err, err); return 0; }
+    var decide = 0;
+    if (intra) { decide = load64(e + AV1E_DECIDE); }
     var ec = av1_enc_new(src, s, fh, decide);
     var ncc = av1_ncdf_new();
-    var cc = av1_ccdf_new(av1_coeff_cdf_qbucket(base_q_idx));
+    var cc = av1_ccdf_new(av1_coeff_cdf_qbucket(av1_fh_base_q_idx(fh)));
     var enc = av1_sym_enc_init(4096, av1_fh_disable_cdf_update(fh));
     if ((ec == 0) || (ncc == 0) || (cc == 0) || (enc == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
     store64(tile + AV1TILE_ENC, enc);
     store64(tile + AV1TILE_CC, cc);
     store64(tile + AV1TILE_NCC, ncc);
+    if (intra == 0) {
+        # the inter lane, as av1_frame_dec_tile wires it, and its four CDF families (as av1_decode_inter_tile)
+        var ir = av1_tile_set_inter_ctx(tile, fh, refs, s, dpb);
+        if (ir != DR_OK) { store64(out_err, ir); return 0; }
+        var ccr = av1_refcdf_new();
+        var cim = av1_imcdf_new();
+        var cii = av1_iicdf_new();
+        var cmv = av1_mvcdf_new();
+        if ((ccr == 0) || (cim == 0) || (cii == 0) || (cmv == 0)) { store64(out_err, DR_ERR_OOM); return 0; }
+        store64(tile + AV1TILE_CCREF, ccr);
+        store64(tile + AV1TILE_CCIM, cim);
+        store64(tile + AV1TILE_CCII, cii);
+        store64(tile + AV1TILE_CCMV, cmv);
+        var inh = av1_tile_inherit_cdfs(tile);
+        if (inh != DR_OK) { store64(out_err, inh); return 0; }
+    }
     store64(tile + AV1TILE_EKEY, ec);
-    av1_enc_tile(tile, ec, block_size);
+    av1_enc_tile(tile, ec, load64(e + AV1E_BSIZE));
     store64(tile + AV1TILE_EKEY, 0);
     var tlen = 0;
     var tbytes = av1_sym_enc_finish(enc, &tlen);
     if (tbytes == 0) {
-        e = av1_sym_enc_err(enc);
-        if (e == DR_OK) { e = DR_ERR_OOM; }
-        store64(out_err, e); return 0;
+        err = av1_sym_enc_err(enc);
+        if (err == DR_OK) { err = DR_ERR_OOM; }
+        store64(out_err, err); return 0;
     }
-    # the decoder's frame end (its in-loop filters are all off here): the picture a decoder outputs
-    var recon = av1_frame_dec_finish(fdc, &e);
-    if (recon == 0) { store64(out_err, e); return 0; }
+    var sce = av1_frame_dec_save_ctx(fdc, tile, 0);   # exit_symbol's frame context: the coder's final CDFs
+    if (sce != DR_OK) { store64(out_err, sce); return 0; }
     var tiles = dr_alloc(8);
     var sizes = dr_alloc(8);
     var bw = dr_bw_init(tlen + 64);
@@ -1699,27 +1876,112 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_
     store64(tiles, tbytes);
     store64(sizes, tlen);
     var rc = av1_td_write_obu(bw);
-    if (rc == DR_OK) { rc = av1_seq_write_obu(bw, s); }
-    if (rc == DR_OK) { rc = av1_frame_write_obu(bw, s, 0, fh, 0, 0, 0, tiles, sizes); }
+    if ((rc == DR_OK) && (load64(e + AV1E_COUNT) == 0)) { rc = av1_seq_write_obu(bw, s); }
+    if (rc == DR_OK) { rc = av1_frame_write_obu(bw, s, refs, fh, 0, 0, 0, tiles, sizes); }
     if (rc != DR_OK) { store64(out_err, rc); return 0; }
     var n = dr_bw_flush(bw);
     if (dr_bw_err(bw) != DR_OK) { store64(out_err, dr_bw_err(bw)); return 0; }
+    # the decoder's frame end (its in-loop filters are all off here): the picture a decoder outputs, and the slots'
+    # saved state; then the reference update the next frame's header and prediction are read against
+    var recon = av1_frame_dec_finish(fdc, &err);
+    if (recon == 0) { store64(out_err, err); return 0; }
+    var ue = av1_dpb_update(dpb, refs, s, fh, recon);
+    if (ue != DR_OK) { store64(out_err, ue); return 0; }
     store64(out_len, n);
     store64(out_recon, recon);
     return dr_bw_buf(bw);
 }
 
-# av1_encode_keyframe as a standalone IVF file (DKIF, AV01, src's size, a 30 / 1 timebase, the one frame at pts 0).
-fn av1_encode_keyframe_ivf(src, base_q_idx, block_size, sb128, decide, out_len, out_recon, out_err): i64 {
+# Encode src, the encoder's next picture (a DrFrame of any format drishti decodes: 1 or 3 planes, 8 / 10 / 12 bits,
+# 4:2:0 / 4:2:2 / 4:4:4, at most 4096 samples wide in one tile; every picture after the first in the first's format).
+# Returns its temporal unit — temporal delimiter, the sequence header OBU (the first picture only), the frame OBU —
+# with its byte length at *out_len, and at *out_recon the frame any conforming decoder outputs for it (cropped to src's
+# size). 0 on error, DR_ERR_* at *out_err: BOUNDS for a bad argument or a picture not in the first one's format,
+# UNSUPPORTED for a frame needing more than one tile, OOM. A refused picture — a bad argument, a picture out of the
+# first's format, a first picture no sequence header or key frame header can be made for — leaves the encoder as it
+# was. A failure while coding a frame is STICKY, as the streaming decoder's are: the reference state may be part-way
+# through its update, so that call and every later one return it.
+fn av1_encoder_encode(e, src, out_len, out_recon, out_err): i64 {
     store64(out_len, 0);
-    var n = 0;
-    var tu = av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, &n, out_recon, out_err);
-    if (tu == 0) { return 0; }
-    var iw = dr_ivf_writer_init(DR_FOURCC_AV01, dr_frame_width(src), dr_frame_height(src), 30, 1);
+    store64(out_recon, 0);
+    store64(out_err, DR_OK);
+    if ((e == 0) || (src == 0)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    if (load64(e + AV1E_ERR) != DR_OK) { store64(out_err, load64(e + AV1E_ERR)); return 0; }
+    var count = load64(e + AV1E_COUNT);
+    var q = load64(e + AV1E_QIDX);
+    var s = load64(e + AV1E_SEQ);
+    var err = 0;
+    var fh = 0;
+    if (count == 0) {
+        s = av1_enc_seq_for(src, load64(e + AV1E_SB128), load64(e + AV1E_DECIDE), out_err);
+        if (s == 0) { return 0; }
+        store64(e + AV1E_SEQ, s);                        # until a picture is coded, each first picture makes its own
+        fh = av1_fh_init_key(s, q, &err);
+    } else {
+        if (av1_enc_same_format(s, src) == 0) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+        var oh = count & ((1 << av1_seq_order_hint_bits(s)) - 1);
+        fh = av1_fh_init_inter(s, load64(e + AV1E_REFS), q, oh, 0, 1, &err);
+        if ((fh != 0) && (av1_fh_tx_mode(fh) != AV1_ONLY_4X4)) { store64(fh + AV1FH_TX_MODE, AV1_TX_MODE_LARGEST); }
+    }
+    if (fh == 0) { store64(out_err, err); return 0; }
+    var tu = av1_enc_frame(e, src, fh, out_len, out_recon, out_err);
+    if (tu == 0) {
+        if (load64(out_err) == DR_OK) { store64(out_err, DR_ERR_BOUNDS); }   # every failure has a code
+        store64(e + AV1E_ERR, load64(out_err));
+        store64(out_len, 0);
+        store64(out_recon, 0);
+        return 0;
+    }
+    store64(e + AV1E_COUNT, count + 1);
+    return tu;
+}
+
+# One shown KEY_FRAME of src: an encoder's first picture (av1_encoder_new, av1_encoder_encode) — temporal delimiter,
+# sequence header OBU, frame OBU — with its length at *out_len and its reconstruction at *out_recon. The 0.8.6
+# encoder's stream byte for byte when decide is 0. 0 on error, DR_ERR_* at *out_err as av1_encoder_new and
+# av1_encoder_encode give them.
+fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_recon, out_err): i64 {
+    store64(out_len, 0);
+    store64(out_recon, 0);
+    var e = av1_encoder_new(base_q_idx, block_size, sb128, decide, out_err);
+    if (e == 0) { return 0; }
+    if (src == 0) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    return av1_encoder_encode(e, src, out_len, out_recon, out_err);
+}
+
+# The pictures srcs[0..count) (count >= 1 DrFrame pointers) encoded by one encoder as a standalone IVF file (DKIF,
+# AV01, the first picture's size, a 30 / 1 timebase, frame k at pts k), its length at *out_len; each picture's
+# reconstruction at out_recons[k] when out_recons is not 0. 0 on error, DR_ERR_* at *out_err (BOUNDS for count < 1).
+fn av1_encode_ivf(srcs, count, base_q_idx, block_size, sb128, decide, out_len, out_recons, out_err): i64 {
+    store64(out_len, 0);
+    store64(out_err, DR_OK);
+    if ((srcs == 0) || (count < 1)) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var e = av1_encoder_new(base_q_idx, block_size, sb128, decide, out_err);
+    if (e == 0) { return 0; }
+    var first = load64(srcs);
+    if (first == 0) { store64(out_err, DR_ERR_BOUNDS); return 0; }
+    var iw = dr_ivf_writer_init(DR_FOURCC_AV01, dr_frame_width(first), dr_frame_height(first), 30, 1);
     if (iw == 0) { store64(out_err, DR_ERR_OOM); return 0; }
-    var rc = dr_ivf_write_frame(iw, tu, n, 0);
-    if (rc != DR_OK) { store64(out_err, rc); return 0; }
+    var k = 0;
+    while (k < count) {
+        var n = 0;
+        var recon = 0;
+        var tu = av1_encoder_encode(e, load64(srcs + (k * 8)), &n, &recon, out_err);
+        if (tu == 0) { return 0; }
+        if (out_recons != 0) { store64(out_recons + (k * 8), recon); }
+        var rc = dr_ivf_write_frame(iw, tu, n, k);
+        if (rc != DR_OK) { store64(out_err, rc); return 0; }
+        k = k + 1;
+    }
     var buf = dr_ivf_writer_finish(iw, out_len);
     if (buf == 0) { store64(out_err, DR_ERR_OOM); return 0; }
     return buf;
+}
+
+# av1_encode_keyframe as a standalone IVF file (DKIF, AV01, src's size, a 30 / 1 timebase, the one frame at pts 0).
+fn av1_encode_keyframe_ivf(src, base_q_idx, block_size, sb128, decide, out_len, out_recon, out_err): i64 {
+    store64(out_recon, 0);
+    var one[8];   # 8 bytes: the one picture pointer
+    store64(&one, src);
+    return av1_encode_ivf(&one, 1, base_q_idx, block_size, sb128, decide, out_len, out_recon, out_err);
 }

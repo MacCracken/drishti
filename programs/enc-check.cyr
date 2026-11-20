@@ -2,25 +2,30 @@
 # the standalone .ivf for make conformance to decode with aomdec, dav1d and drishti.
 #
 # I/O contract (fixed paths, as the other harness programs):
-#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK SB [DECIDE]": FORMAT 0 monochrome, 1 4:2:0,
-#                              2 4:2:2, 3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32, 12 = 64x64,
-#                              15 = 128x128); SB the superblock size, 64 or 128; DECIDE what the encoder decides
-#                              (AV1ENC_DECIDE_* bits: 1 the luma mode, 2 the chroma mode, 4 the luma transform
-#                              size, 8 the luma transform types, 16 the partition — BLOCK is then the smallest; 0,
-#                              the default, nothing)
-#   IN   build/enc-input.yuv   the picture, planar in the `aomdec --rawvideo` layout: Y, then U and V (none for
+#   IN   build/enc-input.cfg   ASCII "W H BITDEPTH FORMAT QINDEX BLOCK SB [DECIDE [FRAMES]]": FORMAT 0 monochrome,
+#                              1 4:2:0, 2 4:2:2, 3 4:4:4; BLOCK the block size (3 = 8x8, 6 = 16x16, 9 = 32x32,
+#                              12 = 64x64, 15 = 128x128); SB the superblock size, 64 or 128; DECIDE what the encoder
+#                              decides on the key frame (AV1ENC_DECIDE_* bits: 1 the luma mode, 2 the chroma mode,
+#                              4 the luma transform size, 8 the luma transform types, 16 the partition — BLOCK is
+#                              then the smallest; 0, the default, nothing); FRAMES the pictures in the input, 1 (the
+#                              default: one key frame, av1_encode_keyframe_ivf) to 64 (a key frame, then inter frames:
+#                              one encoder, av1_encode_ivf; 0.8.8)
+#   IN   build/enc-input.yuv   the pictures, each planar in the `aomdec --rawvideo` layout: Y, then U and V (none for
 #                              monochrome), each its visible rectangle, one byte per sample at 8 bits and two
 #                              little-endian at 10 / 12
-#   OUT  build/enc-out.ivf     the encoded stream: an IVF file, one temporal unit
+#   OUT  build/enc-out.ivf     the encoded stream: an IVF file, one temporal unit per picture
 #   stdout: "MODES y=<n> uv=<n> cfl=<cells> ymask=<bits> txsizes=<n> txtypes=<cells> bsizes=<n>" (what the decoder
 #     reads in the stream: how many distinct luma / chroma modes, the CfL cells, the luma modes as a bit mask, how many
-#     distinct luma transform sizes, the luma cells not DCT_DCT, how many distinct block sizes), "RD sse=<n>
-#     samples=<n> peak=<n>" (the reconstruction's squared error over every visible sample of every plane, the sample
-#     count, the largest sample value: a PSNR), "ENC bytes=<ivf bytes> decode_eq_recon=<1|0>
-#     lossless_exact=<1|0|->" and a SUMMARY line.
-#     decode_eq_recon: drishti, decoding the .ivf it wrote (read back with the IVF reader), outputs exactly the
-#       reconstruction the encoder returned — the script then holds that output to aomdec's and dav1d's.
-#     lossless_exact (QINDEX 0 only): the reconstruction is the input picture, sample for sample.
+#     distinct luma transform sizes, the luma cells not DCT_DCT, how many distinct block sizes; of the key frame),
+#     with FRAMES > 1 "INTER frames=<n> cells=<n> inter=<n> globalmv=<n> skip=<n>" (what the decoder reads in the
+#     frames after the first: how many are INTER_FRAMEs, their MI cells, the cells of an inter block, of a GLOBALMV
+#     block, of a skip block), "RD sse=<n> samples=<n> peak=<n>" (the reconstructions' squared error over every
+#     visible sample of every plane of every picture, the sample count, the largest sample value: a PSNR),
+#     "ENC bytes=<ivf bytes> decode_eq_recon=<1|0> lossless_exact=<1|0|->" and a SUMMARY line.
+#     decode_eq_recon: drishti, decoding the .ivf it wrote (read back with the IVF reader, one temporal unit at a time
+#       through the streaming decoder), outputs exactly the reconstruction the encoder returned for every picture —
+#       the script then holds that output to aomdec's and dav1d's.
+#     lossless_exact (QINDEX 0 only): every reconstruction is its input picture, sample for sample.
 # Exit 0 when the stream was written and every check printed holds.
 #
 # Build: cyrius build programs/enc-check.cyr build/drishti-enc-check
@@ -170,17 +175,94 @@ fn ec_modes(tu, n, w, h, has_uv): i64 {
     ec_puts("\n");
     return 0;
 }
+# "INTER frames=<INTER_FRAMEs> cells=<their MI cells> inter=<cells of an inter block> globalmv=<cells of a GLOBALMV
+# block> skip=<cells of a skip block>": the frames after the first of the stream ivf[0..n), as the decoder reads them —
+# each temporal unit decoded by the decoder's own pieces against the reference state the frames before it left
+# (av1_frame_parse_uncompressed_header, av1_frame_dec_new / _set_inter / _group, the grids of its tile, the frame end
+# and av1_dpb_update), its RefFrame[0], YModes and Skips grids counted over the frame's MI cells.
+fn ec_inter(ivf, n): i64 {
+    var e = 0;
+    var r = dr_ivf_reader_init(ivf, n, &e);
+    if (r == 0) { ec_puts("INTER unreadable\n"); return 0; }
+    var refs = av1_ref_state_new();
+    var dpb = av1_dpb_new();
+    var seq = 0;
+    var k = 0;
+    var nint = 0;
+    var cells = 0;
+    var ninter = 0;
+    var ngm = 0;
+    var nskip = 0;
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+        var it = av1_obu_iter_init(pp, ps);
+        var t = 0;
+        var off = 0;
+        var sz = 0;
+        while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+            if (t == AV1_OBU_SEQUENCE_HEADER) { seq = av1_seq_parse(pp + off, sz, &e); }
+            if ((t == AV1_OBU_FRAME) && (seq != 0)) {
+                var fh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, pp + off, sz, &e);
+                if (fh == 0) { ec_puts("INTER unreadable\n"); return 0; }
+                var hb = (av1_fh_bits_consumed(fh) + 7) >> 3;
+                var fdc = av1_frame_dec_new(seq, fh, &e);
+                if (fdc == 0) { ec_puts("INTER unreadable\n"); return 0; }
+                av1_frame_dec_set_inter(fdc, dpb, refs);
+                if (av1_frame_dec_group(fdc, pp + off + hb, sz - hb, &e) < 1) {
+                    ec_puts("INTER unreadable\n");
+                    return 0;
+                }
+                var tile = av1_frame_dec_tile0(fdc);
+                if ((k > 0) && (av1_fh_frame_type(fh) == AV1_INTER_FRAME)) {
+                    nint = nint + 1;
+                    var rr = 0;
+                    while (rr < av1_fh_mi_rows(fh)) {
+                        var cc = 0;
+                        while (cc < av1_fh_mi_cols(fh)) {
+                            cells = cells + 1;
+                            if (av1_grid_get(tile, AV1TILE_REF0S, rr, cc) > AV1_INTRA_FRAME) { ninter = ninter + 1; }
+                            if (av1_grid_get(tile, AV1TILE_YMODES, rr, cc) == AV1_GLOBALMV) { ngm = ngm + 1; }
+                            if (av1_grid_get(tile, AV1TILE_SKIPS, rr, cc) != 0) { nskip = nskip + 1; }
+                            cc = cc + 1;
+                        }
+                        rr = rr + 1;
+                    }
+                }
+                var frame = av1_frame_dec_finish(fdc, &e);
+                if (frame == 0) { ec_puts("INTER unreadable\n"); return 0; }
+                if (av1_dpb_update(dpb, refs, seq, fh, frame) != DR_OK) { ec_puts("INTER unreadable\n"); return 0; }
+            }
+        }
+        k = k + 1;
+    }
+    ec_puts("INTER frames=");
+    ec_putn(nint);
+    ec_puts(" cells=");
+    ec_putn(cells);
+    ec_puts(" inter=");
+    ec_putn(ninter);
+    ec_puts(" globalmv=");
+    ec_putn(ngm);
+    ec_puts(" skip=");
+    ec_putn(nskip);
+    ec_puts("\n");
+    return 0;
+}
 fn main(): i64 {
     alloc_init();
     if (av1_tables_init() != DR_OK) { ec_puts("SUMMARY oom\n"); return 1; }
     var cbuf = alloc(256);
     var cn = file_read_all("build/enc-input.cfg", cbuf, 255);
-    var cfg = alloc(8 * 8);
+    var cfg = alloc(9 * 8);
     var nc = 0;
-    if (cn > 0) { nc = ec_parse(cbuf, cn, cfg, 8); }
-    if ((nc != 7) && (nc != 8)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    if (cn > 0) { nc = ec_parse(cbuf, cn, cfg, 9); }
+    if ((nc < 7) || (nc > 9)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
     var decide = 0;
-    if (nc == 8) { decide = load64(cfg + 56); }
+    if (nc >= 8) { decide = load64(cfg + 56); }
+    var nfr = 1;
+    if (nc == 9) { nfr = load64(cfg + 64); }
     var w = load64(cfg);
     var h = load64(cfg + 8);
     var bd = load64(cfg + 16);
@@ -197,68 +279,109 @@ fn main(): i64 {
     if (fmt == 0) { np = 1; }
     if (fmt == 2) { suby = 0; }
     if (fmt == 3) { subx = 0; suby = 0; }
-    if ((fmt > 3) || (w < 1) || (h < 1) || (w > 16384) || (h > 16384)) { ec_puts("SUMMARY bad-cfg\n"); return 1; }
+    if ((fmt > 3) || (w < 1) || (h < 1) || (w > 16384) || (h > 16384) || (nfr < 1) || (nfr > 64)) {
+        ec_puts("SUMMARY bad-cfg\n"); return 1;
+    }
     var e = 0;
-    var src = dr_frame_new(w, h, np, subx, suby, bd, 8, &e);
-    if (src == 0) { ec_puts("SUMMARY bad-format\n"); return 1; }
+    var srcs = alloc(nfr * 8);
+    var f = 0;
+    while (f < nfr) {
+        var sf = dr_frame_new(w, h, np, subx, suby, bd, 8, &e);
+        if (sf == 0) { ec_puts("SUMMARY bad-format\n"); return 1; }
+        store64(srcs + (f * 8), sf);
+        f = f + 1;
+    }
+    var src = load64(srcs);
     var bps = 1;
     if (bd > 8) { bps = 2; }
     var buf = alloc(EC_MAX_INPUT);
     var n = file_read_all("build/enc-input.yuv", buf, EC_MAX_INPUT);
-    var need = 0;
+    var per = 0;
     var p = 0;
     while (p < np) {
-        need = need + (dr_frame_plane_width(src, p) * dr_frame_plane_height(src, p) * bps);
+        per = per + (dr_frame_plane_width(src, p) * dr_frame_plane_height(src, p) * bps);
         p = p + 1;
     }
-    if (n != need) { ec_puts("SUMMARY bad-input-size\n"); return 1; }
+    if (n != (per * nfr)) { ec_puts("SUMMARY bad-input-size\n"); return 1; }
     var off = 0;
     var maxv = (1 << bd) - 1;
-    p = 0;
-    while (p < np) {
-        var y = 0;
-        while (y < dr_frame_plane_height(src, p)) {
-            var x = 0;
-            while (x < dr_frame_plane_width(src, p)) {
-                var v = load8(buf + off);
-                if (bps == 2) { v = v | (load8(buf + off + 1) << 8); }
-                if (v > maxv) { ec_puts("SUMMARY sample-out-of-range\n"); return 1; }
-                dr_frame_set(src, p, x, y, v);
-                off = off + bps;
-                x = x + 1;
+    f = 0;
+    while (f < nfr) {
+        var sf2 = load64(srcs + (f * 8));
+        p = 0;
+        while (p < np) {
+            var y = 0;
+            while (y < dr_frame_plane_height(sf2, p)) {
+                var x = 0;
+                while (x < dr_frame_plane_width(sf2, p)) {
+                    var v = load8(buf + off);
+                    if (bps == 2) { v = v | (load8(buf + off + 1) << 8); }
+                    if (v > maxv) { ec_puts("SUMMARY sample-out-of-range\n"); return 1; }
+                    dr_frame_set(sf2, p, x, y, v);
+                    off = off + bps;
+                    x = x + 1;
+                }
+                y = y + 1;
             }
-            y = y + 1;
+            p = p + 1;
         }
-        p = p + 1;
+        f = f + 1;
     }
     var ilen = 0;
-    var recon = 0;
-    var ivf = av1_encode_keyframe_ivf(src, q, bs, sb128, decide, &ilen, &recon, &e);
+    var recons = alloc(nfr * 8);
+    var ivf = 0;
+    if (nfr == 1) {
+        ivf = av1_encode_keyframe_ivf(src, q, bs, sb128, decide, &ilen, recons, &e);
+    } else {
+        ivf = av1_encode_ivf(srcs, nfr, q, bs, sb128, decide, &ilen, recons, &e);
+    }
     if (ivf == 0) { ec_puts("SUMMARY encode-error err="); ec_putn(e); ec_puts("\n"); return 1; }
     if (file_write_all("build/enc-out.ivf", ivf, ilen) < 0) { ec_puts("SUMMARY write-failed\n"); return 1; }
-    # read the file back as a decoder would, and decode its one temporal unit
+    # read the file back as a decoder would, and decode it a temporal unit at a time
     var same = 0;
     var r = dr_ivf_reader_init(ivf, ilen, &e);
-    var pp = 0;
-    var ps = 0;
-    var pt = 0;
-    if ((r != 0) && (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK)) {
-        var de = 0;
-        var out = av1_decode_obus(pp, ps, &de);
-        if ((out != 0) && (de == DR_OK)) { same = ec_same(out, recon); }
-        ec_modes(pp, ps, w, h, np > 1);
+    var dec = av1_decoder_new(0);
+    if ((r != 0) && (dec != 0)) {
+        same = 1;
+        var pp = 0;
+        var ps = 0;
+        var pt = 0;
+        var k = 0;
+        while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+            var de = 0;
+            var out = av1_decoder_decode(dec, pp, ps, &de);
+            if ((k >= nfr) || (out == 0) || (de != DR_OK)) { same = 0; }
+            if (same == 1) { same = ec_same(out, load64(recons + (k * 8))); }
+            if (k == 0) { ec_modes(pp, ps, w, h, np > 1); }
+            k = k + 1;
+        }
+        if (k != nfr) { same = 0; }
     }
+    if (nfr > 1) { ec_inter(ivf, ilen); }
     var exact = 0 - 1;
-    if (q == 0) { exact = ec_same(recon, src); }
-    # the distortion of what the decoders output (the reconstruction, which aomdec's output is held to): the SSE over
-    # every visible sample of every plane, against the input
+    if (q == 0) {
+        exact = 1;
+        f = 0;
+        while (f < nfr) {
+            if (ec_same(load64(recons + (f * 8)), load64(srcs + (f * 8))) == 0) { exact = 0; }
+            f = f + 1;
+        }
+    }
+    # the distortion of what the decoders output (the reconstructions, which aomdec's output is held to): the SSE over
+    # every visible sample of every plane of every picture, against the input
     var sse = 0;
     var nsamp = 0;
-    p = 0;
-    while (p < np) {
-        sse = sse + av1_rd_sse(src, recon, p, 0, 0, dr_frame_plane_width(src, p), dr_frame_plane_height(src, p));
-        nsamp = nsamp + (dr_frame_plane_width(src, p) * dr_frame_plane_height(src, p));
-        p = p + 1;
+    f = 0;
+    while (f < nfr) {
+        var sf3 = load64(srcs + (f * 8));
+        var rf = load64(recons + (f * 8));
+        p = 0;
+        while (p < np) {
+            sse = sse + av1_rd_sse(sf3, rf, p, 0, 0, dr_frame_plane_width(sf3, p), dr_frame_plane_height(sf3, p));
+            nsamp = nsamp + (dr_frame_plane_width(sf3, p) * dr_frame_plane_height(sf3, p));
+            p = p + 1;
+        }
+        f = f + 1;
     }
     ec_puts("RD sse=");
     ec_putn(sse);

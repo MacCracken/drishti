@@ -4,6 +4,89 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.8 bite 2: the inter frame encoder — drishti's inter frames decode in aomdec and dav1d
+
+**drishti encodes sequences.** The keyframe encoder became a streaming encoder (`src/av1_enc.cyr`):
+`av1_encoder_new(base_q_idx, block_size, sb128, decide, out_err)`, then `av1_encoder_encode(e, src, ...)` once per
+picture, each call returning that picture's temporal unit and its reconstruction. The first picture is the key frame
+0.8.7 coded, with the sequence header in front. Every later one is a shown INTER_FRAME:
+- at the next order hint (modulo 2^OrderHintBits), all seven references in slot 0, so LAST_FRAME is the picture before
+  it, refreshing slot 0;
+- its header `av1_fh_init_inter`'s (bite 1) with TX_MODE_LARGEST, no primary reference frame;
+- every block GLOBALMV off LAST_FRAME, at the motion vector the decoder derives for it (`av1_setup_global_mv`; zero
+  under the identity model), its residual through the forward transform and the quantizer, **skip** when every level
+  is 0.
+
+`decide` applies to the key frame alone; inter frames are cut in fixed blocks of `block_size`. `av1_encode_ivf` wraps
+a list of pictures as one IVF file (frame k at pts k). `av1_encode_keyframe` and `av1_encode_keyframe_ivf` are now one
+encoder's first picture, and still the 0.8.6 encoder's bytes when deciding nothing (the gate's md5s hold).
+
+**The reconstruction is the decoder's, as on the key frame.** Three decoder pieces came out to be shared:
+- **`av1_inter_predict`** (`src/av1_intertile.cyr`): storage loop 1 and compute_prediction, lifted out of
+  `av1_decode_block_inter` unchanged — every decoded stream in the gate still matches.
+- **The encoder hook** in `av1_transform_block_inter`, the twin of the intra one: with `AV1TILE_EKEY` set it takes each
+  transform block's levels from `av1_enc_tx_levels` (the source quantized against the prediction the decoder's code
+  just made) and reconstructs from them.
+- **`av1_frame_dec_save_ctx`** (`src/av1_decode.cyr`): exit_symbol's saved frame context, now one function for the
+  decoder's tile groups and the encoder.
+
+`av1_enc_block_inter` runs the residual pass on that code, then writes the mode info
+(`av1_write_inter_frame_mode_info`) with the skip it found, and each transform block's `coeffs( )`. The encoder keeps a
+decoder's reference state: each frame ends in the decoder's `av1_frame_dec_finish` (the slots' saved motion field,
+segment map and CDF context, from the coder's adapted CDFs) and the 7.20 update (`av1_dpb_update`), and each frame
+header is written against the state the decoder reads it against.
+
+**`av1_fb_set_single`** (`src/av1_intermode.cyr`) builds the block record the reader leaves for a single-reference
+inter block — comp_group_idx 0, compound_idx 1, COMPOUND_AVERAGE, the frame's filter both ways — and refuses a
+SWITCHABLE frame filter, a reference outside LAST..ALTREF, or a mode that is not a single-reference inter mode.
+
+**The gate.** `programs/enc-check.cyr` takes a FRAMES count (a ninth config field). It encodes the pictures with one
+encoder, decodes the stream back a temporal unit at a time, and prints an INTER line: what the decoder reads in the
+frames after the first (their INTER_FRAMEs, their cells, and how many cells are inter, GLOBALMV and skip). `make
+conformance` gains an **inter frame encoder** section of 13 clips (testsrc2; mandelbrot at odd sizes): 4:2:0 / 4:2:2 /
+4:4:4 / monochrome at 8, 10 and 12 bits; 17x9 to 352x288; 8x8 to 128x128 blocks at both superblock sizes; two lossless;
+two with a decided key frame. Each case must be shown to be what it names, by enc-check's INTER line and the vector
+probe's frame types. Then, all hard: drishti decodes the stream to the encoder's reconstruction, drishti = aomdec frame
+for frame, dav1d = aomdec, and lossless clips come out of aomdec as the source, byte for byte. The odd-size cases are
+mandelbrot zooms: ffmpeg's testsrc2 rounds an odd size down to even without a word (99x61 comes out 98x60), which
+enc-check's input size check caught on the first run of the section.
+
+**Tests.**
+- **New suite `tests/av1_enc_inter.tcyr`** (211 assertions):
+  - sequences in every format, depth and block size, at both superblock sizes, decoding to their reconstructions;
+  - the headers, each parsed against the reference state the frames before it left;
+  - the order hint across its wrap (130 pictures);
+  - the skip decision known by construction: a repeated lossless picture is all skip; a picture that IS its
+    reference's reconstruction at q140 is all skip; one changed sample makes exactly its 16x16 block non-skip; every
+    sample changed makes none skip;
+  - the key frame byte for byte, the IVF file, the refusals (a later picture out of the first's format is refused and
+    leaves the encoder usable), and an OOM sweep over a three-picture encode.
+- **`tests/av1_intermode.tcyr`**: `av1_fb_set_single` round trips through the writer and the reader **word for word**,
+  every one of the record's 70 words, not the handful the dispatch tests look at.
+
+**Encoder failures are sticky**, as the streaming decoder's are. A refused picture (a bad argument, a later picture out
+of the first's format, a first picture no key frame can be made for) leaves the encoder as it was; any failure while
+a frame is being coded latches, and that call and every later one return it, since the reference state may be part
+way through its update.
+
+**Mutation testing:** 31 mutants, 27 killed, 4 equivalent.
+- **Equivalent:** three lines that mirror the decoder but change no output in these frames — the lossless TX_4X4
+  `tx_size`, the per-block `av1_tile_block_setup`, and the BlockDecoded marks. They are read only by an intra block,
+  segmentation or deltas, and none of these frames has any. The fourth, a guard on storing the first picture's sequence
+  header, was redundant (every first picture makes its own) and is gone.
+- **Three survived the first run; each was a real gap, now closed:**
+  - the order hint masked to 6 bits instead of 7 passed the wrap test, which checked picture 129, where 6 and 7 bits
+    agree. It now checks picture 100 too;
+  - `decide` leaking into the inter frames (a partition search on an inter tile) passed every test, because no test
+    followed a decided key frame with inter frames. One does now, and requires the inter frames' fixed cut;
+  - a failed picture was still counted. That is what made the encoder's failures sticky.
+
+**Gates after bite 2:** `make test` **50** suites (new: `av1_enc_inter`), **35,720** assertions (+278); `make fuzz`
+**7,429**; bench, `vet`, `lint`, `fmt-check`, `version-check` and `distlib --check` green, `dist/drishti.cyr`
+regenerated (still labelled v0.8.7); `make conformance` **4731 matched / 0 known-gap / 0 regressed / 0 skipped** (+66:
+the 13 inter frame encoder clips, every frame of each judged against aomdec and dav1d, the lossless ones against the
+source).
+
 ### Added — 0.8.8 bite 1: the inter frame header writer — every frame header of the corpus rewritten bit-exact
 
 **The header writer writes every frame type.** Since 0.8.6, `av1_frame_write_uncompressed_header` (`src/av1_hdrw.cyr`)

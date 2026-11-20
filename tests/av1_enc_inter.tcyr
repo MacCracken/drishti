@@ -1,0 +1,636 @@
+# tests/av1_enc_inter.tcyr — the INTER frame encoder (src/av1_enc.cyr, 0.8.8): pictures in, a key frame then inter
+# frames out, every inter block GLOBALMV off LAST_FRAME with its residual coded, skip when the residual quantizes to 0.
+#
+# As for the key frame, the evidence is the DECODER reading what the encoder wrote — drishti's here, a temporal unit
+# at a time through the streaming decoder (av1_decoder_decode, the reference state carried from frame to frame), and
+# aomdec and dav1d in make conformance. Here:
+#   * every frame of a sequence decodes to the encoder's reconstruction, in every format, depth, block and
+#     superblock size, at sizes that are multiples of nothing; LOSSLESS gives every source picture back;
+#   * the headers are the ones the encoder means (frame type, order hint, references, refresh, tx mode), the
+#     sequence header in front of the first temporal unit only;
+#   * the SKIP decision where the answer is known by construction: a picture repeated losslessly, a picture that is
+#     its reference's own reconstruction at a lossy quantizer, one changed sample, every sample changed;
+#   * the refusals, and OOM.
+# Pictures are gradients, LCG noise and their moving versions (ie_pic below), so nothing here is a fixture.
+include "src/main.cyr"
+
+var Ie_Seed = 1;
+var Ie_Sb = 0;        # the superblock size every encode below uses: 0 = 64x64, 1 = 128x128
+var Ie_Decide = 0;    # what ie_run's key frame decides (AV1ENC_DECIDE_*)
+fn ie_rnd(): i64 {
+    Ie_Seed = ((Ie_Seed * 1103515245) + 12345) & 2147483647;
+    return Ie_Seed >> 8;
+}
+# a w x h picture: kind 0 = a gradient moved dx samples right and dy down, 1 = LCG noise seeded with seed, 2 = the
+# gradient with a noise square at (dx, dy) of 12 x 12 samples (a moving object on a still background), 3 = that
+# square over a flat mid grey
+fn ie_pic(w, h, np, subx, suby, bd, kind, dx, dy, seed): i64 {
+    Ie_Seed = seed;
+    var e = 0;
+    var f = dr_frame_new(w, h, np, subx, suby, bd, 8, &e);
+    if (f == 0) { return 0; }
+    var maxv = (1 << bd) - 1;
+    var p = 0;
+    while (p < np) {
+        var sx = 0;
+        var sy = 0;
+        if (p > 0) { sx = subx; sy = suby; }
+        var y = 0;
+        while (y < dr_frame_plane_height(f, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(f, p)) {
+                var gx = x;
+                var gy = y;
+                if (kind == 0) { gx = x - (dx >> sx); gy = y - (dy >> sy); }
+                var v = (((gx * 3) + (gy * 5) + (p * 40)) % (maxv + 1) + (maxv + 1)) % (maxv + 1);
+                if (kind == 1) { v = ie_rnd() % (maxv + 1); }
+                if (kind == 3) { v = 1 << (bd - 1); }
+                if ((kind == 2) || (kind == 3)) {
+                    var lx = x << sx;
+                    var ly = y << sy;
+                    if ((lx >= dx) && (lx < (dx + 12)) && (ly >= dy) && (ly < (dy + 12))) { v = ie_rnd() % (maxv + 1); }
+                }
+                dr_frame_set(f, p, x, y, v);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return f;
+}
+# sum of |a - b| over every visible sample (-1 when the frames' shapes differ)
+fn ie_sad(a, b): i64 {
+    if ((dr_frame_num_planes(a) != dr_frame_num_planes(b)) || (dr_frame_width(a) != dr_frame_width(b))
+      || (dr_frame_height(a) != dr_frame_height(b))) { return 0 - 1; }
+    var n = 0;
+    var p = 0;
+    while (p < dr_frame_num_planes(a)) {
+        var y = 0;
+        while (y < dr_frame_plane_height(a, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(a, p)) {
+                var d = dr_frame_get(a, p, x, y) - dr_frame_get(b, p, x, y);
+                if (d < 0) { d = 0 - d; }
+                n = n + d;
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return n;
+}
+# a copy of frame f (every visible sample)
+fn ie_copy(f): i64 {
+    var e = 0;
+    var g = dr_frame_new(dr_frame_width(f), dr_frame_height(f), dr_frame_num_planes(f), dr_frame_subx(f),
+      dr_frame_suby(f), dr_frame_bit_depth(f), 8, &e);
+    if (g == 0) { return 0; }
+    var p = 0;
+    while (p < dr_frame_num_planes(f)) {
+        var y = 0;
+        while (y < dr_frame_plane_height(f, p)) {
+            var x = 0;
+            while (x < dr_frame_plane_width(f, p)) {
+                dr_frame_set(g, p, x, y, dr_frame_get(f, p, x, y));
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        p = p + 1;
+    }
+    return g;
+}
+
+enum IeConst { IE_MAX = 16; }
+var Ie_Tus = 0;       # IE_MAX temporal unit pointers of the last ie_run
+var Ie_Lens = 0;      # their lengths
+var Ie_Recs = 0;      # their reconstructions
+var Ie_Err = 0;       # the last ie_run's encode error
+# encode srcs[0..n) with one encoder, then decode the temporal units one at a time with a streaming decoder: 0 when
+# every output IS the encoder's reconstruction, else a negative step (-1 encode, -2 decode, -3 output !=
+# reconstruction, -4 setup)
+fn ie_run(srcs, n, q, bs): i64 {
+    if (n > IE_MAX) { return 0 - 4; }
+    var e = 0;
+    var enc = av1_encoder_new(q, bs, Ie_Sb, Ie_Decide, &e);
+    if (enc == 0) { Ie_Err = e; return 0 - 1; }
+    var k = 0;
+    while (k < n) {
+        var len = 0;
+        var rec = 0;
+        var tu = av1_encoder_encode(enc, load64(srcs + (k * 8)), &len, &rec, &e);
+        if (tu == 0) { Ie_Err = e; return 0 - 1; }
+        store64(Ie_Tus + (k * 8), tu);
+        store64(Ie_Lens + (k * 8), len);
+        store64(Ie_Recs + (k * 8), rec);
+        k = k + 1;
+    }
+    var dec = av1_decoder_new(0);
+    if (dec == 0) { return 0 - 4; }
+    k = 0;
+    while (k < n) {
+        var de = 0;
+        var out = av1_decoder_decode(dec, load64(Ie_Tus + (k * 8)), load64(Ie_Lens + (k * 8)), &de);
+        if ((out == 0) || (de != DR_OK)) { return 0 - 2; }
+        if (ie_sad(out, load64(Ie_Recs + (k * 8))) != 0) { return 0 - 3; }
+        k = k + 1;
+    }
+    return 0;
+}
+var Ie_Srcs = 0;      # IE_MAX picture pointers
+# n pictures of a w x h sequence of kind (0: the gradient moving (k, k / 2) at picture k; 1: fresh noise each
+# picture; 2: the noise square moving (2k, k) over the still gradient; 3: over flat grey) into Ie_Srcs
+fn ie_seq(w, h, np, subx, suby, bd, kind, n): i64 {
+    var k = 0;
+    while (k < n) {
+        var pk = 0;
+        if (kind == 0) { pk = ie_pic(w, h, np, subx, suby, bd, 0, k, k >> 1, 0); }
+        if (kind == 1) { pk = ie_pic(w, h, np, subx, suby, bd, 1, 0, 0, (w * 131) + h + (k * 7919)); }
+        if ((kind == 2) || (kind == 3)) { pk = ie_pic(w, h, np, subx, suby, bd, kind, 2 * k, k, 77 + k); }
+        if (pk == 0) { return 0 - 1; }
+        store64(Ie_Srcs + (k * 8), pk);
+        k = k + 1;
+    }
+    return 0;
+}
+# a sequence encoded and decoded: 0 when every output is its reconstruction and, lossless, every reconstruction is its
+# source; else the step that broke (ie_run's, or -5 a lossless reconstruction that is not its source)
+fn ie_case(w, h, np, subx, suby, bd, kind, n, q, bs): i64 {
+    if (ie_seq(w, h, np, subx, suby, bd, kind, n) != 0) { return 0 - 4; }
+    var r = ie_run(Ie_Srcs, n, q, bs);
+    if (r != 0) { return r; }
+    if (q == 0) {
+        var k = 0;
+        while (k < n) {
+            if (ie_sad(load64(Ie_Recs + (k * 8)), load64(Ie_Srcs + (k * 8))) != 0) { return 0 - 5; }
+            k = k + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_ie_sequences() {
+    assert_eq(ie_case(64, 64, 3, 1, 1, 8, 0, 4, 60, 9), 0, "4:2:0 8-bit 64x64, moving gradient, q60, 32x32 blocks");
+    assert_eq(ie_case(64, 64, 3, 1, 1, 8, 0, 4, 0, 9), 0, "the same lossless: every picture back");
+    assert_eq(ie_case(37, 23, 3, 1, 1, 8, 2, 5, 90, 3), 0, "4:2:0 37x23, a moving square, q90, 8x8 blocks");
+    assert_eq(ie_case(37, 23, 3, 1, 1, 8, 2, 5, 0, 3), 0, "the same lossless");
+    assert_eq(ie_case(48, 40, 3, 1, 0, 10, 0, 3, 120, 6), 0, "4:2:2 10-bit 48x40, q120, 16x16 blocks");
+    assert_eq(ie_case(48, 40, 3, 1, 0, 10, 1, 3, 0, 6), 0, "4:2:2 10-bit noise lossless");
+    assert_eq(ie_case(40, 24, 3, 0, 0, 12, 0, 3, 40, 3), 0, "4:4:4 12-bit 40x24, q40, 8x8 blocks");
+    assert_eq(ie_case(40, 24, 3, 0, 0, 12, 1, 3, 0, 6), 0, "4:4:4 12-bit noise lossless");
+    assert_eq(ie_case(33, 17, 1, 1, 1, 8, 2, 4, 200, 3), 0, "monochrome 33x17, q200");
+    assert_eq(ie_case(33, 17, 1, 1, 1, 8, 2, 4, 0, 6), 0, "monochrome lossless");
+    assert_eq(ie_case(100, 70, 3, 1, 1, 8, 1, 3, 30, 12), 0, "4:2:0 100x70 noise, q30, 64x64 blocks (edge overhang)");
+    assert_eq(ie_case(17, 9, 3, 1, 1, 8, 0, 6, 50, 3), 0, "4:2:0 17x9, six pictures");
+}
+fn test_ie_sequences_128() {
+    Ie_Sb = 1;
+    assert_eq(ie_case(64, 64, 3, 1, 1, 8, 0, 4, 60, 9), 0, "128x128 superblocks: 64x64 4:2:0, q60");
+    assert_eq(ie_case(37, 23, 3, 1, 1, 8, 2, 4, 0, 3), 0, "128x128 superblocks: 37x23 lossless");
+    assert_eq(ie_case(136, 72, 3, 1, 1, 8, 2, 3, 80, 15), 0, "128x128 blocks: 136x72, q80 (chunked residual)");
+    assert_eq(ie_case(136, 72, 3, 1, 1, 8, 1, 3, 0, 15), 0, "128x128 blocks lossless");
+    assert_eq(ie_case(72, 40, 3, 1, 0, 10, 0, 3, 100, 12), 0, "128x128 superblocks: 4:2:2 10-bit, 64x64 blocks");
+    Ie_Sb = 0;
+}
+
+# the headers: the first temporal unit is temporal delimiter, sequence header, frame (a shown KEY_FRAME); every later
+# one temporal delimiter and frame — a shown INTER_FRAME at order hint k, all seven references in slot 0, refreshing
+# slot 0 alone, no primary reference frame, the regular filter, single reference, TX_MODE_LARGEST (lossy) or
+# ONLY_4X4 (lossless) — each header parsed against the reference state the frames before it left
+fn ie_headers(q, n): i64 {
+    if (ie_seq(40, 24, 3, 1, 1, 8, 0, n) != 0) { return 0 - 1; }
+    if (ie_run(Ie_Srcs, n, q, 6) != 0) { return 0 - 2; }
+    var refs = av1_ref_state_new();
+    var dpb = av1_dpb_new();
+    var seq = 0;
+    var k = 0;
+    while (k < n) {
+        var tu = load64(Ie_Tus + (k * 8));
+        var it = av1_obu_iter_init(tu, load64(Ie_Lens + (k * 8)));
+        var t = 0;
+        var off = 0;
+        var sz = 0;
+        var i = 0;
+        while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+            var want = AV1_OBU_FRAME;
+            if (i == 0) { want = AV1_OBU_TEMPORAL_DELIMITER; }
+            if ((i == 1) && (k == 0)) { want = AV1_OBU_SEQUENCE_HEADER; }
+            assert_eq(t, want, "the OBU order of a temporal unit");
+            var e = 0;
+            if (t == AV1_OBU_SEQUENCE_HEADER) { seq = av1_seq_parse(tu + off, sz, &e); }
+            if (t == AV1_OBU_FRAME) {
+                var fh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, tu + off, sz, &e);
+                assert(fh != 0, "the frame header parses against the reference state");
+                if (fh == 0) { return 0 - 3; }
+                assert_eq(av1_fh_show_frame(fh), 1, "every frame shown");
+                if (k == 0) {
+                    assert_eq(av1_fh_frame_type(fh), AV1_KEY_FRAME, "the first is a key frame");
+                } else {
+                    assert_eq(av1_fh_frame_type(fh), AV1_INTER_FRAME, "every later frame an inter frame");
+                    assert_eq(av1_fh_order_hint(fh), k, "at order hint k");
+                    assert_eq(av1_fh_refresh_frame_flags(fh), 1, "refreshing slot 0 alone");
+                    assert_eq(av1_fh_primary_ref_frame(fh), AV1_PRIMARY_REF_NONE, "no primary reference frame");
+                    assert_eq(av1_fh_reference_select(fh), 0, "single reference");
+                    assert_eq(av1_fh_interpolation_filter(fh), AV1_EIGHTTAP, "the regular eight-tap filter");
+                    var j = 0;
+                    var slots = 0;
+                    while (j < AV1_REFS_PER_FRAME) { slots = slots + av1_fh_ref_frame_idx(fh, j); j = j + 1; }
+                    assert_eq(slots, 0, "all seven references in slot 0");
+                    var txm = AV1_TX_MODE_LARGEST;
+                    if (q == 0) { txm = AV1_ONLY_4X4; }
+                    assert_eq(av1_fh_tx_mode(fh), txm, "TX_MODE_LARGEST, ONLY_4X4 lossless");
+                }
+                var hb = (av1_fh_bits_consumed(fh) + 7) >> 3;
+                var fr = av1_decode_frame_ref(seq, fh, dpb, refs, tu + off + hb, sz - hb, &e);
+                assert(fr != 0, "and the frame decodes against the DPB");
+                if (fr == 0) { return 0 - 4; }
+                av1_dpb_update(dpb, refs, seq, fh, fr);
+            }
+            i = i + 1;
+        }
+        var nobu = 3;
+        if (k > 0) { nobu = 2; }
+        assert_eq(i, nobu, "a temporal unit's OBU count");
+        k = k + 1;
+    }
+    return 0;
+}
+fn test_ie_headers() {
+    assert_eq(ie_headers(80, 5), 0, "five frames at q80");
+    assert_eq(ie_headers(0, 3), 0, "three frames lossless");
+}
+# the order hint wraps at 2^OrderHintBits (7 bits): 130 pictures of a tiny sequence decode to their reconstructions
+# across the wrap; picture 100's order hint is 100 (not 100 mod 64, the wrap of a narrower field) and picture 129's 1
+fn test_ie_order_hint_wrap() {
+    var e = 0;
+    var enc = av1_encoder_new(100, 3, 0, 0, &e);
+    var dec = av1_decoder_new(0);
+    var pic = ie_pic(16, 8, 1, 1, 1, 8, 1, 0, 0, 5);
+    var ok = 1;
+    var last_oh = 0 - 1;
+    var oh100 = 0 - 1;
+    var k = 0;
+    while (k < 130) {
+        var len = 0;
+        var rec = 0;
+        var tu = av1_encoder_encode(enc, pic, &len, &rec, &e);
+        if (tu == 0) { ok = 0; }
+        if (ok) {
+            var de = 0;
+            var out = av1_decoder_decode(dec, tu, len, &de);
+            if ((out == 0) || (de != DR_OK) || (ie_sad(out, rec) != 0)) { ok = 0; }
+            # the decoder's 7.20 update saved the order hint of the frame that refreshed slot 0: picture 129's
+            if (ok && (k == 100)) { oh100 = av1_ref_order_hint(av1_decoder_refs(dec), 0); }
+            if (ok && (k == 129)) { last_oh = av1_ref_order_hint(av1_decoder_refs(dec), 0); }
+        }
+        k = k + 1;
+    }
+    assert_eq(ok, 1, "130 pictures decode to their reconstructions across the order hint wrap");
+    assert_eq(av1_encoder_count(enc), 130, "the encoder counted them");
+    assert_eq(oh100, 100, "picture 100 is at order hint 100");
+    assert_eq(last_oh, 1, "picture 129 is at order hint 129 mod 128 = 1");
+}
+
+# What the decoder reads in temporal unit k of the last ie_run: each MI cell's skip, inter and GLOBALMV, through the
+# decoder's own pieces against the state the units before it left. Ie_Skip / Ie_Inter / Ie_Gm count frame k's cells,
+# Ie_Skip_Map[r * 64 + c] its skips (frames at most 64 MI cells on a side).
+var Ie_Skip = 0;
+var Ie_Inter = 0;
+var Ie_Gm = 0;
+var Ie_Cells = 0;
+var Ie_Skip_Map = 0;
+var Ie_Bs = 0;        # ie_read counts frame k's cells whose MiSize is not Ie_Bs into Ie_Odd
+var Ie_Odd = 0;
+fn ie_read(n, k): i64 {
+    var refs = av1_ref_state_new();
+    var dpb = av1_dpb_new();
+    var seq = 0;
+    var j = 0;
+    while (j <= k) {
+        var tu = load64(Ie_Tus + (j * 8));
+        var it = av1_obu_iter_init(tu, load64(Ie_Lens + (j * 8)));
+        var t = 0;
+        var off = 0;
+        var sz = 0;
+        while (av1_obu_next(it, &t, &off, &sz) == DR_OK) {
+            var e = 0;
+            if (t == AV1_OBU_SEQUENCE_HEADER) { seq = av1_seq_parse(tu + off, sz, &e); }
+            if (t == AV1_OBU_FRAME) {
+                var fh = av1_frame_parse_uncompressed_header(seq, refs, 0, 0, tu + off, sz, &e);
+                if (fh == 0) { return 0 - 1; }
+                var hb = (av1_fh_bits_consumed(fh) + 7) >> 3;
+                var fdc = av1_frame_dec_new(seq, fh, &e);
+                if (fdc == 0) { return 0 - 1; }
+                av1_frame_dec_set_inter(fdc, dpb, refs);
+                if (av1_frame_dec_group(fdc, tu + off + hb, sz - hb, &e) < 1) { return 0 - 1; }
+                if (j == k) {
+                    var tile = av1_frame_dec_tile0(fdc);
+                    Ie_Skip = 0;
+                    Ie_Inter = 0;
+                    Ie_Gm = 0;
+                    Ie_Cells = 0;
+                    Ie_Odd = 0;
+                    var r = 0;
+                    while (r < av1_fh_mi_rows(fh)) {
+                        var c = 0;
+                        while (c < av1_fh_mi_cols(fh)) {
+                            var sk = av1_grid_get(tile, AV1TILE_SKIPS, r, c);
+                            Ie_Cells = Ie_Cells + 1;
+                            Ie_Skip = Ie_Skip + sk;
+                            if ((r < 64) && (c < 64)) { store64(Ie_Skip_Map + (((r * 64) + c) * 8), sk); }
+                            if (av1_grid_get(tile, AV1TILE_REF0S, r, c) == AV1_LAST_FRAME) { Ie_Inter = Ie_Inter + 1; }
+                            if (av1_grid_get(tile, AV1TILE_YMODES, r, c) == AV1_GLOBALMV) { Ie_Gm = Ie_Gm + 1; }
+                            if (av1_grid_get(tile, AV1TILE_MISIZES, r, c) != Ie_Bs) { Ie_Odd = Ie_Odd + 1; }
+                            c = c + 1;
+                        }
+                        r = r + 1;
+                    }
+                }
+                var fr = av1_frame_dec_finish(fdc, &e);
+                if (fr == 0) { return 0 - 1; }
+                av1_dpb_update(dpb, refs, seq, fh, fr);
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+fn ie_skip_at(r, c): i64 { return load64(Ie_Skip_Map + (((r * 64) + c) * 8)); }
+
+fn test_ie_skip_known() {
+    # (1) a picture repeated, lossless: the inter frame's residual is exactly zero, so every block is skip
+    var p = ie_pic(48, 32, 3, 1, 1, 8, 1, 0, 0, 9);
+    store64(Ie_Srcs, p);
+    store64(Ie_Srcs + 8, p);
+    assert_eq(ie_run(Ie_Srcs, 2, 0, 6), 0, "a repeated picture, lossless, decodes");
+    assert_eq(ie_read(2, 1), 0, "and reads");
+    assert_eq(Ie_Cells, 96, "48x32: 12 x 8 MI cells");
+    assert_eq(Ie_Skip, 96, "every cell skip: the residual is exactly zero");
+    assert_eq(Ie_Inter, 96, "every cell inter, off LAST_FRAME");
+    assert_eq(Ie_Gm, 96, "every cell GLOBALMV");
+    assert_eq(ie_sad(load64(Ie_Recs + 8), p), 0, "and the skip frame is the picture");
+    var tu0 = load64(Ie_Lens);
+    var tu1 = load64(Ie_Lens + 8);
+    assert(tu1 < (tu0 / 20), "an all-skip inter frame costs a small fraction of its key frame");
+    # (2) at a lossy quantizer, a picture whose source IS its reference's reconstruction: zero residual again
+    var q = ie_pic(48, 32, 3, 1, 1, 8, 1, 0, 0, 10);
+    store64(Ie_Srcs, q);
+    var e = 0;
+    var enc = av1_encoder_new(140, 6, Ie_Sb, 0, &e);
+    var len = 0;
+    var rec0 = 0;
+    var t0 = av1_encoder_encode(enc, q, &len, &rec0, &e);
+    assert(t0 != 0, "q140 key frame");
+    var src1 = ie_copy(rec0);
+    store64(Ie_Srcs, q);
+    store64(Ie_Srcs + 8, src1);
+    assert_eq(ie_run(Ie_Srcs, 2, 140, 6), 0, "the reconstruction fed back as the next picture decodes");
+    assert_eq(ie_read(2, 1), 0, "and reads");
+    assert_eq(Ie_Skip, 96, "every cell skip at q140: the prediction is the picture");
+    assert_eq(ie_sad(load64(Ie_Recs + 8), src1), 0, "and the inter frame reconstructs it exactly");
+    assert(ie_sad(rec0, q) > 0, "while the key frame itself was lossy (so (2) is not (1) again)");
+    # (3) lossless, one luma sample changed at (21, 9): exactly the 16x16 block holding it (MI rows 0..3, cols 4..7)
+    # is not skip
+    var p3 = ie_copy(p);
+    dr_frame_set(p3, 0, 21, 9, (dr_frame_get(p, 0, 21, 9) + 1) & 255);
+    store64(Ie_Srcs, p);
+    store64(Ie_Srcs + 8, p3);
+    assert_eq(ie_run(Ie_Srcs, 2, 0, 6), 0, "one changed sample, lossless, decodes");
+    assert_eq(ie_sad(load64(Ie_Recs + 8), p3), 0, "to the changed picture");
+    assert_eq(ie_read(2, 1), 0, "and reads");
+    assert_eq(Ie_Skip, 96 - 16, "all but one 16x16 block skip");
+    var inblk = 0;
+    var r = 0;
+    while (r < 4) {
+        var c = 4;
+        while (c < 8) { inblk = inblk + ie_skip_at(r, c); c = c + 1; }
+        r = r + 1;
+    }
+    assert_eq(inblk, 0, "and that block is the one holding (21, 9)");
+    # (4) lossless, every luma sample changed by 1 (no sample at the top): no block is skip
+    var p4 = ie_pic(48, 32, 3, 1, 1, 8, 0, 0, 0, 0);
+    var p5 = ie_copy(p4);
+    var y = 0;
+    while (y < 32) {
+        var x = 0;
+        while (x < 48) {
+            var v = dr_frame_get(p4, 0, x, y);
+            if (v == 255) { v = 0; dr_frame_set(p4, 0, x, y, v); }
+            dr_frame_set(p5, 0, x, y, v + 1);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(Ie_Srcs, p4);
+    store64(Ie_Srcs + 8, p5);
+    assert_eq(ie_run(Ie_Srcs, 2, 0, 6), 0, "every sample changed, lossless, decodes");
+    assert_eq(ie_sad(load64(Ie_Recs + 8), p5), 0, "to the changed picture");
+    assert_eq(ie_read(2, 1), 0, "and reads");
+    assert_eq(Ie_Skip, 0, "no block skip");
+    assert_eq(Ie_Inter, 96, "every cell still inter");
+}
+# the first temporal unit of a sequence is av1_encode_keyframe's, byte for byte
+fn test_ie_keyframe_same() {
+    var p = ie_pic(40, 24, 3, 1, 1, 8, 1, 0, 0, 3);
+    var n = 0;
+    var rec = 0;
+    var e = 0;
+    var kt = av1_encode_keyframe(p, 70, 6, Ie_Sb, 0, &n, &rec, &e);
+    assert(kt != 0, "av1_encode_keyframe");
+    store64(Ie_Srcs, p);
+    store64(Ie_Srcs + 8, p);
+    assert_eq(ie_run(Ie_Srcs, 2, 70, 6), 0, "a two-picture sequence");
+    assert_eq(load64(Ie_Lens), n, "its first temporal unit is the key frame's length");
+    var same = 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(load64(Ie_Tus) + i) != load8(kt + i)) { same = 0; }
+        i = i + 1;
+    }
+    assert_eq(same, 1, "and its bytes");
+}
+# av1_encode_ivf: one IVF file, frame k at pts k, each temporal unit the encoder's
+fn test_ie_ivf() {
+    if (ie_seq(40, 24, 3, 1, 1, 8, 2, 3) != 0) { assert(0, "pictures"); return 0; }
+    var n = 0;
+    var e = 0;
+    var recs = dr_alloc(3 * 8);
+    var ivf = av1_encode_ivf(Ie_Srcs, 3, 60, 3, Ie_Sb, 0, &n, recs, &e);
+    assert(ivf != 0, "av1_encode_ivf writes");
+    assert_eq(load8(ivf + 24) | (load8(ivf + 25) << 8), 3, "three frames in the IVF header");
+    var r = dr_ivf_reader_init(ivf, n, &e);
+    var dec = av1_decoder_new(0);
+    var pp = 0;
+    var ps = 0;
+    var pt = 0;
+    var k = 0;
+    var ok = 1;
+    while (dr_ivf_next_frame(r, &pp, &ps, &pt) == DR_OK) {
+        if (pt != k) { ok = 0; }
+        var de = 0;
+        var out = av1_decoder_decode(dec, pp, ps, &de);
+        if ((out == 0) || (k >= 3)) { ok = 0; } else { if (ie_sad(out, load64(recs + (k * 8))) != 0) { ok = 0; } }
+        k = k + 1;
+    }
+    assert_eq(k, 3, "three temporal units");
+    assert_eq(ok, 1, "each at pts k, decoding to its reconstruction");
+}
+
+# a decided key frame (every AV1ENC_DECIDE_* bit), then inter frames: decide is the key frame's alone, so the inter
+# frames are still cut in blocks of block_size, every one inter — and the key frame really decided (more than one block
+# size in it)
+fn test_ie_decided_key() {
+    Ie_Decide = AV1ENC_DECIDE_ALL;
+    assert_eq(ie_case(64, 32, 3, 1, 1, 8, 3, 3, 80, 6), 0, "a decided key frame, then two inter frames, decode");
+    Ie_Bs = 6;
+    assert_eq(ie_read(3, 0), 0, "the key frame reads");
+    assert(Ie_Odd > 0, "the key frame decided its partition (larger blocks over the flat grey)");
+    assert_eq(ie_read(3, 1), 0, "inter frame 1 reads");
+    assert_eq(Ie_Odd, 0, "inter frame 1: every block 16x16, the fixed cut");
+    assert_eq(Ie_Inter, Ie_Cells, "and every cell inter");
+    assert_eq(ie_read(3, 2), 0, "inter frame 2 reads");
+    assert_eq(Ie_Odd, 0, "inter frame 2: every block 16x16");
+    Ie_Decide = 0;
+    assert_eq(ie_case(64, 32, 3, 1, 1, 8, 3, 3, 0, 6), 0, "and lossless: every picture back");
+}
+# a failure while coding a frame is sticky: the call and every later one return it, and nothing more is counted
+fn test_ie_sticky() {
+    var e = 0;
+    var enc = av1_encoder_new(60, 6, Ie_Sb, 0, &e);
+    var len = 0;
+    var rec = 0;
+    var p0 = ie_pic(32, 16, 3, 1, 1, 8, 1, 0, 0, 1);
+    assert(av1_encoder_encode(enc, p0, &len, &rec, &e) != 0, "the first picture");
+    var p1 = ie_pic(32, 16, 3, 1, 1, 8, 2, 4, 2, 2);
+    dr_alloc_fail_at(3);
+    var t1 = av1_encoder_encode(enc, p1, &len, &rec, &e);
+    dr_alloc_fail_at(0);
+    assert_eq(t1, 0, "the second fails on its third allocation");
+    assert_eq(e, DR_ERR_OOM, "as OOM");
+    assert_eq(len, 0, "no bytes");
+    assert_eq(rec, 0, "no reconstruction");
+    assert_eq(av1_encoder_count(enc), 1, "and is not counted");
+    assert_eq(av1_encoder_encode(enc, p1, &len, &rec, &e), 0, "the next call fails too, with nothing failing");
+    assert_eq(e, DR_ERR_OOM, "with the latched error");
+    assert_eq(av1_encoder_count(enc), 1, "still one picture");
+    assert_eq(av1_encoder_encode(enc, 0, &len, &rec, &e), 0, "a null picture");
+    assert_eq(e, DR_ERR_BOUNDS, "is still a BOUNDS refusal");
+}
+
+fn test_ie_refusals() {
+    var e = 0;
+    assert_eq(av1_encoder_new(40, 0, 0, 0, &e), 0, "BLOCK_4X4 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    assert_eq(av1_encoder_new(40, 15, 0, 0, &e), 0, "BLOCK_128X128 at 64x64 superblocks refused");
+    assert_eq(av1_encoder_new(40, 6, 2, 0, &e), 0, "sb128 2 refused");
+    assert_eq(av1_encoder_new(40, 6, 0, 32, &e), 0, "an unknown decide bit refused");
+    assert_eq(av1_encoder_new(256, 6, 0, 0, &e), 0, "base_q_idx 256 refused");
+    assert_eq(av1_encoder_new(0 - 1, 6, 0, 0, &e), 0, "base_q_idx -1 refused");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    var enc = av1_encoder_new(60, 6, 0, 0, &e);
+    assert(enc != 0, "a good encoder");
+    var len = 0;
+    var rec = 0;
+    assert_eq(av1_encoder_encode(enc, 0, &len, &rec, &e), 0, "a null picture refused");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    assert_eq(av1_encoder_encode(0, ie_pic(16, 16, 3, 1, 1, 8, 1, 0, 0, 1), &len, &rec, &e), 0, "a null encoder");
+    var first = ie_pic(32, 16, 3, 1, 1, 8, 1, 0, 0, 1);
+    var t0 = av1_encoder_encode(enc, first, &len, &rec, &e);
+    assert(t0 != 0, "the first picture");
+    var l0 = len;
+    var r0 = rec;
+    # every later picture must be in the first one's format; a refusal leaves the encoder as it was
+    assert_eq(av1_encoder_encode(enc, ie_pic(32, 24, 3, 1, 1, 8, 1, 0, 0, 2), &len, &rec, &e), 0, "another height");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    assert_eq(len, 0, "no bytes");
+    assert_eq(rec, 0, "no reconstruction");
+    assert_eq(av1_encoder_encode(enc, ie_pic(16, 16, 3, 1, 1, 8, 1, 0, 0, 2), &len, &rec, &e), 0, "another width");
+    assert_eq(av1_encoder_encode(enc, ie_pic(32, 16, 3, 1, 1, 10, 1, 0, 0, 2), &len, &rec, &e), 0, "another depth");
+    assert_eq(av1_encoder_encode(enc, ie_pic(32, 16, 1, 1, 1, 8, 1, 0, 0, 2), &len, &rec, &e), 0, "monochrome");
+    assert_eq(av1_encoder_encode(enc, ie_pic(32, 16, 3, 0, 0, 8, 1, 0, 0, 2), &len, &rec, &e), 0, "4:4:4");
+    assert_eq(av1_encoder_encode(enc, ie_pic(32, 16, 3, 1, 0, 8, 1, 0, 0, 2), &len, &rec, &e), 0, "4:2:2");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    assert_eq(av1_encoder_count(enc), 1, "the refusals counted nothing");
+    var second = ie_pic(32, 16, 3, 1, 1, 8, 2, 4, 2, 3);
+    var l1 = 0;
+    var r1 = 0;
+    var t1 = av1_encoder_encode(enc, second, &l1, &r1, &e);
+    assert(t1 != 0, "and the encoder goes on with a picture in the format");
+    var dec = av1_decoder_new(0);
+    var de = 0;
+    var o0 = av1_decoder_decode(dec, t0, l0, &de);
+    assert((o0 != 0) && (ie_sad(o0, r0) == 0), "its key frame decodes");
+    var o1 = av1_decoder_decode(dec, t1, l1, &de);
+    assert((o1 != 0) && (ie_sad(o1, r1) == 0), "and its inter frame, as if nothing had been refused");
+    # a first picture no key frame can be made for is refused, and the encoder takes another first picture after it
+    var enc2 = av1_encoder_new(60, 12, 0, 0, &e);
+    var wide = ie_pic(4160, 8, 1, 1, 1, 8, 3, 0, 0, 1);
+    assert_eq(av1_encoder_encode(enc2, wide, &len, &rec, &e), 0, "a 4160-wide first picture (two tile columns)");
+    assert_eq(e, DR_ERR_UNSUPPORTED, "-> UNSUPPORTED");
+    assert_eq(av1_encoder_count(enc2), 0, "nothing counted");
+    var small = ie_pic(24, 16, 3, 0, 0, 10, 1, 0, 0, 4);
+    var l2 = 0;
+    var r2 = 0;
+    var t2 = av1_encoder_encode(enc2, small, &l2, &r2, &e);
+    assert(t2 != 0, "then a 24x16 4:4:4 10-bit first picture, in a format of its own, is coded");
+    var dec2 = av1_decoder_new(0);
+    var o2 = av1_decoder_decode(dec2, t2, l2, &de);
+    assert((o2 != 0) && (ie_sad(o2, r2) == 0), "and decodes as a key frame in its own format");
+    var n = 0;
+    assert_eq(av1_encode_ivf(Ie_Srcs, 0, 60, 6, 0, 0, &n, 0, &e), 0, "av1_encode_ivf of no pictures refused");
+    assert_eq(e, DR_ERR_BOUNDS, "-> BOUNDS");
+    assert_eq(av1_encode_ivf(0, 2, 60, 6, 0, 0, &n, 0, &e), 0, "a null picture list refused");
+}
+
+# every allocation a three-picture encode makes, failed in turn, is reported as DR_ERR_OOM
+fn ie_oom_op(q): i64 {
+    var n = 0;
+    var e = 0;
+    var ivf = av1_encode_ivf(Ie_Srcs, 3, q, 3, Ie_Sb, 0, &n, 0, &e);
+    if (ivf == 0) { return e; }
+    return DR_OK;
+}
+fn test_ie_oom() {
+    if (ie_seq(24, 16, 3, 1, 1, 8, 2, 3) != 0) { assert(0, "pictures"); return 0; }
+    var n = 0 - 1;
+    assert_eq(dr_alloc_sweep(&ie_oom_op, 60, &n), 0, "OOM sweep: three pictures, lossy");
+    assert(n > 40, "the sweep failed more than forty allocations");
+    assert_eq(dr_alloc_sweep(&ie_oom_op, 0, &n), 0, "OOM sweep: the same lossless");
+}
+
+fn main() {
+    alloc_init();
+    if (av1_tables_init() != DR_OK) { return 1; }
+    Ie_Tus = dr_alloc(IE_MAX * 8);
+    Ie_Lens = dr_alloc(IE_MAX * 8);
+    Ie_Recs = dr_alloc(IE_MAX * 8);
+    Ie_Srcs = dr_alloc(IE_MAX * 8);
+    Ie_Skip_Map = dr_alloc(64 * 64 * 8);
+    test_group("inter frame encoder: every frame decodes to its reconstruction, lossless to its picture");
+    test_ie_sequences();
+    test_group("inter frame encoder at 128x128 superblocks");
+    test_ie_sequences_128();
+    test_group("inter frame encoder: the headers");
+    test_ie_headers();
+    test_ie_order_hint_wrap();
+    test_group("inter frame encoder: the skip decision, known by construction");
+    test_ie_skip_known();
+    Ie_Sb = 1;
+    test_ie_skip_known();
+    Ie_Sb = 0;
+    test_group("inter frame encoder: the key frame, the IVF file");
+    test_ie_keyframe_same();
+    test_ie_ivf();
+    test_group("inter frame encoder: a decided key frame");
+    test_ie_decided_key();
+    test_group("inter frame encoder: refusals and OOM");
+    test_ie_refusals();
+    test_ie_sticky();
+    test_ie_oom();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

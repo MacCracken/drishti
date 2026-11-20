@@ -719,6 +719,96 @@ enccase() { # name = encKIND_WxH_qQ_bB[_s128][_dD]
         fi
     fi
 }
+# ---- THE INTER FRAME ENCODER (0.8.8) — src/av1_enc.cyr's encoder through programs/enc-check.cyr ----
+# intKIND_WxH_qQ_bB_fF[_s128][_dD]: F pictures of an ffmpeg testsrc2 clip (moving bars and a counter over a still
+# frame) of W x H in KIND's format — a mandelbrot zoom where W or H is odd, since testsrc2 rounds an odd size DOWN to
+# even without a word (99x61 comes out 98x60) — encoded by ONE drishti encoder at qindex Q in blocks of size B: a key frame, then
+# F - 1 inter frames, every block GLOBALMV off LAST_FRAME, its residual coded, skip where it quantizes to nothing; at
+# 128x128 superblocks with _s128 (the probe proves the stream's use_128x128_superblock is the one the case names); the
+# key frame deciding what D says (no _d, nothing). A case must be shown to be what it names — the decoder reads F - 1
+# INTER_FRAMEs (enc-check's own reading, and the vector probe's frame_type count), every one of their MI cells an inter
+# block and a GLOBALMV one — or it would prove nothing. Then, all hard:
+#  - drishti-enc-check's own: decoding the .ivf it wrote, a temporal unit at a time, drishti outputs exactly the
+#    reconstruction the encoder returned for every picture (and, at qindex 0, every reconstruction is its picture);
+#  - vs_judge: drishti's output is aomdec's, frame for frame, and dav1d agrees with aomdec;
+#  - at qindex 0, aomdec's output IS the source clip, byte for byte, every frame.
+# So the inter frames mean, to two decoders drishti had no hand in, exactly the pictures the encoder says it coded —
+# their prediction read from the reference frames those decoders hold, their residual and their skips.
+INTER_CASES="int420_176x144_q60_b9_f6 int420ll_176x144_q0_b9_f4 int444_160x120_q90_b6_f4 int422b10_72x40_q80_b3_f4 \
+intmono_99x61_q100_b3_f4 int420_99x61_q30_b3_f4 int420b12_64x64_q40_b12_f3 int420_17x9_q50_b3_f5 \
+int420_352x288_q60_b15_f4_s128 int444b10ll_96x64_q0_b9_f3_s128 int422_200x136_q120_b12_f3_s128 \
+int420_176x144_q60_b3_f4_d31 int420_352x288_q60_b6_f3_s128_d31"
+intercase() { # name = intKIND_WxH_qQ_bB_fF[_s128][_dD]
+    local n="$1" kind geo qs bs fs t1 t2
+    IFS=_ read -r kind geo qs bs fs t1 t2 <<< "$n"
+    local w="${geo%x*}" h="${geo#*x}" q="${qs#q}" b="${bs#b}" fr="${fs#f}" sb=64 pf bd fmt out sbw=0 dec=0 tk
+    local src=testsrc2
+    if [ $((w % 2)) -ne 0 ] || [ $((h % 2)) -ne 0 ]; then src=mandelbrot; fi
+    for tk in "${t1:-}" "${t2:-}"; do
+        case "$tk" in
+            s128) sb=128; sbw=1 ;;
+            d[0-9]|d[0-9][0-9]) dec="${tk#d}" ;;
+            "") ;;
+            *) echo "  $n: SETUP FAILED (unknown case token $tk)"; fail=$((fail+1)); return ;;
+        esac
+    done
+    case "$kind" in
+        int420|int420ll) pf=yuv420p;     bd=8;  fmt=1 ;;
+        int420b12)       pf=yuv420p12le; bd=12; fmt=1 ;;
+        int422)          pf=yuv422p;     bd=8;  fmt=2 ;;
+        int422b10)       pf=yuv422p10le; bd=10; fmt=2 ;;
+        int444)          pf=yuv444p;     bd=8;  fmt=3 ;;
+        int444b10ll)     pf=yuv444p10le; bd=10; fmt=3 ;;
+        intmono)         pf=gray;        bd=8;  fmt=0 ;;
+        *) echo "  $n: SETUP FAILED (unknown case kind)"; fail=$((fail+1)); return ;;
+    esac
+    rm -f "${WORK:?}/$n.ivf" "${WORK:?}/$n.src.yuv" "${WORK:?}/$n.ll.yuv" build/enc-input.yuv build/enc-input.cfg \
+      build/enc-out.ivf
+    ffmpeg -loglevel error -y -f lavfi -i "${src}=size=${w}x${h}:rate=30" -frames:v "$fr" -pix_fmt "$pf" \
+        -f rawvideo "$WORK/$n.src.yuv" 2>/dev/null || { echo "  $n: SETUP FAILED (ffmpeg)"; fail=$((fail+1)); return; }
+    cp "$WORK/$n.src.yuv" build/enc-input.yuv
+    echo "$w $h $bd $fmt $q $b $sb $dec $fr" > build/enc-input.cfg
+    out=$(timeout 300 ./build/drishti-enc-check 2>&1)
+    if ! echo "$out" | grep -q '^SUMMARY ok'; then
+        echo "  $n: REGRESSED (the encoder's own check: $(echo "$out" | tr '\n' ' '))"; fail=$((fail+1)); return
+    fi
+    cp build/enc-out.ivf "$WORK/$n.ivf"
+    local nint cells ninter ngm nskip
+    nint=$(echo "$out" | sed -n 's/^INTER frames=\([0-9]*\) .*/\1/p')
+    cells=$(echo "$out" | sed -n 's/^INTER .* cells=\([0-9]*\) .*/\1/p')
+    ninter=$(echo "$out" | sed -n 's/^INTER .* inter=\([0-9]*\) .*/\1/p')
+    ngm=$(echo "$out" | sed -n 's/^INTER .* globalmv=\([0-9]*\) .*/\1/p')
+    nskip=$(echo "$out" | sed -n 's/^INTER .* skip=\([0-9]*\).*/\1/p')
+    if [ "${nint:-}" != "$((fr - 1))" ] || [ -z "$cells" ] || [ "$cells" -le 0 ] || [ "${ninter:-}" != "$cells" ] \
+      || [ "${ngm:-}" != "$cells" ]; then
+        echo "  $n: SETUP FAILED (the decoder reads ${nint:-?} INTER_FRAMEs of $((fr - 1)), ${ninter:-?} inter and" \
+          "${ngm:-?} GLOBALMV cells of ${cells:-?}: not the sequence the case names, it would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    rm -f build/conformance-input.ivf
+    cp "$WORK/$n.ivf" build/conformance-input.ivf
+    local probe got_sb got_int
+    probe=$(./build/drishti-vector-probe 2>/dev/null)
+    got_sb=$(echo "$probe" | sed -n 's/^ *use_128x128_superblock=//p' | head -1)
+    got_int=$(echo "$probe" | grep -c '^ *frame_type=1$')
+    if [ "$got_sb" != "$sbw" ] || [ "$got_int" != "$((fr - 1))" ]; then
+        echo "  $n: SETUP FAILED (the probe reads use_128x128_superblock=${got_sb:-none} and $got_int inter" \
+          "frames; the case names $sbw and $((fr - 1)) — it would prove nothing)"
+        fail=$((fail+1)); return
+    fi
+    echo "  $n ($(echo "$out" | grep -o 'bytes=[0-9]*'); ${sb}x${sb} superblocks; $((fr - 1)) inter frames, $cells" \
+      "cells all GLOBALMV, $nskip skip; key frame decide $dec; reconstruction = drishti's decode)"
+    pass=$((pass+1))
+    vs_judge "$n" "$fr"
+    if [ "$q" = "0" ]; then
+        aomdec --rawvideo -o "$WORK/$n.ll.yuv" "$WORK/$n.ivf" >/dev/null 2>&1
+        if [ -s "$WORK/$n.ll.yuv" ] && cmp -s "$WORK/$n.ll.yuv" "$WORK/$n.src.yuv"; then
+            echo "  $n: lossless — aomdec's output is the source clip, byte for byte"; pass=$((pass+1))
+        else
+            echo "  $n: REGRESSED (lossless: aomdec's output is not the source clip)"; fail=$((fail+1))
+        fi
+    fi
+}
 # ---- MODE DECISION PAYS (0.8.7's acceptance) — the keyframe encoder deciding against deciding less ----
 # rdKIND_WxH:MAX:DA:BA:DB:BB — an ffmpeg picture (KIND 420: mandelbrot 4:2:0; 420t: testsrc2 4:2:0; 444b10:
 # mandelbrot 4:4:4 10-bit) encoded at qindex 40, 80, 120, 160 and 200 twice: deciding DA in blocks of BA, and deciding
@@ -2758,5 +2848,7 @@ echo "--- keyframe encoder: real pictures encoded by drishti, decoded by drishti
 for c in $ENC_CASES; do enccase "$c"; done
 echo "--- keyframe encoder: decisions against fewer decisions, BD-rate at equal PSNR (0.8.7's acceptance) ---"
 for c in $RD_CASES; do rdcase "$c"; done
+echo "--- inter frame encoder: drishti-encoded sequences, decoded by drishti = aomdec = dav1d, every frame ---"
+for c in $INTER_CASES; do intercase "$c"; done
 
 finish

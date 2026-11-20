@@ -478,21 +478,29 @@ fn av1_frame_dec_group(fdc, buf, sz, out_err): i64 {
         var tile = av1_frame_dec_tile(fdc, tn, buf + av1_tg_tile_offset(tg, tn), av1_tg_tile_size(tg, tn),
           disable_cdf, &derr);
         if (tile == 0) { store64(out_err, derr); return 0 - 1; }
-        # exit_symbol (9.2.4): when the frame adapts (disable_frame_end_update_cdf == 0) and this is tile
-        # context_update_tile_id, a copy of its FINAL CDFs is the frame's saved context. Taken now, while this
-        # tile's families still hold them; one bundle per frame, never mutated after.
-        if ((av1_fh_disable_frame_end_update_cdf(fh) == 0) && (tn == av1_fh_context_update_tile_id(fh))) {
-            var snap = av1_cdf_bundle_new();
-            if (snap == 0) { store64(out_err, DR_ERR_OOM); return 0 - 1; }
-            var sre = av1_cdf_bundle_save(snap, tile);
-            if (sre != DR_OK) { store64(out_err, sre); return 0 - 1; }
-            store64(fdc + AV1FDEC_CTX_CDF, snap);
-        }
+        var sre = av1_frame_dec_save_ctx(fdc, tile, tn);
+        if (sre != DR_OK) { store64(out_err, sre); return 0 - 1; }
         tn = tn + 1;
     }
     store64(fdc + AV1FDEC_TILES_DONE, av1_tg_end(tg) + 1);
     if ((av1_tg_end(tg) + 1) == num_tiles) { return 1; }
     return 0;
+}
+
+# exit_symbol (9.2.4)'s frame context, for tile tn of the frame fdc is decoding, just coded: when the frame adapts
+# (disable_frame_end_update_cdf == 0) and tn is context_update_tile_id, a copy of the tile's FINAL CDFs becomes the
+# frame's saved context, which av1_frame_dec_finish saves into the slots the frame refreshes (7.20). Taken while the
+# tile's families still hold them; one bundle per frame, never mutated after. Shared by av1_frame_dec_group and the
+# encoder (src/av1_enc.cyr), whose coder adapts its CDFs exactly as the decoder's does. Returns DR_OK, DR_ERR_OOM.
+fn av1_frame_dec_save_ctx(fdc, tile, tn): i64 {
+    var fh = load64(fdc + AV1FDEC_FH);
+    if ((av1_fh_disable_frame_end_update_cdf(fh) != 0) || (tn != av1_fh_context_update_tile_id(fh))) { return DR_OK; }
+    var snap = av1_cdf_bundle_new();
+    if (snap == 0) { return DR_ERR_OOM; }
+    var sre = av1_cdf_bundle_save(snap, tile);
+    if (sre != DR_OK) { return sre; }
+    store64(fdc + AV1FDEC_CTX_CDF, snap);
+    return DR_OK;
 }
 
 # Decode ONE tile, TileNum tn, from its tile data buf[0..sz) into the frame under construction — the tile setup and

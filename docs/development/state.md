@@ -6,16 +6,21 @@
 
 ## Version
 
-**0.8.8 in progress** (bite 1 landed 2026-11-19, uncommitted until the user commits; no version bump). **The header
-writer writes inter frames.** `av1_frame_write_uncompressed_header` takes the reference state its parser reads
-(`refs`) and writes INTER_FRAME and SWITCH_FRAME headers: the references (short signaling checked against 7.8's
-derivation, frame id deltas derived), `frame_size_with_refs` (the parser now records `found_ref`), the motion and
-skip-mode syntax, and the loop filter deltas, segmentation, global motion and film grain coded against the primary
-reference frame's saved values. `av1_fh_init_inter` builds the encoder's inter record. `programs/hdr-rewrite.cyr`
-tracks each stream's reference state and rewrites EVERY frame header of the corpus bit-exact, inter ones included, with
-a census of the branches reached gated (short signaling and TRANSLATION / AFFINE models are unit- and fuzz-only:
-libaom emits none). Gates after bite 1: 49 suites, 35,442 assertions; fuzz 7,429; everything else green; `make
-conformance` 4665 matched / 0 known-gap / 0 regressed / 0 skipped (the census is the new case).
+**0.8.8 in progress** (bites 1–2 landed 2026-11-19 / 2026-11-20, uncommitted until the user commits; no version
+bump). **drishti encodes inter frames.**
+- Bite 2, **the inter frame encoder**: `av1_encoder_new` / `av1_encoder_encode` (`src/av1_enc.cyr`), one temporal unit
+  per picture. The first picture is 0.8.7's key frame; every later one is a shown INTER_FRAME, LAST_FRAME the picture
+  before it, every block GLOBALMV (zero motion) with its residual coded and skip where it quantizes to nothing. The
+  reconstruction is the decoder's: `av1_inter_predict` (lifted out of the inter block decoder), an encoder hook in
+  `av1_transform_block_inter`, and the decoder's frame end and 7.20 update for the reference state. Failures are
+  sticky. `av1_encode_ivf` writes a sequence; `av1_fb_set_single` is the reader's single-reference record. 13
+  drishti-encoded clips in `make conformance` decode in aomdec and dav1d to drishti's reconstruction, frame for frame.
+- Bite 1, **the inter frame header writer**: `av1_frame_write_uncompressed_header` takes the reference state its
+  parser reads (`refs`) and writes INTER_FRAME and SWITCH_FRAME headers, everything coded against the primary reference
+  frame's saved values; `av1_fh_init_inter`; every frame header of the corpus rewritten bit-exact, with a census of the
+  branches reached gated (short signaling and TRANSLATION / AFFINE models are unit- and fuzz-only).
+
+Gates after bite 2: 50 suites, 35,720 assertions; fuzz 7,429; everything else green; `make conformance` 4731 matched / 0 known-gap / 0 regressed / 0 skipped (the 13 inter frame encoder clips are the new cases).
 
 **0.8.7** — cut 2026-11-19, not yet tagged (user's git). **drishti decides: the keyframe encoder chooses its
 partition tree, each block's intra modes and its luma transform by rate and distortion**, for 14.9–56.9% fewer bytes
@@ -1872,8 +1877,14 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > MV prediction reused from the decode side, and the inter residual + skip decision. 0.8.7's encoder is the base:
 > its RD (`src/av1_rd.cyr`, the estimator) and its trial machinery (a decoder residual pass per candidate, the block
 > and candidate arenas, context save / restore) carry over. Bite 1 (2026-11-19) built the inter frame header writer
-> and `av1_fh_init_inter`; bite 2 is the inter frame encoder itself (a key frame then inter frames, its reconstruction
-> the decoder's inter lane, decoded by aomdec and dav1d).
+> and `av1_fh_init_inter`; bite 2 (2026-11-20) the inter frame encoder itself: `av1_encoder_new` /
+> `av1_encoder_encode`, a key frame then inter frames off LAST_FRAME, every block GLOBALMV with its residual and skip,
+> the reconstruction the decoder's inter lane (`av1_inter_predict` + the hook in `av1_transform_block_inter`), 13
+> clips decoded by aomdec and dav1d to drishti's reconstruction in `make conformance`. Bite 3 is motion estimation:
+> NEWMV off a searched vector (full-pel, then sub-pel), coded against the decoder's MV stack, chosen against GLOBALMV
+> by rate and distortion. Found in bite 2: the encoder grows with every frame it codes (roadmap 0.8.10, the encoder's
+> memory bound); drishti's comments cite `inter_frame_mode_info` as 5.11.15, which is the TX size syntax (it is
+> 5.11.18).
 >
 > **0.8.7 (cut 2026-11-19), bite by bite:** bite 1 = **rate and distortion**: the symbol coder's ESTIMATOR (each
 > symbol validated as the coder does, then costed in 1/512 bits under the CDFs as they stand, nothing coded and no
