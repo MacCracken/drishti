@@ -4,6 +4,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — 0.8.8 bite 1: the inter frame header writer — every frame header of the corpus rewritten bit-exact
+
+**The header writer writes every frame type.** Since 0.8.6, `av1_frame_write_uncompressed_header` (`src/av1_hdrw.cyr`)
+refused INTER_FRAME and SWITCH_FRAME headers with `DR_ERR_UNSUPPORTED`; it now writes them. It takes a new `refs`
+argument: the reference state the parser reads the header against. The OBU writers `av1_frame_header_write_obu` and
+`av1_frame_write_obu` take `refs` too; an intra or shown-existing frame passes 0. Each new piece of syntax is the inverse
+of its parser:
+- **References:** `primary_ref_frame`, `ref_frame_idx[ ]`, and `frame_refs_short_signaling`. Under short signaling the
+  record's `ref_frame_idx[ ]` must be exactly what 7.8's `set_frame_refs` derives from the last and golden indices.
+  `delta_frame_id_minus_1` is derived from the slots' frame ids (5.9.2's `expectedFrameId` requirement), modulo
+  2^idLen.
+- **`frame_size_with_refs` (5.9.7):** the parser now records which `found_ref` was coded (`AV1FH_FOUND_REF`, 1 + i;
+  decode-neutral). That slot must hold the frame's upscaled width, height and render size, which is where the parser
+  takes them from.
+- **Motion syntax:** `allow_high_precision_mv`, the interpolation filter, `is_motion_mode_switchable`,
+  `use_ref_frame_mvs`, `reference_select`, `allow_warped_motion`, and `skip_mode_present` where 5.9.23 allows skip
+  mode. The derivation of SkipModeFrame[ ] is now one function, `av1_skip_mode_frames` (`src/av1_frame.cyr`), shared by
+  the parser and the writer.
+- **Syntax coded against the primary reference frame's saved values:**
+  - the loop filter deltas: each `update_*_delta` is set exactly where a delta differs from the slot's, libaom's rule;
+  - segmentation's `update_map`, `temporal_update` and `update_data`: kept features must be the slot's;
+  - global motion (5.9.24–5.9.29): each model's type, and its parameters by subexp coding against PrevGmParams. A
+    parameter off its precision grid, or past its range, is refused;
+  - film grain's `update_grain` and `film_grain_params_ref_idx`: a reloaded block must be the slot's.
+
+The derived fields are checked as well: OrderHints[ ], SkipModeFrame[ ], what `load_previous( )` leaves, and on an
+intra frame the inter syntax staying zero. So for every record the writer accepts, parsing its output against the
+same reference state gives the record back word for word.
+
+**`av1_fh_init_inter`** builds a consistent INTER_FRAME record for the encoder. Starting from `av1_fh_init_key`'s
+frame, it is shown and not error resilient, with every reference in one slot. It has no primary reference frame,
+quarter-pel motion, the regular eight-tap filter, single reference prediction and identity global motion; OrderHints[ ]
+are derived from `refs`.
+
+**The corpus check.** `programs/hdr-rewrite.cyr` now keeps each stream's reference state at the header level
+(`av1_frame_update_refs` after every frame), so it parses and rewrites every inter frame header. Every frame header of
+every stream in the gate is rewritten to its exact bits: **2,998 inter frame headers**, beside 1,109 intra and
+shown-existing ones. The rewrite also counts which branches of the writer the corpus reaches (a new CENSUS line, held in
+`make conformance`):
+- 2,216 headers code against a primary reference frame, 315 take their size from a reference, and 322 code a ROTZOOM
+  model;
+- 38 reload film grain, 48 keep a slot's segmentation features, and 3 are switch frames.
+
+Three branches no stream reaches, and the gate names them rather than passing them: short signaling (libaom compiles it
+out: `FRAME_REFS_SHORT_SIGNALING 0`), TRANSLATION models and AFFINE models (libaom searches ROTZOOM models only). Those
+three are held by the unit suite and the fuzz harness alone.
+
+**Tests.**
+- `tests/av1_hdrw.tcyr` gains 159 assertions (557 to 716).
+  - **Known answers:** an inter frame header and a ROTZOOM model, packed by hand from the 5.9.2 syntax table, the subexp
+    coding included.
+  - **Hand-derived derivations:** 7.8's reference derivation for short signaling, and 5.9.23's SkipModeFrame[ ].
+  - **Parser round trips** for every branch above.
+  - **Exhaustive subexp round trips** at every band edge.
+  - **Refusals** for each record the parser would read back differently.
+- `tests/av1_hdrw.fcyr` gains an inter pass: random records against random reference states built from accepted
+  records. Of 3,000, 859 are accepted and every one round trips.
+  - The pass caught two writer bugs before this landed, each a crash: on a record it had already refused, the writer
+    kept going and read the reference state at a null or invalid slot. The writer now stops before any such read.
+
+**Mutation testing:** 41 mutants, 39 killed, 2 equivalent.
+- **Equivalent 1:** a reference index bound that the `f(3)` write enforces anyway.
+- **Equivalent 2:** the subexp band boundary. At `numSyms == mk + 3a`, `ns( 3a )` and the next band code identical bits.
+- **Found by a survivor:** coding the mode deltas against 0 instead of the slot's survived the unit suite, the fuzz
+  harness and the whole corpus. No stream codes mode deltas against a slot that has nonzero ones, and the fuzz reset
+  every delta it poked. Both suites now kill it.
+
+**Gates after bite 1:** `make test` 49 suites, **35,442** assertions (+159); `make fuzz` **7,429** (+7); bench, `vet`,
+`lint`, `fmt-check`, `version-check` and `distlib --check` green, `dist/drishti.cyr` regenerated (still labelled
+v0.8.7); all five programs build; `make conformance` **4665 matched / 0 known-gap / 0 regressed / 0 skipped** (+1, the
+census).
+
 ## [0.8.7] - 2026-11-19
 
 **drishti decides.** The second encode batch: the keyframe encoder chooses its partition tree, each block's intra

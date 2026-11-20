@@ -1,5 +1,6 @@
-# tests/av1_hdrw.tcyr — the header WRITERS (src/av1_hdrw.cyr): sequence_header_obu (5.5), the intra / shown-existing
-# uncompressed frame header (5.9.2), the tile group (5.11.1), the OBUs around them (5.3.1 / 5.10), and uvlc( ) (4.10.3).
+# tests/av1_hdrw.tcyr — the header WRITERS (src/av1_hdrw.cyr): sequence_header_obu (5.5), the uncompressed frame header
+# (5.9.2) of every frame type, inter frames against a reference state, the tile group (5.11.1), the OBUs around them
+# (5.3.1 / 5.10), and uvlc( ) (4.10.3).
 #
 # Three kinds of evidence, none of them the writer checking itself:
 #   * known answers HAND-PACKED from the spec syntax tables, every field's bits commented (test_hw_seq_kat /
@@ -8,10 +9,10 @@
 #   * round trips through the PARSERS (src/av1_seq.cyr, src/av1_frame.cyr — conformance-gated against libaom on the
 #     whole corpus): every record written must parse back as itself, consume exactly the bits written, end in valid
 #     trailing bits, and rewrite to the same bits;
-#   * refusals: a value its field cannot carry, or a record the parser would read back as another, is DR_ERR_BOUNDS;
-#     an inter frame (roadmap 0.8.8) is DR_ERR_UNSUPPORTED — never a header that means something else.
-# scripts/conformance.sh's "header rewrite" section adds the corpus-wide known answer: every sequence header and intra
-# frame header of the corpus rewritten bit-exact (programs/hdr-rewrite.cyr).
+#   * refusals: a value its field cannot carry, or a record the parser would read back as another, is DR_ERR_BOUNDS —
+#     never a header that means something else.
+# scripts/conformance.sh's "header rewrite" section adds the corpus-wide known answer: every sequence header and frame
+# header of the corpus, inter ones against the stream's reference state, rewritten bit-exact (programs/hdr-rewrite.cyr).
 include "src/main.cyr"
 
 var Hw_Nbits = 0;   # payload bits the last hw_*_bytes call wrote (before its trailing bits)
@@ -69,7 +70,7 @@ fn hw_seq_err(s): i64 {
 # ---- frame header ----
 fn hw_fh_bytes(s, fh, tid, sid, out_n): i64 {
     var bw = dr_bw_init(64);
-    Hw_Err = av1_frame_write_uncompressed_header(bw, s, fh, tid, sid);
+    Hw_Err = av1_frame_write_uncompressed_header(bw, s, 0, fh, tid, sid);
     if (Hw_Err != DR_OK) { return 0; }
     Hw_Nbits = dr_bw_bit_pos(bw);
     av1_obu_write_trailing_bits(bw);
@@ -107,7 +108,7 @@ fn hw_key(s, q): i64 {
 }
 fn hw_fh_err(s, fh): i64 {
     var bw = dr_bw_init(64);
-    return av1_frame_write_uncompressed_header(bw, s, fh, 0, 0);
+    return av1_frame_write_uncompressed_header(bw, s, 0, fh, 0, 0);
 }
 
 # ================================================================
@@ -1496,7 +1497,7 @@ fn test_hw_fh_ids_timing() {
     var at0 = Hw_Nbits;
     # temporal layer 1 is outside op 1: its removal time is not coded, so the record must not hold one
     var bw1 = dr_bw_init(64);
-    assert_eq(av1_frame_write_uncompressed_header(bw1, s, fh, 1, 0), DR_ERR_BOUNDS,
+    assert_eq(av1_frame_write_uncompressed_header(bw1, s, 0, fh, 1, 0), DR_ERR_BOUNDS,
       "layer 1: a removal time for op 1, which does not hold it, refused");
     store64(fh + AV1FH_BUFFER_REMOVAL_TIME + 8, 0);
     var f3 = hw_fh_rt_at(s, fh, 1, 0);
@@ -1594,11 +1595,11 @@ fn test_hw_fh_refusals() {
     store64(fh + AV1FH_FRAME_TYPE, AV1_INTER_FRAME);
     store64(fh + AV1FH_FRAME_IS_INTRA, 0);
     var bw = dr_bw_init(16);
-    assert_eq(av1_frame_write_uncompressed_header(bw, s, fh, 0, 0), DR_ERR_UNSUPPORTED,
-      "an inter frame header is roadmap 0.8.8: UNSUPPORTED");
-    assert_eq(dr_bw_err(bw), DR_ERR_UNSUPPORTED, "and the writer's error is set");
+    assert_eq(av1_frame_write_uncompressed_header(bw, s, 0, fh, 0, 0), DR_ERR_BOUNDS,
+      "an inter frame header without a reference state refused");
+    assert_eq(dr_bw_err(bw), DR_ERR_BOUNDS, "and the writer's error is set");
     store64(fh + AV1FH_FRAME_TYPE, 3);
-    assert_eq(hw_fh_err(s, fh), DR_ERR_UNSUPPORTED, "a switch frame: UNSUPPORTED");
+    assert_eq(hw_fh_err(s, fh), DR_ERR_BOUNDS, "a switch frame without a reference state refused");
     store64(fh + AV1FH_FRAME_TYPE, AV1_KEY_FRAME);
     assert_eq(hw_fh_err(s, fh), DR_ERR_BOUNDS, "a key frame recorded as not intra refused");
     store64(fh + AV1FH_FRAME_IS_INTRA, 1);
@@ -1617,12 +1618,12 @@ fn test_hw_fh_refusals() {
     store64(fh + AV1FH_ALLOW_SCT, 1);
     assert_eq(hw_fh_err(s, fh), DR_ERR_BOUNDS, "screen content the sequence forces off refused");
     store64(fh + AV1FH_ALLOW_SCT, 0);
-    assert_eq(av1_frame_write_uncompressed_header(0, s, fh, 0, 0), DR_ERR_BOUNDS, "null writer refused");
+    assert_eq(av1_frame_write_uncompressed_header(0, s, 0, fh, 0, 0), DR_ERR_BOUNDS, "null writer refused");
     var bw2 = dr_bw_init(16);
-    assert_eq(av1_frame_write_uncompressed_header(bw2, 0, fh, 0, 0), DR_ERR_BOUNDS, "null sequence refused");
-    assert_eq(av1_frame_write_uncompressed_header(bw2, s, 0, 0, 0), DR_ERR_BOUNDS, "null header refused");
+    assert_eq(av1_frame_write_uncompressed_header(bw2, 0, 0, fh, 0, 0), DR_ERR_BOUNDS, "null sequence refused");
+    assert_eq(av1_frame_write_uncompressed_header(bw2, s, 0, 0, 0, 0), DR_ERR_BOUNDS, "null header refused");
     dr_bw_set_err(bw2, DR_ERR_TRUNCATED);
-    assert_eq(av1_frame_write_uncompressed_header(bw2, s, fh, 0, 0), DR_ERR_TRUNCATED, "first error kept");
+    assert_eq(av1_frame_write_uncompressed_header(bw2, s, 0, fh, 0, 0), DR_ERR_TRUNCATED, "first error kept");
     assert_eq(dr_bw_bit_pos(bw2), 0, "a writer in error writes nothing");
     return 0;
 }
@@ -1888,7 +1889,7 @@ fn test_hw_fh_layers() {
     # spatial layers: idc 0x103 holds spatial layer 0 only, so spatial layer 1 codes no removal time
     store64(s + AV1_SEQ_OP_IDC, 0x103);
     var bw = dr_bw_init(64);
-    assert_eq(av1_frame_write_uncompressed_header(bw, s, fh, 0, 1), DR_ERR_BOUNDS,
+    assert_eq(av1_frame_write_uncompressed_header(bw, s, 0, fh, 0, 1), DR_ERR_BOUNDS,
       "spatial layer 1, outside op 0: its removal time refused");
     var n = 0;
     hw_fh_bytes(s, fh, 0, 0, &n);
@@ -1908,7 +1909,7 @@ fn test_hw_obu_kat() {
     var bw = dr_bw_init(64);
     assert_eq(av1_td_write_obu(bw), DR_OK, "temporal delimiter");
     assert_eq(av1_seq_write_obu(bw, s), DR_OK, "sequence header OBU");
-    assert_eq(av1_frame_header_write_obu(bw, s, fh, 1, 2, 1), DR_OK, "frame header OBU with an extension");
+    assert_eq(av1_frame_header_write_obu(bw, s, 0, fh, 1, 2, 1), DR_OK, "frame header OBU with an extension");
     var n = dr_bw_flush(bw);
     var b = dr_bw_buf(bw);
     assert_eq(n, 2 + 12 + 10, "2 + 12 + 10 bytes");
@@ -1940,10 +1941,11 @@ fn test_hw_obu_kat() {
     dr_bw_put_bit(bw2, 1);
     assert_eq(av1_td_write_obu(bw2), DR_ERR_BOUNDS, "an OBU at an unaligned position refused");
     var bw3 = dr_bw_init(16);
-    assert_eq(av1_frame_header_write_obu(bw3, s, fh, 1, 8, 0), DR_ERR_BOUNDS, "temporal_id 8 refused");
+    assert_eq(av1_frame_header_write_obu(bw3, s, 0, fh, 1, 8, 0), DR_ERR_BOUNDS, "temporal_id 8 refused");
     store64(fh + AV1FH_FRAME_TYPE, AV1_INTER_FRAME);
     var bw4 = dr_bw_init(16);
-    assert_eq(av1_frame_header_write_obu(bw4, s, fh, 0, 0, 0), DR_ERR_UNSUPPORTED, "an inter frame header OBU");
+    assert_eq(av1_frame_header_write_obu(bw4, s, 0, fh, 0, 0, 0), DR_ERR_BOUNDS,
+      "an inter frame header OBU without a reference state");
     assert_eq(dr_bw_bit_pos(bw4), 0, "a refused frame header OBU writes nothing");
     var bw5 = dr_bw_init(16);
     store64(s + AV1_SEQ_PROFILE, 3);
@@ -2012,7 +2014,7 @@ fn test_hw_tile_group() {
     hw_fh_bytes(s, fh, 0, 0, &hn);
     assert_eq(Hw_Nbits, 55, "the 2 x 2 tile header is 55 bits (not byte aligned)");
     var bwf = dr_bw_init(64);
-    assert_eq(av1_frame_write_obu(bwf, s, fh, 0, 0, 0, tiles, sizes), DR_OK, "a 4-tile FRAME OBU writes");
+    assert_eq(av1_frame_write_obu(bwf, s, 0, fh, 0, 0, 0, tiles, sizes), DR_OK, "a 4-tile FRAME OBU writes");
     var fnb = dr_bw_flush(bwf);
     var it = av1_obu_iter_init(dr_bw_buf(bwf), fnb);
     var ot = 0;
@@ -2140,13 +2142,13 @@ fn hw_e2e(w, h, bd, mono, subx, suby, q, split): i64 {
     av1_td_write_obu(bw);
     av1_seq_write_obu(bw, s);
     if (split) {
-        av1_frame_header_write_obu(bw, s, fh, 0, 0, 0);
+        av1_frame_header_write_obu(bw, s, 0, fh, 0, 0, 0);
         var tw = dr_bw_init(64);
         av1_tile_group_write(tw, fh, 0, 0, tiles, sizes);
         var tn = dr_bw_flush(tw);
         av1_obu_write(bw, AV1_OBU_TILE_GROUP, 0, 0, 0, dr_bw_buf(tw), tn);
     } else {
-        av1_frame_write_obu(bw, s, fh, 0, 0, 0, tiles, sizes);
+        av1_frame_write_obu(bw, s, 0, fh, 0, 0, 0, tiles, sizes);
     }
     if (dr_bw_err(bw) != DR_OK) { return 0 - 3; }
     var n = dr_bw_flush(bw);
@@ -2188,8 +2190,8 @@ fn hw_oom_op(arg): i64 {
     if (bw == 0) { return DR_ERR_OOM; }
     var rc = av1_td_write_obu(bw);
     if (rc == DR_OK) { rc = av1_seq_write_obu(bw, s); }
-    if (rc == DR_OK) { rc = av1_frame_header_write_obu(bw, s, fh, arg, 0, 0); }
-    if (rc == DR_OK) { rc = av1_frame_write_obu(bw, s, fh, arg, 0, 0, tiles, sizes); }
+    if (rc == DR_OK) { rc = av1_frame_header_write_obu(bw, s, 0, fh, arg, 0, 0); }
+    if (rc == DR_OK) { rc = av1_frame_write_obu(bw, s, 0, fh, arg, 0, 0, tiles, sizes); }
     return rc;
 }
 fn test_hw_oom() {
@@ -2200,6 +2202,728 @@ fn test_hw_oom() {
     assert_eq(dr_alloc_sweep(&hw_oom_op, 0, &n), 0, "OOM sweep over seq init, key init and three OBUs");
     assert(n > 6, "the sweep failed more than six allocations");
     assert_eq(dr_alloc_sweep(&hw_oom_op, 1, &n), 0, "the same with extension headers");
+    return 0;
+}
+
+# ================================================================
+# inter frame headers (0.8.8) — written against a reference state
+# ================================================================
+# the header of fh written against refs, its trailing bits added: the bytes, or 0 on a writer error (Hw_Err)
+fn hw_ifh_bytes(s, refs, fh, out_n): i64 {
+    var bw = dr_bw_init(64);
+    Hw_Err = av1_frame_write_uncompressed_header(bw, s, refs, fh, 0, 0);
+    if (Hw_Err != DR_OK) { return 0; }
+    Hw_Nbits = dr_bw_bit_pos(bw);
+    av1_obu_write_trailing_bits(bw);
+    store64(out_n, dr_bw_flush(bw));
+    return dr_bw_buf(bw);
+}
+# a copy of reference state refs, for one parse (a parse changes RefValid; the saved blocks are shared, read-only)
+fn hw_refs_copy(refs): i64 {
+    var c = alloc(AV1REF_SIZE);
+    memcpy(c, refs, AV1REF_SIZE);
+    return c;
+}
+# write -> parse (against a copy of refs) -> rewrite, as hw_fh_rt_at: the parsed record, or 0
+fn hw_ifh_rt(s, refs, fh): i64 {
+    Hw_DiffOff = 0 - 1;
+    var n = 0;
+    var b = hw_ifh_bytes(s, refs, fh, &n);
+    if (b == 0) { return 0; }
+    var nb = Hw_Nbits;
+    var e = 0;
+    var fh2 = av1_frame_parse_uncompressed_header(s, hw_refs_copy(refs), 0, 0, b, n, &e);
+    if ((fh2 == 0) || (e != DR_OK)) { return 0; }
+    if (av1_fh_bits_consumed(fh2) != nb) { return 0; }
+    if (av1_frame_header_end(AV1_OBU_FRAME_HEADER, fh2, b, n) != DR_OK) { return 0; }
+    Hw_DiffOff = hw_rec_diff(fh, fh2, AV1FH_SIZE, AV1FH_BITS_CONSUMED);
+    if (Hw_DiffOff >= 0) { return 0; }
+    var n2 = 0;
+    var b2 = hw_ifh_bytes(s, refs, fh2, &n2);
+    if ((b2 == 0) || (n2 != n)) { return 0; }
+    if (memeq(b, b2, n) == 0) { return 0; }
+    return fh2;
+}
+fn hw_ifh_ok(s, refs, fh): i64 { return hw_ifh_rt(s, refs, fh) != 0; }
+fn hw_ifh_err(s, refs, fh): i64 {
+    var bw = dr_bw_init(64);
+    return av1_frame_write_uncompressed_header(bw, s, refs, fh, 0, 0);
+}
+# the bits the header of fh takes (Hw_Err holds the writer's code)
+fn hw_ifh_bits(s, refs, fh): i64 {
+    var n = 0;
+    if (hw_ifh_bytes(s, refs, fh, &n) == 0) { return 0 - 1; }
+    return Hw_Nbits;
+}
+fn hw_inter(s, refs, q, hint, slot, refresh): i64 {
+    var e = 0;
+    return av1_fh_init_inter(s, refs, q, hint, slot, refresh, &e);
+}
+# point every reference at the slots of idx7 (seven slot numbers, LAST .. ALTREF) and derive OrderHints[ ] from refs
+fn hw_set_refs(fh, refs, a, b, c, d, e, f, g): i64 {
+    store64(fh + AV1FH_REF_FRAME_IDX + 0, a);
+    store64(fh + AV1FH_REF_FRAME_IDX + 8, b);
+    store64(fh + AV1FH_REF_FRAME_IDX + 16, c);
+    store64(fh + AV1FH_REF_FRAME_IDX + 24, d);
+    store64(fh + AV1FH_REF_FRAME_IDX + 32, e);
+    store64(fh + AV1FH_REF_FRAME_IDX + 40, f);
+    store64(fh + AV1FH_REF_FRAME_IDX + 48, g);
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        store64(fh + AV1FH_ORDER_HINTS + ((AV1_LAST_FRAME + i) * 8),
+          av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+# a reference state as a decoder holds it after a key frame (order hint 0, every slot) and then, for k = 1 .. 7, an
+# inter frame at order hint k refreshing slot k alone: slot k holds order hint k
+fn hw_refs_ladder(s): i64 {
+    var refs = av1_ref_state_new();
+    av1_frame_update_refs(refs, s, hw_key(s, 100));
+    var k = 1;
+    while (k < 8) {
+        av1_frame_update_refs(refs, s, hw_inter(s, refs, 100, k, 0, 1 << k));
+        k = k + 1;
+    }
+    return refs;
+}
+
+# known answer: the simplest inter frame, packed by hand from the 5.9.2 syntax table
+fn test_hw_ifh_kat() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    var refs = av1_ref_state_new();
+    av1_frame_update_refs(refs, s, hw_key(s, 100));
+    var fh = hw_inter(s, refs, 100, 1, 0, 1);
+    assert(fh != 0, "av1_fh_init_inter builds a record");
+    # show_existing_frame 0 | frame_type 01 (INTER) | show_frame 1 | error_resilient_mode 0 | disable_cdf_update 0 |
+    # frame_size_override_flag 0 | order_hint 0000001 | primary_ref_frame 111 (NONE) | refresh_frame_flags 00000001 |
+    # frame_refs_short_signaling 0 | ref_frame_idx[ 0..6 ] 000 x 7 | render_and_frame_size_different 0 |
+    # allow_high_precision_mv 0 | is_filter_switchable 0 | interpolation_filter 00 | is_motion_mode_switchable 0 |
+    # disable_frame_end_update_cdf 0 | uniform_tile_spacing_flag 1 | base_q_idx 01100100 | DeltaQYDc, DeltaQUDc,
+    # DeltaQUAc delta_coded 0 0 0 | using_qmatrix 0 | segmentation_enabled 0 | delta_q_present 0 | loop_filter_level
+    # 000000 000000 | loop_filter_sharpness 000 | loop_filter_delta_enabled 0 | tx_mode_select 1 | reference_select 0 |
+    # reduced_tx_set 0 | is_global 0 x 7 — 95 bits; trailing bits 1 then 0s
+    var n = 0;
+    var b = hw_ifh_bytes(s, refs, fh, &n);
+    assert_eq(Hw_Err, DR_OK, "the inter header writes");
+    assert_eq(Hw_Nbits, 95, "95 header bits");
+    assert_eq(n, 12, "12 bytes with its trailing bits");
+    var want = alloc(16);
+    store8(want + 0, 0x30); store8(want + 1, 0x07); store8(want + 2, 0x80); store8(want + 3, 0x80);
+    store8(want + 4, 0x00); store8(want + 5, 0x00); store8(want + 6, 0x02); store8(want + 7, 0xC8);
+    store8(want + 8, 0x00); store8(want + 9, 0x00); store8(want + 10, 0x04); store8(want + 11, 0x01);
+    assert(memeq(b, want, 12), "the inter header is the hand-packed bytes");
+    assert(hw_ifh_ok(s, refs, fh), "and it round trips through the parser");
+    # global motion: LAST a ROTZOOM model, gm_params[ 2 ] = ( 5 << 1 ) + ( 1 << 16 ), the rest the identity's. Against
+    # the default PrevGmParams r = ( 65536 >> 1 ) - ( 1 << 15 ) = 0; decode_signed_subexp_with_ref( -4096, 4097, 0 )
+    # is the unsigned one over 8193 at r 4096, x 4101: recenter( 4096, 4101 ) = 10; subexp( 10 ) = more 1 (10 >= 8),
+    # more 0, then 10 - 8 in 3 bits: 1 0 010. gm_params[ 3 ] and the translations decode 0: 0 000 each.
+    #   is_global 1 | is_rot_zoom 1 | 10010 | 0000 | 0000 | 0000 | is_global 0 x 6 — 113 bits
+    store64(fh + AV1FH_GM_TYPE, AV1_GM_ROTZOOM);
+    store64(fh + AV1FH_GM_PARAMS + (2 * 8), 65536 + 10);
+    store64(fh + AV1FH_GM_PARAMS + (5 * 8), 65536 + 10);
+    var b2 = hw_ifh_bytes(s, refs, fh, &n);
+    assert_eq(Hw_Nbits, 113, "the ROTZOOM model: 113 header bits");
+    assert_eq(n, 15, "15 bytes");
+    var w2 = alloc(16);
+    memcpy(w2, want, 11);
+    store8(w2 + 11, 0xE4); store8(w2 + 12, 0x00); store8(w2 + 13, 0x00); store8(w2 + 14, 0x40);
+    assert(memeq(b2, w2, 15), "the ROTZOOM header is the hand-packed bytes (subexp coding by hand)");
+    assert(hw_ifh_ok(s, refs, fh), "and it round trips");
+    return 0;
+}
+
+# the record helper: its arguments and what it derives
+fn test_hw_ifh_init() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    var refs = hw_refs_ladder(s);
+    var e = 0;
+    assert_eq(av1_fh_init_inter(s, 0, 100, 1, 0, 1, &e), 0, "no reference state: no record");
+    assert_eq(e, DR_ERR_BOUNDS, "  DR_ERR_BOUNDS");
+    assert_eq(av1_fh_init_inter(s, refs, 100, 1, 8, 1, &e), 0, "slot 8 refused");
+    assert_eq(av1_fh_init_inter(s, refs, 100, 1, 0 - 1, 1, &e), 0, "slot -1 refused");
+    assert_eq(av1_fh_init_inter(s, refs, 100, 1, 0, 256, &e), 0, "refresh 256 refused");
+    assert_eq(av1_fh_init_inter(s, refs, 100, 128, 0, 1, &e), 0, "order hint 128 (7 bits) refused");
+    assert_eq(e, DR_ERR_BOUNDS, "  DR_ERR_BOUNDS");
+    assert_eq(av1_fh_init_inter(s, refs, 256, 1, 0, 1, &e), 0, "base_q_idx 256 refused (av1_fh_init_key's check)");
+    var sr = hw_seq(64, 64, 8, 0, 1, 1);
+    store64(sr + AV1_SEQ_REDUCED, 1);
+    store64(sr + AV1_SEQ_STILL, 1);
+    assert_eq(av1_fh_init_inter(sr, refs, 100, 1, 0, 1, &e), 0, "a reduced still picture has no inter frame");
+    var fh = av1_fh_init_inter(s, refs, 100, 9, 5, 0x21, &e);
+    assert_eq(e, DR_OK, "a record");
+    assert_eq(av1_fh_order_hint_ref(fh, AV1_LAST_FRAME), 5, "OrderHints[ LAST ] is slot 5's order hint");
+    assert_eq(av1_fh_order_hint_ref(fh, AV1_ALTREF_FRAME), 5, "OrderHints[ ALTREF ] too");
+    assert_eq(av1_fh_order_hint_ref(fh, AV1_INTRA_FRAME), 0, "OrderHints[ INTRA_FRAME ] stays 0");
+    assert_eq(av1_fh_showable_frame(fh), 1, "a shown inter frame is showable");
+    assert_eq(av1_fh_force_integer_mv(fh), 0, "no intra override of force_integer_mv");
+    assert(hw_ifh_ok(s, refs, fh), "the record round trips");
+    var fl = av1_fh_init_inter(s, refs, 0, 9, 5, 1, &e);
+    assert_eq(av1_fh_tx_mode(fl), AV1_ONLY_4X4, "base_q_idx 0: lossless, ONLY_4X4");
+    assert(hw_ifh_ok(s, refs, fl), "a lossless inter frame round trips");
+    return 0;
+}
+
+# references: explicit indices, short signaling (7.8 by hand), skip mode (5.9.23 by hand), OrderHints
+fn test_hw_ifh_refs() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    var refs = hw_refs_ladder(s);   # slot k holds order hint k
+    var fh = hw_inter(s, refs, 100, 4, 0, 1);
+    hw_set_refs(fh, refs, 3, 2, 1, 0, 5, 6, 7);
+    assert(hw_ifh_ok(s, refs, fh), "seven different references round trip");
+    var full = hw_ifh_bits(s, refs, fh);
+    # set_frame_refs( 3, 0 ) at order hint 4 (7.8): curFrameHint 64, shiftedOrderHints slot k = 60 + k; LAST 3 and
+    # GOLDEN 0 used; ALTREF = latest backward (>= 64) = slot 7; BWDREF = earliest backward = 4; ALTREF2 = next = 5;
+    # LAST2 / LAST3 = latest forward (< 64) left = 2, then 1. So { 3, 2, 1, 0, 4, 5, 7 }.
+    hw_set_refs(fh, refs, 3, 2, 1, 0, 4, 5, 7);
+    store64(fh + AV1FH_SHORT_SIGNALING, 1);
+    assert(hw_ifh_ok(s, refs, fh), "short signaling round trips (set_frame_refs derives the rest)");
+    assert_eq(hw_ifh_bits(s, refs, fh), full - 15, "short signaling: last_frame_idx + gold_frame_idx, 15 bits fewer");
+    hw_set_refs(fh, refs, 3, 2, 1, 0, 4, 6, 7);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "short signaling with an ALTREF2 7.8 does not derive refused");
+    store64(fh + AV1FH_SHORT_SIGNALING, 0);
+    assert(hw_ifh_ok(s, refs, fh), "the same indices coded explicitly round trip");
+    # skip mode at order hint 4 over { 3, 2, 1, 0, 5, 6, 7 }: forwardIdx = the latest hint below 4 = LAST (hint 3);
+    # backwardIdx = the earliest above 4 = BWDREF (i 4, hint 5): SkipModeFrame = { LAST, BWDREF } = { 1, 5 }
+    hw_set_refs(fh, refs, 3, 2, 1, 0, 5, 6, 7);
+    store64(fh + AV1FH_REFERENCE_SELECT, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "skip mode allowed but SkipModeFrame[ ] not derived refused");
+    store64(fh + AV1FH_SKIP_MODE_FRAME0, 1);
+    store64(fh + AV1FH_SKIP_MODE_FRAME1, 5);
+    assert(hw_ifh_ok(s, refs, fh), "reference_select with skip mode allowed (SkipModeFrame { 1, 5 }) round trips");
+    var nsm = hw_ifh_bits(s, refs, fh);
+    store64(fh + AV1FH_SKIP_MODE_PRESENT, 1);
+    assert(hw_ifh_ok(s, refs, fh), "skip_mode_present 1 round trips");
+    assert_eq(hw_ifh_bits(s, refs, fh), nsm, "skip_mode_present costs its one bit either way");
+    store64(fh + AV1FH_SKIP_MODE_FRAME1, 6);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "SkipModeFrame[ 1 ] 6 refused (5 derives)");
+    store64(fh + AV1FH_SKIP_MODE_FRAME1, 5);
+    store64(fh + AV1FH_REFERENCE_SELECT, 0);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "skip mode without reference_select refused (not allowed)");
+    store64(fh + AV1FH_SKIP_MODE_PRESENT, 0);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  and SkipModeFrame[ ] must then be 0");
+    store64(fh + AV1FH_SKIP_MODE_FRAME0, 0);
+    store64(fh + AV1FH_SKIP_MODE_FRAME1, 0);
+    assert(hw_ifh_ok(s, refs, fh), "single reference mode round trips");
+    # forward references only (order hint 9, every slot before it): the second-latest forward one pairs with LAST
+    var f9 = hw_inter(s, refs, 100, 9, 0, 1);
+    hw_set_refs(f9, refs, 7, 6, 5, 4, 3, 2, 1);
+    store64(f9 + AV1FH_REFERENCE_SELECT, 1);
+    store64(f9 + AV1FH_SKIP_MODE_FRAME0, 1);
+    store64(f9 + AV1FH_SKIP_MODE_FRAME1, 2);
+    assert(hw_ifh_ok(s, refs, f9), "forward-only skip mode: SkipModeFrame { LAST, LAST2 } (hints 7 and 6)");
+    # OrderHints[ ] are derived, never coded
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 2);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "OrderHints[ LAST ] not slot 3's refused");
+    store64(fh + AV1FH_ORDER_HINTS + (AV1_LAST_FRAME * 8), 3);
+    store64(fh + AV1FH_ORDER_HINTS, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "OrderHints[ INTRA_FRAME ] not 0 refused");
+    store64(fh + AV1FH_ORDER_HINTS, 0);
+    store64(fh + AV1FH_REF_FRAME_IDX + 8, 8);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "ref_frame_idx 8 refused");
+    store64(fh + AV1FH_REF_FRAME_IDX + 8, 2);
+    assert(hw_ifh_ok(s, refs, fh), "restored");
+    assert_eq(hw_ifh_err(s, 0, fh), DR_ERR_BOUNDS, "an inter header without a reference state refused");
+    # without order hints there is no short signaling bit
+    var so = hw_seq(64, 64, 8, 0, 1, 1);
+    store64(so + AV1_SEQ_ENABLE_ORDER_HINT, 0);
+    store64(so + AV1_SEQ_ORDER_HINT_BITS, 0);
+    var ro = av1_ref_state_new();
+    av1_frame_update_refs(ro, so, hw_key(so, 100));
+    var fo = hw_inter(so, ro, 100, 0, 0, 1);
+    assert(hw_ifh_ok(so, ro, fo), "no order hints: an inter frame round trips");
+    store64(fo + AV1FH_SHORT_SIGNALING, 1);
+    assert_eq(hw_ifh_err(so, ro, fo), DR_ERR_BOUNDS, "  and short signaling is refused (not coded)");
+    return 0;
+}
+
+# frame size: frame_size_with_refs( ) (found_ref), an explicit size, superres from a reference
+fn test_hw_ifh_size() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    store64(s + AV1_SEQ_ENABLE_SUPERRES, 1);
+    var refs = av1_ref_state_new();
+    av1_frame_update_refs(refs, s, hw_key(s, 100));
+    # slot 2: a 48x32 frame (render 40x30), explicitly sized
+    var small = hw_inter(s, refs, 100, 1, 0, 4);
+    store64(small + AV1FH_FRAME_SIZE_OVERRIDE, 1);
+    store64(small + AV1FH_UPSCALED_WIDTH, 48);
+    store64(small + AV1FH_FRAME_WIDTH, 48);
+    store64(small + AV1FH_FRAME_HEIGHT, 32);
+    store64(small + AV1FH_RENDER_WIDTH, 40);
+    store64(small + AV1FH_RENDER_HEIGHT, 30);
+    av1_compute_image_size(small);
+    store64(small + AV1FH_MI_COL_STARTS + 8, av1_fh_mi_cols(small));
+    store64(small + AV1FH_MI_ROW_STARTS + 8, av1_fh_mi_rows(small));
+    assert(hw_ifh_ok(s, refs, small), "an explicitly sized 48x32 frame (no reference found) round trips");
+    var explicit_bits = hw_ifh_bits(s, refs, small);
+    av1_frame_update_refs(refs, s, small);
+    # a 48x32 frame again, its size found in LAST2 (slot 2): found_ref 0 for LAST, 1 for LAST2, then superres
+    var f = hw_inter(s, refs, 100, 2, 0, 1);
+    hw_set_refs(f, refs, 0, 2, 0, 0, 0, 0, 0);
+    store64(f + AV1FH_FRAME_SIZE_OVERRIDE, 1);
+    store64(f + AV1FH_UPSCALED_WIDTH, 48);
+    store64(f + AV1FH_FRAME_WIDTH, 48);
+    store64(f + AV1FH_FRAME_HEIGHT, 32);
+    store64(f + AV1FH_RENDER_WIDTH, 40);
+    store64(f + AV1FH_RENDER_HEIGHT, 30);
+    av1_compute_image_size(f);
+    store64(f + AV1FH_MI_COL_STARTS + 8, av1_fh_mi_cols(f));
+    store64(f + AV1FH_MI_ROW_STARTS + 8, av1_fh_mi_rows(f));
+    store64(f + AV1FH_FOUND_REF, 2);
+    assert(hw_ifh_ok(s, refs, f), "found_ref at LAST2 round trips");
+    # the explicit header coded found_ref 0 x 7 + 6 + 6 size bits + render 1 + 16 + 16; this one found_ref 0 1
+    assert_eq(explicit_bits - hw_ifh_bits(s, refs, f), (7 + 12 + 33) - 2,
+      "found: 50 bits fewer than the explicit size");
+    store64(f + AV1FH_FOUND_REF, 0);
+    assert(hw_ifh_ok(s, refs, f), "the same frame with no reference found (explicit size) round trips");
+    store64(f + AV1FH_FOUND_REF, 1);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "found_ref at LAST (a 64x64 slot) refused");
+    store64(f + AV1FH_FOUND_REF, 8);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "found_ref 8 refused");
+    store64(f + AV1FH_FOUND_REF, 2);
+    store64(f + AV1FH_RENDER_WIDTH, 48);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "found_ref whose slot has another render size refused");
+    store64(f + AV1FH_RENDER_WIDTH, 40);
+    # superres on the found size: FrameWidth = the 48 downscaled at denominator 16 (24), MiCols from it
+    store64(f + AV1FH_USE_SUPERRES, 1);
+    store64(f + AV1FH_SUPERRES_DENOM, 16);
+    store64(f + AV1FH_FRAME_WIDTH, av1_superres_downscaled_width(48, 16));
+    av1_compute_image_size(f);
+    store64(f + AV1FH_MI_COL_STARTS + 8, av1_fh_mi_cols(f));
+    assert(hw_ifh_ok(s, refs, f), "found_ref with superres round trips");
+    store64(f + AV1FH_FRAME_SIZE_OVERRIDE, 0);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "found_ref without frame_size_override refused");
+    store64(f + AV1FH_FOUND_REF, 0);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "  and no override: the sequence's 64x64, not 48x32");
+    # the uncoded inter fields stay zero on an intra frame
+    var k = hw_key(s, 100);
+    store64(k + AV1FH_FOUND_REF, 1);
+    assert_eq(hw_fh_err(s, k), DR_ERR_BOUNDS, "a key frame with a found_ref refused");
+    store64(k + AV1FH_FOUND_REF, 0);
+    store64(k + AV1FH_REF_FRAME_IDX + 16, 1);
+    assert_eq(hw_fh_err(s, k), DR_ERR_BOUNDS, "a key frame with a ref_frame_idx refused");
+    store64(k + AV1FH_REF_FRAME_IDX + 16, 0);
+    store64(k + AV1FH_ORDER_HINTS + (AV1_GOLDEN_FRAME * 8), 1);
+    assert_eq(hw_fh_err(s, k), DR_ERR_BOUNDS, "a key frame with an OrderHints[ ] refused");
+    store64(k + AV1FH_ORDER_HINTS + (AV1_GOLDEN_FRAME * 8), 0);
+    store64(k + AV1FH_INTERP_FILTER, AV1_INTERP_SWITCHABLE);
+    assert_eq(hw_fh_err(s, k), DR_ERR_BOUNDS, "a key frame with an interpolation filter refused");
+    store64(k + AV1FH_INTERP_FILTER, 0);
+    store64(k + AV1FH_ALLOW_HIGH_PREC_MV, 1);
+    assert_eq(hw_fh_err(s, k), DR_ERR_BOUNDS, "a key frame with high precision motion refused");
+    store64(k + AV1FH_ALLOW_HIGH_PREC_MV, 0);
+    assert_eq(hw_fh_err(s, k), DR_OK, "restored");
+    return 0;
+}
+
+# the motion syntax: high precision, the interpolation filter, motion modes, reference MVs, warped motion
+fn test_hw_ifh_motion() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    var refs = hw_refs_ladder(s);
+    var fh = hw_inter(s, refs, 100, 4, 3, 1);
+    var base = hw_ifh_bits(s, refs, fh);
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 1);
+    assert(hw_ifh_ok(s, refs, fh), "allow_high_precision_mv 1 round trips");
+    store64(fh + AV1FH_INTERP_FILTER, AV1_INTERP_SWITCHABLE);
+    assert(hw_ifh_ok(s, refs, fh), "a switchable filter round trips");
+    assert_eq(hw_ifh_bits(s, refs, fh), base - 2, "switchable: is_filter_switchable 1 and no filter bits");
+    var flt = 0;
+    while (flt < 4) {
+        store64(fh + AV1FH_INTERP_FILTER, flt);
+        assert(hw_ifh_ok(s, refs, fh), "each of the four frame filters round trips");
+        flt = flt + 1;
+    }
+    store64(fh + AV1FH_INTERP_FILTER, 5);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "interpolation filter 5 refused");
+    store64(fh + AV1FH_INTERP_FILTER, 0);
+    store64(fh + AV1FH_MOTION_MODE_SWITCHABLE, 1);
+    assert(hw_ifh_ok(s, refs, fh), "is_motion_mode_switchable 1 round trips");
+    store64(fh + AV1FH_USE_REF_FRAME_MVS, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "use_ref_frame_mvs without the sequence tool refused");
+    store64(s + AV1_SEQ_ENABLE_REF_FRAME_MVS, 1);
+    assert(hw_ifh_ok(s, refs, fh), "  with enable_ref_frame_mvs it round trips");
+    store64(fh + AV1FH_ALLOW_WARPED, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "allow_warped_motion without the sequence tool refused");
+    store64(s + AV1_SEQ_ENABLE_WARPED, 1);
+    assert(hw_ifh_ok(s, refs, fh), "  with enable_warped_motion it round trips");
+    # integer motion: screen content with force_integer_mv codes no high precision bit
+    store64(s + AV1_SEQ_FORCE_SCT, AV1_SELECT_SCREEN_CONTENT_TOOLS);
+    store64(fh + AV1FH_ALLOW_SCT, 1);
+    store64(fh + AV1FH_FORCE_INT_MV_CODED, 1);
+    store64(fh + AV1FH_FORCE_INT_MV, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "force_integer_mv with allow_high_precision_mv 1 refused");
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 0);
+    assert(hw_ifh_ok(s, refs, fh), "force_integer_mv round trips");
+    store64(fh + AV1FH_FORCE_INT_MV, 0);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "an inter frame's ForceIntegerMv is the coded value");
+    return 0;
+}
+
+# error resilience, hidden frames, switch frames, frame ids
+fn test_hw_ifh_modes() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    store64(s + AV1_SEQ_ENABLE_REF_FRAME_MVS, 1);
+    store64(s + AV1_SEQ_ENABLE_WARPED, 1);
+    var refs = hw_refs_ladder(s);
+    var fh = hw_inter(s, refs, 100, 4, 3, 1);
+    store64(fh + AV1FH_ERROR_RESILIENT, 1);
+    assert(hw_ifh_ok(s, refs, fh), "error resilient: ref_order_hint[ ] coded as recorded, 0s unlike the slots");
+    var i = 0;
+    while (i < 8) { store64(fh + AV1FH_REF_ORDER_HINT_CODED + (i * 8), i); i = i + 1; }
+    assert(hw_ifh_ok(s, refs, fh), "an error resilient inter frame (ref_order_hint[ ] coded) round trips");
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, 0);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  with a primary reference frame refused (not coded)");
+    store64(fh + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+    store64(fh + AV1FH_USE_REF_FRAME_MVS, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  with reference MVs refused (not coded)");
+    store64(fh + AV1FH_USE_REF_FRAME_MVS, 0);
+    store64(fh + AV1FH_ALLOW_WARPED, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  with warped motion refused (not coded)");
+    store64(fh + AV1FH_ALLOW_WARPED, 0);
+    store64(fh + AV1FH_FRAME_SIZE_OVERRIDE, 1);
+    store64(fh + AV1FH_FOUND_REF, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  with a found_ref refused (error resilience sizes explicitly)");
+    store64(fh + AV1FH_FOUND_REF, 0);
+    assert(hw_ifh_ok(s, refs, fh), "  an explicit override round trips");
+    # a hidden inter frame, showable or not
+    var hf = hw_inter(s, refs, 100, 4, 3, 1);
+    store64(hf + AV1FH_SHOW_FRAME, 0);
+    assert(hw_ifh_ok(s, refs, hf), "a hidden showable inter frame round trips");
+    store64(hf + AV1FH_SHOWABLE_FRAME, 0);
+    assert(hw_ifh_ok(s, refs, hf), "a hidden, not showable inter frame round trips");
+    store64(hf + AV1FH_SHOW_FRAME, 1);
+    assert_eq(hw_ifh_err(s, refs, hf), DR_ERR_BOUNDS, "a shown inter frame that is not showable refused");
+    # SWITCH_FRAME: error resilient, override and refresh 255 implied, the size explicit
+    var sw = hw_inter(s, refs, 100, 4, 3, 255);
+    store64(sw + AV1FH_FRAME_TYPE, AV1_SWITCH_FRAME);
+    store64(sw + AV1FH_ERROR_RESILIENT, 1);
+    store64(sw + AV1FH_FRAME_SIZE_OVERRIDE, 1);
+    i = 0;
+    while (i < 8) { store64(sw + AV1FH_REF_ORDER_HINT_CODED + (i * 8), i); i = i + 1; }
+    assert(hw_ifh_ok(s, refs, sw), "a switch frame round trips");
+    store64(sw + AV1FH_REFRESH_FRAME_FLAGS, 1);
+    assert_eq(hw_ifh_err(s, refs, sw), DR_ERR_BOUNDS, "a switch frame refreshing one slot refused (255 implied)");
+    store64(sw + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    store64(sw + AV1FH_ERROR_RESILIENT, 0);
+    assert_eq(hw_ifh_err(s, refs, sw), DR_ERR_BOUNDS, "a switch frame not error resilient refused");
+    store64(sw + AV1FH_ERROR_RESILIENT, 1);
+    store64(sw + AV1FH_FRAME_SIZE_OVERRIDE, 0);
+    assert_eq(hw_ifh_err(s, refs, sw), DR_ERR_BOUNDS, "a switch frame without frame_size_override refused");
+    # frame ids: delta_frame_id_minus_1 = ( current_frame_id - RefFrameId ) mod 2^idLen, minus 1
+    var sf = hw_seq(64, 64, 8, 0, 1, 1);
+    store64(sf + AV1_SEQ_FRAME_ID_PRESENT, 1);
+    store64(sf + AV1_SEQ_DELTA_FID_LEN, 14);
+    store64(sf + AV1_SEQ_ADD_FID_LEN, 1);
+    var rf = av1_ref_state_new();
+    var kf = hw_key(sf, 100);
+    store64(kf + AV1FH_CURRENT_FRAME_ID, 7);
+    av1_frame_update_refs(rf, sf, kf);          # every slot: frame id 7
+    var ff = hw_inter(sf, rf, 100, 1, 0, 1);
+    store64(ff + AV1FH_CURRENT_FRAME_ID, 10);
+    assert(hw_ifh_ok(sf, rf, ff), "frame ids: deltas of 3 round trip");
+    var nb10 = hw_ifh_bits(sf, rf, ff);
+    store64(ff + AV1FH_CURRENT_FRAME_ID, 3);    # wraps: ( 3 + 32768 - 7 ) mod 32768 = 32764 > 2^14
+    assert_eq(hw_ifh_err(sf, rf, ff), DR_ERR_BOUNDS, "a reference 32764 frames back refused (past 2^14)");
+    store64(ff + AV1FH_CURRENT_FRAME_ID, 7);
+    assert_eq(hw_ifh_err(sf, rf, ff), DR_ERR_BOUNDS, "a reference with the current frame id refused (delta 0)");
+    store64(ff + AV1FH_CURRENT_FRAME_ID, 7 + 16384);
+    assert(hw_ifh_ok(sf, rf, ff), "the largest delta, 2^14, round trips");
+    assert_eq(hw_ifh_bits(sf, rf, ff), nb10, "  and costs the same 15 + 7 x 14 id bits");
+    store64(ff + AV1FH_CURRENT_FRAME_ID, 32768);
+    assert_eq(hw_ifh_err(sf, rf, ff), DR_ERR_BOUNDS, "a current_frame_id past 15 bits refused");
+    # the distance wraps at 2^idLen: slots at frame id 32767, the current frame 2 -> DeltaFrameId ( 2 + 32768 - 32767 )
+    var kw = hw_key(sf, 100);
+    store64(kw + AV1FH_CURRENT_FRAME_ID, 32767);
+    var rw = av1_ref_state_new();
+    av1_frame_update_refs(rw, sf, kw);
+    var fw = hw_inter(sf, rw, 100, 1, 0, 1);
+    store64(fw + AV1FH_CURRENT_FRAME_ID, 2);
+    assert(hw_ifh_ok(sf, rw, fw), "frame ids: a delta that wraps past 2^15 (32767 -> 2: 3) round trips");
+    return 0;
+}
+
+# deltas, segmentation and film grain coded against the primary reference frame's saved values
+fn test_hw_ifh_primary() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    var refs = av1_ref_state_new();
+    av1_frame_update_refs(refs, s, hw_key(s, 100));
+    # slot 1: loop filter deltas with LAST changed to 3, and segment 1 at ALT_Q -20
+    var p = hw_inter(s, refs, 100, 1, 0, 2);
+    store64(p + AV1FH_LF_LEVEL, 10);
+    store64(p + AV1FH_LF_DELTA_ENABLED, 1);
+    store64(p + AV1FH_LF_DELTA_UPDATE, 1);
+    store64(p + AV1FH_LF_REF_DELTAS + (AV1_LAST_FRAME * 8), 3);
+    store64(p + AV1FH_SEG_ENABLED, 1);
+    store64(p + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(p + AV1FH_SEG_UPDATE_DATA, 1);
+    store64(p + AV1FH_FEATURE_ENABLED + (((1 * 8) + 0) * 8), 1);
+    store64(p + AV1FH_FEATURE_DATA + (((1 * 8) + 0) * 8), 0 - 20);
+    assert(hw_ifh_ok(s, refs, p), "a frame with deltas and a segment feature round trips");
+    av1_frame_update_refs(refs, s, p);
+    # a frame whose primary reference is that slot: deltas LAST 3 (as loaded), GOLDEN 2 (changed)
+    var f = hw_inter(s, refs, 100, 2, 1, 1);
+    store64(f + AV1FH_PRIMARY_REF_FRAME, 0);   # LAST: slot 1
+    av1_ref_load_seg_lf(refs, 1, f);           # load_previous( ): the frame starts from slot 1's deltas and features
+    store64(f + AV1FH_LF_DELTA_ENABLED, 1);
+    store64(f + AV1FH_LF_LEVEL, 10);
+    store64(f + AV1FH_LF_DELTA_UPDATE, 1);
+    store64(f + AV1FH_LF_REF_DELTAS + (AV1_GOLDEN_FRAME * 8), 2);
+    store64(f + AV1FH_SEG_ENABLED, 1);
+    store64(f + AV1FH_SEG_UPDATE_MAP, 1);
+    store64(f + AV1FH_SEG_UPDATE_DATA, 0);     # the features stay slot 1's
+    assert(hw_ifh_ok(s, refs, f), "deltas and segmentation against the primary reference round trip");
+    var with_primary = hw_ifh_bits(s, refs, f);
+    # against the defaults (no primary reference) the LAST delta differs too: one more su(1+6) coded, and the
+    # segmentation syntax becomes the implied update_map / update_data with every feature coded
+    store64(f + AV1FH_SEG_ENABLED, 0);
+    store64(f + AV1FH_SEG_UPDATE_MAP, 0);
+    memset(f + AV1FH_FEATURE_ENABLED, 0, 64 * 8);
+    memset(f + AV1FH_FEATURE_DATA, 0, 64 * 8);
+    var w1 = hw_ifh_bits(s, refs, f);
+    store64(f + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+    assert(hw_ifh_ok(s, refs, f), "the same deltas with no primary reference round trip");
+    assert_eq(hw_ifh_bits(s, refs, f) - w1, 7, "no primary (still coded, as 111): one delta more coded, 7 bits");
+    store64(f + AV1FH_PRIMARY_REF_FRAME, 0);
+    store64(f + AV1FH_LF_REF_DELTAS + (AV1_LAST_FRAME * 8), 4);
+    assert(hw_ifh_ok(s, refs, f), "LAST 4 against the primary's 3 round trips (coded)");
+    store64(f + AV1FH_LF_DELTA_UPDATE, 0);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "a delta changed without loop_filter_delta_update refused");
+    store64(f + AV1FH_LF_REF_DELTAS + (AV1_LAST_FRAME * 8), 3);
+    store64(f + AV1FH_LF_REF_DELTAS + (AV1_GOLDEN_FRAME * 8), 0 - 1);
+    assert(hw_ifh_ok(s, refs, f), "the primary's own deltas with no update round trip");
+    store64(f + AV1FH_LF_DELTA_ENABLED, 0);
+    assert(hw_ifh_ok(s, refs, f), "  and with loop_filter_delta_enabled 0 (the loaded deltas kept)");
+    # mode deltas too: slot 3 saves loop_filter_mode_deltas { 2, -1 }; a frame on it keeps them uncoded
+    var pm = hw_inter(s, refs, 100, 3, 0, 8);
+    store64(pm + AV1FH_LF_LEVEL, 10);
+    store64(pm + AV1FH_LF_DELTA_ENABLED, 1);
+    store64(pm + AV1FH_LF_DELTA_UPDATE, 1);
+    store64(pm + AV1FH_LF_MODE_DELTAS, 2);
+    store64(pm + AV1FH_LF_MODE_DELTAS + 8, 0 - 1);
+    assert(hw_ifh_ok(s, refs, pm), "a frame with mode deltas { 2, -1 } round trips");
+    av1_frame_update_refs(refs, s, pm);
+    var fm = hw_inter(s, refs, 100, 4, 3, 1);
+    store64(fm + AV1FH_PRIMARY_REF_FRAME, 0);  # LAST: slot 3
+    av1_ref_load_seg_lf(refs, 3, fm);
+    store64(fm + AV1FH_LF_LEVEL, 10);
+    store64(fm + AV1FH_LF_DELTA_ENABLED, 1);
+    assert(hw_ifh_ok(s, refs, fm), "the primary's mode deltas kept with no update round trip");
+    var kept = hw_ifh_bits(s, refs, fm);
+    store64(fm + AV1FH_LF_DELTA_UPDATE, 1);
+    assert(hw_ifh_ok(s, refs, fm), "  and with an update coding nothing changed");
+    assert_eq(hw_ifh_bits(s, refs, fm), kept + 8 + 2, "  which costs just the 8 + 2 update flags (all 0)");
+    store64(fm + AV1FH_LF_MODE_DELTAS + 8, 3);
+    assert_eq(hw_ifh_bits(s, refs, fm), kept + 8 + 2 + 7, "  one changed mode delta: one su(1+6) more");
+    assert(hw_ifh_ok(s, refs, fm), "  and it round trips");
+    # segmentation: the kept features must be the slot's
+    store64(f + AV1FH_SEG_ENABLED, 1);
+    store64(f + AV1FH_SEG_UPDATE_MAP, 1);
+    av1_ref_load_seg_lf(refs, 1, f);
+    store64(f + AV1FH_LF_DELTA_ENABLED, 0);
+    assert(hw_ifh_ok(s, refs, f), "segmentation_update_data 0 with the slot's features round trips");
+    store64(f + AV1FH_FEATURE_DATA + (((1 * 8) + 0) * 8), 0 - 21);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "  a kept feature not the slot's refused");
+    store64(f + AV1FH_SEG_UPDATE_DATA, 1);
+    assert(hw_ifh_ok(s, refs, f), "  coded instead (update_data 1) it round trips");
+    store64(f + AV1FH_SEG_UPDATE_MAP, 0);
+    store64(f + AV1FH_SEG_TEMPORAL_UPDATE, 1);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "temporal_update without update_map refused (not coded)");
+    store64(f + AV1FH_SEG_UPDATE_MAP, 1);
+    assert(hw_ifh_ok(s, refs, f), "temporal_update with update_map round trips");
+    store64(f + AV1FH_SEG_ENABLED, 0);
+    assert_eq(hw_ifh_err(s, refs, f), DR_ERR_BOUNDS, "segmentation off with update flags left refused");
+    # lossless against a primary reference: no loop filter syntax, the defaults, and loop_filter_delta_enabled as
+    # load_previous( ) leaves it (0) — 1 only with no primary reference (setup_past_independence( ))
+    var fl = hw_inter(s, refs, 0, 2, 1, 1);
+    store64(fl + AV1FH_PRIMARY_REF_FRAME, 0);
+    store64(fl + AV1FH_LF_DELTA_ENABLED, 0);
+    assert(hw_ifh_ok(s, refs, fl), "a lossless frame with a primary reference round trips");
+    store64(fl + AV1FH_LF_DELTA_ENABLED, 1);
+    assert_eq(hw_ifh_err(s, refs, fl), DR_ERR_BOUNDS, "  with loop_filter_delta_enabled 1 refused");
+    store64(fl + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+    assert(hw_ifh_ok(s, refs, fl), "  which no primary reference requires");
+    store64(fl + AV1FH_LF_DELTA_ENABLED, 0);
+    assert_eq(hw_ifh_err(s, refs, fl), DR_ERR_BOUNDS, "  0 with no primary reference refused");
+    store64(fl + AV1FH_PRIMARY_REF_FRAME, 8);
+    assert_eq(hw_ifh_err(s, refs, fl), DR_ERR_BOUNDS, "primary_ref_frame 8 refused");
+    return 0;
+}
+
+# global motion: every type, both precisions, against default and primary-reference PrevGmParams
+fn hw_gm(fh, ref, type, p0, p1, p2, p3, p4, p5): i64 {
+    store64(fh + AV1FH_GM_TYPE + ((ref - 1) * 8), type);
+    var o = fh + AV1FH_GM_PARAMS + ((ref - 1) * 48);
+    store64(o + 0, p0);
+    store64(o + 8, p1);
+    store64(o + 16, p2);
+    store64(o + 24, p3);
+    store64(o + 32, p4);
+    store64(o + 40, p5);
+    return 0;
+}
+# encode_subexp( ) and the subexp-with-reference coding, exhaustively against the parser's decode_subexp( ) (5.9.28) and
+# decode_unsigned_subexp_with_ref( ) (5.9.27): every value at sizes either side of each band edge (numSyms = 4 * mk,
+# where the final ns( ) takes over) and every reference at even and odd sizes (2r == mx, where the recentering flips)
+fn hw_subexp_rt(v, n): i64 {
+    var bw = dr_bw_init(16);
+    if (av1_hdrw_subexp(bw, v, n) != DR_OK) { return 0; }
+    var nb = dr_bw_bit_pos(bw);
+    var len = dr_bw_flush(bw);
+    var br = dr_br_init(dr_bw_buf(bw), len + 1);
+    var got = 0 - 1;
+    if (av1_decode_subexp(br, n, &got) != DR_OK) { return 0; }
+    return (got == v) && (dr_br_bit_pos(br) == nb);
+}
+fn hw_subexp_ref_rt(mx, r, x): i64 {
+    var bw = dr_bw_init(16);
+    if (av1_hdrw_unsigned_subexp_with_ref(bw, mx, r, x) != DR_OK) { return 0; }
+    var nb = dr_bw_bit_pos(bw);
+    var len = dr_bw_flush(bw);
+    var br = dr_br_init(dr_bw_buf(bw), len + 1);
+    var got = 0 - 1;
+    if (av1_decode_unsigned_subexp_with_ref(br, mx, r, &got) != DR_OK) { return 0; }
+    return (got == x) && (dr_br_bit_pos(br) == nb);
+}
+fn test_hw_ifh_subexp() {
+    var bad = 0;
+    var cases = 0;
+    var sizes = alloc(15 * 8);
+    store64(sizes + 0, 1); store64(sizes + 8, 2); store64(sizes + 16, 23); store64(sizes + 24, 24);
+    store64(sizes + 32, 25); store64(sizes + 40, 31); store64(sizes + 48, 32); store64(sizes + 56, 33);
+    store64(sizes + 64, 64); store64(sizes + 72, 65); store64(sizes + 80, 128); store64(sizes + 88, 513);
+    store64(sizes + 96, 1024); store64(sizes + 104, 1025); store64(sizes + 112, 8193);
+    var k = 0;
+    while (k < 15) {
+        var n = load64(sizes + (k * 8));
+        var v = 0;
+        while (v < n) {
+            if (hw_subexp_rt(v, n) == 0) { bad = bad + 1; }
+            cases = cases + 1;
+            v = v + 1;
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "encode_subexp: every value at 15 sizes (band edges 24 / 32 / 64 / 128 / 1024) decodes back");
+    assert_eq(cases, 11183, "  11183 cases");
+    var b1 = dr_bw_init(16);
+    assert_eq(av1_hdrw_subexp(b1, 32, 32), DR_ERR_BOUNDS, "  a value past numSyms refused");
+    bad = 0;
+    var mx = 1;
+    while (mx <= 34) {
+        var r = 0;
+        while (r < mx) {
+            var x = 0;
+            while (x < mx) {
+                if (hw_subexp_ref_rt(mx, r, x) == 0) { bad = bad + 1; }
+                x = x + 1;
+            }
+            r = r + 1;
+        }
+        mx = mx + 1;
+    }
+    assert_eq(bad, 0, "subexp with a reference: every (mx, r, x), mx 1..34 (2r == mx at every even mx), decodes back");
+    var b2 = dr_bw_init(16);
+    assert_eq(av1_hdrw_unsigned_subexp_with_ref(b2, 16, 3, 16), DR_ERR_BOUNDS, "  x past mx refused");
+    return 0;
+}
+fn test_hw_ifh_gm() {
+    var s = hw_seq(64, 64, 8, 0, 1, 1);
+    var refs = hw_refs_ladder(s);
+    var one = 1 << 16;
+    var fh = hw_inter(s, refs, 100, 4, 3, 1);
+    # TRANSLATION at quarter pel: precDiff 16 - ( 3 - 1 ) = 14, |decoded| <= 2^8
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_TRANSLATION, 5 << 14, (0 - 256) << 14, one, 0, 0, one);
+    assert(hw_ifh_ok(s, refs, fh), "a TRANSLATION model (quarter pel, -256 at the range's end) round trips");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_TRANSLATION, 257 << 14, 0, one, 0, 0, one);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  257 past the 2^8 range refused");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_TRANSLATION, (5 << 14) + (1 << 13), 0, one, 0, 0, one);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  an eighth-pel value at quarter pel refused (low bits)");
+    store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 1);
+    assert(hw_ifh_ok(s, refs, fh), "  at high precision (precDiff 13) the same value round trips");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_TRANSLATION, 512 << 13, 0, one, 0, 0, one);
+    assert(hw_ifh_ok(s, refs, fh), "  512, the end of the 2^9 high precision range, round trips");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_TRANSLATION, 5 << 13, 0, one + 2, 0, 0, one);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS,
+      "  a TRANSLATION model with a non-identity gm_params[ 2 ] refused");
+    # ROTZOOM: gm_params[ 4 ] = -[ 3 ], [ 5 ] = [ 2 ]; translations at precDiff 10
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_ROTZOOM, (0 - 3) << 10, 7 << 10, one - 8, 6, 0 - 6, one - 8);
+    assert(hw_ifh_ok(s, refs, fh), "a ROTZOOM model round trips");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_ROTZOOM, 0, 0, one - 8, 6, 6, one - 8);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  gm_params[ 4 ] not -gm_params[ 3 ] refused");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_ROTZOOM, 0, 0, one - 7, 0, 0, one - 7);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  an odd alpha (precDiff 1) refused");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_ROTZOOM, 0, 0, one + 8194, 0, 0, one + 8194);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  an alpha past 2^12 refused");
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_ROTZOOM, 0, 0, one + 8192, 0 - 8192, 8192, one + 8192);
+    assert(hw_ifh_ok(s, refs, fh), "  4096 and -4096, the range's ends, round trip");
+    # AFFINE on ALTREF, every parameter coded
+    hw_gm(fh, AV1_ALTREF_FRAME, AV1_GM_AFFINE, 9 << 10, (0 - 9) << 10, one + 40, 0 - 22, 14, one - 30);
+    assert(hw_ifh_ok(s, refs, fh), "an AFFINE model round trips");
+    store64(fh + AV1FH_GM_TYPE + ((AV1_ALTREF_FRAME - 1) * 8), 4);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  type 4 refused");
+    store64(fh + AV1FH_GM_TYPE + ((AV1_ALTREF_FRAME - 1) * 8), AV1_GM_IDENTITY);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  IDENTITY with non-identity parameters refused");
+    hw_gm(fh, AV1_ALTREF_FRAME, AV1_GM_IDENTITY, 0, 0, one, 0, 0, one);
+    assert(hw_ifh_ok(s, refs, fh), "  the identity restored round trips");
+    # against a primary reference's saved models: PrevGmParams moves the subexp reference, never the result
+    hw_gm(fh, AV1_LAST_FRAME, AV1_GM_ROTZOOM, (0 - 3) << 10, 7 << 10, one - 8, 6, 0 - 6, one - 8);
+    av1_frame_update_refs(refs, s, fh);        # slot 0 now holds this frame's models
+    var g = hw_inter(s, refs, 100, 5, 0, 1);
+    store64(g + AV1FH_PRIMARY_REF_FRAME, 0);
+    av1_ref_load_seg_lf(refs, 0, g);
+    store64(g + AV1FH_LF_DELTA_ENABLED, 0);
+    hw_gm(g, AV1_LAST_FRAME, AV1_GM_ROTZOOM, (0 - 3) << 10, 7 << 10, one - 8, 6, 0 - 6, one - 8);
+    assert(hw_ifh_ok(s, refs, g), "the primary reference's own ROTZOOM model round trips");
+    var same = hw_ifh_bits(s, refs, g);
+    store64(g + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+    av1_setup_past_independence(g);
+    store64(g + AV1FH_LF_DELTA_ENABLED, 0);
+    assert(hw_ifh_ok(s, refs, g), "  and against the identity");
+    # by hand: against the model itself every parameter is v = 0 (4 bits); against the identity gm_params[ 2 ] is
+    # v = 7 and [ 3 ] v = 6 (4 bits each), the translations -3 and 7 v = 5 (4 bits) and v = 14 (5: more 1, more 0, 110)
+    assert_eq(hw_ifh_bits(s, refs, g), same + 1, "  repeating the primary's model codes 1 bit shorter (hand count)");
+    store64(g + AV1FH_PRIMARY_REF_FRAME, 0);
+    av1_ref_load_seg_lf(refs, 0, g);
+    store64(g + AV1FH_LF_DELTA_ENABLED, 0);
+    hw_gm(g, AV1_LAST_FRAME, AV1_GM_ROTZOOM, 4095 << 10, 0 - (4096 << 10), one + 8190, 0 - 8192, 8192, one + 8190);
+    assert(hw_ifh_ok(s, refs, g), "  far from the primary's model (the range's ends) round trips");
+    return 0;
+}
+
+# film grain: update_grain and film_grain_params_ref_idx
+fn test_hw_ifh_grain() {
+    var s = hw_seq(64, 64, 10, 0, 1, 1);
+    store64(s + AV1_SEQ_FILM_GRAIN_PRESENT, 1);
+    var refs = av1_ref_state_new();
+    var k = hw_key(s, 100);
+    hw_grain(k, 2, 0, 10, 10);
+    av1_frame_update_refs(refs, s, k);         # every slot saves this grain
+    var fh = hw_inter(s, refs, 100, 1, 2, 1);
+    hw_grain(fh, 4, 0, 3, 3);
+    assert(hw_ifh_ok(s, refs, fh), "an inter frame's own grain (update_grain 1) round trips");
+    store64(fh + AV1FH_GRAIN + AV1FG_REF_IDX, 2);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  with a ref index left refused (not coded)");
+    # update_grain 0: the block is slot 2's, the seed this frame's
+    memcpy(fh + AV1FH_GRAIN, av1_ref_saved_grain(refs, 2), AV1FG_SIZE);
+    store64(fh + AV1FH_GRAIN + AV1FG_SEED, 0x1234);
+    store64(fh + AV1FH_GRAIN + AV1FG_UPDATE, 0);
+    store64(fh + AV1FH_GRAIN + AV1FG_REF_IDX, 2);
+    assert(hw_ifh_ok(s, refs, fh), "reloaded grain (update_grain 0, slot 2) round trips");
+    assert_eq(hw_ifh_bits(s, refs, fh), hw_ifh_bits(s, refs, hw_inter(s, refs, 100, 1, 2, 1)) + 16 + 1 + 3,
+      "  costing the seed, update_grain and the index past the no-grain frame's apply bit: 20 bits");
+    store64(fh + AV1FH_GRAIN + AV1FG_REF_IDX, 3);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  a slot no reference names refused (6.8.20)");
+    store64(fh + AV1FH_GRAIN + AV1FG_REF_IDX, 2);
+    store64(fh + AV1FH_GRAIN + AV1FG_AR_LAG, 1);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "  a reloaded block that is not the slot's refused");
+    store64(fh + AV1FH_GRAIN + AV1FG_AR_LAG, load64(av1_ref_saved_grain(refs, 2) + AV1FG_AR_LAG));
+    assert(hw_ifh_ok(s, refs, fh), "  restored");
+    store64(fh + AV1FH_FRAME_TYPE, AV1_SWITCH_FRAME);
+    store64(fh + AV1FH_ERROR_RESILIENT, 1);
+    store64(fh + AV1FH_FRAME_SIZE_OVERRIDE, 1);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    assert_eq(hw_ifh_err(s, refs, fh), DR_ERR_BOUNDS, "a switch frame cannot reload grain (update_grain implied 1)");
     return 0;
 }
 
@@ -2239,6 +2963,17 @@ fn main() {
     test_hw_fh_uncoded();
     test_hw_fh_large();
     test_hw_fh_layers();
+    test_group("header writers: inter frame headers (against a reference state)");
+    test_hw_ifh_kat();
+    test_hw_ifh_init();
+    test_hw_ifh_refs();
+    test_hw_ifh_size();
+    test_hw_ifh_motion();
+    test_hw_ifh_modes();
+    test_hw_ifh_primary();
+    test_hw_ifh_subexp();
+    test_hw_ifh_gm();
+    test_hw_ifh_grain();
     test_group("header writers: OBUs and tile groups");
     test_hw_obu_kat();
     test_hw_tile_group();

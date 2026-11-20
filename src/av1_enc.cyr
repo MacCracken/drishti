@@ -1700,7 +1700,7 @@ fn av1_encode_keyframe(src, base_q_idx, block_size, sb128, decide, out_len, out_
     store64(sizes, tlen);
     var rc = av1_td_write_obu(bw);
     if (rc == DR_OK) { rc = av1_seq_write_obu(bw, s); }
-    if (rc == DR_OK) { rc = av1_frame_write_obu(bw, s, fh, 0, 0, 0, tiles, sizes); }
+    if (rc == DR_OK) { rc = av1_frame_write_obu(bw, s, 0, fh, 0, 0, 0, tiles, sizes); }
     if (rc != DR_OK) { store64(out_err, rc); return 0; }
     var n = dr_bw_flush(bw);
     if (dr_bw_err(bw) != DR_OK) { store64(out_err, dr_bw_err(bw)); return 0; }

@@ -589,12 +589,13 @@ echo "--- refused streams: what libaom and dav1d refuse, refused for the same re
 for c in $REFUSED_CASES; do refused_case "$c"; done
 
 # ---- HEADER WRITERS (0.8.6) — src/av1_hdrw.cyr through programs/hdr-rewrite.cyr ----
-# REWRITE: every sequence header and every intra frame header of a stream, parsed and written back, must be exactly the
-# bits it was parsed from. One coded value outside its clip range (a segmentation feature, 5.9.14's Clip3) has two
-# codings of one header: EQUIV — the rewrite parses back to the same record — passes. Inter frame headers are roadmap
-# 0.8.8, and a header naming a reference slot cannot parse against the empty state each header gets, so those are
-# counted, not rewritten; a sequence or intra frame header that does not parse is a failure. One case per stream: the
-# committed reproducers here (no libaom), the published vectors and THIS run's generated streams at the end.
+# REWRITE: every sequence header and every frame header of a stream, parsed and written back, must be exactly the
+# bits it was parsed from. Each frame header is read and written against the reference state the stream has built
+# by then (0.8.8: the inter frame headers, with their primary reference frames, reference-sized frames, global motion
+# and reloaded film grain). One coded value outside its clip range (a segmentation feature, 5.9.14's Clip3) has two
+# codings of one header: EQUIV — the rewrite parses back to the same record — passes. A header that does not parse is
+# a failure. One case per stream: the committed reproducers here (no libaom), the published vectors and THIS run's
+# generated streams at the end, where the CENSUS of the inter syntax they reached is held too (hdr_census).
 # WRITER STREAMS: keyframes the writers alone build (TD + sequence header OBU + frame OBU around the tile writer's
 # all-skip DC tile) at 8-bit 4:2:0, monochrome, 10-bit, 4:4:4 and 12-bit 4:2:2, each decoded by drishti to aomdec's
 # bytes, with dav1d agreeing (vs_judge) — the acceptance shape of batch 0.8.6, with no hand-built byte in the stream.
@@ -799,7 +800,17 @@ rdcase() { # spec = rdKIND_WxH:MAX:DA:BA:DB:BB
         *) echo "  $n: SETUP FAILED (the RD curves: $verdict)"; fail=$((fail+1)) ;;
     esac
 }
-hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_inter=0; hdr_refs=0; hdr_streams=0
+hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_i_ok=0; hdr_i_n=0; hdr_streams=0
+# the census of the inter syntax rewritten (programs/hdr-rewrite.cyr's CENSUS line, its Av1HrCensus order), summed over
+# every stream of every group
+HDR_CENSUS_NAMES="primary_ref error_resilient switch_frame short_signaling size_override found_ref frame_ids
+high_precision switchable_filter frame_filter motion_mode_switchable ref_frame_mvs reference_select skip_mode
+warped_motion gm_translation gm_rotzoom gm_affine segmentation seg_kept_features seg_kept_map lf_delta_update
+film_grain grain_reloaded hidden_frame"
+# the branches no stream drishti has reaches, held by the unit suite and the fuzz harness alone: libaom compiles short
+# signaling out (FRAME_REFS_SHORT_SIGNALING 0) and searches ROTZOOM models only
+HDR_CENSUS_UNREACHED="short_signaling gm_translation gm_affine"
+hdr_cen=(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
 hdr_rewrite_case() { # ivf
     local f="$1" n out rc sum
     n=$(basename "$f" .ivf)
@@ -815,20 +826,50 @@ hdr_rewrite_case() { # ivf
         fail=$((fail+1)); return
     fi
     local v=()
-    read -r -a v <<< "$(echo "$sum" | sed -E 's/.*seq=([0-9]+)\/([0-9]+) intra=([0-9]+)\/([0-9]+) inter_skipped=([0-9]+) equiv=([0-9]+) unparsed=[0-9]+ needs_refs=([0-9]+).*/\1 \2 \3 \4 \5 \6 \7/')"
+    read -r -a v <<< "$(echo "$sum" | sed -E 's/.*seq=([0-9]+)\/([0-9]+) intra=([0-9]+)\/([0-9]+) inter=([0-9]+)\/([0-9]+) equiv=([0-9]+) unparsed=[0-9]+.*/\1 \2 \3 \4 \5 \6 \7/')"
     if [ "${#v[@]}" -ne 7 ] || [ "${v[1]}" -eq 0 ]; then
         echo "  rewrite $n: REGRESSED (no sequence header rewritten: $sum)"; fail=$((fail+1)); return
     fi
+    local c=()
+    read -r -a c <<< "$(echo "$out" | sed -n 's/^CENSUS //p')"
+    if [ "${#c[@]}" -ne "${#hdr_cen[@]}" ]; then
+        echo "  rewrite $n: REGRESSED (no CENSUS line of ${#hdr_cen[@]} counts)"; fail=$((fail+1)); return
+    fi
+    local k
+    for k in "${!c[@]}"; do hdr_cen[k]=$((hdr_cen[k]+c[k])); done
     hdr_s_ok=$((hdr_s_ok+v[0])); hdr_s_n=$((hdr_s_n+v[1])); hdr_f_ok=$((hdr_f_ok+v[2])); hdr_f_n=$((hdr_f_n+v[3]))
-    hdr_inter=$((hdr_inter+v[4])); hdr_eq=$((hdr_eq+v[5])); hdr_refs=$((hdr_refs+v[6])); hdr_streams=$((hdr_streams+1))
+    hdr_i_ok=$((hdr_i_ok+v[4])); hdr_i_n=$((hdr_i_n+v[5])); hdr_eq=$((hdr_eq+v[6])); hdr_streams=$((hdr_streams+1))
     pass=$((pass+1))
 }
 hdr_group() { # label ivf... — one rewrite case per stream, then the group's header counts
     local label="$1" f; shift
-    hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_inter=0; hdr_refs=0; hdr_streams=0
+    hdr_s_ok=0; hdr_s_n=0; hdr_f_ok=0; hdr_f_n=0; hdr_eq=0; hdr_i_ok=0; hdr_i_n=0; hdr_streams=0
     for f in "$@"; do [ -f "$f" ] && hdr_rewrite_case "$f"; done
-    echo "  rewrite $label: $hdr_streams streams; sequence headers $hdr_s_ok/$hdr_s_n and intra frame headers" \
-      "$hdr_f_ok/$hdr_f_n bit-exact, $hdr_eq EQUIV; $hdr_inter inter + $hdr_refs reference-naming headers not rewritten"
+    echo "  rewrite $label: $hdr_streams streams; sequence headers $hdr_s_ok/$hdr_s_n, intra and shown-existing frame" \
+      "headers $hdr_f_ok/$hdr_f_n and inter frame headers $hdr_i_ok/$hdr_i_n bit-exact, $hdr_eq EQUIV"
+}
+# every branch of the inter header writer that a stream reaches must have been reached by one, summed over all three
+# groups (a corpus that stops reaching one stops being evidence for it); the unreached ones are named, not passed
+hdr_census() {
+    local names=() k line="" zero="" u
+    read -r -a names <<< "$(echo $HDR_CENSUS_NAMES)"
+    for k in "${!names[@]}"; do
+        line="$line ${names[k]}=${hdr_cen[k]}"
+        case " $HDR_CENSUS_UNREACHED " in
+            *" ${names[k]} "*)
+                if [ "${hdr_cen[k]}" -ne 0 ]; then zero="$zero ${names[k]}(now-reached:remove-from-HDR_CENSUS_UNREACHED)"; fi ;;
+            *) if [ "${hdr_cen[k]}" -eq 0 ]; then zero="$zero ${names[k]}"; fi ;;
+        esac
+    done
+    echo "  rewrite census (inter headers):$line"
+    if [ -n "$zero" ]; then
+        echo "  rewrite census: REGRESSED (branches the corpus no longer reaches, or newly reaches:$zero)"
+        fail=$((fail+1))
+    else
+        echo "  rewrite census: every branch reached but$(for u in $HDR_CENSUS_UNREACHED; do printf ' %s' "$u"; done)," \
+          "which the unit suite and tests/av1_hdrw.fcyr hold"
+        pass=$((pass+1))
+    fi
 }
 writer_streams() {
     rm -f build/writer-*.ivf
@@ -843,7 +884,7 @@ writer_streams() {
         vs_judge "$c" 1
     done
 }
-echo "--- header writers: every sequence and intra frame header rewritten bit-exact (committed reproducers) ---"
+echo "--- header writers: every sequence and frame header rewritten bit-exact (committed reproducers) ---"
 hdr_group "committed reproducers" tests/repro/*.ivf tests/repro/refused/*.ivf
 
 # ---- OOM FAULT INJECTION (0.8.5) — scripts/oom-sweep.sh, over the committed reproducers (no libaom needed) ----
@@ -2708,6 +2749,8 @@ for v in $PUBLISHED $PUBLISHED_MKV; do [ -f "$VDIR/$v.ivf" ] && pubivf+=("$VDIR/
 hdr_group "published vectors" "${pubivf[@]}"
 mapfile -t genivf < <(find "$WORK" -maxdepth 1 -name '*.ivf' -newer "$HDR_STAMP" | sort)
 hdr_group "generated this run" "${genivf[@]}"
+if [ "${#pubivf[@]}" -gt 0 ]; then hdr_census
+else skip_case "rewrite_census" "no published vectors (the census needs the whole corpus)"; fi
 echo "--- header writers: streams the writers alone build, decoded by drishti = aomdec = dav1d ---"
 writer_streams
 

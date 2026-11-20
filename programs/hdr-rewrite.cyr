@@ -1,20 +1,20 @@
 # drishti header rewrite (0.8.6) — the header writers (src/av1_hdrw.cyr) checked against streams drishti did not make.
 #
 # REWRITE mode (the default): reads build/hdr-rewrite-input.ivf, and for every sequence header OBU and every frame
-# header (OBU_FRAME_HEADER, or the header of an OBU_FRAME) of an intra frame or a shown existing frame, parses it
-# (av1_seq_parse / av1_frame_parse_uncompressed_header), writes the record back (av1_seq_write /
-# av1_frame_write_uncompressed_header) and compares the written bits with the ones the parse consumed, bit for bit.
-# An intra frame header's values do not depend on the reference state (its size comes from the sequence header, it
-# has no primary reference frame, its ref_order_hint[ ] are read raw), so each is parsed against a fresh one, and
-# must parse ("frame UNPARSED intra" otherwise). Inter frame headers are counted and skipped: the writer does not
-# write them yet (roadmap 0.8.8). A header that names a reference slot (an inter frame, or a shown existing frame of a
-# slot the empty state does not hold) can fail that parse: it is counted as needs_refs, not rewritten.
+# header (OBU_FRAME_HEADER, or the header of an OBU_FRAME) parses it (av1_seq_parse /
+# av1_frame_parse_uncompressed_header), writes the record back (av1_seq_write / av1_frame_write_uncompressed_header)
+# and compares the written bits with the ones the parse consumed, bit for bit. Every frame header is parsed and
+# written against the reference state the stream has built so far, as a decoder holds it at the header level:
+# av1_frame_update_refs after each frame (0.8.8; before it, inter frame headers were counted and skipped). That is all
+# a header reads from it — order hints, sizes, frame ids, and each slot's saved deltas, segmentation features, global
+# motion and film grain. The writer is handed the state from BEFORE the parse, which changes RefValid (the writer
+# reads none of it). Every header must parse ("frame UNPARSED" otherwise).
 # A header whose rewrite differs is re-parsed: if the record is identical it is EQUIV, not a failure — a coded value
 # outside its clip range (5.9.14's Clip3 of a segmentation feature) has two codings of one header, and the record keeps
 # only the clipped value.
 #   stdout: "seq <k> OK|EQUIV|DIFF ...", "frame <k> OK|EQUIV|DIFF ..." for each header, then
-#           "SUMMARY seq=<ok>/<n> intra=<ok>/<n> inter_skipped=<n> equiv=<n> unparsed=<n> needs_refs=<n>"
-#           (unparsed = sequence headers and intra frame headers that did not parse: each one a failure)
+#           "SUMMARY seq=<ok>/<n> intra=<ok>/<n> inter=<ok>/<n> equiv=<n> unparsed=<n>"
+#           (intra counts the intra and shown-existing headers; unparsed = headers that did not parse: each a failure)
 #
 # EMIT mode (when build/hdr-rewrite.emit exists): writes streams made by the writers ALONE — temporal delimiter,
 # sequence header OBU, frame OBU with an all-skip DC keyframe tile from the plan-driven tile writer — to
@@ -69,9 +69,62 @@ var Hr_SeqOk = 0;
 var Hr_SeqN = 0;
 var Hr_FrOk = 0;
 var Hr_FrN = 0;
-var Hr_Inter = 0;
+# the inter syntax the rewritten headers reached, one counter per branch of the writer (the CENSUS line): a branch the
+# corpus never takes is one the bit-exact rewrite says nothing about
+var Hr_Census = 0;   # Av1HrCensus counters, 8 bytes each
+enum Av1HrCensus {
+    HRC_PRIMARY = 0; HRC_ER = 1; HRC_SWITCH = 2; HRC_SHORT = 3; HRC_OVERRIDE = 4; HRC_FOUND = 5; HRC_FRAME_ID = 6;
+    HRC_HP = 7; HRC_SWITCHABLE = 8; HRC_FILTER = 9; HRC_MMS = 10; HRC_URFM = 11; HRC_REFSEL = 12; HRC_SKIPMODE = 13;
+    HRC_WARPED = 14; HRC_GM_TRANS = 15; HRC_GM_ROTZOOM = 16; HRC_GM_AFFINE = 17; HRC_SEG = 18; HRC_SEG_KEEP = 19;
+    HRC_SEG_MAP_KEEP = 20; HRC_LF_DELTA = 21; HRC_GRAIN = 22; HRC_GRAIN_LOAD = 23; HRC_HIDDEN = 24; HRC_N = 25;
+}
+fn hr_census_add(k, cond): i64 {
+    if (cond) { store64(Hr_Census + (k * 8), load64(Hr_Census + (k * 8)) + 1); }
+    return 0;
+}
+fn hr_census(s, fh): i64 {
+    hr_census_add(HRC_PRIMARY, av1_fh_primary_ref_frame(fh) != AV1_PRIMARY_REF_NONE);
+    hr_census_add(HRC_ER, av1_fh_error_resilient_mode(fh));
+    hr_census_add(HRC_SWITCH, av1_fh_frame_type(fh) == AV1_SWITCH_FRAME);
+    hr_census_add(HRC_SHORT, av1_fh_frame_refs_short_signaling(fh));
+    hr_census_add(HRC_OVERRIDE, av1_fh_frame_size_override(fh));
+    hr_census_add(HRC_FOUND, load64(fh + AV1FH_FOUND_REF) != 0);
+    hr_census_add(HRC_FRAME_ID, av1_seq_frame_id_present(s));
+    hr_census_add(HRC_HP, av1_fh_allow_high_precision_mv(fh));
+    hr_census_add(HRC_SWITCHABLE, av1_fh_interpolation_filter(fh) == AV1_INTERP_SWITCHABLE);
+    hr_census_add(HRC_FILTER, av1_fh_interpolation_filter(fh) != AV1_INTERP_SWITCHABLE);
+    hr_census_add(HRC_MMS, av1_fh_is_motion_mode_switchable(fh));
+    hr_census_add(HRC_URFM, av1_fh_use_ref_frame_mvs(fh));
+    hr_census_add(HRC_REFSEL, av1_fh_reference_select(fh));
+    hr_census_add(HRC_SKIPMODE, av1_fh_skip_mode_present(fh));
+    hr_census_add(HRC_WARPED, av1_fh_allow_warped_motion(fh));
+    var ref = AV1_LAST_FRAME;
+    var gt = 0;
+    var gr = 0;
+    var ga = 0;
+    while (ref <= AV1_ALTREF_FRAME) {
+        if (av1_fh_gm_type(fh, ref) == AV1_GM_TRANSLATION) { gt = 1; }
+        if (av1_fh_gm_type(fh, ref) == AV1_GM_ROTZOOM) { gr = 1; }
+        if (av1_fh_gm_type(fh, ref) == AV1_GM_AFFINE) { ga = 1; }
+        ref = ref + 1;
+    }
+    hr_census_add(HRC_GM_TRANS, gt);
+    hr_census_add(HRC_GM_ROTZOOM, gr);
+    hr_census_add(HRC_GM_AFFINE, ga);
+    var seg = av1_fh_segmentation_enabled(fh);
+    hr_census_add(HRC_SEG, seg);
+    hr_census_add(HRC_SEG_KEEP, seg && (load64(fh + AV1FH_SEG_UPDATE_DATA) == 0));
+    hr_census_add(HRC_SEG_MAP_KEEP, seg && (load64(fh + AV1FH_SEG_UPDATE_MAP) == 0));
+    hr_census_add(HRC_LF_DELTA, load64(fh + AV1FH_LF_DELTA_UPDATE));
+    var g = fh + AV1FH_GRAIN;
+    hr_census_add(HRC_GRAIN, load64(g + AV1FG_APPLY));
+    hr_census_add(HRC_GRAIN_LOAD, load64(g + AV1FG_APPLY) && (load64(g + AV1FG_UPDATE) == 0));
+    hr_census_add(HRC_HIDDEN, av1_fh_show_frame(fh) == 0);
+    return 0;
+}
+var Hr_InOk = 0;
+var Hr_InN = 0;
 var Hr_Unparsed = 0;
-var Hr_NeedsRefs = 0;
 var Hr_Equiv = 0;
 
 # 1 when records a and b (size bytes) agree everywhere but the 8-byte field at skip (the bit count each parse records)
@@ -111,6 +164,13 @@ fn hr_rewrite(): i64 {
     var r = dr_ivf_reader_init(buf, n, &e);
     if (r == 0) { hr_puts("SUMMARY not-an-ivf\n"); return 1; }
     var seq = 0;
+    var dead = 0;
+    Hr_Census = alloc(HRC_N * 8);
+    memset(Hr_Census, 0, HRC_N * 8);
+    var refs = av1_ref_state_new();
+    var snap = alloc(AV1REF_SIZE);
+    var snap2 = alloc(AV1REF_SIZE);
+    if ((refs == 0) || (snap == 0) || (snap2 == 0)) { hr_puts("SUMMARY oom\n"); return 1; }
     var pp = 0;
     var ps = 0;
     var pt = 0;
@@ -154,58 +214,52 @@ fn hr_rewrite(): i64 {
                     }
                 }
             }
-            if (((t == AV1_OBU_FRAME_HEADER) || (t == AV1_OBU_FRAME)) && (seq != 0)) {
+            if (((t == AV1_OBU_FRAME_HEADER) || (t == AV1_OBU_FRAME)) && (seq != 0) && (dead == 0)) {
+                memcpy(snap, refs, AV1REF_SIZE);   # the state the header is read against (the parse changes RefValid)
                 var fe = 0;
-                var fh = av1_frame_parse_uncompressed_header(seq, av1_ref_state_new(), av1_obu_tid(o), av1_obu_sid(o),
-                  pp + off, sz, &fe);
+                var fh = av1_frame_parse_uncompressed_header(seq, refs, av1_obu_tid(o), av1_obu_sid(o), pp + off, sz,
+                  &fe);
                 if ((fh == 0) || (fe != DR_OK)) {
-                    # each header is parsed against an EMPTY reference state, so one that names a reference (an inter
-                    # frame, a shown existing frame) can fail here, and is not this writer's (roadmap 0.8.8). An intra
-                    # one must parse: its first bits are show_existing_frame 0 and frame_type KEY / INTRA_ONLY.
-                    var b0 = load8(pp + off);
-                    var intra_hdr = av1_seq_reduced(seq);
-                    var ft = (b0 >> 5) & 3;
-                    if (((b0 & 0x80) == 0) && ((ft == AV1_KEY_FRAME) || (ft == AV1_INTRA_ONLY_FRAME))) {
-                        intra_hdr = 1;
-                    }
-                    if (intra_hdr) {
-                        Hr_Unparsed = Hr_Unparsed + 1;
-                        hr_puts("frame UNPARSED intra err=");
-                        hr_putn(fe);
-                        hr_puts("\n");
-                    } else {
-                        Hr_NeedsRefs = Hr_NeedsRefs + 1;
-                    }
+                    Hr_Unparsed = Hr_Unparsed + 1;
+                    hr_puts("frame UNPARSED err=");
+                    hr_putn(fe);
+                    hr_puts("\n");
+                    dead = 1;   # the stream's reference state is lost: no later header can be read
                 }
                 else {
-                    if ((av1_fh_show_existing_frame(fh) == 0) && (av1_fh_frame_is_intra(fh) == 0)) {
-                        Hr_Inter = Hr_Inter + 1;
-                    } else {
-                        Hr_FrN = Hr_FrN + 1;
-                        var bw2 = dr_bw_init(256);
-                        var rc2 = av1_frame_write_uncompressed_header(bw2, seq, fh, av1_obu_tid(o), av1_obu_sid(o));
-                        var nb2 = av1_fh_bits_consumed(fh);
-                        var wb2 = dr_bw_bit_pos(bw2);
-                        dr_bw_flush(bw2);
-                        var ok2 = 0;
-                        if ((rc2 == DR_OK) && (wb2 == nb2) && hr_bits_equal(pp + off, dr_bw_buf(bw2), nb2)) { ok2 = 1; }
-                        if (ok2) { Hr_FrOk = Hr_FrOk + 1; }
-                        if ((ok2 == 0) && (rc2 == DR_OK)) {
-                            var re2 = 0;
-                            var rf = av1_frame_parse_uncompressed_header(seq, av1_ref_state_new(), av1_obu_tid(o),
-                              av1_obu_sid(o), dr_bw_buf(bw2), (wb2 + 7) >> 3, &re2);
-                            if ((rf != 0) && (re2 == DR_OK)
-                              && hr_records_equal(rf, fh, AV1FH_SIZE, AV1FH_BITS_CONSUMED)) {
-                                Hr_Equiv = Hr_Equiv + 1;
-                                ok2 = 2;
-                            }
-                        }
-                        if (ok2 == 2) { hr_puts("frame "); hr_putn(Hr_FrN); hr_puts(" EQUIV\n"); }
-                        else {
-                            hr_report("frame", Hr_FrN, ok2, nb2, wb2,
-                              hr_first_diff(pp + off, dr_bw_buf(bw2), av1_min(nb2, wb2)), rc2);
+                    var inter = (av1_fh_show_existing_frame(fh) == 0) && (av1_fh_frame_is_intra(fh) == 0);
+                    if (inter) { Hr_InN = Hr_InN + 1; } else { Hr_FrN = Hr_FrN + 1; }
+                    var bw2 = dr_bw_init(256);
+                    var rc2 = av1_frame_write_uncompressed_header(bw2, seq, snap, fh, av1_obu_tid(o), av1_obu_sid(o));
+                    var nb2 = av1_fh_bits_consumed(fh);
+                    var wb2 = dr_bw_bit_pos(bw2);
+                    dr_bw_flush(bw2);
+                    var ok2 = 0;
+                    if ((rc2 == DR_OK) && (wb2 == nb2) && hr_bits_equal(pp + off, dr_bw_buf(bw2), nb2)) { ok2 = 1; }
+                    if ((ok2 == 0) && (rc2 == DR_OK)) {
+                        var re2 = 0;
+                        memcpy(snap2, snap, AV1REF_SIZE);
+                        var rf = av1_frame_parse_uncompressed_header(seq, snap2, av1_obu_tid(o), av1_obu_sid(o),
+                          dr_bw_buf(bw2), (wb2 + 7) >> 3, &re2);
+                        if ((rf != 0) && (re2 == DR_OK) && hr_records_equal(rf, fh, AV1FH_SIZE, AV1FH_BITS_CONSUMED)) {
+                            Hr_Equiv = Hr_Equiv + 1;
+                            ok2 = 2;
                         }
                     }
+                    var kind = "frame";
+                    var kn = Hr_FrN;
+                    if (inter) { kind = "inter"; kn = Hr_InN; }
+                    if (ok2 != 0) {
+                        if (inter) { Hr_InOk = Hr_InOk + 1; hr_census(seq, fh); } else { Hr_FrOk = Hr_FrOk + 1; }
+                    }
+                    if (ok2 == 2) { hr_puts(kind); hr_puts(" "); hr_putn(kn); hr_puts(" EQUIV\n"); }
+                    else {
+                        hr_report(kind, kn, ok2, nb2, wb2, hr_first_diff(pp + off, dr_bw_buf(bw2), av1_min(nb2, wb2)),
+                          rc2);
+                    }
+                    # 7.20 at the header level: what the next header reads (a decoder saves the decoded data beside it)
+                    var ue = av1_frame_update_refs(refs, seq, fh);
+                    if (ue != DR_OK) { hr_puts("SUMMARY oom\n"); return 1; }
                 }
             }
         }
@@ -218,14 +272,22 @@ fn hr_rewrite(): i64 {
     hr_putn(Hr_FrOk);
     hr_puts("/");
     hr_putn(Hr_FrN);
-    hr_puts(" inter_skipped=");
-    hr_putn(Hr_Inter);
+    hr_puts(" inter=");
+    hr_putn(Hr_InOk);
+    hr_puts("/");
+    hr_putn(Hr_InN);
     hr_puts(" equiv=");
     hr_putn(Hr_Equiv);
     hr_puts(" unparsed=");
     hr_putn(Hr_Unparsed);
-    hr_puts(" needs_refs=");
-    hr_putn(Hr_NeedsRefs);
+    hr_puts("\n");
+    hr_puts("CENSUS");
+    var ci = 0;
+    while (ci < HRC_N) {
+        hr_puts(" ");
+        hr_putn(load64(Hr_Census + (ci * 8)));
+        ci = ci + 1;
+    }
     hr_puts("\n");
     return 0;
 }
@@ -273,7 +335,7 @@ fn hr_emit_one(path, w, h, bd, mono, subx, suby, qidx): i64 {
     var bw = dr_bw_init(4096);
     av1_td_write_obu(bw);
     av1_seq_write_obu(bw, s);
-    var rc = av1_frame_write_obu(bw, s, fh, 0, 0, 0, tiles, sizes);
+    var rc = av1_frame_write_obu(bw, s, 0, fh, 0, 0, 0, tiles, sizes);
     if (rc != DR_OK) { return rc; }
     var n = dr_bw_flush(bw);
     var iw = dr_ivf_writer_init(DR_FOURCC_AV01, w, h, 30, 1);

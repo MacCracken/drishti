@@ -1,25 +1,26 @@
 # @public — drishti AV1: the header WRITERS (the encode lane) — sequence_header_obu (5.5), the uncompressed frame
-# header (5.9.2) of an intra frame or a shown existing frame, the tile group framing (5.11.1), and the OBUs that carry
-# them (5.3.1 / 5.10). Each is the exact inverse of the parser that reads it, writing from the SAME record:
+# header (5.9.2) of any frame, the tile group framing (5.11.1), and the OBUs that carry them (5.3.1 / 5.10). Each is
+# the exact inverse of the parser that reads it, writing from the SAME record:
 #   av1_seq_write              <- av1_seq_parse                          (src/av1_seq.cyr,   Av1Seq)
 #   av1_frame_write_uncompressed_header <- av1_frame_parse_uncompressed_header (src/av1_frame.cyr, Av1FrameHeader)
 # so a record a parser produced writes back to the bits it was parsed from (scripts/conformance.sh's "header rewrite"
-# section checks that on every sequence header and intra frame header of the corpus, with programs/hdr-rewrite.cyr),
-# and a record the encoder fills (av1_seq_init / av1_fh_init_key below) writes a header its parser reads back as that
-# record.
+# section checks that on every sequence header and frame header of the corpus, inter frames against the reference
+# state the stream builds, with programs/hdr-rewrite.cyr), and a record the encoder fills (av1_seq_init /
+# av1_fh_init_key / av1_fh_init_inter below) writes a header its parser reads back as that record.
 #
 # FLAT module (no includes) — wiring in src/main.cyr, after src/av1_frame.cyr (the records, their accessors and
 # derivations, av1_tile_log2, the seg feature tables) and src/av1_obu.cyr (av1_obu_write_header, trailing bits).
 #
-# Scope: the INTRA frame header (KEY_FRAME and INTRA_ONLY_FRAME) and show_existing_frame — what the encode lane emits
-# through batch 0.8.7. An inter frame's header (references, motion, skip mode, global motion) returns
-# DR_ERR_UNSUPPORTED until the inter encoder needs it (roadmap 0.8.8). Values a field cannot carry, or that its parser
-# would read back as something else, return DR_ERR_BOUNDS: the writer never emits a header that means a different
-# record. That includes the fields the syntax does not code at all — a slot past a count, a strength the frame does
-# not signal, a derived value — which must hold what the parser leaves there (zero, or the default it derives). So for
-# every intra record R it accepts, parsing what it writes gives R back word for word (BITS_CONSUMED aside); a shown
-# existing frame's record is the coded fields only (the parser fills the rest from the reference slot). Every function
-# returns DR_OK or the error, and leaves the bit writer's sticky error set on a writer fault.
+# Scope: every frame type (KEY_FRAME, INTER_FRAME, INTRA_ONLY_FRAME, SWITCH_FRAME) and show_existing_frame. An inter
+# frame's header is written against the reference state its parser reads (refs: the slots' order hints, sizes, frame
+# ids and saved deltas, segmentation features, global motion and film grain). Values a field cannot carry, or that its
+# parser would read back as something else, return DR_ERR_BOUNDS: the writer never emits a header that means a
+# different record. That includes the fields the syntax does not code at all — a slot past a count, a strength the
+# frame does not signal, a derived value — which must hold what the parser leaves there (zero, the default it
+# derives, or what it loads from the primary reference frame). So for every record R it accepts, parsing what it
+# writes against the same reference state gives R back word for word (BITS_CONSUMED aside); a shown existing frame's
+# record is the coded fields only (the parser fills the rest from the reference slot). Every function returns DR_OK
+# or the error, and leaves the bit writer's sticky error set on a writer fault.
 
 # loop_filter_ref_deltas / mode_deltas after setup_past_independence (5.9.2): what an intra frame's deltas are coded
 # against (it has no primary reference frame). Indexed by reference frame, INTRA_FRAME 0 .. ALTREF_FRAME 7.
@@ -374,6 +375,11 @@ fn av1_hdrw_frame_size(bw, s, fh): i64 {
     } else {
         av1_hdrw_must(bw, (up == av1_seq_width(s)) && (hgt == av1_seq_height(s)));
     }
+    return av1_hdrw_superres(bw, s, fh);
+}
+# superres_params( ) — 5.9.8, with FrameWidth the downscaled UpscaledWidth (av1_superres_downscaled_width)
+fn av1_hdrw_superres(bw, s, fh): i64 {
+    var up = av1_fh_upscaled_width(fh);
     var use_sr = av1_fh_use_superres(fh);
     var denom = av1_fh_superres_denom(fh);
     if (av1_seq_enable_superres(s)) {
@@ -388,6 +394,29 @@ fn av1_hdrw_frame_size(bw, s, fh): i64 {
     }
     av1_hdrw_must(bw, av1_fh_frame_width(fh) == av1_superres_downscaled_width(up, denom));
     return dr_bw_err(bw);
+}
+# frame_size_with_refs( ) — 5.9.7. found_ref is coded 0 for each reference before the record's FOUND_REF (1 + the i
+# coded 1; 0 when none is), whose slot must hold the frame's UpscaledWidth, FrameHeight and render size: the parser
+# takes all four from it, then reads superres_params( ). With none found, frame_size( ) + render_size( ) follow.
+fn av1_hdrw_frame_size_with_refs(bw, s, refs, fh): i64 {
+    var fr = load64(fh + AV1FH_FOUND_REF);
+    if ((fr < 0) || (fr > AV1_REFS_PER_FRAME)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        var found = (i + 1) == fr;
+        av1_hdrw_bit(bw, found);                         # found_ref f(1)
+        if (found) {
+            var slot = av1_fh_ref_frame_idx(fh, i);
+            av1_hdrw_must(bw, (av1_fh_upscaled_width(fh) == av1_ref_upscaled_width(refs, slot))
+              && (av1_fh_frame_height(fh) == av1_ref_frame_height(refs, slot))
+              && (av1_fh_render_width(fh) == av1_ref_render_width(refs, slot))
+              && (av1_fh_render_height(fh) == av1_ref_render_height(refs, slot)));
+            return av1_hdrw_superres(bw, s, fh);
+        }
+        i = i + 1;
+    }
+    av1_hdrw_frame_size(bw, s, fh);
+    return av1_hdrw_render_size(bw, fh);
 }
 # render_size( ) — 5.9.6
 fn av1_hdrw_render_size(bw, fh): i64 {
@@ -553,10 +582,42 @@ fn av1_hdrw_quantization(bw, s, fh): i64 {
     }
     return dr_bw_err(bw);
 }
-# segmentation_params( ) — 5.9.14, for a frame without a primary reference (update_map and update_data implied)
-fn av1_hdrw_segmentation(bw, fh): i64 {
+# The reference slot load_previous( ) reads (5.9.2: ref_frame_idx[ primary_ref_frame ]), or -1 with no primary
+# reference frame (setup_past_independence( ) instead).
+fn av1_hdrw_prev_slot(fh): i64 {
+    var pr = av1_fh_primary_ref_frame(fh);
+    if (pr == AV1_PRIMARY_REF_NONE) { return 0 - 1; }
+    return av1_fh_ref_frame_idx(fh, pr);
+}
+# FeatureEnabled (data 0) / FeatureData (data 1) [ seg ][ j ] as the frame starts (5.9.2): 0 with no primary reference
+# (setup_past_independence( )), else what load_previous( ) brings from the slot
+fn av1_hdrw_base_feature(fh, refs, seg, j, data): i64 {
+    var slot = av1_hdrw_prev_slot(fh);
+    if ((slot < 0) || (refs == 0)) { return 0; }
+    if (data) { return av1_ref_saved_feature_data(refs, slot, seg, j); }
+    return av1_ref_saved_feature_enabled(refs, slot, seg, j);
+}
+# segmentation_params( ) — 5.9.14. With no primary reference update_map and update_data are implied 1; with one, both
+# are coded, and update_data 0 keeps the feature arrays load_previous( ) brought from the slot, so the record's must
+# be the slot's.
+fn av1_hdrw_segmentation(bw, fh, refs): i64 {
     var en = av1_fh_segmentation_enabled(fh);
     av1_hdrw_bit(bw, en);                                # segmentation_enabled f(1)
+    var um = load64(fh + AV1FH_SEG_UPDATE_MAP);
+    var tu = load64(fh + AV1FH_SEG_TEMPORAL_UPDATE);
+    var ud = load64(fh + AV1FH_SEG_UPDATE_DATA);
+    var slot = av1_hdrw_prev_slot(fh);
+    if (en == 0) {
+        av1_hdrw_must(bw, (um == 0) && (tu == 0) && (ud == 0));
+    } else {
+        if (slot < 0) {
+            av1_hdrw_must(bw, (um == 1) && (tu == 0) && (ud == 1));
+        } else {
+            av1_hdrw_bit(bw, um);                        # segmentation_update_map f(1)
+            if (um) { av1_hdrw_bit(bw, tu); } else { av1_hdrw_must(bw, tu == 0); }   # segmentation_temporal_update
+            av1_hdrw_bit(bw, ud);                        # segmentation_update_data f(1)
+        }
+    }
     var i = 0;
     while (i < AV1_MAX_SEGMENTS) {
         var j = 0;
@@ -566,31 +627,29 @@ fn av1_hdrw_segmentation(bw, fh): i64 {
             if (en == 0) {
                 av1_hdrw_must(bw, (fe == 0) && (fv == 0));
             } else {
-                av1_hdrw_bit(bw, fe);                    # feature_enabled f(1)
-                if (fe) {
-                    var bits = av1_seg_feature_bits(j);
-                    var limit = av1_seg_feature_max(j);
-                    if (av1_seg_feature_signed(j)) {
-                        if ((fv < (0 - limit)) || (fv > limit)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
-                        dr_su_write(bw, fv, bits + 1);   # feature_value su(1+bitsToRead)
-                    } else {
-                        if ((fv < 0) || (fv > limit)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
-                        av1_hdrw_f(bw, fv, bits);        # feature_value f(bitsToRead)
-                    }
+                if (ud == 0) {
+                    av1_hdrw_must(bw, (fe == av1_hdrw_base_feature(fh, refs, i, j, 0))
+                      && (fv == av1_hdrw_base_feature(fh, refs, i, j, 1)));
                 } else {
-                    av1_hdrw_must(bw, fv == 0);
+                    av1_hdrw_bit(bw, fe);                # feature_enabled f(1)
+                    if (fe) {
+                        var bits = av1_seg_feature_bits(j);
+                        var limit = av1_seg_feature_max(j);
+                        if (av1_seg_feature_signed(j)) {
+                            if ((fv < (0 - limit)) || (fv > limit)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+                            dr_su_write(bw, fv, bits + 1);   # feature_value su(1+bitsToRead)
+                        } else {
+                            if ((fv < 0) || (fv > limit)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+                            av1_hdrw_f(bw, fv, bits);    # feature_value f(bitsToRead)
+                        }
+                    } else {
+                        av1_hdrw_must(bw, fv == 0);
+                    }
                 }
             }
             j = j + 1;
         }
         i = i + 1;
-    }
-    if (en) {
-        av1_hdrw_must(bw, (load64(fh + AV1FH_SEG_UPDATE_MAP) == 1) && (load64(fh + AV1FH_SEG_TEMPORAL_UPDATE) == 0)
-          && (load64(fh + AV1FH_SEG_UPDATE_DATA) == 1));
-    } else {
-        av1_hdrw_must(bw, (load64(fh + AV1FH_SEG_UPDATE_MAP) == 0) && (load64(fh + AV1FH_SEG_TEMPORAL_UPDATE) == 0)
-          && (load64(fh + AV1FH_SEG_UPDATE_DATA) == 0));
     }
     return dr_bw_err(bw);
 }
@@ -622,25 +681,50 @@ fn av1_hdrw_coded_lossless(fh): i64 {
     }
     return 1;
 }
-# loop_filter_params( ) — 5.9.11, the deltas coded against the defaults setup_past_independence leaves (no primary
-# reference): loop_filter_delta_update is the record's, and must be 1 when any delta differs; each update_*_delta is
-# set where its delta differs (libaom's rule, encode_loopfilter).
-fn av1_hdrw_loop_filter(bw, s, fh, coded_lossless): i64 {
+# The loop filter deltas a frame starts from (5.9.2): setup_past_independence( )'s defaults with no primary reference,
+# else the ones load_previous( ) brings from its slot. Reference deltas by reference frame (0 .. 7), mode deltas 0 / 1.
+fn av1_hdrw_base_ref_delta(fh, refs, i): i64 {
+    var slot = av1_hdrw_prev_slot(fh);
+    if ((slot < 0) || (refs == 0)) { return av1_hdrw_default_ref_delta(i); }
+    return av1_ref_saved_lf_ref_delta(refs, slot, i);
+}
+fn av1_hdrw_base_mode_delta(fh, refs, i): i64 {
+    var slot = av1_hdrw_prev_slot(fh);
+    if ((slot < 0) || (refs == 0)) { return 0; }
+    return av1_ref_saved_lf_mode_delta(refs, slot, i);
+}
+# loop_filter_params( ) — 5.9.11, the deltas coded against the ones the frame starts from (av1_hdrw_base_*_delta):
+# loop_filter_delta_update is the record's, and must be 1 when any delta differs; each update_*_delta is set where its
+# delta differs (libaom's rule, encode_loopfilter, against its primary reference frame's deltas).
+fn av1_hdrw_loop_filter(bw, s, fh, refs, coded_lossless): i64 {
     var differ = 0;
     var i = 0;
     while (i < 8) {
-        if (av1_fh_loop_filter_ref_delta(fh, i) != av1_hdrw_default_ref_delta(i)) { differ = 1; }
+        if (av1_fh_loop_filter_ref_delta(fh, i) != av1_hdrw_base_ref_delta(fh, refs, i)) { differ = 1; }
         i = i + 1;
     }
-    if ((av1_fh_loop_filter_mode_delta(fh, 0) != 0) || (av1_fh_loop_filter_mode_delta(fh, 1) != 0)) { differ = 1; }
+    i = 0;
+    while (i < 2) {
+        if (av1_fh_loop_filter_mode_delta(fh, i) != av1_hdrw_base_mode_delta(fh, refs, i)) { differ = 1; }
+        i = i + 1;
+    }
     var update = load64(fh + AV1FH_LF_DELTA_UPDATE);
     if (coded_lossless || av1_fh_allow_intrabc(fh)) {
-        # nothing coded: every level 0, the default deltas, and loop_filter_delta_enabled as setup_past_independence
-        # left it (1)
+        # nothing coded: every level 0, the default deltas (loop_filter_params( ) sets them here whatever the frame
+        # started from), and loop_filter_delta_enabled as the frame started: setup_past_independence( ) sets it 1,
+        # load_previous( ) does not load it (the parser's record holds 0)
+        var dd = 0;
+        i = 0;
+        while (i < 8) {
+            if (av1_fh_loop_filter_ref_delta(fh, i) != av1_hdrw_default_ref_delta(i)) { dd = 1; }
+            i = i + 1;
+        }
+        if ((av1_fh_loop_filter_mode_delta(fh, 0) != 0) || (av1_fh_loop_filter_mode_delta(fh, 1) != 0)) { dd = 1; }
         av1_hdrw_must(bw, (av1_fh_loop_filter_level(fh, 0) == 0) && (av1_fh_loop_filter_level(fh, 1) == 0)
           && (av1_fh_loop_filter_level(fh, 2) == 0) && (av1_fh_loop_filter_level(fh, 3) == 0)
-          && (av1_fh_loop_filter_sharpness(fh) == 0) && (av1_fh_loop_filter_delta_enabled(fh) == 1)
-          && (update == 0) && (differ == 0));
+          && (av1_fh_loop_filter_sharpness(fh) == 0)
+          && (av1_fh_loop_filter_delta_enabled(fh) == (av1_hdrw_prev_slot(fh) < 0))
+          && (update == 0) && (dd == 0));
         return dr_bw_err(bw);
     }
     var l0 = av1_fh_loop_filter_level(fh, 0);
@@ -666,7 +750,7 @@ fn av1_hdrw_loop_filter(bw, s, fh, coded_lossless): i64 {
         i = 0;
         while (i < 8) {
             var v = av1_fh_loop_filter_ref_delta(fh, i);
-            var ch = v != av1_hdrw_default_ref_delta(i);
+            var ch = v != av1_hdrw_base_ref_delta(fh, refs, i);
             dr_bw_put_bit(bw, ch);                       # update_ref_delta f(1)
             if (ch) { dr_su_write(bw, v, 7); }           # loop_filter_ref_deltas[ i ] su(1+6)
             i = i + 1;
@@ -674,8 +758,9 @@ fn av1_hdrw_loop_filter(bw, s, fh, coded_lossless): i64 {
         i = 0;
         while (i < 2) {
             var m = av1_fh_loop_filter_mode_delta(fh, i);
-            dr_bw_put_bit(bw, m != 0);                   # update_mode_delta f(1)
-            if (m != 0) { dr_su_write(bw, m, 7); }       # loop_filter_mode_deltas[ i ] su(1+6)
+            var chm = m != av1_hdrw_base_mode_delta(fh, refs, i);
+            dr_bw_put_bit(bw, chm);                      # update_mode_delta f(1)
+            if (chm) { dr_su_write(bw, m, 7); }          # loop_filter_mode_deltas[ i ] su(1+6)
             i = i + 1;
         }
     }
@@ -804,7 +889,7 @@ fn av1_hdrw_grain_ar(bw, c, n, cap): i64 {
 }
 # film_grain_params( ) — 5.9.30, for an intra frame (update_grain is implied 1). The record is what the parser stores:
 # a zeroed block (reset_grain_params) when no grain is coded, and otherwise zero in every slot it does not read.
-fn av1_hdrw_film_grain(bw, s, fh): i64 {
+fn av1_hdrw_film_grain(bw, s, fh, refs): i64 {
     var g = fh + AV1FH_GRAIN;
     var apply = load64(g + AV1FG_APPLY);
     if ((av1_seq_film_grain_present(s) == 0) || ((av1_fh_show_frame(fh) == 0) && (av1_fh_showable_frame(fh) == 0))) {
@@ -813,7 +898,38 @@ fn av1_hdrw_film_grain(bw, s, fh): i64 {
     av1_hdrw_bit(bw, apply);                             # apply_grain f(1)
     if (apply == 0) { return av1_hdrw_zero(bw, g, 0, AV1FG_SIZE / 8); }
     av1_hdrw_f(bw, load64(g + AV1FG_SEED), 16);          # grain_seed f(16)
-    av1_hdrw_must(bw, (load64(g + AV1FG_UPDATE) == 1) && (load64(g + AV1FG_REF_IDX) == 0));
+    var upd = load64(g + AV1FG_UPDATE);
+    if (av1_fh_frame_type(fh) == AV1_INTER_FRAME) {
+        av1_hdrw_bit(bw, upd);                           # update_grain f(1)
+    } else {
+        av1_hdrw_must(bw, upd == 1);
+    }
+    if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }   # nothing below reads refs for a refused record
+    if (upd == 0) {
+        # load_grain_params( film_grain_params_ref_idx ): the block is the slot's, but for this frame's grain_seed and
+        # the parse-steering fields the parser records (update_grain 0, the index). The index must be one of
+        # ref_frame_idx[ ] with saved parameters (6.8.20; the parser refuses others).
+        var ridx = load64(g + AV1FG_REF_IDX);
+        av1_hdrw_f(bw, ridx, 3);                         # film_grain_params_ref_idx f(3)
+        if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
+        var named = 0;
+        var j = 0;
+        while (j < AV1_REFS_PER_FRAME) {
+            if (av1_fh_ref_frame_idx(fh, j) == ridx) { named = 1; }
+            j = j + 1;
+        }
+        var saved = av1_ref_saved_grain(refs, ridx);
+        if ((named == 0) || (saved == 0)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        var o = 0;
+        while (o < AV1FG_SIZE) {
+            if ((o != AV1FG_SEED) && (o != AV1FG_UPDATE) && (o != AV1FG_REF_IDX)) {
+                av1_hdrw_must(bw, load64(g + o) == load64(saved + o));
+            }
+            o = o + 8;
+        }
+        return dr_bw_err(bw);
+    }
+    av1_hdrw_must(bw, load64(g + AV1FG_REF_IDX) == 0);
     var num_y = load64(g + AV1FG_NUM_Y);
     if ((num_y < 0) || (num_y > 14)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
     av1_hdrw_f(bw, num_y, 4);                            # num_y_points f(4)
@@ -879,6 +995,124 @@ fn av1_hdrw_film_grain(bw, s, fh): i64 {
     return dr_bw_err(bw);
 }
 
+# encode_subexp( v, numSyms ) — the inverse of 5.9.28's decode_subexp: subexp_more_bits 1 while v lies past the
+# current band, then the band's subexp_bits, or the final ns( ) once three bands no longer fit
+fn av1_hdrw_subexp(bw, v, num_syms): i64 {
+    if ((v < 0) || (v >= num_syms)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    var i = 0;
+    var mk = 0;
+    var k = 3;
+    while (dr_bw_err(bw) == DR_OK) {
+        var b2 = k;
+        if (i != 0) { b2 = (k + i) - 1; }
+        var a = 1 << b2;
+        if (num_syms <= (mk + (3 * a))) {
+            return dr_ns_write(bw, v - mk, num_syms - mk);   # subexp_final_bits ns(numSyms - mk)
+        }
+        if (v >= (mk + a)) {
+            dr_bw_put_bit(bw, 1);                        # subexp_more_bits f(1)
+            i = i + 1;
+            mk = mk + a;
+        } else {
+            dr_bw_put_bit(bw, 0);                        # subexp_more_bits f(1)
+            return dr_bw_put_bits(bw, v - mk, b2);       # subexp_bits f(b2)
+        }
+    }
+    return dr_bw_err(bw);
+}
+# The value x in [ 0, mx ) that decode_unsigned_subexp_with_ref( mx, r ) (5.9.27) reads back, coded: its subexp symbol
+# v is recenter( ), the inverse of the parser's inverse_recenter( ) — checked by decoding v again, so a reference r
+# outside [ 0, mx ) (a previous parameter the current range cannot hold) refuses rather than writing another value.
+fn av1_hdrw_unsigned_subexp_with_ref(bw, mx, r, x): i64 {
+    if ((x < 0) || (x >= mx)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    var v = 0;
+    var back = 0;
+    if ((r << 1) <= mx) {
+        v = av1_recenter(r, x);
+        back = av1_inverse_recenter(r, v);
+    } else {
+        v = av1_recenter((mx - 1) - r, (mx - 1) - x);
+        back = (mx - 1) - av1_inverse_recenter((mx - 1) - r, v);
+    }
+    if ((back != x) || (v < 0) || (v >= mx)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    return av1_hdrw_subexp(bw, v, mx);
+}
+# read_global_param( type, ref, idx ) — 5.9.25, inverted: the parameter is ( decoded << precDiff ) + round, so its low
+# precDiff bits past round must be 0 and decoded must lie in [ -mx, mx ], coded against PrevGmParams (av1_prev_gm_param)
+fn av1_hdrw_global_param(bw, fh, refs, type, ref, idx): i64 {
+    var abs_bits = AV1_GM_ABS_ALPHA_BITS;
+    var prec_bits = AV1_GM_ALPHA_PREC_BITS;
+    if (idx < 2) {
+        if (type == AV1_GM_TRANSLATION) {
+            var hp = av1_fh_allow_high_precision_mv(fh);
+            abs_bits = AV1_GM_ABS_TRANS_ONLY_BITS - (1 - hp);
+            prec_bits = AV1_GM_TRANS_ONLY_PREC_BITS - (1 - hp);
+        } else {
+            abs_bits = AV1_GM_ABS_TRANS_BITS;
+            prec_bits = AV1_GM_TRANS_PREC_BITS;
+        }
+    }
+    var prec_diff = AV1_WARPEDMODEL_PREC_BITS - prec_bits;
+    var round = 0;
+    var sub = 0;
+    if ((idx % 3) == 2) {
+        round = 1 << AV1_WARPEDMODEL_PREC_BITS;
+        sub = 1 << prec_bits;
+    }
+    var mx = 1 << abs_bits;
+    var r = (av1_prev_gm_param(fh, refs, ref, idx) >>> prec_diff) - sub;
+    var p = av1_fh_gm_param(fh, ref, idx) - round;
+    if ((p & ((1 << prec_diff) - 1)) != 0) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    var decoded = p >>> prec_diff;
+    if ((decoded < (0 - mx)) || (decoded > mx)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+    # decode_signed_subexp_with_ref( -mx, mx + 1, r ) (5.9.26) is the unsigned one over [ 0, 2mx + 1 ), offset by -mx
+    return av1_hdrw_unsigned_subexp_with_ref(bw, (2 * mx) + 1, r + mx, decoded + mx);
+}
+# global_motion_params( ) — 5.9.24 for an inter frame: each reference's type (is_global / is_rot_zoom /
+# is_translation) and its coded parameters. The rest are the parser's: the identity's 0 / 1 << 16 where the type
+# codes nothing, and ROTZOOM's gm_params[ 4 ] = -gm_params[ 3 ], [ 5 ] = [ 2 ].
+fn av1_hdrw_global_motion(bw, fh, refs): i64 {
+    var ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) {
+        var type = av1_fh_gm_type(fh, ref);
+        if ((type < AV1_GM_IDENTITY) || (type > AV1_GM_AFFINE)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        av1_hdrw_bit(bw, type != AV1_GM_IDENTITY);       # is_global f(1)
+        if (type != AV1_GM_IDENTITY) {
+            av1_hdrw_bit(bw, type == AV1_GM_ROTZOOM);    # is_rot_zoom f(1)
+            if (type != AV1_GM_ROTZOOM) {
+                av1_hdrw_bit(bw, type == AV1_GM_TRANSLATION);   # is_translation f(1)
+            }
+        }
+        if (type >= AV1_GM_ROTZOOM) {
+            av1_hdrw_global_param(bw, fh, refs, type, ref, 2);
+            av1_hdrw_global_param(bw, fh, refs, type, ref, 3);
+            if (type == AV1_GM_AFFINE) {
+                av1_hdrw_global_param(bw, fh, refs, type, ref, 4);
+                av1_hdrw_global_param(bw, fh, refs, type, ref, 5);
+            } else {
+                av1_hdrw_must(bw, (av1_fh_gm_param(fh, ref, 4) == (0 - av1_fh_gm_param(fh, ref, 3)))
+                  && (av1_fh_gm_param(fh, ref, 5) == av1_fh_gm_param(fh, ref, 2)));
+            }
+        } else {
+            var j = 2;
+            while (j < 6) {
+                var def = 0;
+                if ((j % 3) == 2) { def = 1 << AV1_WARPEDMODEL_PREC_BITS; }
+                av1_hdrw_must(bw, av1_fh_gm_param(fh, ref, j) == def);
+                j = j + 1;
+            }
+        }
+        if (type >= AV1_GM_TRANSLATION) {
+            av1_hdrw_global_param(bw, fh, refs, type, ref, 0);
+            av1_hdrw_global_param(bw, fh, refs, type, ref, 1);
+        } else {
+            av1_hdrw_must(bw, (av1_fh_gm_param(fh, ref, 0) == 0) && (av1_fh_gm_param(fh, ref, 1) == 0));
+        }
+        ref = ref + 1;
+    }
+    return dr_bw_err(bw);
+}
+
 # temporal_point_info( ) (5.9.31) where 5.9.2 codes it
 fn av1_hdrw_temporal_point(bw, s, fh): i64 {
     if (av1_seq_decoder_model_present(s) && (av1_seq_equal_picture_interval(s) == 0)) {
@@ -889,10 +1123,67 @@ fn av1_hdrw_temporal_point(bw, s, fh): i64 {
     return dr_bw_err(bw);
 }
 
-# uncompressed_header( ) — 5.9.2, for an intra frame (KEY_FRAME, INTRA_ONLY_FRAME) or a shown existing frame. tid / sid
-# are the OBU's temporal_id / spatial_id (they select the buffer removal times coded). The payload syntax only: a
+# The inter frame's references (5.9.2, from frame_refs_short_signaling to the delta_frame_id_minus_1s). Short
+# signaling codes last_frame_idx and gold_frame_idx (ref_frame_idx[ 0 ] and [ 3 ]) and set_frame_refs( ) (7.8) derives
+# the rest, which must be the record's. With frame ids each delta_frame_id_minus_1 is DeltaFrameId - 1, DeltaFrameId
+# the distance back from current_frame_id to RefFrameId[ ref_frame_idx[ i ] ] (5.9.2's expectedFrameId requirement).
+fn av1_hdrw_inter_refs(bw, s, refs, fh): i64 {
+    var ss = av1_fh_frame_refs_short_signaling(fh);
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        var idx = av1_fh_ref_frame_idx(fh, i);
+        if ((idx < 0) || (idx >= AV1_NUM_REF_FRAMES)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        i = i + 1;
+    }
+    if (av1_seq_enable_order_hint(s)) {
+        av1_hdrw_bit(bw, ss);                            # frame_refs_short_signaling f(1)
+    } else {
+        av1_hdrw_must(bw, ss == 0);
+    }
+    if (ss == 1) {
+        var last = av1_fh_ref_frame_idx(fh, AV1_LAST_FRAME - AV1_LAST_FRAME);
+        var gold = av1_fh_ref_frame_idx(fh, AV1_GOLDEN_FRAME - AV1_LAST_FRAME);
+        av1_hdrw_f(bw, last, 3);                         # last_frame_idx f(3)
+        av1_hdrw_f(bw, gold, 3);                         # gold_frame_idx f(3)
+        var tmp = dr_alloc(AV1FH_SIZE);
+        if (tmp == 0) { return dr_bw_set_err(bw, DR_ERR_OOM); }
+        memcpy(tmp, fh, AV1FH_SIZE);
+        var e = av1_set_frame_refs(s, refs, tmp, last, gold);
+        if (e != DR_OK) { return dr_bw_set_err(bw, e); }
+        i = 0;
+        while (i < AV1_REFS_PER_FRAME) {
+            av1_hdrw_must(bw, av1_fh_ref_frame_idx(tmp, i) == av1_fh_ref_frame_idx(fh, i));
+            i = i + 1;
+        }
+    }
+    var fid = av1_seq_frame_id_present(s);
+    var dlen = av1_seq_delta_frame_id_len(s);
+    var m = 1 << (av1_seq_add_frame_id_len(s) + dlen);   # 1 << idLen
+    i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        if (ss == 0) {
+            av1_hdrw_f(bw, av1_fh_ref_frame_idx(fh, i), 3);   # ref_frame_idx[ i ] f(3)
+        }
+        if (fid) {
+            var rid = av1_ref_frame_id(refs, av1_fh_ref_frame_idx(fh, i));
+            var cur = av1_fh_current_frame_id(fh);
+            if ((rid < 0) || (rid >= m) || (cur < 0) || (cur >= m)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+            var d = ((cur + m) - rid) % m;               # DeltaFrameId
+            if ((d < 1) || (d > (1 << dlen))) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+            av1_hdrw_f(bw, d - 1, dlen);                 # delta_frame_id_minus_1 f(delta_frame_id_length)
+        }
+        i = i + 1;
+    }
+    return dr_bw_err(bw);
+}
+
+# uncompressed_header( ) — 5.9.2: an intra frame (KEY_FRAME, INTRA_ONLY_FRAME), an inter frame (INTER_FRAME,
+# SWITCH_FRAME) or a shown existing frame. refs is the reference state the parser reads the header against (its
+# order hints, frame sizes and ids, and the slots' saved deltas, segmentation features, global motion and film grain;
+# never RefValid, which the parse itself changes); an intra or shown existing frame reads none, and may pass 0. tid /
+# sid are the OBU's temporal_id / spatial_id (they select the buffer removal times coded). The payload syntax only: a
 # frame header OBU adds trailing bits (av1_frame_header_write_obu), a frame OBU byte alignment (av1_frame_write_obu).
-fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
+fn av1_frame_write_uncompressed_header(bw, s, refs, fh, tid, sid): i64 {
     if ((bw == 0) || (s == 0) || (fh == 0)) { return DR_ERR_BOUNDS; }
     if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
     var id_len = 0;
@@ -900,6 +1191,7 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
     var reduced = av1_seq_reduced(s);
     var ftype = av1_fh_frame_type(fh);
     var show = av1_fh_show_frame(fh);
+    var intra = (ftype == AV1_KEY_FRAME) || (ftype == AV1_INTRA_ONLY_FRAME);
     if (reduced) {
         if (av1_fh_show_existing_frame(fh) || (ftype != AV1_KEY_FRAME) || (show == 0)) {
             return dr_bw_set_err(bw, DR_ERR_BOUNDS);
@@ -921,10 +1213,8 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
             }
             return dr_bw_err(bw);
         }
-        # an inter frame's header needs the reference syntax this writer leaves out: roadmap 0.8.8
-        if ((ftype != AV1_KEY_FRAME) && (ftype != AV1_INTRA_ONLY_FRAME)) {
-            return dr_bw_set_err(bw, DR_ERR_UNSUPPORTED);
-        }
+        if ((ftype < AV1_KEY_FRAME) || (ftype > AV1_SWITCH_FRAME)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
+        if ((intra == 0) && (refs == 0)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }   # an inter header reads refs
         av1_hdrw_f(bw, ftype, 2);                        # frame_type f(2)
         av1_hdrw_bit(bw, show);                          # show_frame f(1)
         if (show) {
@@ -934,13 +1224,14 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
             av1_hdrw_must(bw, load64(fh + AV1FH_PRESENTATION_TIME) == 0);   # a hidden frame has no temporal point
             av1_hdrw_bit(bw, av1_fh_showable_frame(fh));   # showable_frame f(1)
         }
-        if ((ftype == AV1_KEY_FRAME) && show) {
+        if ((ftype == AV1_SWITCH_FRAME) || ((ftype == AV1_KEY_FRAME) && show)) {
             av1_hdrw_must(bw, av1_fh_error_resilient_mode(fh) == 1);
         } else {
             av1_hdrw_bit(bw, av1_fh_error_resilient_mode(fh));   # error_resilient_mode f(1)
         }
     }
-    av1_hdrw_must(bw, (av1_fh_frame_is_intra(fh) == 1) && (av1_fh_frame_to_show(fh) == 0)
+    var er = av1_fh_error_resilient_mode(fh);
+    av1_hdrw_must(bw, (av1_fh_frame_is_intra(fh) == intra) && (av1_fh_frame_to_show(fh) == 0)
       && (load64(fh + AV1FH_DISPLAY_FRAME_ID) == 0));
     av1_hdrw_bit(bw, av1_fh_disable_cdf_update(fh));     # disable_cdf_update f(1)
     var sct = av1_fh_allow_screen_content_tools(fh);
@@ -960,19 +1251,26 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
     } else {
         av1_hdrw_must(bw, fimv == 0);
     }
-    av1_hdrw_must(bw, av1_fh_force_integer_mv(fh) == 1);
+    if (intra) { av1_hdrw_must(bw, av1_fh_force_integer_mv(fh) == 1); }
+    else { av1_hdrw_must(bw, av1_fh_force_integer_mv(fh) == fimv); }
     if (av1_seq_frame_id_present(s)) {
         av1_hdrw_f(bw, av1_fh_current_frame_id(fh), id_len);   # current_frame_id f(idLen)
     } else {
         av1_hdrw_must(bw, av1_fh_current_frame_id(fh) == 0);
     }
-    if (reduced == 0) {
-        av1_hdrw_bit(bw, av1_fh_frame_size_override(fh));   # frame_size_override_flag f(1)
+    var fso = av1_fh_frame_size_override(fh);
+    if (ftype == AV1_SWITCH_FRAME) {
+        av1_hdrw_must(bw, fso == 1);
     } else {
-        av1_hdrw_must(bw, av1_fh_frame_size_override(fh) == 0);
+        if (reduced == 0) { av1_hdrw_bit(bw, fso); } else { av1_hdrw_must(bw, fso == 0); }   # frame_size_override_flag
     }
     av1_hdrw_f(bw, av1_fh_order_hint(fh), av1_seq_order_hint_bits(s));   # order_hint f(OrderHintBits)
-    av1_hdrw_must(bw, av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE);
+    var pr = av1_fh_primary_ref_frame(fh);
+    if (intra || er) {
+        av1_hdrw_must(bw, pr == AV1_PRIMARY_REF_NONE);
+    } else {
+        av1_hdrw_f(bw, pr, 3);                           # primary_ref_frame f(3)
+    }
     # buffer removal times: coded for each operating point with a decoder model that holds this OBU's layer (tid /
     # sid); every other slot of the 32 is 0
     var dm = av1_seq_decoder_model_present(s);
@@ -994,12 +1292,12 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
         op = op + 1;
     }
     var refresh = av1_fh_refresh_frame_flags(fh);
-    if ((ftype == AV1_KEY_FRAME) && show) {
+    if ((ftype == AV1_SWITCH_FRAME) || ((ftype == AV1_KEY_FRAME) && show)) {
         av1_hdrw_must(bw, refresh == 255);
     } else {
         av1_hdrw_f(bw, refresh, 8);                      # refresh_frame_flags f(8)
     }
-    if ((refresh != 255) && av1_fh_error_resilient_mode(fh) && av1_seq_enable_order_hint(s)) {
+    if (((intra == 0) || (refresh != 255)) && er && av1_seq_enable_order_hint(s)) {
         var ri = 0;
         while (ri < 8) {
             # ref_order_hint[ i ] f(OrderHintBits)
@@ -1009,31 +1307,79 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
     } else {
         av1_hdrw_zero(bw, fh + AV1FH_REF_ORDER_HINT_CODED, 0, 8);
     }
-    av1_hdrw_frame_size(bw, s, fh);
+    var ibc = av1_fh_allow_intrabc(fh);
+    if (intra) {
+        av1_hdrw_frame_size(bw, s, fh);
+        av1_hdrw_render_size(bw, fh);
+        if (sct && (av1_fh_upscaled_width(fh) == av1_fh_frame_width(fh))) {
+            av1_hdrw_bit(bw, ibc);                       # allow_intrabc f(1)
+        } else {
+            av1_hdrw_must(bw, ibc == 0);
+        }
+        # what the parser leaves zeroed on an intra frame: the inter frame syntax and what it derives
+        av1_hdrw_zero(bw, fh + AV1FH_REF_FRAME_IDX, 0, AV1_REFS_PER_FRAME);
+        av1_hdrw_zero(bw, fh + AV1FH_ORDER_HINTS, 0, 8);
+        av1_hdrw_must(bw, (av1_fh_frame_refs_short_signaling(fh) == 0) && (load64(fh + AV1FH_FOUND_REF) == 0)
+          && (av1_fh_allow_high_precision_mv(fh) == 0) && (av1_fh_interpolation_filter(fh) == 0)
+          && (av1_fh_is_motion_mode_switchable(fh) == 0) && (av1_fh_use_ref_frame_mvs(fh) == 0));
+    } else {
+        av1_hdrw_inter_refs(bw, s, refs, fh);
+        # every read of refs below indexes it by ref_frame_idx[ ], which av1_hdrw_inter_refs bounds: stop on its refusal
+        if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
+        if (fso && (er == 0)) {
+            av1_hdrw_frame_size_with_refs(bw, s, refs, fh);
+        } else {
+            av1_hdrw_must(bw, load64(fh + AV1FH_FOUND_REF) == 0);
+            av1_hdrw_frame_size(bw, s, fh);
+            av1_hdrw_render_size(bw, fh);
+        }
+        av1_hdrw_must(bw, ibc == 0);
+        var hp = av1_fh_allow_high_precision_mv(fh);
+        if (av1_fh_force_integer_mv(fh)) {
+            av1_hdrw_must(bw, hp == 0);
+        } else {
+            av1_hdrw_bit(bw, hp);                        # allow_high_precision_mv f(1)
+        }
+        var filt = av1_fh_interpolation_filter(fh);
+        av1_hdrw_bit(bw, filt == AV1_INTERP_SWITCHABLE);   # is_filter_switchable f(1)
+        if (filt != AV1_INTERP_SWITCHABLE) { av1_hdrw_f(bw, filt, 2); }   # interpolation_filter f(2)
+        av1_hdrw_bit(bw, av1_fh_is_motion_mode_switchable(fh));   # is_motion_mode_switchable f(1)
+        var urfm = av1_fh_use_ref_frame_mvs(fh);
+        if (er || (av1_seq_enable_ref_frame_mvs(s) == 0)) {
+            av1_hdrw_must(bw, urfm == 0);
+        } else {
+            av1_hdrw_bit(bw, urfm);                      # use_ref_frame_mvs f(1)
+        }
+        # OrderHints[ refFrame ] (no bits): each reference's slot's order hint
+        av1_hdrw_must(bw, av1_fh_order_hint_ref(fh, AV1_INTRA_FRAME) == 0);
+        var oi = 0;
+        while (oi < AV1_REFS_PER_FRAME) {
+            av1_hdrw_must(bw, av1_fh_order_hint_ref(fh, AV1_LAST_FRAME + oi)
+              == av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, oi)));
+            oi = oi + 1;
+        }
+    }
+    if (dr_bw_err(bw) != DR_OK) { return dr_bw_err(bw); }
     # compute_image_size( ): the MiCols / MiRows the tile layout and the parser derive from FrameWidth / FrameHeight
     av1_hdrw_must(bw, (av1_fh_mi_cols(fh) == (2 * ((av1_fh_frame_width(fh) + 7) >> 3)))
       && (av1_fh_mi_rows(fh) == (2 * ((av1_fh_frame_height(fh) + 7) >> 3))));
-    av1_hdrw_render_size(bw, fh);
-    var ibc = av1_fh_allow_intrabc(fh);
-    if (sct && (av1_fh_upscaled_width(fh) == av1_fh_frame_width(fh))) {
-        av1_hdrw_bit(bw, ibc);                           # allow_intrabc f(1)
-    } else {
-        av1_hdrw_must(bw, ibc == 0);
-    }
     var dfe = av1_fh_disable_frame_end_update_cdf(fh);
     if (reduced || av1_fh_disable_cdf_update(fh)) {
         av1_hdrw_must(bw, dfe == 1);
     } else {
         av1_hdrw_bit(bw, dfe);                           # disable_frame_end_update_cdf f(1)
     }
+    if ((pr != AV1_PRIMARY_REF_NONE) && ((pr < 0) || (pr >= AV1_REFS_PER_FRAME))) {
+        return dr_bw_set_err(bw, DR_ERR_BOUNDS);
+    }
     av1_hdrw_tile_info(bw, s, fh);
     av1_hdrw_quantization(bw, s, fh);
-    av1_hdrw_segmentation(bw, fh);
+    av1_hdrw_segmentation(bw, fh, refs);
     av1_hdrw_delta_params(bw, fh);
     var coded_lossless = av1_hdrw_coded_lossless(fh);
     var all_lossless = coded_lossless && (av1_fh_frame_width(fh) == av1_fh_upscaled_width(fh));
     av1_hdrw_must(bw, (av1_fh_coded_lossless(fh) == coded_lossless) && (av1_fh_all_lossless(fh) == all_lossless));
-    av1_hdrw_loop_filter(bw, s, fh, coded_lossless);
+    av1_hdrw_loop_filter(bw, s, fh, refs, coded_lossless);
     av1_hdrw_cdef(bw, s, fh, coded_lossless);
     av1_hdrw_lr(bw, s, fh, all_lossless);
     var txm = av1_fh_tx_mode(fh);
@@ -1043,21 +1389,43 @@ fn av1_frame_write_uncompressed_header(bw, s, fh, tid, sid): i64 {
         if ((txm != AV1_TX_MODE_SELECT) && (txm != AV1_TX_MODE_LARGEST)) { return dr_bw_set_err(bw, DR_ERR_BOUNDS); }
         av1_hdrw_bit(bw, txm == AV1_TX_MODE_SELECT);     # tx_mode_select f(1)
     }
-    av1_hdrw_bit(bw, av1_fh_reduced_tx_set(fh));         # reduced_tx_set f(1)
-    # global_motion_params( ): an intra frame codes none, and every reference's parameters are the identity
-    var ref = 0;
-    while (ref < AV1_REFS_PER_FRAME) {
-        av1_hdrw_must(bw, load64(fh + AV1FH_GM_TYPE + (ref * 8)) == AV1_GM_IDENTITY);
-        var j = 0;
-        while (j < 6) {
-            var def = 0;
-            if ((j % 3) == 2) { def = 1 << AV1_WARPEDMODEL_PREC_BITS; }
-            av1_hdrw_must(bw, load64(fh + AV1FH_GM_PARAMS + (((ref * 6) + j) * 8)) == def);
-            j = j + 1;
-        }
-        ref = ref + 1;
+    var rs = av1_fh_reference_select(fh);
+    if (intra) { av1_hdrw_must(bw, rs == 0); } else { av1_hdrw_bit(bw, rs); }   # reference_select f(1)
+    # skip_mode_params( ) (5.9.23): skip_mode_present where skip mode is allowed, SkipModeFrame[ ] derived
+    var smf[16];   # 16 bytes: SkipModeFrame[ 0..1 ]
+    var smp = av1_fh_skip_mode_present(fh);
+    if (av1_skip_mode_frames(s, refs, fh, &smf)) {
+        av1_hdrw_must(bw, (av1_fh_skip_mode_frame(fh, 0) == load64(&smf))
+          && (av1_fh_skip_mode_frame(fh, 1) == load64(&smf + 8)));
+        av1_hdrw_bit(bw, smp);                           # skip_mode_present f(1)
+    } else {
+        av1_hdrw_must(bw, (smp == 0) && (av1_fh_skip_mode_frame(fh, 0) == 0) && (av1_fh_skip_mode_frame(fh, 1) == 0));
     }
-    av1_hdrw_film_grain(bw, s, fh);
+    var aw = av1_fh_allow_warped_motion(fh);
+    if (intra || er || (av1_seq_enable_warped_motion(s) == 0)) {
+        av1_hdrw_must(bw, aw == 0);
+    } else {
+        av1_hdrw_bit(bw, aw);                            # allow_warped_motion f(1)
+    }
+    av1_hdrw_bit(bw, av1_fh_reduced_tx_set(fh));         # reduced_tx_set f(1)
+    if (intra) {
+        # global_motion_params( ): an intra frame codes none, and every reference's parameters are the identity
+        var ref = 0;
+        while (ref < AV1_REFS_PER_FRAME) {
+            av1_hdrw_must(bw, load64(fh + AV1FH_GM_TYPE + (ref * 8)) == AV1_GM_IDENTITY);
+            var j = 0;
+            while (j < 6) {
+                var def = 0;
+                if ((j % 3) == 2) { def = 1 << AV1_WARPEDMODEL_PREC_BITS; }
+                av1_hdrw_must(bw, load64(fh + AV1FH_GM_PARAMS + (((ref * 6) + j) * 8)) == def);
+                j = j + 1;
+            }
+            ref = ref + 1;
+        }
+    } else {
+        av1_hdrw_global_motion(bw, fh, refs);
+    }
+    av1_hdrw_film_grain(bw, s, fh, refs);
     return dr_bw_err(bw);
 }
 
@@ -1128,6 +1496,41 @@ fn av1_fh_init_key(s, base_q_idx, out_err): i64 {
         store64(fh + AV1FH_GM_PARAMS + (((ref * 6) + 2) * 8), 1 << AV1_WARPEDMODEL_PREC_BITS);
         store64(fh + AV1FH_GM_PARAMS + (((ref * 6) + 5) * 8), 1 << AV1_WARPEDMODEL_PREC_BITS);
         ref = ref + 1;
+    }
+    return fh;
+}
+
+# A consistent INTER_FRAME header record for the encoder, against sequence s and the reference state refs it will be
+# read against: av1_fh_init_key's frame (size, tile, quantizer, no filtering, tx_mode) as a shown, non error-resilient
+# inter frame at order_hint, every one of the seven references in reference slot slot, refreshing the slots in
+# refresh, with no primary reference frame (the CDFs and every past state from their defaults: setup_past_independence),
+# quarter-pel motion (allow_high_precision_mv 0), the regular eight-tap filter for the frame (not switchable), no motion
+# mode switching, no reference MVs, single reference prediction (so no skip mode), no warped motion, identity global
+# motion and no film grain. OrderHints[ ] are derived from refs as the parser derives them. Returns the record (heap,
+# AV1FH_SIZE bytes) or 0: DR_ERR_BOUNDS for a null refs, a slot outside 0..7, an order hint OrderHintBits cannot
+# carry or a refresh outside 0..255, and av1_fh_init_key's errors.
+fn av1_fh_init_inter(s, refs, base_q_idx, order_hint, slot, refresh, out_err): i64 {
+    store64(out_err, DR_OK);
+    if ((s == 0) || (refs == 0) || av1_seq_reduced(s) || (slot < 0) || (slot >= AV1_NUM_REF_FRAMES) || (refresh < 0)
+      || (refresh > 255)
+      || (order_hint < 0) || (order_hint >= (1 << av1_seq_order_hint_bits(s)))) {
+        store64(out_err, DR_ERR_BOUNDS);
+        return 0;
+    }
+    var fh = av1_fh_init_key(s, base_q_idx, out_err);
+    if (fh == 0) { return 0; }
+    store64(fh + AV1FH_FRAME_TYPE, AV1_INTER_FRAME);
+    store64(fh + AV1FH_FRAME_IS_INTRA, 0);
+    store64(fh + AV1FH_SHOWABLE_FRAME, 1);               # a shown frame that is not a key frame stays showable
+    store64(fh + AV1FH_ERROR_RESILIENT, 0);
+    store64(fh + AV1FH_FORCE_INT_MV, load64(fh + AV1FH_FORCE_INT_MV_CODED));   # no intra override
+    store64(fh + AV1FH_ORDER_HINT, order_hint);
+    store64(fh + AV1FH_REFRESH_FRAME_FLAGS, refresh);
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        store64(fh + AV1FH_REF_FRAME_IDX + (i * 8), slot);
+        store64(fh + AV1FH_ORDER_HINTS + ((AV1_LAST_FRAME + i) * 8), av1_ref_order_hint(refs, slot));
+        i = i + 1;
     }
     return fh;
 }
@@ -1215,10 +1618,10 @@ fn av1_seq_write_obu(bw, s): i64 {
     return av1_obu_write(bw, AV1_OBU_SEQUENCE_HEADER, 0, 0, 0, dr_bw_buf(pw), n);
 }
 # A frame header OBU: uncompressed_header( ) + trailing_bits( ) (5.3.1).
-fn av1_frame_header_write_obu(bw, s, fh, ext, tid, sid): i64 {
+fn av1_frame_header_write_obu(bw, s, refs, fh, ext, tid, sid): i64 {
     var pw = dr_bw_init(128);
     if (pw == 0) { return DR_ERR_OOM; }
-    var rc = av1_frame_write_uncompressed_header(pw, s, fh, tid, sid);
+    var rc = av1_frame_write_uncompressed_header(pw, s, refs, fh, tid, sid);
     if (rc == DR_OK) { rc = av1_obu_write_trailing_bits(pw); }
     if (rc != DR_OK) { return rc; }
     var n = dr_bw_flush(pw);
@@ -1260,10 +1663,10 @@ fn av1_tile_group_write(bw, fh, tg_start, tg_end, tiles, sizes): i64 {
 }
 # A frame OBU (5.10): uncompressed_header( ), byte_alignment( ), then a tile group of the whole frame (tiles / sizes
 # as av1_tile_group_write takes them, all av1_fh_tile_cols * av1_fh_tile_rows of them).
-fn av1_frame_write_obu(bw, s, fh, ext, tid, sid, tiles, sizes): i64 {
+fn av1_frame_write_obu(bw, s, refs, fh, ext, tid, sid, tiles, sizes): i64 {
     var pw = dr_bw_init(4096);
     if (pw == 0) { return DR_ERR_OOM; }
-    var rc = av1_frame_write_uncompressed_header(pw, s, fh, tid, sid);
+    var rc = av1_frame_write_uncompressed_header(pw, s, refs, fh, tid, sid);
     if (rc != DR_OK) { return rc; }
     while ((dr_bw_bit_pos(pw) & 7) != 0) { dr_bw_put_bit(pw, 0); }   # byte_alignment( )
     rc = av1_tile_group_write(pw, fh, 0, (av1_fh_tile_cols(fh) * av1_fh_tile_rows(fh)) - 1, tiles, sizes);

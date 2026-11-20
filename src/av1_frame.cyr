@@ -185,7 +185,8 @@ enum Av1FhOff {
     AV1FH_TILE_SIZE_BYTES        = 544;
     AV1FH_CONTEXT_UPDATE_TILE_ID = 552;
     AV1FH_UNIFORM_TILE           = 560;
-    # 568..631 free: the film-grain scalars moved into the grain block (AV1FH_GRAIN, 0.8.4)
+    AV1FH_FOUND_REF              = 568;   # 0.8.8: frame_size_with_refs' found_ref, as 1 + the i coded 1 (0: none)
+    # 576..631 free: the film-grain scalars moved into the grain block (AV1FH_GRAIN, 0.8.4)
     AV1FH_SKIP_MODE_FRAME0       = 632;
     AV1FH_SKIP_MODE_FRAME1       = 640;
     AV1FH_BITS_CONSUMED          = 648;   # reader bit position at header end
@@ -775,6 +776,7 @@ fn av1_frame_size_with_refs(br, s, refs, fh): i64 {
         found = dr_br_read_bit(br);   # found_ref f(1)
         if (dr_br_err(br) != DR_OK) { return dr_br_err(br); }
         if (found == 1) {
+            store64(fh + AV1FH_FOUND_REF, i + 1);   # the record keeps which reference was coded (the header writer)
             var slot = av1_fh_ref_frame_idx(fh, i);
             var uw = av1_ref_upscaled_width(refs, slot);
             store64(fh + AV1FH_UPSCALED_WIDTH, uw);
@@ -1439,72 +1441,67 @@ fn av1_frame_reference_mode(br, fh): i64 {
     return dr_br_err(br);
 }
 
-# skip_mode_params() — 5.9.23. skipModeAllowed drives whether the
-# skip_mode_present bit is coded; the forward/backward hint search
-# reproduces that gate cursor-true.
-fn av1_skip_mode_params(br, s, refs, fh): i64 {
-    var skip_allowed = 0;
+# skipModeAllowed and SkipModeFrame[ 0..1 ] — 5.9.23's derivation, which reads no bits: 1 with the two frames at
+# out[ 0 ] / out[ 1 ] when skip mode is allowed, else 0 (out untouched). Shared by the parser (av1_skip_mode_params)
+# and the header writer, which must reproduce the gate the parser takes.
+fn av1_skip_mode_frames(s, refs, fh, out): i64 {
     if (av1_fh_frame_is_intra(fh) || (av1_fh_reference_select(fh) == 0)
       || (av1_seq_enable_order_hint(s) == 0)) {
-        skip_allowed = 0;
-    } else {
-        var forward_idx = 0 - 1;
-        var backward_idx = 0 - 1;
-        var forward_hint = 0;
-        var backward_hint = 0;
-        var i = 0;
-        while (i < AV1_REFS_PER_FRAME) {
-            var ref_hint = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, i));
-            if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) < 0) {
-                if ((forward_idx < 0)
-                  || (av1_get_relative_dist(s, ref_hint, forward_hint) > 0)) {
-                    forward_idx = i;
-                    forward_hint = ref_hint;
-                }
-            } else {
-                if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) > 0) {
-                    if ((backward_idx < 0)
-                      || (av1_get_relative_dist(s, ref_hint, backward_hint) < 0)) {
-                        backward_idx = i;
-                        backward_hint = ref_hint;
-                    }
-                }
-            }
-            i = i + 1;
-        }
-        if (forward_idx < 0) {
-            skip_allowed = 0;
-        } else {
-            if (backward_idx >= 0) {
-                skip_allowed = 1;
-                store64(fh + AV1FH_SKIP_MODE_FRAME0, AV1_LAST_FRAME + av1_min(forward_idx, backward_idx));
-                store64(fh + AV1FH_SKIP_MODE_FRAME1, AV1_LAST_FRAME + av1_max(forward_idx, backward_idx));
-            } else {
-                var second_idx = 0 - 1;
-                var second_hint = 0;
-                var k = 0;
-                while (k < AV1_REFS_PER_FRAME) {
-                    var rh = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, k));
-                    if (av1_get_relative_dist(s, rh, forward_hint) < 0) {
-                        if ((second_idx < 0)
-                          || (av1_get_relative_dist(s, rh, second_hint) > 0)) {
-                            second_idx = k;
-                            second_hint = rh;
-                        }
-                    }
-                    k = k + 1;
-                }
-                if (second_idx < 0) {
-                    skip_allowed = 0;
-                } else {
-                    skip_allowed = 1;
-                    store64(fh + AV1FH_SKIP_MODE_FRAME0, AV1_LAST_FRAME + av1_min(forward_idx, second_idx));
-                    store64(fh + AV1FH_SKIP_MODE_FRAME1, AV1_LAST_FRAME + av1_max(forward_idx, second_idx));
-                }
-            }
-        }
+        return 0;
     }
-    if (skip_allowed) {
+    var forward_idx = 0 - 1;
+    var backward_idx = 0 - 1;
+    var forward_hint = 0;
+    var backward_hint = 0;
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        var ref_hint = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, i));
+        if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) < 0) {
+            if ((forward_idx < 0)
+              || (av1_get_relative_dist(s, ref_hint, forward_hint) > 0)) {
+                forward_idx = i;
+                forward_hint = ref_hint;
+            }
+        } else {
+            if (av1_get_relative_dist(s, ref_hint, av1_fh_order_hint(fh)) > 0) {
+                if ((backward_idx < 0)
+                  || (av1_get_relative_dist(s, ref_hint, backward_hint) < 0)) {
+                    backward_idx = i;
+                    backward_hint = ref_hint;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (forward_idx < 0) { return 0; }
+    if (backward_idx >= 0) {
+        store64(out, AV1_LAST_FRAME + av1_min(forward_idx, backward_idx));
+        store64(out + 8, AV1_LAST_FRAME + av1_max(forward_idx, backward_idx));
+        return 1;
+    }
+    var second_idx = 0 - 1;
+    var second_hint = 0;
+    var k = 0;
+    while (k < AV1_REFS_PER_FRAME) {
+        var rh = av1_ref_order_hint(refs, av1_fh_ref_frame_idx(fh, k));
+        if (av1_get_relative_dist(s, rh, forward_hint) < 0) {
+            if ((second_idx < 0)
+              || (av1_get_relative_dist(s, rh, second_hint) > 0)) {
+                second_idx = k;
+                second_hint = rh;
+            }
+        }
+        k = k + 1;
+    }
+    if (second_idx < 0) { return 0; }
+    store64(out, AV1_LAST_FRAME + av1_min(forward_idx, second_idx));
+    store64(out + 8, AV1_LAST_FRAME + av1_max(forward_idx, second_idx));
+    return 1;
+}
+
+# skip_mode_params() — 5.9.23: skip_mode_present is coded only where av1_skip_mode_frames allows skip mode.
+fn av1_skip_mode_params(br, s, refs, fh): i64 {
+    if (av1_skip_mode_frames(s, refs, fh, fh + AV1FH_SKIP_MODE_FRAME0)) {
         store64(fh + AV1FH_SKIP_MODE_PRESENT, dr_br_read_bit(br));   # skip_mode_present f(1)
     } else {
         store64(fh + AV1FH_SKIP_MODE_PRESENT, 0);

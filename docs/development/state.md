@@ -6,6 +6,17 @@
 
 ## Version
 
+**0.8.8 in progress** (bite 1 landed 2026-11-19, uncommitted until the user commits; no version bump). **The header
+writer writes inter frames.** `av1_frame_write_uncompressed_header` takes the reference state its parser reads
+(`refs`) and writes INTER_FRAME and SWITCH_FRAME headers: the references (short signaling checked against 7.8's
+derivation, frame id deltas derived), `frame_size_with_refs` (the parser now records `found_ref`), the motion and
+skip-mode syntax, and the loop filter deltas, segmentation, global motion and film grain coded against the primary
+reference frame's saved values. `av1_fh_init_inter` builds the encoder's inter record. `programs/hdr-rewrite.cyr`
+tracks each stream's reference state and rewrites EVERY frame header of the corpus bit-exact, inter ones included, with
+a census of the branches reached gated (short signaling and TRANSLATION / AFFINE models are unit- and fuzz-only:
+libaom emits none). Gates after bite 1: 49 suites, 35,442 assertions; fuzz 7,429; everything else green; `make
+conformance` 4665 matched / 0 known-gap / 0 regressed / 0 skipped (the census is the new case).
+
 **0.8.7** — cut 2026-11-19, not yet tagged (user's git). **drishti decides: the keyframe encoder chooses its
 partition tree, each block's intra modes and its luma transform by rate and distortion**, for 14.9–56.9% fewer bytes
 than 0.8.6's fixed DC_PRED at the same PSNR, every decided stream decoding in `aomdec` and dav1d to drishti's
@@ -1860,7 +1871,9 @@ None yet — registered targets: tarang, tazama, jalwa, aethersafta
 > reconstruct"** (roadmap table): motion estimation (diamond / hex search, sub-pel refinement), reference selection,
 > MV prediction reused from the decode side, and the inter residual + skip decision. 0.8.7's encoder is the base:
 > its RD (`src/av1_rd.cyr`, the estimator) and its trial machinery (a decoder residual pass per candidate, the block
-> and candidate arenas, context save / restore) carry over; the inter frame header writer does not exist yet.
+> and candidate arenas, context save / restore) carry over. Bite 1 (2026-11-19) built the inter frame header writer
+> and `av1_fh_init_inter`; bite 2 is the inter frame encoder itself (a key frame then inter frames, its reconstruction
+> the decoder's inter lane, decoded by aomdec and dav1d).
 >
 > **0.8.7 (cut 2026-11-19), bite by bite:** bite 1 = **rate and distortion**: the symbol coder's ESTIMATOR (each
 > symbol validated as the coder does, then costed in 1/512 bits under the CDFs as they stand, nothing coded and no

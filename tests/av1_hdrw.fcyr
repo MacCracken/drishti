@@ -23,6 +23,7 @@ fn hfz_rand(): i64 {
 }
 fn hfz_range(lo, hi): i64 { return lo + (hfz_rand() % ((hi - lo) + 1)); }   # uniform in [lo, hi]
 
+fn hfz_puts(t): i64 { return print(t, strlen(t)); }
 fn hfz_report(what, acc, n): i64 {
     print("  ", 2); print(what, strlen(what)); print(": accepted ", 11); print_num(acc); print(" of ", 4); print_num(n);
     print(" random records (the rest refused)\n", 35);
@@ -160,7 +161,7 @@ fn hfz_pass_seq(n): i64 {
 # ---- frame headers ----
 fn hfz_fh_check(s, fh): i64 {
     var bw = dr_bw_init(64);
-    if (av1_frame_write_uncompressed_header(bw, s, fh, 0, 0) != DR_OK) { return 0 - 1; }
+    if (av1_frame_write_uncompressed_header(bw, s, 0, fh, 0, 0) != DR_OK) { return 0 - 1; }
     var nb = dr_bw_bit_pos(bw);
     av1_obu_write_trailing_bits(bw);
     var n = dr_bw_flush(bw);
@@ -172,7 +173,7 @@ fn hfz_fh_check(s, fh): i64 {
     Hfz_Off = hfz_diff(fh, fh2, AV1FH_SIZE, AV1FH_BITS_CONSUMED);
     if (Hfz_Off >= 0) { return 4; }
     var bw2 = dr_bw_init(64);
-    if (av1_frame_write_uncompressed_header(bw2, s, fh2, 0, 0) != DR_OK) { return 5; }
+    if (av1_frame_write_uncompressed_header(bw2, s, 0, fh2, 0, 0) != DR_OK) { return 5; }
     av1_obu_write_trailing_bits(bw2);
     var n2 = dr_bw_flush(bw2);
     if ((n2 != n) || (memeq(dr_bw_buf(bw), dr_bw_buf(bw2), n) == 0)) { return 5; }
@@ -300,6 +301,315 @@ fn hfz_pass_fh(n): i64 {
     return 0;
 }
 
+# ---- inter frame headers (0.8.8): random records against random reference states ----
+# write fh against refs; parse it against a COPY of refs (a parse changes RefValid) and require the same contract as
+# hfz_fh_check: 0 = round trips word for word, 0 - 1 = refused, else the failing step
+fn hfz_ifh_check(s, refs, fh): i64 {
+    var bw = dr_bw_init(64);
+    if (av1_frame_write_uncompressed_header(bw, s, refs, fh, 0, 0) != DR_OK) { return 0 - 1; }
+    var nb = dr_bw_bit_pos(bw);
+    av1_obu_write_trailing_bits(bw);
+    var n = dr_bw_flush(bw);
+    var e = 0;
+    var rc = alloc(AV1REF_SIZE);
+    memcpy(rc, refs, AV1REF_SIZE);
+    var fh2 = av1_frame_parse_uncompressed_header(s, rc, 0, 0, dr_bw_buf(bw), n, &e);
+    if ((fh2 == 0) || (e != DR_OK)) { return 1; }
+    if (av1_fh_bits_consumed(fh2) != nb) { return 2; }
+    if (av1_frame_header_end(AV1_OBU_FRAME_HEADER, fh2, dr_bw_buf(bw), n) != DR_OK) { return 3; }
+    Hfz_Off = hfz_diff(fh, fh2, AV1FH_SIZE, AV1FH_BITS_CONSUMED);
+    if (Hfz_Off >= 0) { return 4; }
+    var bw2 = dr_bw_init(64);
+    if (av1_frame_write_uncompressed_header(bw2, s, refs, fh2, 0, 0) != DR_OK) { return 5; }
+    av1_obu_write_trailing_bits(bw2);
+    var n2 = dr_bw_flush(bw2);
+    if ((n2 != n) || (memeq(dr_bw_buf(bw), dr_bw_buf(bw2), n) == 0)) { return 5; }
+    return 0;
+}
+# a random global motion parameter for model type at index idx, on its precision grid most of the time
+fn hfz_gm_value(type, idx, hp): i64 {
+    var prec_diff = 1;
+    var mx = 4096;
+    if (idx < 2) {
+        prec_diff = 10;
+        if (type == AV1_GM_TRANSLATION) { prec_diff = 13 + (1 - hp); mx = 512 >> (1 - hp); }
+    }
+    var d = hfz_range(0 - mx - 2, mx + 2);
+    var v = d << prec_diff;
+    if (hfz_range(0, 7) == 0) { v = v + hfz_range(0, (1 << prec_diff) - 1); }   # off the grid now and then
+    if ((idx % 3) == 2) { v = v + (1 << 16); }
+    return v;
+}
+# models in their parser form: the identity's parameters where a type codes none, ROTZOOM's [ 4 ] / [ 5 ] derived
+fn hfz_gm_shape(fh, ref): i64 {
+    var type = av1_fh_gm_type(fh, ref);
+    var o = fh + AV1FH_GM_PARAMS + ((ref - 1) * 48);
+    if ((type < AV1_GM_IDENTITY) || (type > AV1_GM_AFFINE)) { return 0; }
+    if (type < AV1_GM_ROTZOOM) {
+        store64(o + 16, 1 << 16); store64(o + 24, 0); store64(o + 32, 0); store64(o + 40, 1 << 16);
+    }
+    if (type == AV1_GM_IDENTITY) { store64(o, 0); store64(o + 8, 0); }
+    if (type == AV1_GM_ROTZOOM) { store64(o + 32, 0 - load64(o + 24)); store64(o + 40, load64(o + 16)); }
+    return 0;
+}
+fn hfz_ifh_poke(s, fh): i64 {
+    var f = hfz_range(0, 27);
+    var o = 0;
+    var v = 0;
+    if (f == 0) { o = AV1FH_FRAME_TYPE; v = 1 + (2 * hfz_range(0, 1)); }   # INTER or SWITCH
+    if (f == 1) { o = AV1FH_ERROR_RESILIENT; v = hfz_range(0, 1); }
+    if (f == 2) { o = AV1FH_PRIMARY_REF_FRAME; v = hfz_range(0, 8); }
+    if (f == 3) { o = AV1FH_REF_FRAME_IDX + (8 * hfz_range(0, 6)); v = hfz_range(0, 8); }
+    if (f == 4) { o = AV1FH_SHORT_SIGNALING; v = hfz_range(0, 1); }
+    if (f == 5) { o = AV1FH_FRAME_SIZE_OVERRIDE; v = hfz_range(0, 1); }
+    if (f == 6) { o = AV1FH_FOUND_REF; v = hfz_range(0, 8); }
+    if (f == 7) { o = AV1FH_ALLOW_HIGH_PREC_MV; v = hfz_range(0, 1); }
+    if (f == 8) { o = AV1FH_INTERP_FILTER; v = hfz_range(0, 5); }
+    if (f == 9) { o = AV1FH_MOTION_MODE_SWITCHABLE; v = hfz_range(0, 1); }
+    if (f == 10) { o = AV1FH_USE_REF_FRAME_MVS; v = hfz_range(0, 1); }
+    if (f == 11) { o = AV1FH_REFERENCE_SELECT; v = hfz_range(0, 1); }
+    if (f == 12) { o = AV1FH_SKIP_MODE_PRESENT; v = hfz_range(0, 1); }
+    if (f == 13) { o = AV1FH_ALLOW_WARPED; v = hfz_range(0, 1); }
+    if (f == 14) { o = AV1FH_GM_TYPE + (8 * hfz_range(0, 6)); v = hfz_range(0, 4); }
+    if (f == 15) {
+        var ref = hfz_range(AV1_LAST_FRAME, AV1_ALTREF_FRAME);
+        var idx = hfz_range(0, 5);
+        o = AV1FH_GM_PARAMS + ((((ref - 1) * 6) + idx) * 8);
+        v = hfz_gm_value(av1_fh_gm_type(fh, ref), idx, av1_fh_allow_high_precision_mv(fh));
+    }
+    if (f == 16) { o = AV1FH_SEG_UPDATE_MAP + (8 * hfz_range(0, 2)); v = hfz_range(0, 1); }   # map, temporal, data
+    if (f == 17) { o = AV1FH_GRAIN + AV1FG_UPDATE; v = hfz_range(0, 1); }
+    if (f == 18) { o = AV1FH_GRAIN + AV1FG_REF_IDX; v = hfz_range(0, 8); }
+    if (f == 19) { o = AV1FH_REF_ORDER_HINT_CODED + (8 * hfz_range(0, 7)); v = hfz_range(0, 130); }
+    if (f == 20) { o = AV1FH_CURRENT_FRAME_ID; v = hfz_range(0, 40000); }
+    if (f == 21) { o = AV1FH_SHOW_FRAME + (8 * hfz_range(0, 1)); v = hfz_range(0, 1); }   # show, showable
+    if (f == 22) { o = AV1FH_SKIP_MODE_FRAME0 + (8 * hfz_range(0, 1)); v = hfz_range(0, 7); }
+    if (f == 23) { o = AV1FH_ORDER_HINTS + (8 * hfz_range(0, 7)); v = hfz_range(0, 130); }
+    if (f == 24) { o = AV1FH_UPSCALED_WIDTH + (8 * hfz_range(0, 2)); v = hfz_range(1, 80); }   # upscaled, w, h
+    if (f >= 25) { return hfz_fh_poke(fh); }   # the syntax every frame shares
+    store64(fh + o, v);
+    return 0;
+}
+# the derived fields, in the parser's order, so a good share of the random records are consistent
+fn hfz_ifh_derive(s, refs, fh): i64 {
+    var ft = av1_fh_frame_type(fh);
+    if (ft == AV1_SWITCH_FRAME) {
+        store64(fh + AV1FH_ERROR_RESILIENT, 1);
+        store64(fh + AV1FH_FRAME_SIZE_OVERRIDE, 1);
+        store64(fh + AV1FH_REFRESH_FRAME_FLAGS, 255);
+    }
+    var er = av1_fh_error_resilient_mode(fh);
+    if (er) {
+        store64(fh + AV1FH_PRIMARY_REF_FRAME, AV1_PRIMARY_REF_NONE);
+        store64(fh + AV1FH_USE_REF_FRAME_MVS, 0);
+        store64(fh + AV1FH_ALLOW_WARPED, 0);
+    }
+    store64(fh + AV1FH_SHOWABLE_FRAME, (av1_fh_show_frame(fh) == 0) || 1);
+    if (av1_fh_frame_refs_short_signaling(fh)) {
+        av1_set_frame_refs(s, refs, fh, av1_fh_ref_frame_idx(fh, 0) & 7, av1_fh_ref_frame_idx(fh, 3) & 7);
+    }
+    var i = 0;
+    while (i < AV1_REFS_PER_FRAME) {
+        var slot = av1_fh_ref_frame_idx(fh, i) & 7;
+        store64(fh + AV1FH_REF_FRAME_IDX + (i * 8), slot);
+        store64(fh + AV1FH_ORDER_HINTS + ((AV1_LAST_FRAME + i) * 8), av1_ref_order_hint(refs, slot));
+        i = i + 1;
+    }
+    store64(fh + AV1FH_ORDER_HINTS, 0);
+    store64(fh + AV1FH_FOUND_REF, 0);
+    if (av1_fh_frame_size_override(fh) && (er == 0) && hfz_range(0, 1)) {
+        var fr = hfz_range(1, 7);
+        var fs = av1_fh_ref_frame_idx(fh, fr - 1);
+        store64(fh + AV1FH_FOUND_REF, fr);
+        store64(fh + AV1FH_UPSCALED_WIDTH, av1_ref_upscaled_width(refs, fs));
+        store64(fh + AV1FH_FRAME_HEIGHT, av1_ref_frame_height(refs, fs));
+        store64(fh + AV1FH_RENDER_WIDTH, av1_ref_render_width(refs, fs));
+        store64(fh + AV1FH_RENDER_HEIGHT, av1_ref_render_height(refs, fs));
+    }
+    if (av1_fh_frame_size_override(fh) == 0) {
+        store64(fh + AV1FH_UPSCALED_WIDTH, av1_seq_width(s));
+        store64(fh + AV1FH_FRAME_HEIGHT, av1_seq_height(s));
+    }
+    store64(fh + AV1FH_USE_SUPERRES, 0);
+    store64(fh + AV1FH_SUPERRES_DENOM, AV1_SUPERRES_NUM);
+    store64(fh + AV1FH_FRAME_WIDTH, av1_fh_upscaled_width(fh));
+    av1_compute_image_size(fh);
+    if (load64(fh + AV1FH_FOUND_REF) == 0) {
+        store64(fh + AV1FH_RENDER_WIDTH, av1_fh_upscaled_width(fh));
+        store64(fh + AV1FH_RENDER_HEIGHT, av1_fh_frame_height(fh));
+    }
+    av1_fh_set_tiles_uniform(s, fh, 0, 0);
+    if (av1_fh_force_integer_mv(fh)) { store64(fh + AV1FH_ALLOW_HIGH_PREC_MV, 0); }
+    # the past state: load_previous( ) or setup_past_independence( ), then segmentation off clears the features
+    av1_frame_past_state(fh, refs);
+    if (av1_fh_segmentation_enabled(fh) == 0) {
+        memset(fh + AV1FH_FEATURE_ENABLED, 0, 128 * 8);
+        store64(fh + AV1FH_SEG_UPDATE_MAP, 0);
+        store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
+        store64(fh + AV1FH_SEG_UPDATE_DATA, 0);
+    } else {
+        if (av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE) {
+            store64(fh + AV1FH_SEG_UPDATE_MAP, 1);
+            store64(fh + AV1FH_SEG_TEMPORAL_UPDATE, 0);
+            store64(fh + AV1FH_SEG_UPDATE_DATA, 1);
+        }
+    }
+    av1_compute_lossless(fh);
+    store64(fh + AV1FH_LF_DELTA_ENABLED, 0);
+    store64(fh + AV1FH_LF_DELTA_UPDATE, 0);
+    if (av1_fh_coded_lossless(fh)) {
+        store64(fh + AV1FH_TX_MODE, AV1_ONLY_4X4);
+        memset(fh + AV1FH_LF_LEVEL, 0, 4 * 8);
+        av1_lf_default_deltas(fh);
+        store64(fh + AV1FH_LF_DELTA_ENABLED, av1_fh_primary_ref_frame(fh) == AV1_PRIMARY_REF_NONE);
+    }
+    # deltas coded half the time — a reference or mode delta changed from where the frame started — so the slots a
+    # history leaves hold varied deltas, and later frames code against them
+    if ((av1_fh_coded_lossless(fh) == 0) && (hfz_range(0, 1) == 0)) {
+        store64(fh + AV1FH_LF_LEVEL, hfz_range(0, 63));
+        store64(fh + AV1FH_LF_DELTA_ENABLED, 1);
+        store64(fh + AV1FH_LF_DELTA_UPDATE, 1);
+        store64(fh + AV1FH_LF_REF_DELTAS + (8 * hfz_range(0, 9)), hfz_range(0 - 63, 63));   # 8 ref + 2 mode deltas
+    }
+    var smf = alloc(16);
+    if (av1_skip_mode_frames(s, refs, fh, smf)) {
+        store64(fh + AV1FH_SKIP_MODE_FRAME0, load64(smf));
+        store64(fh + AV1FH_SKIP_MODE_FRAME1, load64(smf + 8));
+    } else {
+        store64(fh + AV1FH_SKIP_MODE_FRAME0, 0);
+        store64(fh + AV1FH_SKIP_MODE_FRAME1, 0);
+        store64(fh + AV1FH_SKIP_MODE_PRESENT, 0);
+    }
+    var ref = AV1_LAST_FRAME;
+    while (ref <= AV1_ALTREF_FRAME) { hfz_gm_shape(fh, ref); ref = ref + 1; }
+    var g = fh + AV1FH_GRAIN;
+    if (load64(g + AV1FG_APPLY) && (load64(g + AV1FG_UPDATE) == 0)) {
+        var ridx = av1_fh_ref_frame_idx(fh, hfz_range(0, 6));
+        var saved = av1_ref_saved_grain(refs, ridx);
+        if ((ft == AV1_INTER_FRAME) && (saved != 0) && load64(saved + AV1FG_APPLY)) {
+            var seed = load64(g + AV1FG_SEED);
+            memcpy(g, saved, AV1FG_SIZE);
+            store64(g + AV1FG_SEED, seed);
+            store64(g + AV1FG_UPDATE, 0);
+            store64(g + AV1FG_REF_IDX, ridx);
+        } else {
+            store64(g + AV1FG_UPDATE, 1);
+            store64(g + AV1FG_REF_IDX, 0);
+        }
+    }
+    return 0;
+}
+# a random reference state: a key frame, then up to four random inter frames the writer accepted (so the slots hold
+# deltas, models, features and grain the next frames are coded against)
+fn hfz_refs(s): i64 {
+    var refs = av1_ref_state_new();
+    var e = 0;
+    var key = av1_fh_init_key(s, hfz_range(1, 255), &e);
+    if (key == 0) { return 0; }
+    if (av1_seq_film_grain_present(s) && hfz_range(0, 1)) {
+        var g = key + AV1FH_GRAIN;
+        store64(g + AV1FG_APPLY, 1);
+        store64(g + AV1FG_UPDATE, 1);
+        store64(g + AV1FG_SEED, hfz_range(0, 65535));
+        store64(g + AV1FG_SCALING_M8, hfz_range(0, 3));
+    }
+    av1_frame_update_refs(refs, s, key);
+    var m = hfz_range(0, 4);
+    var k = 0;
+    while (k < m) {
+        var fh = av1_fh_init_inter(s, refs, hfz_range(0, 255), hfz_range(0, (1 << av1_seq_order_hint_bits(s)) - 1),
+          hfz_range(0, 7), hfz_range(0, 255), &e);
+        if (fh != 0) {
+            var p = hfz_range(0, 6);
+            var j = 0;
+            while (j < p) { hfz_ifh_poke(s, fh); j = j + 1; }
+            hfz_ifh_derive(s, refs, fh);
+            if (hfz_ifh_check(s, refs, fh) == 0) { av1_frame_update_refs(refs, s, fh); }
+        }
+        k = k + 1;
+    }
+    return refs;
+}
+var Hfz_InterSeen = 0;   # accepted records with a primary reference frame / a coded model / reloaded grain
+fn hfz_pass_ifh(n): i64 {
+    var acc = 0;
+    var bad = 0;
+    var prim = 0;
+    var gm = 0;
+    var short = 0;
+    var found = 0;
+    var k = 0;
+    while (k < n) {
+        var s = hfz_fh_seq();
+        store64(s + AV1_SEQ_ENABLE_REF_FRAME_MVS, hfz_range(0, 1));
+        store64(s + AV1_SEQ_ENABLE_WARPED, hfz_range(0, 1));
+        if (hfz_range(0, 5) == 0) {
+            store64(s + AV1_SEQ_ENABLE_ORDER_HINT, 0);
+            store64(s + AV1_SEQ_ORDER_HINT_BITS, 0);
+        }
+        var refs = hfz_refs(s);
+        var e = 0;
+        var fh = 0;
+        if (refs != 0) {
+            fh = av1_fh_init_inter(s, refs, hfz_range(0, 255), hfz_range(0, (1 << av1_seq_order_hint_bits(s)) - 1),
+              hfz_range(0, 7), hfz_range(0, 255), &e);
+        }
+        if (fh != 0) {
+            # the syntax that reads the reference state, seeded often: a primary reference frame, a global motion model
+            if (hfz_range(0, 2) == 0) { store64(fh + AV1FH_PRIMARY_REF_FRAME, hfz_range(0, 6)); }
+            if (hfz_range(0, 2) == 0) {
+                var gref = hfz_range(AV1_LAST_FRAME, AV1_ALTREF_FRAME);
+                var gt = hfz_range(AV1_GM_TRANSLATION, AV1_GM_AFFINE);
+                store64(fh + AV1FH_GM_TYPE + ((gref - 1) * 8), gt);
+                var gi = 0;
+                while (gi < 6) {
+                    store64(fh + AV1FH_GM_PARAMS + ((((gref - 1) * 6) + gi) * 8),
+                      hfz_gm_value(gt, gi, av1_fh_allow_high_precision_mv(fh)));
+                    gi = gi + 1;
+                }
+            }
+            var p = hfz_range(0, 6);
+            var j = 0;
+            while (j < p) { hfz_ifh_poke(s, fh); j = j + 1; }
+            if (hfz_range(0, 3) != 0) { hfz_ifh_derive(s, refs, fh); }
+            var r = hfz_ifh_check(s, refs, fh);
+            if (r == 0) {
+                acc = acc + 1;
+                if (av1_fh_primary_ref_frame(fh) != AV1_PRIMARY_REF_NONE) { prim = prim + 1; }
+                if (av1_fh_frame_refs_short_signaling(fh)) { short = short + 1; }
+                if (load64(fh + AV1FH_FOUND_REF) != 0) { found = found + 1; }
+                var ref = AV1_LAST_FRAME;
+                var any = 0;
+                while (ref <= AV1_ALTREF_FRAME) {
+                    if (av1_fh_gm_type(fh, ref) != AV1_GM_IDENTITY) { any = 1; }
+                    ref = ref + 1;
+                }
+                gm = gm + any;
+            }
+            if (r > 0) {
+                if (bad == 0) {
+                    assert_eq(r * 10000 + Hfz_Off, 0 - 1, "inter fuzz: the first broken round trip (step, word)");
+                }
+                bad = bad + 1;
+            }
+        }
+        k = k + 1;
+    }
+    hfz_report("inter fuzz", acc, n);
+    hfz_puts("    accepted with a primary reference "); print_num(prim);
+    hfz_puts(", a global motion model "); print_num(gm);
+    hfz_puts(", short signaling "); print_num(short);
+    hfz_puts(", a found size "); print_num(found); hfz_puts("\n");
+    assert_eq(bad, 0, "inter fuzz: every inter frame header the writer accepts round trips word for word");
+    assert(acc > (n / 10), "inter fuzz: over a tenth of the random records are accepted (the property is exercised)");
+    assert(acc < n, "inter fuzz: some random records are refused (the refusals are exercised)");
+    assert(prim > (acc / 20), "inter fuzz: accepted records with a primary reference frame are common");
+    assert(gm > (acc / 20), "inter fuzz: accepted records with a global motion model are common");
+    assert(short > 0, "inter fuzz: some accepted records use short signaling");
+    assert(found > 0, "inter fuzz: some accepted records take their size from a reference");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     if (av1_tables_init() != DR_OK) { return 1; }
@@ -307,6 +617,8 @@ fn main(): i64 {
     hfz_pass_seq(3000);
     test_group("header writer fuzz: random intra frame header records");
     hfz_pass_fh(3000);
+    test_group("header writer fuzz: random inter frame header records against random reference states");
+    hfz_pass_ifh(3000);
     return assert_summary();
 }
 
